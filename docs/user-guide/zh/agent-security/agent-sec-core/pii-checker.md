@@ -231,10 +231,12 @@ scanner verdict `deny` 描述扫描风险，hook policy `block` 决定 adapter �
 
 ### OpenClaw 输入保护
 
-在正式版 OpenClaw `>=2026.5.12` 上，PII Checker 使用 `before_agent_run` 扫描
-`prompt`、`systemPrompt` 和 hook 提供的会话消息文本，包括工具参数和结果，
-记录为 `source=model_input`；不扫描媒体载荷或消息元数据。检查对象是运行入口可见的文本，
-不覆盖运行中的每一次模型请求或宿主独立的辅助模型调用（例如会话标题生成），也不保证能读取用户原始输入。
+在正式版 OpenClaw `>=2026.5.12` 上，PII Checker 使用 `before_agent_run`，
+只扫描 `prompt` 中的本轮用户输入，不扫描 system prompt、会话历史、媒体载荷或消息元数据。
+`prompt` 缺失、不是字符串或仅含空白时跳过扫描，不回退读取其他字段。
+仍记录为 `source=model_input`，用于标识模型运行入口 hook，不代表覆盖完整上下文。
+检查对象是 OpenClaw 在运行入口提供的本轮输入，不覆盖运行中的每一次模型请求，
+也不覆盖宿主独立的辅助模型调用（例如会话标题生成），不保证能读取用户原始输入。
 
 较旧的受支持版本（`>=2026.4.14`）、预发布版以及无法识别的版本，使用
 `before_dispatch` 和 `source=user_input`，只扫描 OpenClaw 提供的入站文本。

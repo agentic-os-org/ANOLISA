@@ -21,7 +21,7 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
-use crate::analyzer::token::merge_response_output_text;
+use crate::analyzer::token::{merge_response_output_text, merge_response_tool_calls};
 use crate::parser::sse::{ParsedSseEvent, SSEParser};
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
@@ -251,7 +251,8 @@ pub fn count_response_tokens(
     // Accumulate content from all SSE chunks. The shared merge counts each
     // delta once and reads the Responses closing events only as a fallback,
     // so a complete capture is not counted two or three times.
-    let (all_content, all_reasoning, all_tool_calls) = merge_response_output_text(response_jsons);
+    let (all_content, all_reasoning, _) = merge_response_output_text(response_jsons);
+    let tool_calls = merge_response_tool_calls(response_jsons);
 
     let mut has_content = false;
 
@@ -289,86 +290,68 @@ pub fn count_response_tokens(
         });
     }
 
-    // Add tool calls with Qwen template format
-    // According to tokenizer_config.json, <tool_call>, <function=...>, <parameter=...> are NOT special tokens,
-    // so they ARE counted as output tokens by the API
-    //
-    // NOTE: For SSE streaming, tool_calls come in chunks:
-    // - First chunk: "exec: " (function name + colon)
-    // - Following chunks: ": {...}" (colon + arguments fragments)
-    // We need to aggregate all chunks first to get the complete tool call
-    if !all_tool_calls.is_empty() {
-        // Aggregate all chunks: first chunk has "name: ", rest have ": fragment"
-        let mut aggregated = String::new();
-        for tc in &all_tool_calls {
-            if aggregated.is_empty() {
-                // First chunk contains "name: " or just "name:"
-                aggregated.push_str(tc);
+    // Each protocol call is complete before rendering its Qwen template.
+    if !tool_calls.is_empty() {
+        for aggregated in &tool_calls {
+            // Now parse the aggregated "name: arguments" string
+            let (name, arguments) = if let Some(pos) = aggregated.find(": ") {
+                (&aggregated[..pos], &aggregated[pos + 2..])
+            } else if let Some(pos) = aggregated.find(':') {
+                // Handle case where there's no space after colon
+                (&aggregated[..pos], &aggregated[pos + 1..])
             } else {
-                // Subsequent chunks start with ": ", skip the leading ": "
-                let fragment = tc.strip_prefix(": ").unwrap_or(tc);
-                aggregated.push_str(fragment);
-            }
-        }
+                ("", aggregated.as_str())
+            };
 
-        // Now parse the aggregated "name: arguments" string
-        let (name, arguments) = if let Some(pos) = aggregated.find(": ") {
-            (&aggregated[..pos], &aggregated[pos + 2..])
-        } else if let Some(pos) = aggregated.find(':') {
-            // Handle case where there's no space after colon
-            (&aggregated[..pos], &aggregated[pos + 1..])
-        } else {
-            ("", aggregated.as_str())
-        };
+            // Build Qwen tool_call template format:
+            // <tool_call>
+            // <function={name}>
+            // <parameter={arg_name}>
+            // {arg_value}
+            // </parameter>
+            // </function>
+            // </tool_call>
+            let mut tool_call_str = String::new();
+            tool_call_str.push_str("<tool_call>\n<function=");
+            tool_call_str.push_str(name);
+            tool_call_str.push_str(">\n");
 
-        // Build Qwen tool_call template format:
-        // <tool_call>
-        // <function={name}>
-        // <parameter={arg_name}>
-        // {arg_value}
-        // </parameter>
-        // </function>
-        // </tool_call>
-        let mut tool_call_str = String::new();
-        tool_call_str.push_str("<tool_call>\n<function=");
-        tool_call_str.push_str(name);
-        tool_call_str.push_str(">\n");
-
-        // Parse arguments JSON and format each parameter
-        if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(arguments) {
-            if let Some(obj) = args_json.as_object() {
-                for (arg_name, arg_value) in obj {
-                    tool_call_str.push_str("<parameter=");
-                    tool_call_str.push_str(arg_name);
-                    tool_call_str.push_str(">\n");
-                    // Format value: if string use as-is, otherwise use JSON
-                    let value_str = if let Some(s) = arg_value.as_str() {
-                        s.to_string()
-                    } else {
-                        arg_value.to_string()
-                    };
-                    tool_call_str.push_str(&value_str);
-                    tool_call_str.push_str("\n</parameter>\n");
+            // Parse arguments JSON and format each parameter
+            if let Ok(args_json) = serde_json::from_str::<serde_json::Value>(arguments) {
+                if let Some(obj) = args_json.as_object() {
+                    for (arg_name, arg_value) in obj {
+                        tool_call_str.push_str("<parameter=");
+                        tool_call_str.push_str(arg_name);
+                        tool_call_str.push_str(">\n");
+                        // Format value: if string use as-is, otherwise use JSON
+                        let value_str = if let Some(s) = arg_value.as_str() {
+                            s.to_string()
+                        } else {
+                            arg_value.to_string()
+                        };
+                        tool_call_str.push_str(&value_str);
+                        tool_call_str.push_str("\n</parameter>\n");
+                    }
                 }
+            } else {
+                // Fallback: use raw arguments string
+                tool_call_str.push_str(arguments);
+                tool_call_str.push('\n');
             }
-        } else {
-            // Fallback: use raw arguments string
-            tool_call_str.push_str(arguments);
-            tool_call_str.push('\n');
-        }
 
-        tool_call_str.push_str("</function>\n</tool_call>");
+            tool_call_str.push_str("</function>\n</tool_call>");
+
+            let tokens = tokenizer
+                .count(&tool_call_str)
+                .unwrap_or(tool_call_str.len() / 4);
+            *by_type.entry("tool_calls".to_string()).or_insert(0) += tokens;
+            per_block.push(OutputTokenCount {
+                content_type: "tool_calls".to_string(),
+                tokens,
+            });
+        }
 
         has_content = true;
-
-        let tokens = tokenizer
-            .count(&tool_call_str)
-            .unwrap_or(tool_call_str.len() / 4);
-        *by_type.entry("tool_calls".to_string()).or_insert(0) += tokens;
-        per_block.push(OutputTokenCount {
-            content_type: "tool_calls".to_string(),
-            tokens,
-        });
     }
 
     if has_content {
@@ -2387,6 +2370,73 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert!(
             count.total_tokens > 0,
             "a tool-only Responses turn must not count as zero output tokens"
+        );
+    }
+
+    /// Parallel Responses function calls are announced by separate
+    /// `response.output_item.added` events with their own deltas. The
+    /// counter used to join every fragment into ONE `name: arguments`
+    /// string, so the second call's announcement landed inside the first
+    /// call's arguments: the concatenated JSON failed to parse, the render
+    /// fell back to raw text, and every name after the first was lost.
+    /// Two identical calls must count exactly twice one call.
+    #[test]
+    fn count_response_tokens_counts_parallel_tool_calls_separately() {
+        let tokenizer = fixture_word_level_tokenizer("responses_parallel");
+
+        let added = |name: &str, id: &str| {
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": if id == "fc_1" { 0 } else { 1 },
+                "item": {
+                    "type": "function_call",
+                    "id": id,
+                    "call_id": id,
+                    "name": name,
+                },
+            })
+        };
+        let delta = |fragment: &str, id: &str| {
+            serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": id,
+                "output_index": if id == "fc_1" { 0 } else { 1 },
+                "delta": fragment,
+            })
+        };
+
+        let one_call = vec![added("read_file", "fc_1"), delta("{\"cmd\":\"a\"}", "fc_1")];
+        let single =
+            count_response_tokens(&one_call, &tokenizer).expect("single call must be countable");
+        let single_tool_tokens = single
+            .by_type
+            .get("tool_calls")
+            .copied()
+            .expect("the single call must render a tool_calls block");
+
+        let two_calls = vec![
+            added("read_file", "fc_1"),
+            delta("{\"cmd\":\"a\"}", "fc_1"),
+            added("write_file", "fc_2"),
+            delta("{\"cmd\":\"b\"}", "fc_2"),
+        ];
+        let double = count_response_tokens(&two_calls, &tokenizer)
+            .expect("parallel calls must be countable");
+
+        assert_eq!(
+            double.by_type.get("tool_calls").copied(),
+            Some(2 * single_tool_tokens),
+            "two identical calls must count exactly twice one call, got {:?} vs {}",
+            double.by_type,
+            single_tool_tokens
+        );
+        assert_eq!(
+            double
+                .per_block
+                .iter()
+                .filter(|b| b.content_type == "tool_calls")
+                .count(),
+            2
         );
     }
 }

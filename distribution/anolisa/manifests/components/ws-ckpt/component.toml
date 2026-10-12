@@ -7,7 +7,7 @@ display_name = "Workspace Checkpoint"
 description = "Workspace checkpoint - btrfs COW session-level isolation and rollback"
 owner = "ws-ckpt-team"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
@@ -18,7 +18,7 @@ package = "ws-ckpt"
 
 [component.platform]
 os = ["linux"]
-arch = ["x86_64"]
+arch = ["x86_64", "aarch64"]
 min_kernel = "5.4"
 
 [[component.dependencies]]
@@ -115,7 +115,7 @@ display_name = "ws-ckpt for OpenClaw"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "scripts/openclaw"
+source = "share/anolisa/runtime/ws-ckpt/plugins/openclaw"
 dest = "{datadir}/runtime/ws-ckpt/plugins/openclaw/"
 detect = { binary = "openclaw" }
 
@@ -137,7 +137,7 @@ display_name = "ws-ckpt for Hermes"
 adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "ws-ckpt"
-source = "scripts/hermes"
+source = "share/anolisa/runtime/ws-ckpt/plugins/hermes"
 dest = "{datadir}/runtime/ws-ckpt/plugins/hermes/"
 detect = { binary = "hermes" }
 

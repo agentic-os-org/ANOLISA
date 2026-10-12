@@ -25,6 +25,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from pathlib import Path
 
 #: Default answer-length ceiling below which a tool-less single-turn session is
 #: considered to carry nothing reusable. Deliberately a parameter, not a
@@ -70,7 +71,8 @@ def main():
     args = ap.parse_args()
 
     try:
-        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        uri = Path(args.db).resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
         rows = conn.execute(
             "SELECT session_id, first_user_message, atif_json FROM collected_trajectories"
         ).fetchall()

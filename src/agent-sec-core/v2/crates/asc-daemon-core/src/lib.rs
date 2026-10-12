@@ -8,6 +8,7 @@ mod action;
 mod identity;
 pub use action::ActionService;
 mod pap;
+pub mod scope_discovery;
 
 pub use identity::{
     PeerCredentials, Principal, PrincipalPolicy, PrincipalPolicyError, PrincipalRole,
@@ -17,3 +18,6 @@ pub use pap::{
     EnqueueError, NotFoundResource, PolicyAdministration, PolicyAdministrationError,
     PolicyInputError, ResourcePage,
 };
+
+/// Authorized, transport-independent query services and persistence ports.
+pub mod query;

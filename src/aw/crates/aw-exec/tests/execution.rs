@@ -112,6 +112,26 @@ fn duplex_payloads_larger_than_pipe_buffers_do_not_deadlock() {
 }
 
 #[test]
+fn bulk_streams_are_not_throttled_by_the_poll_interval() {
+    // Pacing every 8 KiB chunk by the 2 ms poll interval needs over 12 s for
+    // these 72 MiB of pipe traffic, far beyond the 5 s fixture deadline.
+    let directory = Directory::new();
+    let input: Vec<_> = (0..24 << 20).map(|index| (index % 251) as u8).collect();
+    let output = execute(
+        &directory.command("binary"),
+        &input,
+        limits(input.len(), input.len() + 6, input.len() + 1),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.input_bytes_written, input.len());
+    assert_eq!(output.stdout.len(), input.len() + 6);
+    assert!(output.stdout.starts_with(&input));
+    assert_eq!(output.stderr.len(), input.len() + 1);
+    directory.assert_reaped();
+}
+
+#[test]
 fn exact_stream_limits_including_zero_are_allowed() {
     for length in [0, 1, 65536] {
         let directory = Directory::new();
@@ -238,32 +258,34 @@ fn early_stdin_close_reports_partial_delivery_and_keeps_output() {
 
 #[test]
 fn runtime_cancellation_kills_and_reaps_the_started_child() {
-    let directory = Directory::new();
-    let cancelled = AtomicBool::new(false);
-    let (result, started, cancelled_at) = thread::scope(|scope| {
-        let setter = scope.spawn(|| {
-            let started = wait_until_exists(
-                &directory.0.join("leader.pid"),
+    for execute in [run, aw_exec::run_cooperative] {
+        let directory = Directory::new();
+        let cancelled = AtomicBool::new(false);
+        let (result, started, cancelled_at) = thread::scope(|scope| {
+            let setter = scope.spawn(|| {
+                let started = wait_until_exists(
+                    &directory.0.join("leader.pid"),
+                    Instant::now() + NORMAL_TIMEOUT,
+                );
+                let cancelled_at = Instant::now();
+                cancelled.store(true, Ordering::Release);
+                (started, cancelled_at)
+            });
+            let result = execute(
+                &directory.command("wait"),
+                b"",
+                limits(0, 0, 0),
                 Instant::now() + NORMAL_TIMEOUT,
+                &cancelled,
             );
-            let cancelled_at = Instant::now();
-            cancelled.store(true, Ordering::Release);
-            (started, cancelled_at)
+            let (started, cancelled_at) = setter.join().unwrap();
+            (result, started, cancelled_at)
         });
-        let result = run(
-            &directory.command("wait"),
-            b"",
-            limits(0, 0, 0),
-            Instant::now() + NORMAL_TIMEOUT,
-            &cancelled,
-        );
-        let (started, cancelled_at) = setter.join().unwrap();
-        (result, started, cancelled_at)
-    });
-    assert!(started, "fixture never reached runtime cancellation point");
-    assert!(matches!(result, Err(Error::Cancelled)));
-    assert!(cancelled_at.elapsed() < CLEANUP_ALLOWANCE);
-    directory.assert_reaped();
+        assert!(started, "fixture never reached runtime cancellation point");
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancelled_at.elapsed() < CLEANUP_ALLOWANCE);
+        directory.assert_reaped();
+    }
 }
 
 #[test]

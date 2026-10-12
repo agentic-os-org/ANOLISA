@@ -10,7 +10,7 @@ pub trait ObservabilitySink: Send + Sync {
     ///
     /// # Errors
     /// Returns a safe failure without exposing storage paths or record contents.
-    fn write(&self, record: &ObservabilityRecord) -> Result<(), ObservabilityWriteError>;
+    fn write(&self, record: &ObservabilityRecord, uid: u32) -> Result<(), ObservabilityWriteError>;
 }
 
 /// Safe ingestion failures for protocol projection.
@@ -41,6 +41,7 @@ impl ObservabilityService {
     /// Returns validation or storage failure; invalid records never reach the sink.
     pub fn record(
         &self,
+        peer: crate::PeerCredentials,
         hook: &str,
         observed_at: &str,
         metrics: &Map<String, Value>,
@@ -53,6 +54,6 @@ impl ObservabilityService {
             "metadata": asc_observability::snapshot().agent,
             "metrics": metrics,
         }))?;
-        self.sink.write(&record)
+        self.sink.write(&record, peer.uid())
     }
 }

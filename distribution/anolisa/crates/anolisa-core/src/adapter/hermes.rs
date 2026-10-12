@@ -1044,6 +1044,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1076,6 +1077,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: false,
             ops: &ops,
         };
@@ -1140,6 +1142,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1208,6 +1211,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };

@@ -857,6 +857,9 @@ export const AtifViewerPage: React.FC = () => {
         }
         setDoc(parsed as AtifDocument);
         setNodePath([]);
+        const nextParams = new URLSearchParams(searchParamsRef.current);
+        nextParams.delete('node');
+        setSearchParams(nextParams, { replace: true });
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setLoadedQuery({ type: 'session', id: parsed.session_id ?? '' });
@@ -876,7 +879,7 @@ export const AtifViewerPage: React.FC = () => {
     };
     reader.readAsText(file);
     e.target.value = '';
-  }, [t]);
+  }, [setSearchParams, t]);
 
   // JSON download
   const handleDownload = useCallback(() => {

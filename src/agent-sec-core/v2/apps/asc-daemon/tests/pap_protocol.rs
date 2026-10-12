@@ -1,3 +1,9 @@
+#[cfg(test)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/policy.rs"
+));
+
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,12 +20,10 @@ use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
-use asc_policy_repository::{BindingStateRepository, BindingStateWrite, WriteResult};
 use asc_policy_types::authoring::PolicyTemplate;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
-use asc_policy_types::scope::{PreparedScope, ScopeSelector};
+use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
@@ -28,26 +32,6 @@ use uuid::Uuid;
 mod support;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
-
-fn transition_binding(
-    repository: &ProcessLocalPapRepository,
-    id: &ResourceId,
-    status: BindingStatus,
-) {
-    let current = repository.get_binding_state(id).unwrap().unwrap();
-    current
-        .binding
-        .status
-        .phase
-        .validate_successor(status)
-        .unwrap();
-    let mut next = current.clone();
-    next.binding.status.phase = status;
-    assert_eq!(
-        repository.compare_exchange_binding_state(&current, &BindingStateWrite::new(next)),
-        Ok(WriteResult::Applied)
-    );
-}
 
 struct RunningPapDaemon {
     directory: PathBuf,
@@ -75,7 +59,7 @@ impl RunningPapDaemon {
         max_request_frame_bytes: usize,
         repository: Arc<ProcessLocalPapRepository>,
     ) -> Self {
-        let application = PapService::new(repository, Arc::new(PolicyTemplateCompiler));
+        let application = PapService::new(repository).with_scope_discovery(Arc::new(Discovery));
         Self::start_with_application(role, max_request_frame_bytes, application).await
     }
 
@@ -176,7 +160,12 @@ impl RecordingAdministration {
     }
 
     fn scope(&self) -> PreparedScope {
-        self.binding.spec.scope.clone()
+        PreparedScope {
+            scope_id: self.binding.spec.scope.scope_id.clone(),
+            selector: self.binding.spec.scope.selector.clone(),
+            policy_snapshots: vec![self.policy()],
+            status: asc_policy_types::scope::ScopeStatus::Active,
+        }
     }
 }
 
@@ -235,22 +224,13 @@ impl PolicyAdministration for RecordingAdministration {
         Ok(self.policy())
     }
 
-    fn create_scope(
+    fn create_scope_assignment(
         &self,
         principal: &Principal,
-        _selector: &ScopeSelector,
+        _selector: &asc_policy_types::scope::ScopeSelector,
+        _policies: &[asc_policy_types::scope::PolicyReference],
     ) -> Result<PreparedScope, PolicyAdministrationError> {
         self.record(principal, "policy.scopes.create")?;
-        Ok(self.scope())
-    }
-
-    fn update_scope(
-        &self,
-        principal: &Principal,
-        _scope_id: &ResourceId,
-        _selector: &ScopeSelector,
-    ) -> Result<PreparedScope, PolicyAdministrationError> {
-        self.record(principal, "policy.scopes.update")?;
         Ok(self.scope())
     }
 
@@ -258,7 +238,6 @@ impl PolicyAdministration for RecordingAdministration {
         &self,
         principal: &Principal,
         _id: &ResourceId,
-        _revision: Revision,
     ) -> Result<PreparedScope, PolicyAdministrationError> {
         self.record(principal, "policy.scopes.get")?;
         Ok(self.scope())
@@ -277,39 +256,16 @@ impl PolicyAdministration for RecordingAdministration {
         })
     }
 
-    fn delete_scope_revision(
+    fn delete_scope(
         &self,
         principal: &Principal,
         _id: &ResourceId,
-        _revision: Revision,
-    ) -> Result<PreparedScope, PolicyAdministrationError> {
+    ) -> Result<ScopeDeletion, PolicyAdministrationError> {
         self.record(principal, "policy.scopes.delete")?;
-        Ok(self.scope())
-    }
-
-    fn create_binding(
-        &self,
-        principal: &Principal,
-        _policy_id: &ResourceId,
-        _policy_revision: Revision,
-        _scope_id: &ResourceId,
-        _scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError> {
-        self.record(principal, "policy.bindings.create")?;
-        Ok(self.binding.clone())
-    }
-
-    fn update_binding(
-        &self,
-        principal: &Principal,
-        _binding_id: &ResourceId,
-        _policy_id: &ResourceId,
-        _policy_revision: Revision,
-        _scope_id: &ResourceId,
-        _scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError> {
-        self.record(principal, "policy.bindings.update")?;
-        Ok(self.binding.clone())
+        Ok(ScopeDeletion {
+            scope_id: self.scope().scope_id,
+            completed: false,
+        })
     }
 
     fn get_binding(
@@ -334,13 +290,13 @@ impl PolicyAdministration for RecordingAdministration {
         })
     }
 
-    fn delete_binding(
+    fn retry_scope(
         &self,
         principal: &Principal,
-        _id: &ResourceId,
-    ) -> Result<BindingView, PolicyAdministrationError> {
-        self.record(principal, "policy.bindings.delete")?;
-        Ok(self.binding.clone())
+        _: &ResourceId,
+    ) -> Result<PreparedScope, PolicyAdministrationError> {
+        self.record(principal, "policy.scopes.retry")?;
+        Ok(self.scope())
     }
 }
 
@@ -382,6 +338,7 @@ fn all_frozen_methods_route_once_and_return_domain_values_directly() {
         let expected = match fixture["resultType"].as_str().unwrap() {
             "PreparedPolicy" => expected_policy.clone(),
             "PreparedScope" => expected_scope.clone(),
+            "ScopeDeletion" => json!({"scopeId":expected_scope["scopeId"],"completed":false}),
             "BindingView" => expected_binding.clone(),
             "ListResult<PreparedPolicy>" => {
                 json!({"items": [expected_policy.clone()], "total": 1})
@@ -584,6 +541,7 @@ enum ParamKind {
     String,
     PolicyTemplate,
     ScopeSelector,
+    PolicyReferences,
     Limit,
     Offset,
 }
@@ -631,10 +589,11 @@ fn method_param_specs(method: &str) -> Vec<ParamSpec> {
                 required: true,
             },
         ],
-        "policy.templates.get"
-        | "policy.templates.delete"
-        | "policy.scopes.get"
-        | "policy.scopes.delete" => vec![id("id"), revision("revision")],
+        "policy.templates.get" | "policy.templates.delete" => vec![id("id"), revision("revision")],
+        "policy.scopes.get"
+        | "policy.scopes.delete"
+        | "policy.scopes.retry"
+        | "policy.bindings.get" => vec![id("id")],
         "policy.templates.list" | "policy.scopes.list" | "policy.bindings.list" => vec![
             ParamSpec {
                 name: "limit",
@@ -647,33 +606,18 @@ fn method_param_specs(method: &str) -> Vec<ParamSpec> {
                 required: false,
             },
         ],
-        "policy.scopes.create" => vec![ParamSpec {
-            name: "selector",
-            kind: ParamKind::ScopeSelector,
-            required: true,
-        }],
-        "policy.scopes.update" => vec![
-            id("scopeId"),
+        "policy.scopes.create" => vec![
             ParamSpec {
                 name: "selector",
                 kind: ParamKind::ScopeSelector,
                 required: true,
             },
+            ParamSpec {
+                name: "policyTemplates",
+                kind: ParamKind::PolicyReferences,
+                required: false,
+            },
         ],
-        "policy.bindings.create" => vec![
-            id("policyId"),
-            revision("policyRevision"),
-            id("scopeId"),
-            revision("scopeRevision"),
-        ],
-        "policy.bindings.update" => vec![
-            id("bindingId"),
-            id("policyId"),
-            revision("policyRevision"),
-            id("scopeId"),
-            revision("scopeRevision"),
-        ],
-        "policy.bindings.get" | "policy.bindings.delete" => vec![id("id")],
         unexpected => panic!("unregistered PAP method {unexpected}"),
     }
 }
@@ -755,8 +699,20 @@ fn invalid_param_values(kind: ParamKind) -> Vec<(&'static str, Value, &'static s
         ParamKind::PolicyTemplate => vec![(
             "wrong type",
             Value::Null,
-            "invalid type: null, expected internally tagged enum PolicyTemplate",
+            "invalid type: null, expected struct PolicyTemplate",
         )],
+        ParamKind::PolicyReferences => vec![
+            (
+                "null",
+                Value::Null,
+                "invalid type: null, expected a sequence",
+            ),
+            (
+                "object",
+                json!({}),
+                "invalid type: map, expected a sequence",
+            ),
+        ],
         ParamKind::ScopeSelector => vec![(
             "wrong type",
             Value::Null,
@@ -922,7 +878,7 @@ async fn run_frozen_error_cases(path: &Path) -> Vec<String> {
             "method": "policy.templates.create",
             "params": {
                 "policyName": "existing-policy",
-                "template": {"kind": "prevent_file_deletion", "files": ["/existing"]}
+                "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/existing"}, "where": {"operation": {"eq": "delete"}}}]}
             }
         }),
     )
@@ -1148,35 +1104,16 @@ async fn real_uds_denies_every_crud_method_with_the_exact_public_error() {
 async fn real_uds_accepts_domain_and_pagination_boundary_values() {
     let daemon = RunningPapDaemon::start(PrincipalRole::PolicyAdministrator).await;
     let maximum_path = format!("/{}", "p".repeat(4_095));
-    for (name, request) in [
-        (
-            "256-byte policy name and 4096-byte path",
-            json!({
-                "method": "policy.templates.create",
-                "params": {
-                    "policyName": "n".repeat(256),
-                    "template": {
-                        "kind": "prevent_file_deletion",
-                        "files": [maximum_path]
-                    }
-                }
-            }),
-        ),
-        (
-            "maximum PID",
-            json!({
-                "method": "policy.scopes.create",
-                "params": {"selector": {"kind": "pid", "pid": u32::MAX}}
-            }),
-        ),
-        (
-            "maximum cgroup ID",
-            json!({
-                "method": "policy.scopes.create",
-                "params": {"selector": {"kind": "cgroup_id", "cgroupId": u64::MAX}}
-            }),
-        ),
-    ] {
+    for (name, request) in [(
+        "256-byte policy name and 4096-byte path",
+        json!({
+            "method": "policy.templates.create",
+            "params": {
+                "policyName": "n".repeat(256),
+                "template": file_policy(vec![maximum_path])
+            }
+        }),
+    )] {
         let response = support::request_json(&daemon.socket_path, &request).await;
         assert!(response.get("result").is_some(), "{name}: {response}");
     }
@@ -1212,7 +1149,7 @@ async fn real_uds_accepts_domain_and_pagination_boundary_values() {
         json!({"method": "policy.templates.update", "params": {
             "policyId": maximum_id,
             "policyName": "valid",
-            "template": {"kind": "prevent_file_deletion", "files": ["/"]}
+            "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/"}, "where": {"operation": {"eq": "delete"}}}]}
         }}),
         json!({"method": "policy.templates.get", "params": {
             "id": "a", "revision": u32::MAX
@@ -1220,31 +1157,10 @@ async fn real_uds_accepts_domain_and_pagination_boundary_values() {
         json!({"method": "policy.templates.delete", "params": {
             "id": maximum_id, "revision": u32::MAX
         }}),
-        json!({"method": "policy.scopes.update", "params": {
-            "scopeId": maximum_id,
-            "selector": {"kind": "pid", "pid": u32::MAX}
-        }}),
-        json!({"method": "policy.scopes.get", "params": {
-            "id": "a-_.:0", "revision": u32::MAX
-        }}),
-        json!({"method": "policy.scopes.delete", "params": {
-            "id": maximum_id, "revision": u32::MAX
-        }}),
-        json!({"method": "policy.bindings.create", "params": {
-            "policyId": maximum_id,
-            "policyRevision": u32::MAX,
-            "scopeId": "a",
-            "scopeRevision": u32::MAX
-        }}),
-        json!({"method": "policy.bindings.update", "params": {
-            "bindingId": maximum_id,
-            "policyId": "a",
-            "policyRevision": u32::MAX,
-            "scopeId": maximum_id,
-            "scopeRevision": u32::MAX
-        }}),
+        json!({"method": "policy.scopes.retry", "params":{"id":maximum_id}}),
+        json!({"method": "policy.scopes.get", "params":{"id":"a-_.:0"}}),
+        json!({"method": "policy.scopes.delete", "params":{"id":maximum_id}}),
         json!({"method": "policy.bindings.get", "params": {"id": maximum_id}}),
-        json!({"method": "policy.bindings.delete", "params": {"id": "a"}}),
     ];
     for request in boundary_requests {
         let method = request["method"].as_str().unwrap();
@@ -1259,295 +1175,70 @@ async fn real_uds_accepts_domain_and_pagination_boundary_values() {
     clippy::too_many_lines,
     reason = "the stateful CRUD error sequence must retain its captured resource identities"
 )]
-async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
+async fn real_uds_distinguishes_stale_references_and_closed_scope_admission() {
     let repository = Arc::new(ProcessLocalPapRepository::default());
-    let daemon = RunningPapDaemon::start_with_repository(
+    let pap = PapService::new(repository.clone()).with_scope_discovery(Arc::new(Discovery));
+    let original = pap
+        .create_policy("v1", &file_policy(vec!["/a".into()]))
+        .unwrap();
+    let scope = pap
+        .create_scope_assignment(
+            &ScopeSelector::Pid { pid: 4242 },
+            &[asc_policy_types::scope::PolicyReference {
+                policy_id: original.policy_id.clone(),
+                policy_revision: original.revision,
+            }],
+        )
+        .unwrap();
+    let instance = RecordingAdministration::new().binding.spec.scope.process;
+    asc_pap::ScopeBindingSink::sync_instances(
+        &pap,
+        &scope.scope_id,
+        std::slice::from_ref(&instance),
+    )
+    .unwrap();
+    let binding = pap.list_bindings(10, 0).unwrap().items.remove(0);
+    let current = pap
+        .update_policy(&original.policy_id, "v2", &original.template)
+        .unwrap();
+    let daemon = RunningPapDaemon::start_with_application(
         PrincipalRole::PolicyAdministrator,
         4 * 1024 * 1024,
-        Arc::clone(&repository),
+        pap.clone(),
     )
     .await;
-
-    let policy = support::request_json(
+    let stale = support::request_json(&daemon.socket_path, &json!({"method":"policy.scopes.create", "params":{"selector":scope.selector,"policyTemplates":[{"policyId":original.policy_id,"policyRevision":1}]}})).await;
+    assert_eq!(stale["error"]["code"], "not_found");
+    pap.delete_policy_revision(&current.policy_id, current.revision)
+        .unwrap();
+    assert_eq!(
+        pap.get_scope(&scope.scope_id).unwrap().policy_snapshots,
+        vec![original]
+    );
+    let deleted = support::request_json(
         &daemon.socket_path,
-        &json!({
-            "method": "policy.templates.create",
-            "params": {
-                "policyName": "policy-v1",
-                "template": {"kind": "prevent_file_deletion", "files": ["/v1"]}
-            }
-        }),
+        &json!({"method":"policy.scopes.delete","params":{"id":scope.scope_id}}),
     )
     .await;
-    let policy_id = policy["result"]["policyId"].as_str().unwrap().to_owned();
-    let policy = support::request_json(
+    assert_eq!(deleted["result"]["completed"], false);
+    assert!(asc_pap::ScopeBindingSink::sync_instances(&pap, &scope.scope_id, &[instance]).is_err());
+    let get = support::request_json(
         &daemon.socket_path,
-        &json!({
-            "method": "policy.templates.update",
-            "params": {
-                "policyId": policy_id,
-                "policyName": "policy-v2",
-                "template": {"kind": "prevent_file_deletion", "files": ["/v2"]}
-            }
-        }),
+        &json!({"method":"policy.bindings.get","params":{"id":binding.spec.binding_id}}),
     )
     .await;
-    assert_eq!(policy["result"]["revision"], 2);
-
-    let scope = support::request_json(
-        &daemon.socket_path,
-        &json!({
-            "method": "policy.scopes.create",
-            "params": {"selector": {"kind": "pid", "pid": 1}}
-        }),
-    )
-    .await;
-    let scope_id = scope["result"]["scopeId"].as_str().unwrap().to_owned();
-    let scope = support::request_json(
-        &daemon.socket_path,
-        &json!({
-            "method": "policy.scopes.update",
-            "params": {
-                "scopeId": scope_id,
-                "selector": {"kind": "cgroup_id", "cgroupId": 2}
-            }
-        }),
-    )
-    .await;
-    assert_eq!(scope["result"]["revision"], 2);
-
-    let mut failures = Vec::new();
-    for (name, request, expected) in [
-        (
-            "get stale policy revision",
-            json!({"method": "policy.templates.get", "params": {"id": policy_id, "revision": 1}}),
-            json!({"code": "not_found", "message": "policy revision was not found"}),
-        ),
-        (
-            "delete stale policy revision",
-            json!({"method": "policy.templates.delete", "params": {"id": policy_id, "revision": 1}}),
-            json!({"code": "not_found", "message": "policy revision was not found"}),
-        ),
-        (
-            "get stale scope revision",
-            json!({"method": "policy.scopes.get", "params": {"id": scope_id, "revision": 1}}),
-            json!({"code": "not_found", "message": "scope revision was not found"}),
-        ),
-        (
-            "delete stale scope revision",
-            json!({"method": "policy.scopes.delete", "params": {"id": scope_id, "revision": 1}}),
-            json!({"code": "not_found", "message": "scope revision was not found"}),
-        ),
-        (
-            "create binding with stale policy revision",
-            json!({"method": "policy.bindings.create", "params": {
-                "policyId": policy_id,
-                "policyRevision": 1,
-                "scopeId": scope_id,
-                "scopeRevision": 2
-            }}),
-            json!({"code": "not_found", "message": "referenced policy revision was not found"}),
-        ),
-        (
-            "create binding with stale scope revision",
-            json!({"method": "policy.bindings.create", "params": {
-                "policyId": policy_id,
-                "policyRevision": 2,
-                "scopeId": scope_id,
-                "scopeRevision": 1
-            }}),
-            json!({"code": "not_found", "message": "referenced scope revision was not found"}),
-        ),
-        (
-            "create binding with missing scope revision",
-            json!({"method": "policy.bindings.create", "params": {
-                "policyId": policy_id,
-                "policyRevision": 2,
-                "scopeId": "missing-scope",
-                "scopeRevision": 1
-            }}),
-            json!({"code": "not_found", "message": "referenced scope revision was not found"}),
-        ),
+    assert_eq!(get["result"]["status"]["phase"], "PENDING_DELETE");
+    for method in [
+        "policy.scopes.update",
+        "policy.bindings.create",
+        "policy.bindings.update",
+        "policy.bindings.delete",
     ] {
-        let response = support::request_json(&daemon.socket_path, &request).await;
-        record_error_response(&mut failures, name, &response, &expected);
+        let response =
+            support::request_json(&daemon.socket_path, &json!({"method":method,"params":{}})).await;
+        assert_eq!(response["error"]["code"], "unknown_method");
     }
-
-    let binding = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.create", "params": {
-            "policyId": policy_id,
-            "policyRevision": 2,
-            "scopeId": scope_id,
-            "scopeRevision": 2
-        }}),
-    )
-    .await;
-    let binding_id = binding["result"]["spec"]["bindingId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let binding_resource_id = ResourceId::new(binding_id.clone()).unwrap();
-
-    for (name, request, expected) in [
-        (
-            "update binding with stale policy revision",
-            json!({"method": "policy.bindings.update", "params": {
-                "bindingId": binding_id,
-                "policyId": policy_id,
-                "policyRevision": 1,
-                "scopeId": scope_id,
-                "scopeRevision": 2
-            }}),
-            json!({"code": "not_found", "message": "referenced policy revision was not found"}),
-        ),
-        (
-            "update binding with stale scope revision",
-            json!({"method": "policy.bindings.update", "params": {
-                "bindingId": binding_id,
-                "policyId": policy_id,
-                "policyRevision": 2,
-                "scopeId": scope_id,
-                "scopeRevision": 1
-            }}),
-            json!({"code": "not_found", "message": "referenced scope revision was not found"}),
-        ),
-    ] {
-        let response = support::request_json(&daemon.socket_path, &request).await;
-        record_error_response(&mut failures, name, &response, &expected);
-    }
-
-    transition_binding(&repository, &binding_resource_id, BindingStatus::Applying);
-    let identical_apply = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.update", "params": {
-            "bindingId": binding_id,
-            "policyId": policy_id,
-            "policyRevision": 2,
-            "scopeId": scope_id,
-            "scopeRevision": 2
-        }}),
-    )
-    .await;
-    assert_eq!(identical_apply["result"]["status"]["phase"], "APPLYING");
-    assert_eq!(identical_apply["result"]["spec"]["bindingRevision"], 1);
-
-    let conflict = json!({
-        "code": "conflict",
-        "message": "binding reconciliation operation is in progress"
-    });
-    let response = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.update", "params": {
-            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 1,
-            "scopeId": scope_id, "scopeRevision": 2
-        }}),
-    )
-    .await;
-    record_error_response(
-        &mut failures,
-        "changed binding update while apply is running",
-        &response,
-        &conflict,
-    );
-
-    let deletion = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
-    )
-    .await;
-    assert_eq!(deletion["result"]["status"]["phase"], "PENDING_DELETE");
-    let repeated_pending_deletion = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
-    )
-    .await;
-    assert_eq!(
-        repeated_pending_deletion["result"]["status"]["phase"],
-        "PENDING_DELETE"
-    );
-    assert_eq!(
-        repeated_pending_deletion["result"]["spec"]["bindingRevision"],
-        1
-    );
-    assert_eq!(
-        deletion["result"]["spec"],
-        identical_apply["result"]["spec"]
-    );
-    let response = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.update", "params": {
-            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 2,
-            "scopeId": scope_id, "scopeRevision": 2
-        }}),
-    )
-    .await;
-    record_error_response(
-        &mut failures,
-        "pending delete cannot be cancelled",
-        &response,
-        &conflict,
-    );
-    transition_binding(&repository, &binding_resource_id, BindingStatus::Deleting);
-    let repeated_running_deletion = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
-    )
-    .await;
-    assert_eq!(
-        repeated_running_deletion["result"]["status"]["phase"],
-        "DELETING"
-    );
-    assert_eq!(
-        repeated_running_deletion["result"]["spec"]["bindingRevision"],
-        1
-    );
-    let response = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.update", "params": {
-            "bindingId": binding_id,
-            "policyId": policy_id,
-            "policyRevision": 2,
-            "scopeId": scope_id,
-            "scopeRevision": 2
-        }}),
-    )
-    .await;
-    record_error_response(
-        &mut failures,
-        "binding update while delete is running",
-        &response,
-        &conflict,
-    );
-
-    transition_binding(
-        &repository,
-        &binding_resource_id,
-        BindingStatus::DeleteFailed,
-    );
-    let response = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.update", "params": {
-            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 2,
-            "scopeId": scope_id, "scopeRevision": 2
-        }}),
-    )
-    .await;
-    record_error_response(
-        &mut failures,
-        "failed delete cannot be cancelled",
-        &response,
-        &conflict,
-    );
-    let retried = support::request_json(
-        &daemon.socket_path,
-        &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
-    )
-    .await;
-    assert_eq!(retried["result"], deletion["result"]);
-
     daemon.stop().await;
-    assert_error_matrix(&failures);
 }
 
 #[tokio::test]
@@ -1567,12 +1258,13 @@ async fn real_uds_scheduling_rejection_and_get_list_match_frozen_wire() {
     .unwrap();
     for case in cases {
         let mut binding: BindingView = serde_json::from_value(case["binding"].clone()).unwrap();
-        binding.status = BindingStatus::PendingApply.into();
+        binding.status = BindingStatus::ApplyFailed.into();
         binding.status.error = None;
         let spec = binding.spec.clone();
         let repo = Arc::new(
             ProcessLocalPapRepository::with_binding_states(vec![
                 asc_policy_repository::BindingStateSnapshot {
+                    status_version: 1,
                     binding,
                     deployments: vec![],
                 },
@@ -1584,8 +1276,9 @@ async fn real_uds_scheduling_rejection_and_get_list_match_frozen_wire() {
         } else {
             asc_pap::EnqueueError::Stopped
         };
-        let pap = PapService::new(repo, Arc::new(PolicyTemplateCompiler))
-            .with_reconcile_enqueuer(Arc::new(Reject(reason)));
+        let pap = PapService::new(repo)
+            .with_reconcile_enqueuer(Arc::new(Reject(reason)))
+            .with_scope_discovery(Arc::new(Discovery));
         let daemon = RunningPapDaemon::start_with_application(
             PrincipalRole::PolicyAdministrator,
             4 * 1024 * 1024,
@@ -1593,18 +1286,17 @@ async fn real_uds_scheduling_rejection_and_get_list_match_frozen_wire() {
         )
         .await;
         let operation = case["operation"].as_str().unwrap();
-        let params = if operation == "delete" {
-            json!({"id": spec.binding_id})
+        let method = if operation == "delete" {
+            "policy.scopes.delete"
         } else {
-            json!({"bindingId": spec.binding_id, "policyId": spec.policy.policy_id, "policyRevision": spec.policy.revision, "scopeId": spec.scope.scope_id, "scopeRevision": spec.scope.revision})
+            "policy.scopes.retry"
         };
-        let request = format!(
-            "{}\n",
-            json!({"method": format!("policy.bindings.{operation}"), "params": params})
-        );
-        let response = uds_request(&daemon.socket_path, request.as_bytes()).await;
-        assert!(response.get("error").is_none());
-        assert_eq!(response["result"], case["binding"]);
+        let response = support::request_json(
+            &daemon.socket_path,
+            &json!({"method":method,"params":{"id":spec.scope.scope_id}}),
+        )
+        .await;
+        assert!(response.get("error").is_none(), "{response}");
         let get = format!(
             "{}\n",
             json!({"method":"policy.bindings.get", "params":{"id":spec.binding_id}})
@@ -1624,15 +1316,16 @@ async fn real_uds_scheduling_rejection_and_get_list_match_frozen_wire() {
 #[tokio::test]
 async fn unavailable_preflight_returns_wire_error_without_creating_binding() {
     let repo = Arc::new(ProcessLocalPapRepository::default());
-    let pap = PapService::new(repo, Arc::new(PolicyTemplateCompiler))
-        .with_reconcile_enqueuer(Arc::new(asc_daemon::UnavailableReconciliation));
+    let pap = PapService::new(repo)
+        .with_reconcile_enqueuer(Arc::new(asc_daemon::UnavailableReconciliation))
+        .with_scope_discovery(Arc::new(Discovery));
     let daemon = RunningPapDaemon::start_with_application(
         PrincipalRole::PolicyAdministrator,
         4 * 1024 * 1024,
         pap,
     )
     .await;
-    let response = uds_request(&daemon.socket_path, b"{\"method\":\"policy.bindings.create\",\"params\":{\"policyId\":\"10000000-0000-4000-8000-000000000001\",\"policyRevision\":1,\"scopeId\":\"10000000-0000-4000-8000-000000000002\",\"scopeRevision\":1}}\n").await;
+    let response = support::request_json(&daemon.socket_path, &json!({"method":"policy.scopes.create","params":{"selector":{"kind":"pid","pid":4242},"policyTemplates":[{"policyId":"missing","policyRevision":1}]}})).await;
     assert_eq!(
         response["error"],
         json!({"code":"unavailable", "message":"reconciliation runtime is unavailable"})
@@ -1645,4 +1338,14 @@ async fn unavailable_preflight_returns_wire_error_without_creating_binding() {
     .await;
     assert_eq!(response["result"], json!({"items":[], "total":0}));
     daemon.stop().await;
+}
+
+struct Discovery;
+impl asc_pap::ScopeDiscovery for Discovery {
+    fn start(&self, _: &asc_pap::ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
+    fn stop(&self, _: &asc_foundation_types::ResourceId) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
 }

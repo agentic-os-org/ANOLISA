@@ -31,6 +31,11 @@ pub trait ProcessIdentityResolver: Send + Sync {
     /// # Errors
     /// Returns a stable local resolution category.
     fn boot_id(&self) -> Result<String, ProcessIdentityError>;
+
+    /// Reads the target PID namespace inode identity.
+    /// # Errors
+    /// Returns a stable local resolution category.
+    fn pid_namespace(&self, pid: i32) -> Result<String, ProcessIdentityError>;
 }
 
 /// Linux `/proc` implementation of [`ProcessIdentityResolver`].
@@ -50,6 +55,21 @@ impl ProcessIdentityResolver for ProcProcessIdentityResolver {
             }
         })?;
         parse_process_start_time(&stat)
+    }
+
+    fn pid_namespace(&self, pid: i32) -> Result<String, ProcessIdentityError> {
+        if pid <= 0 {
+            return Err(ProcessIdentityError::InvalidPid);
+        }
+        fs::read_link(format!("/proc/{pid}/ns/pid"))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    ProcessIdentityError::Exited
+                } else {
+                    ProcessIdentityError::Unavailable
+                }
+            })
     }
 
     fn boot_id(&self) -> Result<String, ProcessIdentityError> {

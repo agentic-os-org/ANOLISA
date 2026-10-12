@@ -9,14 +9,17 @@
 //!   blob must not blank out a whole query.
 //!
 //! Unlike v1 the repository does not own the store: the kernel owns connection
-//! lifecycle, so every method takes a `&Connection`.
+//! lifecycle, so every method takes a `&Connection`. The filter and scope
+//! vocabulary lives in `asc-security-events::query`; this module renders it
+//! into SQL.
 
 use std::fmt::Write as _;
 
+use asc_security_events::query::QueryScope;
+pub use asc_security_events::query::{EventFilters, GroupCounts, VALID_GROUP_FIELDS};
 use asc_security_events::timestamp::utc_iso_to_epoch;
 use asc_security_events::{
-    CorrelationCandidate, EventResult, SecurityEvent, SecurityEventsSummary, TimestampError,
-    extract_verdict,
+    CorrelationCandidate, EventResult, SecurityEvent, SecurityEventsSummary, extract_verdict,
 };
 use asc_sqlite_kernel::{KernelError, RecordRepository, TableSpec};
 use rusqlite::types::Value as SqlValue;
@@ -29,20 +32,14 @@ use crate::security_events::table::SECURITY_EVENTS_TABLES;
 /// `_CORRELATION_CANDIDATE_LIMIT`).
 pub const CORRELATION_CANDIDATE_LIMIT: u32 = 1000;
 
-/// Group fields accepted by [`SecurityEventRepository::count_by`].
+const CORRELATION_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Hard cap on the buckets one `count_by` may collect.
 ///
-/// Listed in v1's `_COUNT_BY_COLUMNS` order.
-pub const VALID_GROUP_FIELDS: &[&str] = &[
-    "category",
-    "event_type",
-    "result",
-    "trace_id",
-    "session_id",
-    "run_id",
-    "call_id",
-    "tool_call_id",
-    "verdict",
-];
+/// The grouping itself runs in SQL; this bounds the collected result so a
+/// pathological cardinality (for example `group_by trace_id` over a very
+/// large scope) cannot translate into unbounded memory in the daemon.
+pub const MAX_GROUP_BUCKETS: usize = 100_000;
 
 /// Group fields aggregated by [`SecurityEventRepository::summary`] in one query.
 const SUMMARY_GROUP_FIELDS: &[&str] = &["category", "event_type", "result", "session_id", "run_id"];
@@ -51,103 +48,25 @@ const SUMMARY_GROUP_FIELDS: &[&str] = &["category", "event_type", "result", "ses
 const SELECT_COLUMNS: &str = "event_id, event_type, category, result, timestamp, timestamp_epoch, \
                               trace_id, pid, uid, session_id, run_id, call_id, tool_call_id, details";
 
-/// Optional query filters, all combined with `AND`.
-///
-/// Time bounds are stored as epochs because that is what the indexed column
-/// holds; use [`EventFilters::since`] / [`EventFilters::until`] to supply the ISO
-/// strings the v1 API takes.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct EventFilters {
-    /// Exact `event_type`.
-    pub event_type: Option<String>,
-    /// Exact `category`.
-    pub category: Option<String>,
-    /// Exact `result`.
-    pub result: Option<String>,
-    /// Exact `trace_id`.
-    pub trace_id: Option<String>,
-    /// Exact `session_id`.
-    pub session_id: Option<String>,
-    /// Exact `run_id`.
-    pub run_id: Option<String>,
-    /// Exact `call_id`.
-    pub call_id: Option<String>,
-    /// Exact `tool_call_id`.
-    pub tool_call_id: Option<String>,
-    /// Exact `verdict`.
-    pub verdict: Option<String>,
-    /// Inclusive lower bound on `timestamp_epoch`.
-    pub since_epoch: Option<f64>,
-    /// Exclusive upper bound on `timestamp_epoch`.
-    pub until_epoch: Option<f64>,
-}
+// Collision detection spans the store so labels survive pagination and time filtering.
+const QUALIFIED_SESSION: &str = "CASE WHEN EXISTS(SELECT 1 FROM security_events AS other \
+    WHERE other.session_id=security_events.session_id AND other.uid!=security_events.uid) \
+    THEN security_events.uid || '_' || security_events.session_id ELSE security_events.session_id END";
 
-impl EventFilters {
-    /// Sets the inclusive lower bound from a UTC ISO timestamp.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TimestampError`] when `value` is not ISO-8601, matching v1,
-    /// where `utc_iso_to_epoch` raises out of `query()`.
-    pub fn since(mut self, value: &str) -> Result<Self, TimestampError> {
-        self.since_epoch = Some(utc_iso_to_epoch(value, "since")?);
-        Ok(self)
-    }
-
-    /// Sets the exclusive upper bound from a UTC ISO timestamp.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TimestampError`] when `value` is not ISO-8601.
-    pub fn until(mut self, value: &str) -> Result<Self, TimestampError> {
-        self.until_epoch = Some(utc_iso_to_epoch(value, "until")?);
-        Ok(self)
-    }
-
-    /// Renders the `WHERE` clause and its bound parameters.
-    ///
-    /// Returns an empty string when nothing is filtered, so callers can splice
-    /// the result unconditionally.
-    fn build(&self) -> (String, Vec<SqlValue>) {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<SqlValue> = Vec::new();
-
-        let equality = [
-            ("event_type", self.event_type.as_ref()),
-            ("category", self.category.as_ref()),
-            ("result", self.result.as_ref()),
-            ("trace_id", self.trace_id.as_ref()),
-            ("session_id", self.session_id.as_ref()),
-            ("run_id", self.run_id.as_ref()),
-            ("call_id", self.call_id.as_ref()),
-            ("tool_call_id", self.tool_call_id.as_ref()),
-            ("verdict", self.verdict.as_ref()),
-        ];
-        for (column, value) in equality {
-            if let Some(value) = value {
-                params.push(SqlValue::Text(value.clone()));
-                clauses.push(format!("{column} = ?{}", params.len()));
-            }
-        }
-        if let Some(since) = self.since_epoch {
-            params.push(SqlValue::Real(since));
-            clauses.push(format!("timestamp_epoch >= ?{}", params.len()));
-        }
-        if let Some(until) = self.until_epoch {
-            params.push(SqlValue::Real(until));
-            clauses.push(format!("timestamp_epoch < ?{}", params.len()));
-        }
-
-        if clauses.is_empty() {
-            (String::new(), params)
-        } else {
-            (format!(" WHERE {}", clauses.join(" AND ")), params)
-        }
+fn session_column(scope: QueryScope) -> &'static str {
+    if scope == QueryScope::All {
+        QUALIFIED_SESSION
+    } else {
+        "session_id"
     }
 }
 
-/// Counts grouped by one column; `None` is the SQL `NULL` bucket.
-pub type GroupCounts = Vec<(Option<String>, u64)>;
+fn select_columns(scope: QueryScope) -> String {
+    SELECT_COLUMNS.replace(
+        ", session_id,",
+        &format!(", {} AS session_id,", session_column(scope)),
+    )
+}
 
 /// The filters of one correlation-candidate query.
 ///
@@ -218,7 +137,7 @@ impl RecordRepository for SecurityEventRepository {
 }
 
 impl SecurityEventRepository {
-    /// Returns matching events, newest first.
+    /// Returns matching events, newest first, within one owner scope.
     ///
     /// # Errors
     ///
@@ -227,22 +146,28 @@ impl SecurityEventRepository {
         &self,
         conn: &Connection,
         filters: &EventFilters,
+        scope: &QueryScope,
         limit: u32,
-        offset: u32,
+        offset: i64,
     ) -> Result<Vec<SecurityEvent>, KernelError> {
-        let (where_clause, mut params) = filters.build();
+        let (where_clause, mut params) = build_filters(filters, *scope);
         params.push(SqlValue::Integer(i64::from(limit)));
-        params.push(SqlValue::Integer(i64::from(offset)));
+        params.push(SqlValue::Integer(offset));
         let sql = format!(
-            "SELECT {SELECT_COLUMNS} FROM security_events{where_clause} \
-             ORDER BY timestamp_epoch DESC LIMIT ?{} OFFSET ?{}",
+            "SELECT {} FROM security_events{where_clause} \
+             ORDER BY timestamp_epoch DESC, event_id DESC LIMIT ?{} OFFSET ?{}",
+            select_columns(*scope),
             params.len() - 1,
             params.len()
         );
         collect_events(conn, &sql, &params)
     }
 
-    /// Returns one event by id.
+    /// Returns one event by id, or `None`.
+    ///
+    /// A record outside `scope` and a record that does not exist are
+    /// indistinguishable, by design: `event_id` is caller-supplied, so its
+    /// presence must not leak another owner's data.
     ///
     /// # Errors
     ///
@@ -251,25 +176,47 @@ impl SecurityEventRepository {
         &self,
         conn: &Connection,
         event_id: &str,
+        scope: &QueryScope,
     ) -> Result<Option<SecurityEvent>, KernelError> {
-        let sql = format!("SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1");
-        let events = collect_events(conn, &sql, &[SqlValue::Text(event_id.to_owned())])?;
+        let (sql, params): (String, Vec<SqlValue>) = match *scope {
+            QueryScope::Owner(uid) => (
+                format!(
+                    "SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1 AND uid = ?2"
+                ),
+                vec![
+                    SqlValue::Text(event_id.to_owned()),
+                    SqlValue::Integer(i64::from(uid)),
+                ],
+            ),
+            QueryScope::All => (
+                format!(
+                    "SELECT {} FROM security_events WHERE event_id = ?1",
+                    select_columns(*scope)
+                ),
+                vec![SqlValue::Text(event_id.to_owned())],
+            ),
+        };
+        let events = collect_events(conn, &sql, &params)?;
         Ok(events.into_iter().next())
     }
 
-    /// Returns up to [`CORRELATION_CANDIDATE_LIMIT`] rows for correlation.
+    /// Returns up to [`CORRELATION_CANDIDATE_LIMIT`] rows for correlation,
+    /// within one owner scope.
     ///
     /// Ordered ascending by `(timestamp_epoch, event_id)` so the caller sees a
     /// stable chronological sequence. An empty `categories` or an all-empty
-    /// `tool_call_ids` short-circuits to no candidates, as in v1.
+    /// `tool_call_ids` short-circuits to no candidates, as in v1. Malformed
+    /// candidates are skipped; the collected payload is bounded to 4 MiB.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Sqlite`] when the query cannot run.
+    /// Returns [`KernelError::Sqlite`] when the query cannot run, or
+    /// [`KernelError::Malformed`] when the candidate payload exceeds its budget.
     pub fn query_correlation_candidates(
         &self,
         conn: &Connection,
         request: &CorrelationRequest<'_>,
+        scope: &QueryScope,
     ) -> Result<Vec<CorrelationCandidate>, KernelError> {
         if request.categories.is_empty() {
             return Ok(Vec::new());
@@ -277,6 +224,10 @@ impl SecurityEventRepository {
 
         let mut params: Vec<SqlValue> = vec![SqlValue::Text(request.session_id.to_owned())];
         let mut clauses = vec!["session_id = ?1".to_owned()];
+        if let QueryScope::Owner(uid) = *scope {
+            params.push(SqlValue::Integer(i64::from(uid)));
+            clauses.push(format!("uid = ?{}", params.len()));
+        }
 
         let placeholders = push_in_list(&mut params, request.categories);
         clauses.push(format!("category IN ({placeholders})"));
@@ -311,19 +262,32 @@ impl SecurityEventRepository {
         let mut statement = conn.prepare(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
         let mut candidates = Vec::new();
+        let mut bytes = 0;
         while let Some(row) = rows.next()? {
-            let epoch: f64 = row.get("timestamp_epoch")?;
-            if let Some(event) = row_to_event(row)? {
-                candidates.push(CorrelationCandidate {
-                    event,
-                    timestamp_epoch: epoch,
-                });
+            let candidate = row_to_candidate(row).unwrap_or_else(|_| {
+                tracing::warn!(target: "asc_process_diagnostic",
+                    "security correlation candidate skipped: malformed row");
+                None
+            });
+            let payload = candidate
+                .as_ref()
+                .map(|row| (&row.event, row.timestamp_epoch));
+            bytes += serde_json::to_vec(&payload)
+                .map_err(|_| {
+                    KernelError::Malformed("invalid correlation candidate payload".into())
+                })?
+                .len();
+            if bytes > CORRELATION_CANDIDATE_BYTES {
+                return Err(KernelError::Malformed(
+                    "security correlation candidates exceed resource limits".into(),
+                ));
             }
+            candidates.extend(candidate);
         }
         Ok(candidates)
     }
 
-    /// Counts matching events.
+    /// Counts matching events within one owner scope.
     ///
     /// A non-zero `offset` counts what remains *after* skipping that many rows,
     /// which is how v1 keeps pagination counters honest.
@@ -335,14 +299,15 @@ impl SecurityEventRepository {
         &self,
         conn: &Connection,
         filters: &EventFilters,
-        offset: u32,
+        scope: &QueryScope,
+        offset: i64,
     ) -> Result<u64, KernelError> {
-        let (where_clause, mut params) = filters.build();
+        let (where_clause, mut params) = build_filters(filters, *scope);
         let sql = if offset > 0 {
-            params.push(SqlValue::Integer(i64::from(offset)));
+            params.push(SqlValue::Integer(offset));
             format!(
                 "SELECT COUNT(*) FROM (SELECT event_id FROM security_events{where_clause} \
-                 ORDER BY timestamp_epoch DESC LIMIT -1 OFFSET ?{})",
+                 ORDER BY timestamp_epoch DESC, event_id DESC LIMIT -1 OFFSET ?{})",
                 params.len()
             )
         } else {
@@ -355,7 +320,8 @@ impl SecurityEventRepository {
         Ok(count.try_into().unwrap_or_default())
     }
 
-    /// Counts matching events grouped by one allowlisted field.
+    /// Counts matching events within one owner scope, grouped by one allowlisted
+    /// field.
     ///
     /// When grouping by `verdict` without also filtering on it, NULL and empty
     /// verdicts are excluded — otherwise the dashboard would show a bucket for
@@ -371,11 +337,17 @@ impl SecurityEventRepository {
         conn: &Connection,
         group_field: &str,
         filters: &EventFilters,
-        offset: u32,
+        scope: &QueryScope,
+        offset: i64,
     ) -> Result<GroupCounts, KernelError> {
         let column = validate_group_field(group_field)?;
+        let column = if column == "session_id" {
+            session_column(*scope)
+        } else {
+            column
+        };
 
-        let (mut where_clause, mut params) = filters.build();
+        let (mut where_clause, mut params) = build_filters(filters, *scope);
         if column == "verdict" && filters.verdict.is_none() {
             let extra = "verdict IS NOT NULL AND verdict != ''";
             where_clause = if where_clause.is_empty() {
@@ -386,11 +358,11 @@ impl SecurityEventRepository {
         }
 
         let sql = if offset > 0 {
-            params.push(SqlValue::Integer(i64::from(offset)));
+            params.push(SqlValue::Integer(offset));
             format!(
                 "SELECT group_value, COUNT(*) FROM \
                  (SELECT {column} AS group_value FROM security_events{where_clause} \
-                 ORDER BY timestamp_epoch DESC LIMIT -1 OFFSET ?{}) \
+                 ORDER BY timestamp_epoch DESC, event_id DESC LIMIT -1 OFFSET ?{}) \
                  GROUP BY group_value",
                 params.len()
             )
@@ -404,13 +376,18 @@ impl SecurityEventRepository {
         let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
         let mut counts = Vec::new();
         while let Some(row) = rows.next()? {
+            if counts.len() >= MAX_GROUP_BUCKETS {
+                return Err(KernelError::Malformed(format!(
+                    "grouped counts exceeded the resource bound of {MAX_GROUP_BUCKETS} buckets"
+                )));
+            }
             let count: i64 = row.get(1)?;
             counts.push((row.get(0)?, count.try_into().unwrap_or_default()));
         }
         Ok(counts)
     }
 
-    /// Returns the dashboard aggregates and the newest rows.
+    /// Returns the dashboard aggregates and the newest rows of one owner scope.
     ///
     /// The five group counts come back in one `UNION ALL` query, as in v1, so a
     /// dashboard render costs two statements rather than six.
@@ -422,15 +399,21 @@ impl SecurityEventRepository {
         &self,
         conn: &Connection,
         filters: &EventFilters,
+        scope: &QueryScope,
         latest_limit: u32,
     ) -> Result<SecurityEventsSummary, KernelError> {
-        let (where_clause, params) = filters.build();
+        let (where_clause, params) = build_filters(filters, *scope);
         let branches: Vec<String> = SUMMARY_GROUP_FIELDS
             .iter()
             .map(|field| {
+                let column = if *field == "session_id" {
+                    session_column(*scope)
+                } else {
+                    field
+                };
                 format!(
-                    "SELECT '{field}' AS group_field, {field} AS group_value, COUNT(*) AS count \
-                     FROM security_events{where_clause} GROUP BY {field}"
+                    "SELECT '{field}' AS group_field, {column} AS group_value, COUNT(*) AS count \
+                     FROM security_events{where_clause} GROUP BY {column}"
                 )
             })
             .collect();
@@ -461,7 +444,7 @@ impl SecurityEventRepository {
         drop(rows);
         drop(statement);
 
-        let latest = self.query(conn, filters, latest_limit, 0)?;
+        let latest = self.query(conn, filters, scope, latest_limit, 0)?;
         let take = |name: &str| -> GroupCounts {
             groups
                 .iter()
@@ -479,6 +462,54 @@ impl SecurityEventRepository {
             by_run: take("run_id"),
             latest_events: latest,
         })
+    }
+}
+
+/// Renders the `WHERE` clause and its bound parameters for one scope.
+///
+/// For an owner scope the owner predicate is always the first clause, so
+/// pagination, `COUNT` and `GROUP BY` never see another owner's rows. The
+/// root `All` scope has no owner predicate at all; returns an empty clause
+/// only then and when nothing else is filtered.
+fn build_filters(filters: &EventFilters, scope: QueryScope) -> (String, Vec<SqlValue>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+
+    if let QueryScope::Owner(uid) = scope {
+        params.push(SqlValue::Integer(i64::from(uid)));
+        clauses.push(format!("uid = ?{}", params.len()));
+    }
+
+    let equality = [
+        ("event_type", filters.event_type.as_ref()),
+        ("category", filters.category.as_ref()),
+        ("result", filters.result.as_ref()),
+        ("trace_id", filters.trace_id.as_ref()),
+        ("session_id", filters.session_id.as_ref()),
+        ("run_id", filters.run_id.as_ref()),
+        ("call_id", filters.call_id.as_ref()),
+        ("tool_call_id", filters.tool_call_id.as_ref()),
+        ("verdict", filters.verdict.as_ref()),
+    ];
+    for (column, value) in equality {
+        if let Some(value) = value {
+            params.push(SqlValue::Text(value.clone()));
+            clauses.push(format!("{column} = ?{}", params.len()));
+        }
+    }
+    if let Some(since) = filters.since_epoch {
+        params.push(SqlValue::Real(since));
+        clauses.push(format!("timestamp_epoch >= ?{}", params.len()));
+    }
+    if let Some(until) = filters.until_epoch {
+        params.push(SqlValue::Real(until));
+        clauses.push(format!("timestamp_epoch < ?{}", params.len()));
+    }
+
+    if clauses.is_empty() {
+        (String::new(), params)
+    } else {
+        (format!(" WHERE {}", clauses.join(" AND ")), params)
     }
 }
 
@@ -635,6 +666,17 @@ fn row_to_event(row: &Row<'_>) -> Result<Option<SecurityEvent>, KernelError> {
     }))
 }
 
+fn row_to_candidate(row: &Row<'_>) -> Result<Option<CorrelationCandidate>, KernelError> {
+    // Correlation skips invalid identities instead of applying the legacy reader's zero fallback.
+    row.get::<_, u32>("pid")?;
+    row.get::<_, u32>("uid")?;
+    let timestamp_epoch = row.get("timestamp_epoch")?;
+    Ok(row_to_event(row)?.map(|event| CorrelationCandidate {
+        event,
+        timestamp_epoch,
+    }))
+}
+
 fn skip(reason: &str) -> Option<SecurityEvent> {
     tracing::warn!(target: "asc_process_diagnostic", "[security_events] malformed row skipped: {reason}");
     None
@@ -696,25 +738,40 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_filter_set_renders_no_where_clause() {
-        let (clause, params) = EventFilters::default().build();
-        assert!(clause.is_empty());
-        assert!(params.is_empty());
+    fn a_bare_scope_renders_only_the_owner_clause() {
+        let (clause, params) = build_filters(&EventFilters::default(), QueryScope::Owner(1000));
+        assert_eq!(clause, " WHERE uid = ?1");
+        assert_eq!(params, vec![SqlValue::Integer(1000)]);
     }
 
     #[test]
-    fn filters_are_numbered_in_declaration_order() {
+    fn an_all_scope_renders_no_owner_clause() {
+        let (clause, params) = build_filters(&EventFilters::default(), QueryScope::All);
+        assert_eq!(clause, "");
+        assert!(params.is_empty());
+
+        let filters = EventFilters {
+            category: Some("exec".to_owned()),
+            ..EventFilters::default()
+        };
+        let (clause, params) = build_filters(&filters, QueryScope::All);
+        assert_eq!(clause, " WHERE category = ?1");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn filters_are_numbered_after_the_owner_predicate() {
         let filters = EventFilters {
             category: Some("exec".to_owned()),
             verdict: Some("deny".to_owned()),
             since_epoch: Some(1.0),
             ..EventFilters::default()
         };
-        let (clause, params) = filters.build();
+        let (clause, params) = build_filters(&filters, QueryScope::Owner(1000));
         assert_eq!(
             clause,
-            " WHERE category = ?1 AND verdict = ?2 AND timestamp_epoch >= ?3"
+            " WHERE uid = ?1 AND category = ?2 AND verdict = ?3 AND timestamp_epoch >= ?4"
         );
-        assert_eq!(params.len(), 3);
+        assert_eq!(params.len(), 4);
     }
 }

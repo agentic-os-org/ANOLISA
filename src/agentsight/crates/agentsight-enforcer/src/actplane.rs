@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,6 +30,9 @@ use uuid::Uuid;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+mod inode_policy;
+use inode_policy::InodePolicy;
+
 // Compile-time guard: compiler and engine must agree on CConfig ABI size.
 // If this fails, one crate's CRule definition was modified without updating the other.
 const _: () = assert!(
@@ -54,16 +55,15 @@ struct ActiveBinding {
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
-    /// Inodes guarded in the BPF inode_guard map for this binding.
-    /// Each entry is `(ino, dev)` and must be cleaned up when the binding
-    /// is detached so the map does not leak stale entries.
-    guarded_inodes: Vec<(u64, u32)>,
+    // Retain file identities through detach, including failed cleanup retries.
+    inode_policy: InodePolicy,
 }
 
 struct PreparedBinding {
     request: ApplyPolicy,
     credential_policy: Option<CredentialExfiltrationPolicy>,
     compiled: Compiled,
+    inode_policy: InodePolicy,
 }
 
 struct RuntimeState {
@@ -120,13 +120,12 @@ impl ActPlaneBackend {
     /// reload handle, self-protection, initial cleanup, or event drain cannot be
     /// established.
     pub fn open() -> Result<Self, BackendError> {
+        let runtime_lock = PinnedEngine::try_lock_runtime()
+            .map_err(|error| kernel_error("lock singleton runtime", error))?;
         let engine = Arc::new(
             PinnedEngine::open_or_install_singleton()
                 .map_err(|error| kernel_error("open pinned singleton", error))?,
         );
-        let runtime_lock = engine
-            .try_lock_runtime()
-            .map_err(|error| kernel_error("lock singleton runtime", error))?;
         let reload = Arc::new(
             engine
                 .reload_handle()
@@ -137,9 +136,15 @@ impl ActPlaneBackend {
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
         let drained = prepare_runtime(
             || {
-                reload
-                    .clear_runtime_state()
-                    .map_err(|error| kernel_error("clear stale runtime state", error))
+                let mut errors = inode_policy::clear(&engine);
+                if let Err(error) = reload.clear_runtime_state() {
+                    errors.push(format!("clear stale runtime state: {error}"));
+                }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(BackendError::KernelFailure(errors.join("; ")))
+                }
             },
             || {
                 engine
@@ -147,12 +152,6 @@ impl ActPlaneBackend {
                     .map_err(|error| kernel_error("drain stale pinned events", error))
             },
         )?;
-
-        // Clear stale inode guards that may survive a crash or SIGKILL so
-        // they do not leak into the next binding.
-        if let Err(e) = engine.clear_inode_guards() {
-            eprintln!("agentsight: failed to clear stale inode guards on startup: {e}");
-        }
 
         let state = Arc::new(RuntimeState::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -198,6 +197,7 @@ impl ActPlaneBackend {
         if let Err(error) = self.reload.clear_runtime_state() {
             errors.push(format!("clear runtime state: {error}"));
         }
+        errors.extend(inode_policy::clear(&self.engine));
         errors
     }
 
@@ -242,10 +242,16 @@ impl ActPlaneBackend {
                 "policy must declare a COMMAND or AGENT source label".into(),
             ));
         }
+        let inode_policy = InodePolicy::prepare(
+            &request.policy_dsl,
+            &compiled,
+            self.engine.inode_guard_mode(),
+        )?;
         Ok(PreparedBinding {
             request,
             credential_policy,
             compiled,
+            inode_policy,
         })
     }
 
@@ -259,6 +265,7 @@ impl ActPlaneBackend {
             request,
             credential_policy,
             compiled,
+            inode_policy,
         } = prepared;
         let label = compiled
             .labels
@@ -273,7 +280,10 @@ impl ActPlaneBackend {
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
         self.engine
             .seed_label_in_domain(request.root_pid, id, label)
-            .map_err(|error| kernel_error("seed target process domain", error))?;
+            .map_err(|error| {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                kernel_error_with_cleanup("seed target process domain", error, cleanup)
+            })?;
 
         // Rebind coverage: detaching a binding clears cap_task but leaves the
         // tree's per-domain state behind, so processes that joined the session
@@ -341,11 +351,6 @@ impl ActPlaneBackend {
             ));
         }
 
-        // Populate inode guard map for kernel-level fast-path protection.
-        // This allows 5.10/6.6 kernels (where bpf_d_path is unavailable in
-        // LSM hooks) to still block file deletion via inode matching.
-        let guarded_inodes = populate_inode_guards(&self.engine, &request.policy_dsl, id);
-
         let binding = Binding {
             request,
             state: BindingState::Enforced,
@@ -356,22 +361,35 @@ impl ActPlaneBackend {
             },
             domain_id: Some(id),
         };
-        bindings.insert(
-            id,
-            ActiveBinding {
-                binding: binding.clone(),
-                credential_policy,
-                kernel_pid: None,
-                reasons: compiled.reasons,
-                rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
-                label_names: compiled
-                    .labels
-                    .into_iter()
-                    .map(|(name, mask)| (mask, name))
-                    .collect(),
-                guarded_inodes,
-            },
-        );
+        let mut active = ActiveBinding {
+            binding: binding.clone(),
+            credential_policy,
+            kernel_pid: None,
+            reasons: compiled.reasons,
+            rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
+            label_names: compiled
+                .labels
+                .into_iter()
+                .map(|(name, mask)| (mask, name))
+                .collect(),
+            inode_policy,
+        };
+        if let Err(error) = active.inode_policy.install(&self.engine, id) {
+            let cleanup = self.cleanup_binding(&active.binding.request, id, None);
+            if !cleanup.is_empty() {
+                // Keep descriptors and the binding available for a detach retry;
+                // never allow inode reuse while a partial registration survives.
+                active.binding.state = BindingState::Failed;
+                active.binding.message = Some(cleanup.join("; "));
+                bindings.insert(id, active);
+            }
+            return Err(kernel_error_with_cleanup(
+                "install inode policy",
+                error,
+                cleanup,
+            ));
+        }
+        bindings.insert(id, active);
         Ok(binding)
     }
 
@@ -430,13 +448,6 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
-        // Clean up inode guard entries before tearing down the domain so the
-        // BPF map does not retain stale entries for a detached binding.
-        for &(ino, dev) in &active.guarded_inodes {
-            if let Err(e) = self.engine.unguard_inode(ino, dev) {
-                eprintln!("failed to unguard inode {ino}:{dev}: {e}");
-            }
-        }
         let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
         if !cleanup.is_empty() {
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
@@ -642,10 +653,9 @@ impl Drop for ActPlaneBackend {
                 );
             }
         }
-        // Batch-clear all remaining inode guard entries so no stale inodes
-        // survive the enforcer shutdown — covers both normal and error paths.
-        if let Err(e) = self.engine.clear_inode_guards() {
-            eprintln!("agentsight-enforcer: failed to clear inode guards during shutdown: {e}");
+        // Also covers failed installs that left no active binding.
+        for error in inode_policy::clear(&self.engine) {
+            log::error!("agentsight-enforcer shutdown: {error}");
         }
         self.stop.store(true, Ordering::Release);
         let poller = self
@@ -1238,6 +1248,8 @@ fn operation_name(operation: u32) -> &'static str {
         2 => "write",
         3 => "connect",
         4 => "recv",
+        5 => "unlink",
+        6 => "rename",
         _ => "unknown",
     }
 }
@@ -1416,158 +1428,9 @@ fn is_init_pid_namespace() -> bool {
     result
 }
 
-/// Extract concrete file paths from DSL `block (unlink|write|rename) file "..."`
-/// clauses only.  Source definitions (`source X = file "..."`) and non-block
-/// rules (`notify`, `audit`) are excluded so that credential source files and
-/// observation-only policies do not receive unintended delete protection.
-///
-/// Paths containing glob characters (`*`, `?`) are skipped because they cannot
-/// be stat'd for an inode.  Only absolute paths are returned.
-fn extract_guarded_paths(dsl: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    // Only match `block <op> file "..."` — not `source X = file` or `notify`.
-    let block_file_needles = [
-        "block unlink file \"",
-        "block write file \"",
-        "block rename file \"",
-    ];
-    for needle in &block_file_needles {
-        let mut rest = dsl;
-        while let Some(pos) = rest.find(needle) {
-            let start = pos + needle.len();
-            rest = &rest[start..];
-            if let Some(end) = rest.find('"') {
-                let path = &rest[..end];
-                if path.starts_with('/')
-                    && !path.contains('*')
-                    && !path.contains('?')
-                    && !paths.iter().any(|p| p == path)
-                {
-                    // The inode guard fast path only checks te_pid_active()
-                    // (= process is in any domain), which is semantically
-                    // equivalent to "if AGENT" / "if COMMAND" (all exec in
-                    // domain).  Rules with other labels (e.g. "if CREDENTIAL")
-                    // or with "unless" conditions cannot be faithfully evaluated
-                    // by the fast path and must be excluded.
-                    //
-                    // The DSL ignores newlines, so a clause can wrap and the
-                    // label may sit on its own line: examine the clause text —
-                    // up to the next clause verb or `because` — as tokens. A
-                    // line-based check treated a wrapped `if SECRET` as an
-                    // unlabelled AGENT rule and guarded its path for every
-                    // process in the domain.
-                    let clause_rest = &rest[end + 1..];
-                    let clause_end = [
-                        "because", "block ", "notify ", "kill ", "rule ", "source ", "label ",
-                    ]
-                    .iter()
-                    .filter_map(|marker| clause_rest.find(marker))
-                    .min()
-                    .unwrap_or(clause_rest.len());
-                    let clause = &clause_rest[..clause_end];
-                    let words: Vec<&str> = clause.split_whitespace().collect();
-                    let has_unless = words.contains(&"unless");
-                    let has_non_standard_label = words
-                        .windows(2)
-                        .any(|pair| pair[0] == "if" && pair[1] != "AGENT" && pair[1] != "COMMAND");
-                    if !has_unless && !has_non_standard_label {
-                        paths.push(path.to_string());
-                    }
-                }
-                rest = &rest[end + 1..];
-            } else {
-                break;
-            }
-        }
-    }
-    paths
-}
-
-/// Stat each guarded file path from the DSL and insert the `(ino, dev)` pair
-/// into the BPF inode guard map with UNLINK | RENAME protection flags.
-///
-/// Returns the list of successfully guarded `(ino, dev)` pairs so the caller
-/// can store them for later cleanup.
-#[cfg(target_os = "linux")]
-fn populate_inode_guards(
-    engine: &PinnedEngine,
-    policy_dsl: &str,
-    domain_id: u32,
-) -> Vec<(u64, u32)> {
-    let mut guarded: Vec<(u64, u32)> = Vec::new();
-    for path in extract_guarded_paths(policy_dsl) {
-        match fs::metadata(&path) {
-            Ok(meta) => {
-                let ino = meta.ino();
-                let dev = userspace_dev_to_kernel(meta.dev());
-                let flags =
-                    ebpf_ifc_engine::INODE_GUARD_UNLINK | ebpf_ifc_engine::INODE_GUARD_RENAME;
-                if let Err(e) = engine.guard_inode(ino, dev, flags, domain_id) {
-                    eprintln!("failed to guard inode {ino}:{dev} for {path}: {e}");
-                } else {
-                    guarded.push((ino, dev));
-                }
-            }
-            Err(e) => eprintln!("cannot stat {path} for inode guard: {e}"),
-        }
-    }
-    guarded
-}
-
-#[cfg(not(target_os = "linux"))]
-fn populate_inode_guards(
-    _engine: &PinnedEngine,
-    _policy_dsl: &str,
-    _domain_id: u32,
-) -> Vec<(u64, u32)> {
-    Vec::new()
-}
-
-/// Convert a userspace `stat.st_dev` value (glibc `new_encode_dev` format) to
-/// the kernel-internal `dev_t` layout used by `super_block.s_dev` and read by
-/// BPF via `BPF_CORE_READ(inode, i_sb, s_dev)`.
-///
-/// Userspace:  `(minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)`
-/// Kernel:     `MKDEV(major, minor)` = `(major << 20) | minor`
-#[cfg(target_os = "linux")]
-fn userspace_dev_to_kernel(dev: u64) -> u32 {
-    let dev = dev as u32;
-    let major = (dev & 0xfff00) >> 8;
-    let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
-    (major << 20) | minor
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-
-    /// The inode guard fast path only knows "the process is in a domain", so
-    /// only clauses gated on AGENT/COMMAND may use it. The DSL ignores
-    /// newlines, so the label can sit on its own line — a line-based check
-    /// treated a wrapped `if SECRET` as an unlabelled rule and guarded its path
-    /// for every process in the domain.
-    #[test]
-    fn guarded_paths_skip_wrapped_non_agent_labels() {
-        let wrapped = "source SECRET = file \"/tmp/secret\"\nrule r:\n  block unlink file \"/data/important\"\n    if SECRET\n  because \"x\"\n";
-        assert!(
-            extract_guarded_paths(wrapped).is_empty(),
-            "a SECRET-gated clause must not be fast-pathed"
-        );
-
-        let unless =
-            "rule r:\n  block unlink file \"/data/important\" unless AGENT\n  because \"x\"\n";
-        assert!(extract_guarded_paths(unless).is_empty());
-
-        let agent = "rule r:\n  block unlink file \"/data/important\" if AGENT\n  because \"x\"\n";
-        assert_eq!(
-            extract_guarded_paths(agent),
-            vec!["/data/important".to_string()]
-        );
-
-        // A following clause's label must not leak onto the earlier path.
-        let two_clauses = "rule r:\n  block unlink file \"/a\" if AGENT\n  block write file \"/b\" if SECRET\n  because \"x\"\n";
-        assert_eq!(extract_guarded_paths(two_clauses), vec!["/a".to_string()]);
-    }
 
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope, Effect,
@@ -1603,7 +1466,7 @@ mod tests {
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
-            guarded_inodes: Vec::new(),
+            inode_policy: InodePolicy::default(),
         }
     }
 
@@ -1638,6 +1501,43 @@ mod tests {
             taint_ttl_secs: 900,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Enforce,
+        }
+    }
+
+    #[test]
+    fn inode_unlink_and_rename_preserve_lowered_rule_reason_and_target() {
+        let compiled = compile_str(
+            "source AGENT = exec \"**\"\nsource OTHER = exec \"**\"\n\
+             rule prior:\n notify connect endpoint \"*\" if AGENT or OTHER\n because \"prior\"\n\
+             rule protect:\n block unlink file \"/protected\" if AGENT\n because \"keep file\"\n",
+        )
+        .unwrap();
+        let mut active = active_binding();
+        active.reasons = compiled.reasons;
+        active.rule_names = compiled.meta.into_iter().map(|meta| meta.name).collect();
+        for (op, name) in [(5, "unlink"), (6, "rename")] {
+            let mut raw = raw_violation(100);
+            raw.op = op;
+            raw.rule_id = 2;
+            raw.target = "/protected".into();
+            let event = convert_violation_at(raw, &active, 200, Some(100), Uuid::new_v4());
+            assert_eq!(event.operation, name);
+            assert_eq!(event.target, "/protected");
+            assert_eq!(event.rule_id.as_deref(), Some("protect"));
+            assert_eq!(event.reason.as_deref(), Some("keep file"));
+            assert_eq!(event.effect, Effect::Block);
+            assert!(event.blocked);
+            assert!(!event.killed);
+        }
+        for (op, name) in [
+            (0, "exec"),
+            (1, "open"),
+            (2, "write"),
+            (3, "connect"),
+            (4, "recv"),
+            (7, "unknown"),
+        ] {
+            assert_eq!(operation_name(op), name);
         }
     }
 
@@ -1813,6 +1713,15 @@ mod tests {
         )
         .expect("audit violation should convert");
 
+        let SecurityEventKind::FileAction(source) = &events[0].kind else {
+            panic!("first evidence must be the credential read");
+        };
+        assert_eq!(source.operation, "open");
+        assert_eq!(source.path, "~/.aws/credentials");
+        let SecurityEventKind::TaintTransition(taint) = &events[1].kind else {
+            panic!("second evidence must be the credential taint");
+        };
+        assert_eq!(taint.label, "CREDENTIAL");
         let SecurityEventKind::NetworkAction(network) = &events[2].kind else {
             panic!("third evidence must be a network action");
         };

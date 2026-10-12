@@ -52,7 +52,8 @@ RPM 安装套件 914 项通过、37 项跳过，再单独通过修正后的 syst
 V2 RPM 安装 `/usr/lib/systemd/system/agent-sec-core.service`，以 `root:root` 运行，
 不创建专用账户或安装 sysusers 文件。
 也可用 `make install-systemd-system DESTDIR=<staging>` 审阅生成物；该 target 仅 staging。
-RPM 宏负责 system service 的 preset/卸载/升级生命周期，不自动启用用户 session 服务。
+RPM 宏负责 system service 的 preset/卸载/升级生命周期。V2 spec 会在首次安装或检测到
+V1 user unit 的升级时自动启用并启动 system service；无 system manager 的容器或镜像安装不启动它。
 V2 核心 CLI 子包不再依赖 Python Ledger；Hook 子包依赖及 wheel 专用 RPM 设置保持原样。
 源包只收录对应代际的 unit 模板。
 V2 RPM CI 同时检查 system unit 的 root 身份配置，并断言 user unit 不存在；
@@ -64,13 +65,17 @@ V2 RPM CI 同时检查 system unit 的 root 身份配置，并断言 user unit �
 检查 journal 中的 SIGSYS、权限错误或内存执行限制错误。后续引入 JIT 或新增 syscall
 依赖时必须重新验收。上述当前核心路径已完成真实 systemd 验收；不代表新增 JIT/syscall 路径或整个 issue 的验收。
 
-运维切换前停止、禁用原 V1 user service，安装 V2 包，然后按部署策略执行：
+运维切换前停止、禁用原 V1 user service，安装 V2 包。运行中的 system manager 会自动启动
+V2 service；随后验证：
 
 ```bash
-sudo systemctl enable --now agent-sec-core.service
+sudo systemctl status agent-sec-core.service
 sudo agent-sec-cli --socket /run/agent-sec-core/daemon.sock policy list
 sudo journalctl -u agent-sec-core.service
 ```
+
+在无 system manager 的镜像或容器安装后，或服务被手动停止或禁用时，执行
+`sudo systemctl enable --now agent-sec-core.service` 恢复服务。
 
 运行目录 0755、socket 0666，普通用户无需加入服务组即可连接；目录仅服务账户可写，
 锁保持 0600。需要非 root 管理员时，通过 unit drop-in 的 `--policy-admin-uid <UID>`

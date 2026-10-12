@@ -64,6 +64,7 @@ pub fn extract_token_data(
     if let Some(resp) = response_json {
         // Extract content blocks
         if let Some(content) = resp.get("content").and_then(|c| c.as_array()) {
+            let mut reasoning = String::new();
             for block in content {
                 let block_type = block.get("type").and_then(|t| t.as_str());
 
@@ -75,6 +76,23 @@ pub fn extract_token_data(
                                     content: text.to_string(),
                                 });
                                 has_content = true;
+                            }
+                        }
+                    }
+                    // Extended thinking arrives as a `thinking` block whose
+                    // text sits in the `thinking` field (a `redacting_thinking`
+                    // block carries no plaintext and stays unextracted). The
+                    // shared SSE extractor already maps thinking deltas to
+                    // reasoning_content; without this arm a non-streaming
+                    // thinking response reported no reasoning at all while its
+                    // streamed twin did.
+                    Some("thinking") => {
+                        if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                if !reasoning.is_empty() {
+                                    reasoning.push('\n');
+                                }
+                                reasoning.push_str(text);
                             }
                         }
                     }
@@ -92,6 +110,10 @@ pub fn extract_token_data(
                     }
                     _ => {}
                 }
+            }
+            if !reasoning.is_empty() {
+                token_data.reasoning_content = Some(reasoning);
+                has_content = true;
             }
         }
     }
@@ -238,6 +260,63 @@ mod tests {
         let data = token_data.unwrap();
         assert_eq!(data.tool_calls.len(), 1);
         assert!(data.tool_calls[0].contains("get_weather"));
+    }
+
+    /// Extended thinking arrives as a `thinking` content block. The shared
+    /// SSE extractor already maps thinking deltas to reasoning_content, so
+    /// the non-streaming arm must too — a thinking-only response otherwise
+    /// extracted to nothing.
+    #[test]
+    fn test_extract_thinking_blocks() {
+        let response = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "content": [
+                {"type": "thinking", "thinking": "consider the options"},
+                {"type": "text", "text": "The answer"}
+            ]
+        });
+        let token_data = extract_token_data(None, Some(&response));
+        assert!(token_data.is_some());
+        let data = token_data.unwrap();
+        assert_eq!(
+            data.reasoning_content.as_deref(),
+            Some("consider the options")
+        );
+        assert_eq!(data.response_content.len(), 1);
+        assert_eq!(data.response_content[0].content, "The answer");
+    }
+
+    #[test]
+    fn test_extract_thinking_only_response() {
+        let response = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "content": [{"type": "thinking", "thinking": "still thinking"}]
+        });
+        let token_data = extract_token_data(None, Some(&response));
+        assert!(
+            token_data.is_some(),
+            "a thinking-only response is assistant output"
+        );
+        assert_eq!(
+            token_data.unwrap().reasoning_content.as_deref(),
+            Some("still thinking")
+        );
+    }
+
+    #[test]
+    fn test_redacted_thinking_block_is_not_extracted() {
+        let response = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "content": [
+                {"type": "redacting_thinking", "data": "encrypted"},
+                {"type": "text", "text": "Answer"}
+            ]
+        });
+        let token_data = extract_token_data(None, Some(&response));
+        assert!(token_data.is_some());
+        let data = token_data.unwrap();
+        assert!(data.reasoning_content.is_none());
+        assert_eq!(data.response_content.len(), 1);
     }
 
     #[test]

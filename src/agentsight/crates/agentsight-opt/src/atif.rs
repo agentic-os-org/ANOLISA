@@ -46,7 +46,7 @@ pub struct AtifTrajectory {
     pub schema_version: String,
     /// Informational only (run-scoped); ATIF v1.7 relaxed it to optional, and
     /// nothing in this crate reads it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_session_id")]
     pub session_id: String,
     #[serde(default)]
     pub agent: Option<AtifAgent>,
@@ -201,6 +201,13 @@ pub struct AtifFinalMetrics {
     pub total_steps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+}
+
+fn de_session_id<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // ─── Parsing & helpers ───────────────────────────────────────────────────────
@@ -394,7 +401,7 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
                 let msg = step.message.as_deref().unwrap_or("");
                 out.push_str(&format!(
                     "[{ts}] system: {}\n",
-                    truncate_chars(msg, OBSERVATION_TRIM_CHARS)
+                    truncate_chars(msg, NARRATION_TRIM_CHARS)
                 ));
             }
             "user" => {
@@ -737,5 +744,35 @@ mod tests {
         assert!(!text.contains(&"log ".repeat(1_000)));
         // A short user turn is not a pasted payload and stays verbatim.
         assert!(text.contains("user: keep this short turn verbatim\n"));
+    }
+
+    /// A system prompt is narration — it belongs to the same head cap as
+    /// thinking/text/user, not the 80-char observation cap. A typical role
+    /// instruction ("You are a senior code reviewer...") is 200-800 chars;
+    /// the observation cap truncated it to a sliver the perf prompt could
+    /// not read.
+    #[test]
+    fn render_trimmed_caps_system_prompts_as_narration() {
+        // Put the distinguishing content past the 80-char observation cap:
+        // under OBSERVATION it would be cut; under NARRATION it survives.
+        let filler = "R".repeat(100);
+        let system_prompt = format!("{filler} distributed-systems reviewer role");
+        let json = serde_json::json!({
+            "schema_version": "ATIF-v1.6",
+            "session_id": "s1",
+            "agent": {"name": "a", "version": "1"},
+            "steps": [
+                {"step_id": 1, "source": "system", "timestamp": "2026-01-01T00:00:01Z",
+                 "message": system_prompt}
+            ]
+        });
+        let traj = AtifTrajectory::from_json(&json.to_string()).unwrap();
+        let text = render_trimmed(&traj);
+        // "distributed" sits at char ~101: under the 80-char observation cap
+        // it is truncated away; under the 800-char narration cap it survives.
+        assert!(
+            text.contains("distributed-systems"),
+            "system prompt content past 80 chars must survive the narration cap"
+        );
     }
 }

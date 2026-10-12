@@ -924,6 +924,7 @@ mod tests {
                 component: "tokenless".to_string(),
                 framework: Some("openclaw".to_string()),
                 allow_unsafe_plugin_install: false,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
             adapter::AdapterCommands::Disable {

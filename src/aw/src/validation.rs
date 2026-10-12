@@ -67,8 +67,8 @@ impl Registry {
     /// Checks whether a boundary's declared powers are internally consistent.
     ///
     /// # Errors
-    /// Rejects observation-only mutation, unsupported gating and impossible
-    /// synchronous delivery claims. This does not test the native hook itself.
+    /// Rejects observation-only mutation, unsupported gating and delivery-ordering claims the declared
+    /// mode cannot enforce; `synchronous` is schema-legitimate. Does not test the native hook itself.
     pub fn validate_boundary(&self, boundary: &Value) -> Result<(), Error> {
         self.validate("boundary-descriptor-v1", boundary)?;
         let observe = boundary["invocation_mode"] == "observe_only";

@@ -41,7 +41,7 @@ The correct platform-specific binary is automatically installed via `optionalDep
 If no prebuilt binary is available for your platform:
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/distribution/anolisa
 cargo build --release -p anolisa-cli
 ```

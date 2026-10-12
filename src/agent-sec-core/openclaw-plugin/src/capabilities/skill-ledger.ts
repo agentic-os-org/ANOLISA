@@ -8,6 +8,7 @@ import {
   envHookPolicy,
   isHookPolicyValue,
   normalizeHookPolicy,
+  truncateApprovalText,
   type HookPolicy,
   type TraceContext,
 } from "../utils.js";
@@ -240,10 +241,15 @@ export const skillLedger: SecurityCapability = {
 
           const severity = confirmationSeverity(status);
           if (cfg.policy === "ask" && severity) {
+            const details = "\nDetails: logs.";
+            const description = truncateApprovalText(
+              `[skill-ledger][${status}] Skill: ${truncateApprovalText(skillName, 48)}; ${summary.message}`,
+              256 - details.length,
+            ) + details;
             return {
               requireApproval: {
                 title: "Skill Ledger Security Check",
-                description: message,
+                description,
                 severity,
               },
             };

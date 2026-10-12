@@ -56,7 +56,7 @@ def invoke(hook, payload):
 def hooks(name):
     payload = {"hook_event_name": name, "cwd": os.getcwd(), "session_id": "fixture-session",
                "tool_use_id": "fixture-call", "tool_name": "custom_tool",
-               "tool_input": {"command": "echo fixture", "ratio": 0.125, "标签": "测试"},
+               "tool_input": {"command": option("--tool-command", "echo fixture"), "ratio": 0.125, "标签": "测试"},
                "scenario": scenario, "run_id": run_id}
     if name == "PostToolUse":
         payload["tool_response"] = {"result": "native-output"}

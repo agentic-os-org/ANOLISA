@@ -45,14 +45,20 @@ The core binaries require no Python Ledger runtime. `install-core-v2` installs b
 `/etc/agent-sec/skillsec.json`. Reinstallation preserves an existing configuration; RPM uses
 `%config(noreplace)`. Installation does not initialize a signing key or enable Agent Hooks.
 
-RPM follows the distribution's systemd preset and may enable this service at boot. Review its
-configuration, then explicitly start the root system service:
+On a host with a running systemd manager, RPM enables and starts the root system service during
+initial installation and V1-to-V2 upgrades. Review its configuration before installing, then verify
+that the daemon is available:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-sec-core.service
 sudo systemctl status agent-sec-core.service
 agent-sec-cli skill-ledger status
+```
+
+If the RPM was installed into an image or container without a systemd manager, or the service was
+later stopped or disabled, start it explicitly:
+
+```sh
+sudo systemctl enable --now agent-sec-core.service
 ```
 
 Use system `systemctl`, without `--user`. The unit creates runtime/state/log directories, keeps

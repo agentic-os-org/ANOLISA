@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { sanitizeFts5Query } from "../fts5-sanitize.js";
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
@@ -60,10 +60,21 @@ function toMessageRecord(row: RawMessageRow): MessageRecord {
 }
 
 export class MessageStore {
+  private statements = new Map<string, StatementSync>();
+
   constructor(private db: DatabaseSync) {}
 
+  private prepare(sql: string): StatementSync {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+
   createMessage(input: CreateMessageInput): MessageRecord {
-    const row = this.db.prepare(`
+    const row = this.prepare(`
       INSERT INTO messages (session_id, seq, turn_seq, role, content, token_count, raw_message)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       RETURNING message_id, session_id, seq, turn_seq, role, content, token_count, raw_message, created_at
@@ -81,7 +92,7 @@ export class MessageStore {
   }
 
   getMessages(sessionId: string): MessageRecord[] {
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       `SELECT message_id, session_id, seq, turn_seq, role, content, token_count, raw_message, created_at
        FROM messages WHERE session_id = ? ORDER BY seq ASC`
     ).all(sessionId) as RawMessageRow[];
@@ -90,35 +101,35 @@ export class MessageStore {
   }
 
   getMessageCount(sessionId: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT COUNT(*) as count FROM messages WHERE session_id = ?`
     ).get(sessionId) as RawCountRow;
     return row.count;
   }
 
   getNextSeq(sessionId: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT MAX(seq) as max_seq FROM messages WHERE session_id = ?`
     ).get(sessionId) as RawMaxSeqRow;
     return (row.max_seq ?? 0) + 1;
   }
 
   getLastUserSeq(sessionId: string): number | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT MAX(seq) as max_seq FROM messages WHERE session_id = ? AND role = 'user'`
     ).get(sessionId) as RawMaxSeqRow;
     return row.max_seq ?? null;
   }
 
   getMaxTurnSeq(sessionId: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT MAX(turn_seq) as max_seq FROM messages WHERE session_id = ?`
     ).get(sessionId) as RawMaxSeqRow;
     return row.max_seq ?? 0;
   }
 
   getLastMessage(sessionId: string): MessageRecord | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT message_id, session_id, seq, turn_seq, role, content, token_count, raw_message, created_at
        FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1`
     ).get(sessionId) as RawMessageRow | undefined;
@@ -128,7 +139,7 @@ export class MessageStore {
   searchMessages(sessionId: string, query: string, limit: number): MessageRecord[] {
     const sanitized = sanitizeFts5Query(query);
     try {
-      const rows = this.db.prepare(`
+      const rows = this.prepare(`
         SELECT m.message_id, m.session_id, m.seq, m.turn_seq, m.role, m.content, m.token_count, m.raw_message, m.created_at
         FROM messages_fts fts
         JOIN messages m ON m.message_id = fts.rowid
@@ -145,6 +156,7 @@ export class MessageStore {
 
   getMessagesByTurnSeqs(sessionId: string, turnSeqs: number[]): MessageRecord[] {
     if (turnSeqs.length === 0) return [];
+    // The number of placeholders is unbounded, so these statements stay uncached.
     const placeholders = turnSeqs.map(() => "?").join(",");
     const rows = this.db.prepare(`
       SELECT message_id, session_id, seq, turn_seq, role, content, token_count, raw_message, created_at
@@ -157,14 +169,18 @@ export class MessageStore {
   }
 
   setTurnSummary(sessionId: string, turnSeq: number, summary: string): void {
-    this.db.prepare(`
+    this.prepare(`
       UPDATE messages SET summary = ?
-      WHERE session_id = ? AND turn_seq = ? AND role = 'user'
+      WHERE message_id = (
+        SELECT message_id FROM messages
+        WHERE session_id = ? AND turn_seq = ?
+        ORDER BY seq ASC LIMIT 1
+      )
     `).run(summary, sessionId, turnSeq);
   }
 
   getTurnSummaries(sessionId: string): { turnSeq: number; summary: string }[] {
-    const rows = this.db.prepare(`
+    const rows = this.prepare(`
       SELECT DISTINCT turn_seq, summary FROM messages
       WHERE session_id = ? AND summary IS NOT NULL
       ORDER BY turn_seq ASC
@@ -174,7 +190,7 @@ export class MessageStore {
   }
 
   getDistinctTurnSeqs(sessionId: string): number[] {
-    const rows = this.db.prepare(`
+    const rows = this.prepare(`
       SELECT DISTINCT turn_seq FROM messages
       WHERE session_id = ?
       ORDER BY turn_seq ASC

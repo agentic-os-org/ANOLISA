@@ -41,7 +41,7 @@ use skillfs_fuse::security::{
     SecurityModeConfig, SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver,
     StagingMatcher, SummaryWriteOutcome, TrustedPeerConfig, TrustedWriterConfig,
     UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
-    resolve_protocol_events_path, spawn_drift_watcher,
+    resolve_events_path_outside_source, resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
@@ -1551,6 +1551,20 @@ async fn cmd_mount(
         )
         .map_err(|e| format!("{}", e))?;
     }
+    // Same guard for --events-log. Without it a log path inside the source
+    // is accepted and every security event write lands in the skill
+    // workspace: the drift watcher re-scans it (self-feeding loop) and a
+    // path on top of a SKILL.md corrupts the manifest. The resolved path is
+    // kept for the writer: it must open the object this guard approved, not
+    // resolve the raw flag again, or a symlink swapped in while the mount is
+    // being set up would aim the open at a path nobody checked.
+    let events_log_resolved: Option<PathBuf> = match events_log.as_ref() {
+        Some(p) => Some(
+            resolve_events_path_outside_source(p, source_roots.physical_source_root())
+                .map_err(|e| format!("{}", e))?,
+        ),
+        None => None,
+    };
 
     // #1262 PrivateTmp gate. When a daemon-facing operation is enabled,
     // agent-sec-core.service runs with PrivateTmp=true and therefore
@@ -1924,15 +1938,25 @@ async fn cmd_mount(
         let resolver_for_ctrl = active_resolver
             .clone()
             .expect("active_resolver presence checked above");
-        let event_writer: Arc<dyn SecurityEventWriter> = if let Some(p) = events_log.as_ref() {
-            let writer = JsonlSecurityEventWriter::new(p, 0).map_err(|e| {
-                format!("failed to open --events-log path '{}': {}", p.display(), e)
-            })?;
-            info!(path = %p.display(), "security events JSONL enabled");
-            Arc::new(writer) as Arc<dyn SecurityEventWriter>
-        } else {
-            Arc::new(NoopSecurityEventWriter) as Arc<dyn SecurityEventWriter>
-        };
+        let event_writer: Arc<dyn SecurityEventWriter> =
+            if let Some(resolved) = events_log_resolved.as_deref() {
+                // Open the exact object the containment guard approved, and do
+                // not re-resolve the raw flag here: a symlink swapped in since
+                // that guard would then aim the open at a path nobody checked.
+                // The writer's no-follow descent covers the approved path
+                // itself.
+                let writer = JsonlSecurityEventWriter::new(resolved, 0).map_err(|e| {
+                    format!(
+                        "failed to open --events-log path '{}': {}",
+                        resolved.display(),
+                        e
+                    )
+                })?;
+                info!(path = %resolved.display(), "security events JSONL enabled");
+                Arc::new(writer) as Arc<dyn SecurityEventWriter>
+            } else {
+                Arc::new(NoopSecurityEventWriter) as Arc<dyn SecurityEventWriter>
+            };
         let failed_behavior = file_config
             .as_ref()
             .map(|c| c.failed_resolve_behavior())

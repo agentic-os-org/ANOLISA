@@ -629,3 +629,150 @@ fn scan_reports_special_files_instead_of_skipping_them() {
     );
     fs::remove_file(&fifo).unwrap();
 }
+
+fn blocked_exports(
+    service: &Arc<SkillSecService>,
+    root: &SkillRoot,
+    output: &Path,
+    count: usize,
+    before_release: impl FnOnce(),
+) -> Vec<Result<Value, SkillSecError>> {
+    let lock = service.skill_lock(&root.identity).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    std::thread::scope(|scope| {
+        let held = lock.lock().unwrap();
+        let workers: Vec<_> = (0..count)
+            .map(|_| scope.spawn(move || service.export(root, "latest", output, uid, deadline())))
+            .collect();
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        // Each export acquires this Arc after pinning and validating its empty
+        // destination. Our guard prevents writes until every caller gets here.
+        while Arc::strong_count(&lock) != count + 1 {
+            assert!(
+                !workers
+                    .iter()
+                    .any(std::thread::ScopedJoinHandle::is_finished),
+                "export returned before reaching the held Skill lock"
+            );
+            assert!(
+                Instant::now() < ready_deadline,
+                "exports did not reach the held Skill lock within timeout"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        before_release();
+        drop(held);
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    })
+}
+
+#[test]
+fn failed_export_does_not_leave_partial_output() {
+    let (_temporary, service, root) = fixture();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export");
+    fs::create_dir(&output).unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).unwrap();
+    let moved = output.with_file_name("export-moved");
+    // Replace the path after export pins it, but before writes can begin.
+    // Final verification must fail and clean all artifacts in the pinned tree.
+    let result = blocked_exports(&service, &root, &output, 1, || {
+        fs::rename(&output, &moved).unwrap();
+        fs::create_dir(&output).unwrap();
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).unwrap();
+    });
+    assert!(
+        matches!(&result[0], Err(SkillSecError::Integrity(message))
+            if message.contains("directory was replaced")),
+        "swapped output must fail verify_path: {result:?}"
+    );
+    assert!(
+        fs::read_dir(&moved).unwrap().next().is_none(),
+        "the partial tree written through the pinned handle must be removed"
+    );
+    assert!(
+        fs::read_dir(&output).unwrap().next().is_none(),
+        "the replacement directory must stay untouched"
+    );
+}
+
+#[test]
+fn failed_export_keeps_a_competing_writers_parallel_artifacts() {
+    let (_temporary, service, root) = fixture();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export-foreign");
+    fs::create_dir(&output).unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).unwrap();
+    // Publish after the empty guard, before export can write its snapshot.
+    let mut result = blocked_exports(&service, &root, &output, 1, || {
+        fs::write(output.join("manifest.json"), b"{\"foreign\": true}\n").unwrap();
+    });
+    let error = result
+        .pop()
+        .unwrap()
+        .expect_err("the NOREPLACE manifest write must fail");
+    assert!(
+        matches!(error, SkillSecError::Io { ref source, .. }
+            if source.kind() == std::io::ErrorKind::AlreadyExists),
+        "expected EEXIST on manifest.json, got: {error}"
+    );
+    assert!(
+        !output.join("snapshot").exists(),
+        "this invocation's snapshot must be removed"
+    );
+    assert_eq!(
+        fs::read(output.join("manifest.json")).unwrap(),
+        b"{\"foreign\": true}\n",
+        "the competing writer's record must survive"
+    );
+    assert!(!output.join("findings.json").exists());
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+}
+
+#[test]
+fn failed_export_spares_a_competing_exports_completed_output() {
+    // Two exports race into the same empty --output (a concurrent retry for
+    // the same workspace). The per-skill lock serializes them, so the export
+    // that loses the race fails fresh_child("snapshot") with EEXIST because
+    // the directory belongs to the winner. The loser's error cleanup must
+    // delete nothing: the completed output is owned by the winning call.
+    let (_temporary, service, root) = fixture();
+    let bulk = vec![7_u8; 4096];
+    fs::write(root.io_dir.join("bulk.bin"), &bulk).unwrap();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export-race");
+    fs::create_dir(&output).unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).unwrap();
+    let results = blocked_exports(&service, &root, &output, 2, || {});
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one export must complete: {results:?}"
+    );
+    let error = results.into_iter().find_map(Result::err).unwrap();
+    assert!(
+        matches!(error, SkillSecError::Io { ref source, .. }
+            if source.kind() == std::io::ErrorKind::AlreadyExists),
+        "expected EEXIST on snapshot, got: {error}"
+    );
+    // The winner's completed output must be untouched.
+    assert_eq!(fs::read(output.join("snapshot/bulk.bin")).unwrap(), bulk);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["versionId"], "v000001");
+    assert!(output.join("findings.json").exists());
+    assert_eq!(
+        fs::read_dir(output.join("snapshot")).unwrap().count(),
+        3,
+        "SKILL.md, run.sh and bulk.bin must all survive"
+    );
+}

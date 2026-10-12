@@ -19,6 +19,7 @@ use crate::runtime::startup::{
 };
 use crate::runtime::state::{AnalysisMode, InlineState};
 use crate::shell_host::{LoginEffectGuard, LoginEffectSource, ShellIntegration};
+use crate::upgrade::check::{read_cached_notice, startup_upgrade_check_enabled_for_env};
 
 #[cfg(debug_assertions)]
 use super::failopen::maybe_inject_failopen_panic;
@@ -318,6 +319,15 @@ pub(crate) fn run_raw(
             }
         }
     }
+    if startup_upgrade_check_enabled_for_env() && crate::runtime::startup::startup_banner_enabled()
+    {
+        if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
+            inline_state.startup_upgrade.resolved = Some(Some(notice));
+        }
+        inline_state
+            .startup_upgrade
+            .start_probe(env!("CARGO_PKG_VERSION"));
+    }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;
     inline_state.hooks.noisy_groups = hook_feedback.noisy_groups;
@@ -391,6 +401,9 @@ pub(crate) fn run_raw(
             }
         }
     }));
+    // Before any fail-open exec or exit: probe commands run in their own process groups
+    // and would otherwise outlive the session with no deadline left to stop them.
+    inline_state.startup_upgrade.shutdown();
 
     let raw_result = match relay_outcome {
         Ok(result) => result,

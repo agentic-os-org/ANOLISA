@@ -1040,6 +1040,15 @@ targets = {targets}
         assert!(!agentsight.supports_target("macos", "x86_64"));
         assert!(!agentsight.supports_target("linux", "aarch64"));
 
+        let ws_ckpt = index
+            .components
+            .iter()
+            .find(|component| component.name == "ws-ckpt")
+            .expect("ws-ckpt entry");
+        assert!(ws_ckpt.supports_target("linux", "aarch64"));
+        assert!(!ws_ckpt.supports_target("macos", "aarch64"));
+        assert!(!ws_ckpt.supports_target("macos", "x86_64"));
+
         for name in ["cosh-ng", "tokenless"] {
             let component = index
                 .components

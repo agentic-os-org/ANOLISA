@@ -26,6 +26,18 @@ TARGETS = {
             "profile": "darwin11-x86_64",
         },
     ),
+    "ws-ckpt": (
+        {
+            "target-os": "linux",
+            "target-arch": "x86_64",
+            "profile": "gnu2.28-x86_64",
+        },
+        {
+            "target-os": "linux",
+            "target-arch": "aarch64",
+            "profile": "gnu2.28-aarch64",
+        },
+    ),
     "cosh-ng": (
         {
             "target-os": "linux",

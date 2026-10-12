@@ -21,6 +21,7 @@ const POLICY: RetryPolicy = RetryPolicy {
 
 fn initial() -> ReconcileRecord {
     ReconcileRecord {
+        status_version: 1,
         binding: asc_policy_types::binding::BindingView {
             spec: serde_json::from_str(include_str!(
                 "../../asc-policy-types/tests/fixtures/prepared-binding.json"
@@ -107,7 +108,7 @@ impl TargetDeploymentClient for Rig {
             assert!(
                 self.repo
                     .compare_exchange_reconcile_intent(
-                        &ExpectedBinding::from_binding(&current.binding),
+                        &ExpectedBinding::from_snapshot(&current),
                         &desired
                     )
                     .unwrap()
@@ -194,6 +195,7 @@ fn rig(
 }
 
 fn expected_failure(mut record: ReconcileRecord, registered: bool) -> ReconcileRecord {
+    record.status_version += 2;
     record.binding.status.phase = record
         .binding
         .status
@@ -234,7 +236,9 @@ fn panics_fail_claimed_apply_without_losing_cleanup() {
             Disposition::Skipped
         );
         let mut expected_trace = vec!["before_claim", "after_claim"];
-        if point != "after_claim" {
+        if point == "after_claim" {
+            expected_trace.extend(["before_claim", "after_claim"]);
+        } else {
             expected_trace.push("prepare");
         }
         if matches!(point, "register" | "create") {
@@ -242,6 +246,8 @@ fn panics_fail_claimed_apply_without_losing_cleanup() {
         }
         if point == "create" {
             expected_trace.push("create");
+        } else if point == "register" {
+            expected_trace.push("register");
         }
         expected_trace.extend(["before_finish", "after_finish"]);
         assert_eq!(*rig.trace.lock().unwrap(), expected_trace);
@@ -249,7 +255,7 @@ fn panics_fail_claimed_apply_without_losing_cleanup() {
 }
 
 #[test]
-fn panic_before_claim_does_not_fail_unclaimed_intent() {
+fn panic_during_claim_resolves_original_write_before_terminalizing() {
     let mut schedule = AttemptSchedule::default();
     let input = initial();
     let id = input.binding.spec.binding_id.clone();
@@ -260,15 +266,15 @@ fn panic_before_claim_does_not_fail_unclaimed_intent() {
             .reconcile(&id, &mut schedule)))
         .is_err()
     );
-    assert_eq!(rig.read(&id).unwrap(), Some(input));
+    assert_eq!(rig.read(&id).unwrap(), Some(expected_failure(input, false)));
     assert_eq!(
         rig.core().reconcile(&id, &mut schedule).unwrap(),
-        Disposition::Completed
+        Disposition::Skipped
     );
 }
 
 #[test]
-fn panic_without_committed_result_recovers_budget_and_schedules_fresh_attempt() {
+fn panic_with_storage_failure_retains_completion_without_repeating_io() {
     let mut schedule = AttemptSchedule::default();
     let input = initial();
     let id = input.binding.spec.binding_id.clone();
@@ -281,6 +287,7 @@ fn panic_without_committed_result_recovers_budget_and_schedules_fresh_attempt() 
     );
     let mut running = expected_failure(input.clone(), true);
     running.binding.status.phase = BindingStatus::Applying;
+    running.status_version -= 1;
     running.binding.status.error = None;
     assert_eq!(rig.read(&id).unwrap(), Some(running));
     assert_eq!(
@@ -290,12 +297,15 @@ fn panic_without_committed_result_recovers_budget_and_schedules_fresh_attempt() 
     rig.fail_finish.store(false, Ordering::SeqCst);
     assert_eq!(
         rig.core().reconcile(&id, &mut schedule).unwrap(),
-        Disposition::Skipped
+        Disposition::Failed {
+            error: Failure::new(FailureKind::Rejected, "RECONCILE_WORKER_PANICKED")
+        }
     );
     let recovered = rig.read(&id).unwrap().unwrap();
-    assert_eq!(recovered.binding.status.phase, BindingStatus::PendingApply);
+    assert_eq!(recovered.binding.status.phase, BindingStatus::ApplyFailed);
+    assert_eq!(recovered.status_version, 3);
     assert_eq!(schedule.attempts_started, 1);
-    assert!(schedule.next_attempt_at.is_some());
+    assert!(schedule.next_attempt_at.is_none());
     assert_eq!(
         recovered.deployments,
         expected_failure(input, true).deployments
@@ -468,7 +478,7 @@ fn delete_commit_response_failure_replays_absence_without_repeating_client_io() 
     assert_eq!(rig.read(&id).unwrap(), None);
     assert_eq!(
         rig.core().reconcile(&id, &mut schedule).unwrap(),
-        Disposition::Skipped
+        Disposition::Completed
     );
     assert_eq!(
         rig.trace

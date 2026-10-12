@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -190,6 +191,44 @@ test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
   });
 
   assert.deepEqual([...disabledHandlers.keys()].sort(), ["session_end", "session_start"]);
+});
+
+test("binary discovery skips searchable directories and follows executable symlinks", async () => {
+  const shadow = join(sandbox, "path-shadow");
+  const binaries = join(sandbox, "path-symlinks");
+  mkdirSync(join(shadow, "tokenless"), { recursive: true });
+  mkdirSync(binaries);
+  symlinkSync(fakeTokenless, join(binaries, "tokenless"));
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shadow}:${binaries}:${previousPath}`;
+    const freshUrl = pathToFileURL(pluginPath);
+    freshUrl.searchParams.set("binary-discovery", "directory-shadow");
+    const { default: freshPlugin } = await import(freshUrl.href);
+    const hooks = new Map();
+    freshPlugin.register({
+      pluginConfig: { rtk_enabled: false, post_tool_enabled: true, tool_ready_enabled: false },
+      on(name, hook) { hooks.set(name, hook); },
+    });
+    const message = { role: "toolResult", content: [{ type: "text", text: "compress me" }] };
+    const result = hooks.get("tool_result_persist")({ toolName: "web_fetch", toolCallId: "directory-shadow", message }, {
+      sessionId: "directory-shadow-session", toolName: "web_fetch", toolCallId: "directory-shadow",
+    });
+    assert.equal(result?.message.content[0].text, "compressed text");
+    assert.equal(requests().length, 1);
+    hooks.get("before_tool_call")({ toolName: "exec", toolCallId: "directory-shadow-file", params: { command: "cat page.html" } }, {
+      sessionId: "directory-shadow-session", toolName: "exec", toolCallId: "directory-shadow-file",
+    });
+    hooks.get("tool_result_persist")({ toolName: "exec", toolCallId: "directory-shadow-file", message: "<html></html>" }, {
+      sessionId: "directory-shadow-session", toolName: "exec", toolCallId: "directory-shadow-file",
+    });
+    const fileRead = requests()[1].request.input;
+    assert.equal(fileRead.content_origin, "command_output");
+    assert.equal(fileRead.command, "cat page.html");
+    assert.equal(fileRead.output_optimization, "none");
+  } finally {
+    process.env.PATH = previousPath;
+  }
 });
 
 test("resumed non-exec tools retain UUID attribution when RTK is disabled", () => {

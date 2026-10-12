@@ -63,10 +63,12 @@ validated `check`/`show` results while retaining host policies; see the
 
 Cosh-NG reserves 10 seconds for SkillSec initialization and querying in one Hook invocation.
 
-The source-built Rust `agent-sec-cli` provides all 15 Policy, Scope and Binding CRUD
+The source-built Rust `agent-sec-cli` provides 12 Policy, Scope and Binding administration
 commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
-and [V2 workspace](v2/README.md). PAP state is currently process-local; Binding
-acceptance does not imply enforcement. To authorize non-root Policy CLI callers, configure
+and [V2 workspace](v2/README.md). PAP state persists in SQLite; Binding acceptance does not imply enforcement.
+PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
+currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
+own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
@@ -395,7 +397,8 @@ The shared CLI `--trace-context` adapter propagates attribution through the top-
 envelope; `params.traceContext` is not supported.
 
 OpenClaw records model-entry scans as `source=model_input` on stable `>=2026.5.12`;
-older supported hosts retain inbound scanning. Input blocking depends on policy,
+this input hook scans only the current `prompt`, excluding system prompts and history.
+Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
 
 Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
@@ -548,6 +551,8 @@ agent-sec-cli harden --downstream-help
 
 ## Observability
 
+Rust V2 report/review query the daemon exclusively. Ordinary users see their own records; root can query records across all UIDs. Query identity comes only from the UDS peer. Report keeps V1’s `--session-id`, `--last`, and `--format`; review takes no command-specific options. Report JSON adds no UID field. `observability schema` generates the V1-compatible record schema locally from the Rust contracts.
+
 ```bash
 # Interactive drill-down TUI (requires an interactive terminal)
 agent-sec-cli observability review
@@ -566,6 +571,10 @@ Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agen
 
 Security events are written both as JSONL and into a SQLite store. Query the store
 with `agent-sec-cli events`:
+
+V2 queries use the UDS peer UID: ordinary users read their own events and root reads
+all UIDs. Filter with the original session ID; root receives matching events from all UIDs.
+For colliding session IDs, root response labels use `UID_session_id` to distinguish owners.
 
 ```bash
 agent-sec-cli events --last-hours 24

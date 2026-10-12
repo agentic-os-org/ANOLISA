@@ -2,6 +2,165 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
+mod java_application_argument_regressions {
+    use super::*;
+
+    #[test]
+    fn java_application_arguments_do_not_name_a_service() {
+        for cmdline in [
+            "java\0-jar\0/opt/client/report.jar\0kafka",
+            "java\0-cp\0/opt/client/lib\0com.example.Report\0elasticsearch",
+            "java\0com.example.Report\0/opt/data/pulsar.json",
+            "java\0com.example.Report\0@config\0kafka",
+            "java\0-jar\0/opt/client/report.jar\0@config\0kafka",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), None, "{cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn java_daemon_identity_is_not_overridden_by_application_arguments() {
+        assert_eq!(
+            runtime_service_from_cmdline("java\0kafka.Kafka\0elasticsearch"),
+            Some("kafka")
+        );
+        assert_eq!(
+            runtime_service_from_cmdline("java\0-jar\0kafka_2.13-3.7.0.jar\0pulsar"),
+            Some("kafka")
+        );
+        for cmdline in [
+            "java\0-m\0app/kafka.Kafka\0elasticsearch",
+            "java\0--module\0app/kafka.Kafka\0elasticsearch",
+            "java\0--module=app/kafka.Kafka\0elasticsearch",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn non_java_runtime_matching_keeps_its_existing_behavior() {
+        for (cmdline, expected) in [
+            ("python3\0/opt/app/spark.py", Some("spark")),
+            ("node\0/opt/app/server.js\0kafka", Some("kafka")),
+            ("python3\0/opt/app/sparklesh-report.py", None),
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), expected);
+        }
+    }
+
+    #[test]
+    fn java_launcher_option_values_keep_the_daemon_identity() {
+        for cmdline in [
+            "java\0--module-path\0/opt/client/lib\0kafka.Kafka",
+            "java\0--add-opens\0java.base/java.lang=ALL-UNNAMED\0kafka.Kafka",
+            "java\0--source\x0021\0Report.java\0kafka",
+        ] {
+            let expected = if cmdline.contains("Report.java") {
+                None
+            } else {
+                Some("kafka")
+            };
+            assert_eq!(
+                runtime_service_from_cmdline(cmdline),
+                expected,
+                "{cmdline:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn java_options_argument_file_does_not_hide_the_entrypoint() {
+        for cmdline in [
+            "java\0@/tmp/jvm-options.txt\0kafka.Kafka",
+            "java\0@/tmp/jvm-options.txt\0-jar\0kafka_2.13-3.7.0.jar",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn java_literal_at_source_name_keeps_its_identity() {
+        for cmdline in [
+            "java\0--disable-@files\0@spark.java",
+            "java\0@@spark.java",
+            "java\0--disable-@files\0--source\x0021\0@spark.java",
+            "java\0spark.java",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("spark"));
+        }
+    }
+
+    #[test]
+    fn unresolved_java_argument_files_preserve_legacy_matching() {
+        for cmdline in [
+            "java\0@options.txt\0/opt/client/lib\0kafka.Kafka",
+            "java\0-cp\0@classpath.txt\0/opt/client/lib\0kafka.Kafka",
+            "java\0-jar\0@jar-arguments.txt\0/opt/client/report.jar\0kafka.Kafka",
+            "java\0--module\0@module-arguments.txt\0app/kafka.Kafka",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn a_java_client_argument_must_not_trigger_streaming_read_ahead() {
+        let mut processes = vec![ProcessInfo {
+            name: "java".into(),
+        }];
+        if let Some(service) =
+            runtime_service_from_cmdline("java\0-jar\0/opt/client/report.jar\0kafka")
+        {
+            processes.push(ProcessInfo {
+                name: service.into(),
+            });
+        }
+        let info = SystemInfo {
+            kernel_version: "6.6.0".into(),
+            os_distro: String::new(),
+            cpu_model: String::new(),
+            cpu_cores: 8,
+            numa_nodes: 1,
+            memory_total_gb: 16,
+            disks: vec![DiskInfo {
+                name: "fixture-java-client".into(),
+                disk_type: DiskType::HDD,
+                scheduler: "mq-deadline".into(),
+                available_schedulers: vec!["mq-deadline".into()],
+                nr_requests: 128,
+                read_ahead_kb: 128,
+                rq_affinity: 1,
+                hidden: false,
+                holders: vec![],
+            }],
+            network: vec![],
+            sysctl: SysctlValues {
+                swappiness: 60,
+                dirty_ratio: 20,
+                dirty_background_ratio: 10,
+                somaxconn: 128,
+                thp_enabled: "always".into(),
+            },
+            processes,
+        };
+        let workload = crate::profile::classify(&info);
+        let evaluation = crate::rules::evaluate_with_workload(&info, &workload).unwrap();
+        let disk_recommendations: Vec<_> = evaluation
+            .recommendations
+            .iter()
+            .filter(|recommendation| {
+                recommendation.param == "block/fixture-java-client/read_ahead_kb"
+            })
+            .collect();
+        assert!(
+            disk_recommendations.is_empty(),
+            "a client request must not change the disk's 128-KiB readahead: {disk_recommendations:?}"
+        );
+        assert_eq!(workload, crate::profile::WorkloadType::Mixed);
+        assert!(!crate::services::detect_services(&info).contains(&"Kafka"));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
     pub kernel_version: String,
@@ -400,11 +559,11 @@ fn read_cgroup_memory_limit_kb() -> u64 {
 }
 
 /// The memory limit that binds a process: the smallest real limit from its
-/// own cgroup up to the mount root, 0 when nothing on that chain limits
-/// memory.
+/// accounting chain, 0 when nothing on that chain limits memory. A legacy v1
+/// parent with hierarchy disabled is outside that accounting chain.
 ///
-/// The root file alone is not the process's limit. Limits are inherited — a
-/// child cgroup can never exceed its ancestors — so the binding limit is the
+/// The root file alone is not the process's limit. Within a hierarchy, limits
+/// are inherited, so the binding limit is the
 /// minimum over the chain: a systemd unit with `MemoryMax=4G` on a 64 GB
 /// host, or a `--memory 2g` container run with host-shared cgroup
 /// namespaces, keeps its deeper `memory.max` while the root file still reads
@@ -422,14 +581,14 @@ fn cgroup_memory_limit_kb_from(root: &Path, self_cgroup: &str) -> u64 {
     // a hybrid host delegates the memory controller to v1, so the v2 walk
     // finds no file at all and must not answer "no limit" from that.
     if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
-        if let Some(kb) = chain_limit_kb(root, &rel, "memory.max", cgroup_v2_limit_kb) {
+        if let Some(kb) = chain_min_value(root, &rel, "memory.max", cgroup_v2_limit_kb) {
             return kb;
         }
     }
     // cgroup v1: the line of the memory controller, walked under the
     // controller's own mount (`/sys/fs/cgroup/memory`).
     if let Some(rel) = cgroup_v1_relative_path(self_cgroup) {
-        if let Some(kb) = chain_limit_kb(
+        if let Some(kb) = chain_min_value(
             &root.join("memory"),
             &rel,
             "memory.limit_in_bytes",
@@ -441,10 +600,10 @@ fn cgroup_memory_limit_kb_from(root: &Path, self_cgroup: &str) -> u64 {
     // No navigable /proc/self/cgroup (unreadable, or a layout the walks
     // cannot follow): the root files remain the best approximation — the
     // pre-existing behaviour.
-    if let Some(kb) = chain_limit_kb(root, "/", "memory.max", cgroup_v2_limit_kb) {
+    if let Some(kb) = chain_min_value(root, "/", "memory.max", cgroup_v2_limit_kb) {
         return kb;
     }
-    chain_limit_kb(
+    chain_min_value(
         &root.join("memory"),
         "/",
         "memory.limit_in_bytes",
@@ -463,21 +622,21 @@ fn cgroup_v2_relative_path(content: &str) -> Option<String> {
 }
 
 /// Pure /proc/self/cgroup parsing: the relative cgroup path of the v1 line
-/// for the memory controller (`<hierarchy>:<controllers>:<path>`), when
-/// present. The controller list decides, so the v2 line (empty controller
-/// field) and other controllers' lines never match. The line is split into
-/// exactly three fields because the path runs to the end of the line: a
-/// cgroup directory may itself be named with a colon (kernfs only forbids
-/// '/' and '\0' in names), so an unbounded split truncates the membership
-/// at the colon inside the name — the same idiom the CPU membership reader
-/// already uses (`splitn(3, ':')`, cpu_hierarchy).
-fn cgroup_v1_relative_path(content: &str) -> Option<String> {
+/// for `controller` (`<hierarchy>:<controllers>:<path>`), when present. The
+/// controller list decides, so the v2 line (empty controller field) and other
+/// controllers' lines never match. The line is split into exactly three fields
+/// because the path runs to the end of the line: a cgroup directory may itself
+/// be named with a colon (kernfs only forbids '/' and '\0' in names), so an
+/// unbounded split truncates the membership at the colon inside the name — the
+/// same idiom the CPU membership reader already uses (`splitn(3, ':')`,
+/// cpu_hierarchy).
+fn cgroup_v1_controller_relative_path(content: &str, controller: &str) -> Option<String> {
     content.lines().find_map(|line| {
         let mut fields = line.splitn(3, ':');
         let hierarchy = fields.next()?;
         let controllers = fields.next()?;
         let path = fields.next()?;
-        if !hierarchy.is_empty() && controllers.split(',').any(|c| c == "memory") {
+        if !hierarchy.is_empty() && controllers.split(',').any(|c| c == controller) {
             Some(path.to_string())
         } else {
             None
@@ -485,13 +644,22 @@ fn cgroup_v1_relative_path(content: &str) -> Option<String> {
     })
 }
 
+/// The memory controller's membership line
+/// ([`cgroup_v1_controller_relative_path`], kept for the callers that only ever
+/// need memory).
+fn cgroup_v1_relative_path(content: &str) -> Option<String> {
+    cgroup_v1_controller_relative_path(content, "memory")
+}
+
 /// Walk the cgroup chain from `rel` up to `root`, reading `file` at every
-/// level; the effective limit is the smallest real limit seen, because a
-/// child can never exceed its ancestors. Levels with no limit (the v2 `max`
-/// sentinel, the v1 unlimited constant, unparsable content) are skipped.
+/// level; the effective value is the smallest real one seen. A v1 memory walk
+/// stops before a parent that disables hierarchical accounting. Levels with no
+/// value (the v2 `max` sentinel, the v1 unlimited constant, unparsable content)
+/// are skipped.
 /// `None` when no level of the chain offers the file at all, so the caller
-/// can fall back to the next hierarchy.
-fn chain_limit_kb(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) -> Option<u64> {
+/// can fall back to the next hierarchy. `parse` sets the unit: the memory
+/// walks read kilobytes, the cpuset walk reads the CPUs in a mask.
+fn chain_min_value(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) -> Option<u64> {
     // Namespace-relative parent components must never walk above this mount
     // — the same guard cpu_chain_limit carries for the CPU walk.
     let rel = Path::new(rel.trim_start_matches('/'));
@@ -501,10 +669,20 @@ fn chain_limit_kb(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) ->
     {
         return None;
     }
-    let mut dir = root.join(rel);
+    let own_dir = root.join(rel);
+    let mut dir = own_dir.clone();
     let mut saw_limit_file = false;
     let mut best: u64 = 0;
     loop {
+        // Legacy v1 children are charged to a parent only while that parent
+        // enables hierarchy. Unknown state keeps the existing ancestor walk.
+        if file == "memory.limit_in_bytes"
+            && dir != own_dir
+            && fs::read_to_string(dir.join("memory.use_hierarchy"))
+                .is_ok_and(|state| state.trim() == "0")
+        {
+            break;
+        }
         if let Ok(content) = fs::read_to_string(dir.join(file)) {
             saw_limit_file = true;
             let kb = parse(&content);
@@ -559,7 +737,24 @@ fn read_cgroup_cpu_limit_cores() -> u64 {
 // CPU bandwidth is constrained by both the process's cgroup and its ancestors.
 // A readable unlimited v2 chain must not fall through to an unrelated v1 tree;
 // an absent v2 CPU controller on a hybrid hierarchy must allow v1 fallback.
+//
+// The cpuset controller bounds the same number by a second mechanism: it
+// decides which CPUs the process may run on, and a container pinned to two of
+// a host's sixty-four (a `--cpuset-cpus` container, a Kubernetes pod under the
+// static CPU-manager policy, a systemd unit with `AllowedCPUs=`) runs at most
+// two CPUs' worth of work in parallel. Sizing cpu-scaled rules for the host's
+// sixty-four is the same mis-scaling the bandwidth quota is read to prevent,
+// so the effective count is the smaller of the two limits.
 fn cgroup_cpu_limit_cores_from(root: &Path, self_cgroup: &str) -> u64 {
+    let quota = cgroup_cpu_quota_cores_from(root, self_cgroup);
+    let cpuset = cgroup_cpuset_core_count_from(root, self_cgroup);
+    match (quota, cpuset) {
+        (0, count) | (count, 0) => count,
+        (quota, cpuset) => quota.min(cpuset),
+    }
+}
+
+fn cgroup_cpu_quota_cores_from(root: &Path, self_cgroup: &str) -> u64 {
     if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
         if let Some(cores) = cpu_chain_limit(root, &rel, true) {
             return cores;
@@ -593,6 +788,75 @@ fn cgroup_cpu_limit_cores_from(root: &Path, self_cgroup: &str) -> u64 {
         .iter()
         .find_map(|r| cpu_chain_limit(r, "/", false))
         .unwrap_or(0)
+}
+
+/// The CPUs the cpuset controller grants this process: the smallest mask on
+/// the chain from its own cgroup up to the mount root, 0 when no readable mask
+/// exists on that chain (the controller lives on the other hierarchy, or no
+/// mask is set) — 0 clamps nothing, exactly like an unlimited quota.
+///
+/// cgroup v2 keeps the mask in `cpuset.cpus.effective` of the cgroup itself: a
+/// read-only file the kernel fills with the CPUs the parent actually grants,
+/// so it already folds in the ancestors. cgroup v1 keeps the matching
+/// `cpuset.effective_cpus` under the controller's own mount. Reading the
+/// process's own cgroup (rather than the root file) is what makes a container
+/// or a unit with a narrower mask bind: the effective file of every ancestor
+/// above it is wider.
+fn cgroup_cpuset_core_count_from(root: &Path, self_cgroup: &str) -> u64 {
+    if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
+        if let Some(cpus) = chain_min_value(root, &rel, "cpuset.cpus.effective", cpuset_mask_cpus) {
+            return cpus;
+        }
+    }
+    if let Some(rel) = cgroup_v1_controller_relative_path(self_cgroup, "cpuset") {
+        if let Some(cpus) = chain_min_value(
+            &root.join("cpuset"),
+            &rel,
+            "cpuset.effective_cpus",
+            cpuset_mask_cpus,
+        ) {
+            return cpus;
+        }
+    }
+    // Membership that cannot be followed: the mount root's own mask still
+    // bounds what the process may use — the container root in the common
+    // private-cgroup-namespace case.
+    if let Some(cpus) = chain_min_value(root, "/", "cpuset.cpus.effective", cpuset_mask_cpus) {
+        return cpus;
+    }
+    chain_min_value(
+        &root.join("cpuset"),
+        "/",
+        "cpuset.effective_cpus",
+        cpuset_mask_cpus,
+    )
+    .unwrap_or(0)
+}
+
+/// A cpuset mask (`cpuset.cpus`, cpuset v1's `cpuset.effective_cpus`, and v2's
+/// `cpuset.cpus.effective` share the format) → the number of CPUs it lists:
+/// comma-separated single CPUs and `first-last` ranges, so `0-3,8,10-11` is
+/// seven CPUs. 0 when the mask is empty or unparsable, which clamps nothing:
+/// an empty mask means the cgroup inherits its parent's set, not that it may
+/// use zero CPUs, and a malformed mask is no evidence of a restriction.
+fn cpuset_mask_cpus(raw: &str) -> u64 {
+    let mut cpus = 0u64;
+    for part in raw.trim().split(',') {
+        let part = part.trim();
+        match part.split_once('-') {
+            Some((first, last)) => {
+                match (first.trim().parse::<u64>(), last.trim().parse::<u64>()) {
+                    (Ok(first), Ok(last)) if first <= last => cpus += last - first + 1,
+                    _ => return 0,
+                }
+            }
+            None => match part.parse::<u64>() {
+                Ok(_) => cpus += 1,
+                Err(_) => return 0,
+            },
+        }
+    }
+    cpus
 }
 
 fn cpu_chain_limit(root: &Path, rel: &str, v2: bool) -> Option<u64> {
@@ -873,7 +1137,13 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
     let mut nets = Vec::new();
 
     if let Ok(entries) = fs::read_dir(net_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
+        let entries: Vec<fs::DirEntry> = entries.filter_map(|e| e.ok()).collect();
+        // Every ifindex this namespace has, for the peer test below.
+        let local_ifindexes: Vec<u64> = entries
+            .iter()
+            .filter_map(|entry| read_sysfs_u64(&entry.path().join("ifindex")))
+            .collect();
+        for entry in &entries {
             let name = entry.file_name().to_string_lossy().to_string();
             // The tun driver creates tun/tap devices and reports a fixed
             // SPEED_10000 for every one of them — `tun_setup()` seeds the link
@@ -895,6 +1165,21 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
             // marker so a custom-named tunnel cannot masquerade as the host
             // link either.
             let is_tun_device = entry.path().join("tun_flags").exists();
+            // The veth driver reports the same fixed SPEED_10000
+            // (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-132;
+            // master:129-135) for every device it registers, and its devices
+            // are the container plumbing: the host end of a pair is named by
+            // the CNI rather than `veth*` (Calico's `cali*`, Cilium's
+            // `lxc<id>` and `cilium_host`), and inside a container the same
+            // driver backs the workload's own `eth0`. The pair is identified
+            // from this side by `iflink`, which names the peer's ifindex
+            // (`veth_get_iflink` returns it, 0 once the peer is gone): a peer
+            // in another namespace is not one of THIS namespace's interfaces,
+            // while the link handlers that report a negotiated rate point at a
+            // device inside it - a VLAN its parent (`vlan_dev_get_iflink`), a
+            // bridge port its bridge, an attached tunnel the device it runs
+            // over - so their readings stay.
+            let peer_is_external = link_peer_leaves_namespace(&entry.path(), &local_ifindexes);
             if name == "lo"
                 || name.starts_with("veth")
                 || name.starts_with("br-")
@@ -904,6 +1189,7 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
                 || name.starts_with("tun")
                 || name.starts_with("tap")
                 || is_tun_device
+                || peer_is_external
             {
                 continue;
             }
@@ -923,6 +1209,39 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
     }
 
     Ok(nets)
+}
+
+/// Whether the interface in `dir` links to a device outside this network
+/// namespace.
+///
+/// `iflink` names the ifindex of the device an interface is linked to, and
+/// `dev_get_iflink`'s contract is that a physical interface links to itself
+/// (net/core/dev.c). A link target that is not one of `local_ifindexes`
+/// identifies a device whose peer sits on the other side of a namespace - the
+/// veth pair the container runtimes create, whose driver reports a fixed
+/// SPEED_10000 for both ends whatever the host link is - or no device at all
+/// (`veth_get_iflink` returns 0 once the peer is gone, an unattached tunnel
+/// keeps iflink 0), which carries no negotiated rate either. The shapes that
+/// derive a real reading keep it: a VLAN links to its parent
+/// (`vlan_dev_get_iflink`), a bridge port to its bridge, an attached tunnel to
+/// the device it runs over, a bond to itself for the lack of a link handler. A
+/// veth pair whose ends share one namespace links locally and is already
+/// skipped by name. An unreadable `iflink` or `ifindex` is not evidence, and
+/// keeps the interface.
+fn link_peer_leaves_namespace(dir: &Path, local_ifindexes: &[u64]) -> bool {
+    let (Some(ifindex), Some(iflink)) = (
+        read_sysfs_u64(&dir.join("ifindex")),
+        read_sysfs_u64(&dir.join("iflink")),
+    ) else {
+        return false;
+    };
+    iflink != ifindex && !local_ifindexes.contains(&iflink)
+}
+
+/// A sysfs attribute holding one unsigned number, `None` when the file is
+/// absent or unparsable.
+fn read_sysfs_u64(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 fn read_sysctl_values() -> Result<SysctlValues> {
@@ -1090,7 +1409,7 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     let Some(&program) = args.first() else {
         return false;
     };
-    if is_monitoring_helper_name(program) {
+    if is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program)) {
         return true;
     }
     if is_shell_program(program) {
@@ -1100,7 +1419,9 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
             && args
                 .get(2)
                 .and_then(|&payload| payload.split_whitespace().next())
-                .is_some_and(is_monitoring_helper_name);
+                .is_some_and(|program| {
+                    is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
+                });
     }
     if program.rsplit('/').next().unwrap_or_default() == "java" {
         // A JVM names its program in the jar after `-jar`; argv[0] is only the
@@ -1262,28 +1583,92 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
 /// classified as Spark and fired the streaming rules on an unrelated
 /// workload. This is the same class of false positive the name-boundary fix
 /// for `has_process` removed (etcdctl vs etcd).
+/// Java argument scanning stops at an explicit entrypoint. Launches using
+/// unexpanded argument files retain legacy matching because the entrypoint
+/// cannot be located from the visible arguments alone.
 ///
 /// Each candidate argument is matched by its file-name component only (a
 /// directory named after a service is not the program), and a marker matches
 /// only as a whole consecutive run of name tokens, so `sparklesh` or
 /// `etcdbackup` no longer satisfy `spark`/`etcd`.
 fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
-    // Collect identity-bearing args: everything that is not an option, plus
-    // the jar path that follows `-jar` (that one *is* an option's value but
-    // names the program).
+    // Java exposes one entrypoint; retain the existing candidate scan for
+    // other runtimes whose launch contracts differ.
     let mut candidates: Vec<&str> = Vec::new();
-    let mut args = cmdline.split('\0').filter(|a| !a.is_empty());
+    let nonempty: fn(&&str) -> bool = |value| !value.is_empty();
+    let mut args = cmdline.split('\0').filter(nonempty);
+    let is_java = args
+        .clone()
+        .next()
+        .is_some_and(|program| program.rsplit('/').next() == Some("java"));
+    if is_java {
+        let _ = args.next();
+    }
+    let mut bound_java_entrypoint = is_java;
+    let mut argument_files_enabled = true;
+    let is_argument_file =
+        |value: &str| value.len() > 1 && value.starts_with('@') && !value.starts_with("@@");
     while let Some(arg) = args.next() {
-        if arg == "-jar" {
-            if let Some(jar) = args.next() {
-                candidates.push(jar);
+        if bound_java_entrypoint && arg == "--disable-@files" {
+            argument_files_enabled = false;
+            continue;
+        } else if bound_java_entrypoint && argument_files_enabled && is_argument_file(arg) {
+            // An argument file can end with an option whose value is supplied
+            // on the command line. Preserve the old scan instead of guessing.
+            bound_java_entrypoint = false;
+            candidates.clear();
+            args = cmdline.split('\0').filter(nonempty);
+            continue;
+        } else if arg == "-jar" || (bound_java_entrypoint && matches!(arg, "-m" | "--module")) {
+            if let Some(entrypoint) = args.next() {
+                if bound_java_entrypoint && argument_files_enabled && is_argument_file(entrypoint) {
+                    bound_java_entrypoint = false;
+                    candidates.clear();
+                    args = cmdline.split('\0').filter(nonempty);
+                    continue;
+                }
+                candidates.push(entrypoint);
             }
-        } else if arg == "-cp" || arg == "-classpath" || arg == "--class-path" {
-            // The classpath is an option value, not the program: it names
-            // libraries (often service jars), not the entrypoint.
-            let _ = args.next();
+            if bound_java_entrypoint {
+                break;
+            }
+        } else if bound_java_entrypoint && arg.starts_with("--module=") {
+            candidates.push(&arg["--module=".len()..]);
+            break;
+        } else if arg == "-cp"
+            || arg == "-classpath"
+            || arg == "--class-path"
+            || (bound_java_entrypoint
+                && matches!(
+                    arg,
+                    "-p" | "--module-path"
+                        | "--upgrade-module-path"
+                        | "--add-modules"
+                        | "--limit-modules"
+                        | "--add-exports"
+                        | "--add-opens"
+                        | "--add-reads"
+                        | "--patch-module"
+                        | "--enable-native-access"
+                        | "--source"
+                ))
+        {
+            // Search paths and JVM option values describe the launch
+            // environment, not the application entrypoint.
+            if let Some(value) = args.next() {
+                if bound_java_entrypoint && argument_files_enabled && is_argument_file(value) {
+                    bound_java_entrypoint = false;
+                    candidates.clear();
+                    args = cmdline.split('\0').filter(nonempty);
+                }
+            }
         } else if !arg.starts_with('-') {
             candidates.push(arg);
+            // Java passes everything after its main class/source or JAR to
+            // the application; those values cannot identify the JVM's service.
+            if bound_java_entrypoint {
+                break;
+            }
         }
     }
 
@@ -1804,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_limit_kb_refuses_to_walk_above_the_mount() {
+    fn chain_min_value_refuses_to_walk_above_the_mount() {
         // Parity with cpu_chain_limit: a membership line whose path carries
         // a parent component must not let the walk read limit files outside
         // the mount root it was given.
@@ -1822,7 +2207,7 @@ mod tests {
         fs::write(outside.join("memory.max"), b"4294967296\n").expect("write outside limit");
 
         assert_eq!(
-            chain_limit_kb(&root, "/../escape", "memory.max", cgroup_v2_limit_kb),
+            chain_min_value(&root, "/../escape", "memory.max", cgroup_v2_limit_kb),
             None,
             "a parent component must not escape the mount"
         );
@@ -2221,6 +2606,79 @@ mod tests {
             info.network
                 .iter()
                 .map(|n| (n.name.as_str(), n.speed_mbps))
+                .collect::<Vec<_>>()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The veth driver reports the same fixed SPEED_10000 for every device it
+    /// registers (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-132;
+    /// master:129-135), and its devices are the container plumbing: the host
+    /// end of a pair is named by the CNI rather than `veth*` (Calico's
+    /// `cali*`, Cilium's `lxc<id>` and `cilium_host`), and inside a container
+    /// the same driver backs the workload's own `eth0`. What identifies the
+    /// pair from this side is `iflink`: it names the peer's ifindex
+    /// (`veth_get_iflink` returns it, 0 once the peer is gone), and a peer in
+    /// another namespace is not one of THIS namespace's interfaces — while
+    /// every other `ndo_get_iflink` user links inside it (a VLAN its parent,
+    /// `vlan_dev_get_iflink`, so a VLAN keeps its parent's real reading; a
+    /// bridge port its bridge; an attached tunnel the device it runs over).
+    #[test]
+    fn network_info_ignores_a_veth_peered_outside_the_namespace() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_veth_peer_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // A 1 GbE NIC, a VLAN on it (its iflink names the NIC, which resolves
+        // here), and two CNI host ends whose peers (ifindex 77/78) live in the
+        // containers' namespaces.
+        for (name, speed, ifindex, iflink) in [
+            ("eth0", "1000\n", 2, 2),
+            ("eth0.100", "1000\n", 3, 2),
+            ("cali1234abcd", "10000\n", 4, 77),
+            ("lxc30c0b5a", "10000\n", 5, 78),
+        ] {
+            let iface = dir.join(name);
+            fs::create_dir_all(&iface).expect("create fake interface dir");
+            fs::write(iface.join("speed"), speed).expect("write speed");
+            fs::write(iface.join("ifindex"), format!("{ifindex}\n")).expect("write ifindex");
+            fs::write(iface.join("iflink"), format!("{iflink}\n")).expect("write iflink");
+        }
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        assert_eq!(
+            info.max_net_speed(),
+            1000,
+            "a veth whose peer lives outside this namespace must not decide the host link speed: {:?}",
+            info.network
+                .iter()
+                .map(|n| (n.name.as_str(), n.speed_mbps))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            info.network.iter().any(|n| n.name == "eth0.100"),
+            "a link that resolves inside this namespace keeps its reading: {:?}",
+            info.network
+                .iter()
+                .map(|n| (n.name.as_str(), n.speed_mbps))
+                .collect::<Vec<_>>()
+        );
+        // The same list is the interface count the ARP-tuning rules qualify
+        // hosts by (`network.len() >= 2`, rules/mod.rs arp_tuning_skipped):
+        // container plumbing is not a second NIC, so only the two real
+        // interfaces may remain.
+        assert_eq!(
+            info.network.len(),
+            2,
+            "the ARP rules' 2+ interface premise must not be satisfied by a veth pair: {:?}",
+            info.network
+                .iter()
+                .map(|n| n.name.as_str())
                 .collect::<Vec<_>>()
         );
 
@@ -3004,6 +3462,55 @@ mod tests {
     }
 
     #[test]
+    fn collector_directories_do_not_hide_daemon_programs() {
+        for cmdline in [
+            "/opt/exporter/postgres\0-D\0/var/lib/postgresql/data",
+            "/opt/exporter/nginx\0-g\0daemon off;",
+            "sh\0-c\0/opt/exporter/postgres -D /var/lib/postgresql/data",
+            "/opt/exporter/bin/java\0com.example.Main",
+        ] {
+            assert!(!cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn collector_programs_and_raw_task_names_keep_matching() {
+        for cmdline in [
+            "/usr/local/bin/postgres_exporter\0--web.listen-address=:9187",
+            "/opt/exporter/postgres_exporter\0--web.listen-address=:9187",
+            "sh\0-c\0/opt/exporter/postgres_exporter --web.listen-address=:9187",
+            "java\0-jar\0/opt/client/jmx_prometheus_httpserver.jar",
+        ] {
+            assert!(cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
+        }
+        assert!(is_monitoring_helper_name("node_exporter/x"));
+    }
+
+    #[test]
+    fn a_live_daemon_under_a_collector_directory_stays_visible() {
+        let root = std::env::temp_dir().join(format!("ktuner_daemon_path_{}", std::process::id()));
+        let dir = root.join("exporter");
+        fs::create_dir_all(&dir).expect("create private fixture");
+        let program = dir.join("postgres");
+        fs::copy("/bin/sleep", &program).expect("copy inert executable");
+        let mut command = std::process::Command::new(&program);
+        command.arg("30").stdout(std::process::Stdio::null());
+        let mut child = spawn_fresh_executable(&mut command, "spawn inert daemon-named process");
+        let pid = child.id().to_string();
+        wait_for_cmdline(&pid, b"exporter/postgres");
+        let comm = read_comm_from(&format!("/proc/{pid}/comm"));
+        let filtered = is_monitoring_helper(&pid);
+        child.kill().ok();
+        child.wait().ok();
+        fs::remove_dir_all(&root).ok();
+        assert_eq!(comm.as_deref(), Some("postgres"));
+        assert!(
+            !filtered,
+            "the program's parent directory is not its identity"
+        );
+    }
+
+    #[test]
     fn test_cmdline_names_helper_only_program_names_decide() {
         // argv[0] names the collector whatever the later arguments say...
         assert!(cmdline_names_helper(
@@ -3079,3 +3586,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cpu_hierarchy_tests.rs"]
 mod cpu_hierarchy_tests;
+
+#[cfg(test)]
+#[path = "memory_hierarchy_tests.rs"]
+mod memory_hierarchy_tests;

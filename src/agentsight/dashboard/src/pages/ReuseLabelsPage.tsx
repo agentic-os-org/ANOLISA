@@ -12,6 +12,7 @@
  * rule gets noticed.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { sameMembers } from '../utils/setSelection';
 
 import { useI18n } from '../i18n';
 import {
@@ -299,8 +300,8 @@ export const ReuseLabelsPage: React.FC = () => {
   };
 
   const toggleAllPending = () => {
-    const pending = rows.filter((row) => !row.human_backed).map((row) => row.session_id);
-    setSelected((current) => (current.size === pending.length ? new Set() : new Set(pending)));
+    const pending = new Set(rows.filter((row) => !row.human_backed).map((row) => row.session_id));
+    setSelected((current) => (sameMembers(current, pending) ? new Set() : pending));
   };
 
   /**
@@ -325,7 +326,9 @@ export const ReuseLabelsPage: React.FC = () => {
         })
         .map((row) => row.session_id),
     );
-    setSelected((current) => (ids.size === current.size ? new Set() : ids));
+    // Toggle off only when this criterion's rows are the current selection:
+    // a hand-picked selection of the same size is a different selection.
+    setSelected((current) => (sameMembers(current, ids) ? new Set() : ids));
   };
 
   return (

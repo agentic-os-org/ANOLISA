@@ -75,6 +75,7 @@ function runHook(runner, hookName, payload) {
 
   return new Promise((resolve) => {
     let stdout = "";
+    let stdoutBytes = 0;
     let settled = false;
     let child;
     let timer;
@@ -120,9 +121,13 @@ function runHook(runner, hookName, payload) {
     child.on("error", () => finish(null));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      if (stdout.length < MAX_HOOK_OUTPUT_BYTES) {
-        stdout += chunk.slice(0, MAX_HOOK_OUTPUT_BYTES - stdout.length);
+      if (settled) return;
+      stdoutBytes += Buffer.byteLength(chunk, "utf8");
+      if (stdoutBytes > MAX_HOOK_OUTPUT_BYTES) {
+        finish(null, true);
+        return;
       }
+      stdout += chunk;
     });
     child.on("close", (code) => {
       finish(code === 0 ? parseHookOutput(stdout) : null);
@@ -255,7 +260,7 @@ export const TokenlessPlugin = async () => {
 
       if (typeof tools[0].description === "string") output.description = tools[0].description;
       if (tools[0].parameters && typeof tools[0].parameters === "object") {
-        output.parameters = tools[0].parameters;
+        output.parameters = JSON.parse(JSON.stringify(tools[0].parameters));
       }
     },
   };

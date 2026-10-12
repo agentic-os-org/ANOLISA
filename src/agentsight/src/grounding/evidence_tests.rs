@@ -728,6 +728,8 @@ fn the_evidence_digest_stays_inside_its_byte_budget() {
         source_call_id: None,
         haystack: text,
         numbers: Vec::new(),
+        literal_text: String::new(),
+        urls: Vec::new(),
     };
     let pool: Vec<EvidenceEntry> = (1..=6)
         .map(|step| entry(step, "读取配置文件的缓冲区大小".repeat(400)))
@@ -1099,4 +1101,179 @@ fn unknown_ratio_only_covers_the_selected_round() {
         0.0,
         "an unknown call from an earlier round must not trigger abstention"
     );
+}
+
+#[test]
+fn derived_ratio_is_recognised_in_either_operand_order() {
+    // Error rate / share / per-token cost are quotients whose operands appear
+    // in the other order in the tool output; a single-direction `a / b` check
+    // reported the correct computation as invented.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.4167。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.4167"))
+        .expect("the ratio claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Derived,
+        "5000 / 12000 is an arithmetic consequence of two pooled values"
+    );
+}
+
+#[test]
+fn a_value_no_pair_derives_stays_unresolved() {
+    // The negative half of the ratio check: a figure that matches none of the
+    // sums, differences, products or quotients of the pooled pair is still
+    // reported instead of being waved through as a derivation.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.7311。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.7311"))
+        .expect("the numeric claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Unresolved,
+        "0.7311 derives from no pair of 12000 and 5000"
+    );
+}
+
+#[test]
+fn strong_literals_require_complete_observed_values() {
+    for (class, literal, extension) in [
+        (ClaimClass::Version, "1.2.3", "1.2.30"),
+        (ClaimClass::Path, "/tmp/report.txt", "/tmp/report.txt.bak"),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/apiv2",
+        ),
+    ] {
+        let claim = Claim {
+            text: literal.into(),
+            class,
+            value: None,
+        };
+        for observed in [
+            format!("Found {literal}."),
+            format!(r#"{{"value":"{literal}"}}"#),
+            format!("`{literal}`"),
+            format!("({literal})"),
+            format!(r#"{{"value":"{literal}\n"}}"#),
+        ] {
+            let mut pool = Vec::new();
+            push_entry(&mut pool, 3, Some("source".into()), &observed);
+            assert!(
+                matches!(ground_one(&claim, &pool), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+                "{observed}"
+            );
+        }
+        for observed in [
+            extension.to_string(),
+            format!(r#"{{"value":"{extension}"}}"#),
+        ] {
+            let mut pool = Vec::new();
+            push_entry(&mut pool, 3, Some("source".into()), &observed);
+            assert!(
+                matches!(ground_one(&claim, &pool), Grounding::Unresolved),
+                "{observed}"
+            );
+        }
+    }
+    let mut pool = Vec::new();
+    push_entry(&mut pool, 3, None, "version=v1.2.3");
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "1.2.3".into(),
+                class: ClaimClass::Version,
+                value: None
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+    for (class, literal, observed) in [
+        (ClaimClass::Version, "1.2.3", "11.2.3"),
+        (ClaimClass::Version, "1.2.3", "1.2.3-rc1"),
+        (ClaimClass::Path, "/tmp/report.txt", "/other/tmp/report.txt"),
+        (
+            ClaimClass::Path,
+            "/tmp/report.txt",
+            "/tmp/report.txt,backup",
+        ),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/api?limit=120",
+        ),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/api,backup",
+        ),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(&mut pool, 3, None, observed);
+        assert!(
+            matches!(
+                ground_one(
+                    &Claim {
+                        text: literal.into(),
+                        class,
+                        value: None
+                    },
+                    &pool
+                ),
+                Grounding::Unresolved
+            ),
+            "{observed}"
+        );
+    }
+}
+
+#[test]
+fn weak_containment_and_numeric_rounding_remain_supported() {
+    let mut pool = Vec::new();
+    push_entry(&mut pool, 1, None, "qualified_name_suffix: 242391");
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "qualified_name".into(),
+                class: ClaimClass::Identifier,
+                value: None
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "240k".into(),
+                class: ClaimClass::Number,
+                value: Some(240000.0)
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
 }

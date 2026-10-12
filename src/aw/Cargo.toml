@@ -8,10 +8,15 @@ members = [
     "crates/aw-provider",
     "crates/aw-provider-sec-core",
     "crates/aw-service",
+    "crates/aw-package",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+aw-service = { path = "crates/aw-service" }
 aw-config = { path = "crates/aw-config" }
 aw-core = { path = "crates/aw-core" }
 aw-contracts = { path = "." }

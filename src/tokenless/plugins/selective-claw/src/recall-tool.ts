@@ -15,7 +15,8 @@ export function executeExpandTurn(
 ): RecallResult {
   if (turnSeqs.length === 0) return { found: 0, turns: [] };
 
-  const messages = store.getMessagesByTurnSeqs(sessionId, turnSeqs);
+  const requestedTurns = [...new Set(turnSeqs)];
+  const messages = store.getMessagesByTurnSeqs(sessionId, requestedTurns);
   const turnMap = new Map<number, MessageRecord[]>();
   for (const m of messages) {
     const arr = turnMap.get(m.turnSeq) ?? [];
@@ -23,7 +24,7 @@ export function executeExpandTurn(
     turnMap.set(m.turnSeq, arr);
   }
 
-  const turns = turnSeqs
+  const turns = requestedTurns
     .filter((ts) => turnMap.has(ts))
     .map((ts) => ({
       turnSeq: ts,

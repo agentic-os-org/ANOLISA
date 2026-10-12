@@ -446,7 +446,11 @@ fn eval_swappiness(
         || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse")
-        || info.has_process("redis-server");
+        || info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the redis-server gates must count it too.
+        || info.has_process("valkey-server");
 
     let (target, reason) = if is_db
         || *workload == WorkloadType::IoLatency
@@ -492,6 +496,10 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // collapse/split stalls are exactly the latency spikes this rule heads
     // off, so a host running it must not be left on always.
     let is_latency_sensitive = info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the redis-server gates must count it too.
+        || info.has_process("valkey-server")
         || info.has_process("memcached")
         || info.has_process("postgres")
         || info.has_process("mysqld")
@@ -1818,7 +1826,12 @@ fn eval_overcommit_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
     if !info.param_exists(path) {
         return 1;
     }
-    let needs_overcommit = info.has_process("redis-server");
+    // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+    // `valkey-server` binary that carries the same startup warning
+    // ("WARNING overcommit_memory is set to 0! Background save may fail
+    // under low memory condition"), because fork-based RDB/AOF persistence
+    // is unchanged.
+    let needs_overcommit = info.has_process("redis-server") || info.has_process("valkey-server");
     if !needs_overcommit {
         return 1;
     }
@@ -1828,8 +1841,9 @@ fn eval_overcommit_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
             param: "vm.overcommit_memory".to_string(),
             current_value: "0".to_string(),
             recommended_value: "1".to_string(),
-            reason: "Redis 使用 fork 进行 RDB/AOF 持久化，overcommit_memory=0 可能导致 fork 失败"
-                .to_string(),
+            reason:
+                "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory=0 可能导致 fork 失败"
+                    .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
             writable: true,
@@ -1983,6 +1997,14 @@ fn eval_rq_affinity(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 /// cannot deliver the reason's promise. Those two bits have no other reader
 /// in either tree (`block/blk-sysfs.c` shows and stores them, `block/blk-mq.c`
 /// is the only consumer).
+///
+/// Only a migration that is switched off is worth restoring. The default 1
+/// (`QUEUE_FLAG_MQ_DEFAULT` carries `QUEUE_FLAG_SAME_COMP`) already sends a
+/// completion that fired outside the submitter's cache domain back to it, and
+/// a NUMA node never shares a last-level cache with another, so cross-node
+/// completions are covered; 2 adds `QUEUE_FLAG_SAME_FORCE`, which forces the
+/// IPI for completions inside the same cache domain as well, the setting the
+/// sysfs ABI describes as maximizing the distribution of completion work.
 fn eval_rq_affinity_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -1996,12 +2018,12 @@ fn eval_rq_affinity_at(
         return 1;
     }
     for disk in &info.disks {
-        if disk.disk_type == DiskType::NVMe && has_request_queue(disk) && disk.rq_affinity != 2 {
+        if disk.disk_type == DiskType::NVMe && has_request_queue(disk) && disk.rq_affinity == 0 {
             recs.push(Recommendation {
                 param: format!("block/{}/rq_affinity", disk.name),
                 current_value: disk.rq_affinity.to_string(),
-                recommended_value: "2".to_string(),
-                reason: "多 NUMA 节点下强制 IO 完成中断在提交 CPU 上处理，减少跨节点内存访问"
+                recommended_value: "1".to_string(),
+                reason: "多 NUMA 节点下 IO 完成迁移被关闭，恢复默认值让完成回到提交 CPU 所在的缓存域，减少跨节点内存访问"
                     .to_string(),
                 confidence: Confidence::High,
                 category: Category::Performance,
@@ -2020,6 +2042,12 @@ fn eval_rq_affinity_at(
 /// `threadirqs` kernel parameter (`include/linux/interrupt.h`:511-519 and
 /// `kernel/irq/manage.c`:27-36 in v6.6, :28-35 in 7.3-rc6). A kernel built
 /// without CONFIG_IRQ_FORCED_THREADING reads false in both files.
+///
+/// Only the kernel-parameter region of the command line decides: the kernel
+/// stops parsing at a bare `--` and hands the rest to init
+/// (`Documentation/admin-guide/kernel-parameters.rst`:12-16 and
+/// `kernel/params.c`:185-186 in v6.6, :14-18 and :182-183 in 7.3-rc6), so a
+/// `threadirqs` token behind the separator never enables the mode.
 fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
     if let Ok(cmdline) = std::fs::read_to_string(cmdline_path) {
         // The early parameter accepts both spellings; `setup_forced_irqthreads`
@@ -2032,16 +2060,59 @@ fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
         // configuration is not readable from userspace portably, so the token
         // is taken at face value and the residual error is a lost
         // recommendation, not an inert one.
-        if cmdline
-            .split_whitespace()
-            .any(|t| t == "threadirqs" || t.starts_with("threadirqs="))
-        {
+        //
+        // The scan stops at the separator: a token behind it is an init
+        // argument the kernel never reads as a parameter.
+        if cmdline_has_threadirqs(&cmdline) {
             return true;
         }
     }
     match std::fs::read_to_string(version_path) {
         Ok(version) => version.contains("PREEMPT_RT"),
         Err(_) => false,
+    }
+}
+
+// Linux next_arg keeps whitespace inside double quotes and removes a leading
+// quote. Only parsed parameter names decide; a value's -- is never a separator.
+fn cmdline_has_threadirqs(mut cmdline: &str) -> bool {
+    loop {
+        cmdline = cmdline.trim_start_matches([' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}']);
+        if cmdline.is_empty() {
+            return false;
+        }
+        let mut in_quote = false;
+        let end = cmdline
+            .char_indices()
+            .find_map(|(index, ch)| {
+                if ch == '"' {
+                    in_quote = !in_quote;
+                } else if !in_quote
+                    && matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000b}' | '\u{000c}')
+                {
+                    return Some(index);
+                }
+                None
+            })
+            .unwrap_or(cmdline.len());
+        let token = &cmdline[..end];
+        cmdline = &cmdline[end..];
+        let quoted = token.starts_with('"');
+        let token = token.strip_prefix('"').unwrap_or(token);
+        let (name, has_value) = token
+            .split_once('=')
+            .map_or((token, false), |(name, _)| (name, true));
+        let name = if quoted && !has_value {
+            token.strip_suffix('"').unwrap_or(token)
+        } else {
+            name
+        };
+        if name == "--" && !has_value {
+            return false;
+        }
+        if name == "threadirqs" {
+            return true;
+        }
     }
 }
 
@@ -2145,6 +2216,18 @@ fn eval_sched_migration_cost(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 /// `proc_dointvec` with no min/max, so "-1" round-trips verbatim — and
 /// `task_hot()` special-cases it: -1 keeps every task cache-hot (migration
 /// effectively disabled) while 0 makes no task cache-hot (always migrate).
+///
+/// A negative value sits on the cache-hot side of that comparison, never
+/// below the rule's 5 ms target: `proc_dointvec` stores the signed input in
+/// the table's `unsigned int` slot, so `task_hot()`'s
+/// `delta < (s64)sysctl_sched_migration_cost` reads it as ≈4.29e9 ns, and -1
+/// short-circuits to "hot" outright (v5.12 `kernel/sched/fair.c`:7452-7459,
+/// the same shape at 7.3-rc6 `:10670-10685`). A host that pinned tasks this
+/// way already keeps them where they run — at least as strictly as the 5 ms
+/// the target accepts — so writing 5000000 could only make tasks migratable
+/// again, the opposite of the reason's promise. A negative value is left
+/// alone: the same "already at the target" silence the tcp_adv_win_scale
+/// rule keeps for its 0.
 fn eval_sched_migration_cost_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -2160,6 +2243,11 @@ fn eval_sched_migration_cost_at(
     // or the unsigned fallback maps it to 0, the opposite "always migrate"
     // policy, and the report misdiagnoses a pinned host.
     let current = read_sysctl_i64(path);
+    // Every negative value is the pinned side of the comparison (see above):
+    // there is no migration tendency left for the target to raise.
+    if current < 0 {
+        return 1;
+    }
     if current < 5000000 {
         recs.push(Recommendation {
             param: "kernel.sched_migration_cost_ns".to_string(),
@@ -3192,14 +3280,37 @@ fn eval_netdev_budget(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/busy_poll";
+    eval_busy_poll_at(info, recs, "/proc/sys/net/core/busy_poll")
+}
+
+/// Path-injectable form of [`eval_busy_poll`] (the `eval_*_at` idiom) so the
+/// workload gate is assertable against a temp file on any host.
+///
+/// The gate lists every workload whose network round-trips sit on the
+/// request path: the caches (redis, memcached), the proxies (nginx), the
+/// OLTP databases (postgres, mysqld — MariaDB 10.4+ runs as mariadbd, the
+/// same OLTP shape — and mongod) and clickhouse. The OLTP databases appear
+/// in every sibling latency gate — eval_thp's `is_latency_sensitive`, the
+/// swappiness/dirty_ratio db lists, classify's IoLatency — but were missing
+/// here, so a database host never got the busy-polling advice its
+/// synchronous per-query round-trip profile asks for.
+fn eval_busy_poll_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     let current = read_sysctl_u64(path);
     let is_latency_sensitive = info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the redis-server gates must count it too.
+        || info.has_process("valkey-server")
         || info.has_process("memcached")
         || info.has_process("nginx")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
         || info.has_process("clickhouse");
     if is_latency_sensitive && current == 0 {
         recs.push(Recommendation {
@@ -4459,12 +4570,27 @@ fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
     1
 }
 
-fn eval_tcp_dsack(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_dsack";
-    if !std::path::Path::new(path).exists() {
+fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_tcp_dsack_at(info, recs, "/proc/sys/net/ipv4/tcp_dsack")
+}
+
+/// Path-injectable form of [`eval_tcp_dsack`] (the `eval_*_at` idiom).
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_dsack as a plain
+/// `proc_dointvec` int with no min/max (the same table as tcp_sack), so -1
+/// is a legal, persistent value there, and every consumer is a truthiness
+/// test (net/ipv4/tcp_input.c: `tcp_is_sack(tp) && READ_ONCE(sock_net(sk)->
+/// ipv4.sysctl_tcp_dsack)` gates the duplicate-SACK bookkeeping in
+/// tcp_dsack_set / tcp_dsack_extend). The unsigned reader parsed "-1" to
+/// Err and fell back to 0 — the *disabled* value — so the `== 0` gate
+/// invented a finding on a host whose D-SACK is on. The later u8 conversion
+/// (`proc_dou8vec_minmax`, no extra1/extra2; v6.6) rejects negatives at
+/// write time; the signed reader keeps the truthiness contract correct on
+/// both registrations.
+fn eval_tcp_dsack_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_dsack".to_string(),
@@ -4687,20 +4813,64 @@ fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
-    if max_speed >= 10000 && current < 524288 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_limit_output_bytes".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "1048576".to_string(),
-            reason: "万兆网络下 TCP 输出限制过低，限制了单连接吞吐量".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_limit_output_bytes_recommendation(
+        read_sysctl_u64(path),
+        max_speed,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_limit_output_bytes` recommendation for an
+/// already-read value.
+///
+/// Split out from the file probe so the version-dependent target is testable
+/// on any host.
+///
+/// The kernel default moved from 1 MB (16 * 65536) to 4 MB in Linux 6.16
+/// (`net/ipv4/tcp_ipv4.c` sets `4 << 20` from v6.16 on): the upstream commit
+/// is "tcp: increase tcp_limit_output_bytes default value to 4MB", whose
+/// message notes that the default had last changed in 2018 and that "modern
+/// NIC speeds got a 4x increase since then". The fixed 1 MB target now sits
+/// at a quarter of the default of every 6.16+ kernel, so the advice asks an
+/// administrator who is under it to settle at that quarter. Track the
+/// kernel's own default instead; the 1 MB target stays on the kernels whose
+/// default is still that. Only the 6.16+ target *is* the kernel default --
+/// 5.10 through 6.15 ship the 1 MB target and 4.19 ships 256 KB -- so the
+/// reason names a default on that path and a recommendation on the other.
+/// The rule keeps its own trigger of firing below half the target, so a
+/// kernel whose default did not move keeps the previous threshold, output
+/// and silence.
+fn tcp_limit_output_bytes_recommendation(
+    current: u64,
+    max_net_speed_mbps: u64,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if max_net_speed_mbps < 10000 {
+        return None;
+    }
+    let on_6_16_or_later = kernel_at_least(kernel_version, 6, 16);
+    let target = if on_6_16_or_later { 4194304 } else { 1048576 };
+    if current >= target / 2 {
+        return None;
+    }
+    let note = if on_6_16_or_later {
+        format!("内核默认 {target}")
+    } else {
+        format!("建议提高到 {target}")
+    };
+    Some(Recommendation {
+        param: "net.ipv4.tcp_limit_output_bytes".to_string(),
+        current_value: current.to_string(),
+        recommended_value: target.to_string(),
+        reason: format!("万兆网络下 TCP 输出限制 {current} 偏低（{note}），限制了单连接吞吐量"),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_dev_weight(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5022,12 +5192,17 @@ fn eval_default_log_martians_at(
 }
 
 fn eval_laptop_mode(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/laptop_mode";
+    eval_laptop_mode_at(info, recs, "/proc/sys/vm/laptop_mode")
+}
+
+/// Path-injectable form of [`eval_laptop_mode`] (the `eval_*_at` idiom) so the
+/// signed read is assertable against a temp file on any host.
+fn eval_laptop_mode_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if let Some(rec) = laptop_mode_recommendation(
-        read_sysctl_u64(path),
+        read_sysctl_i64(path),
         info.memory_total_gb,
         &info.kernel_version,
     ) {
@@ -5052,8 +5227,21 @@ fn eval_laptop_mode(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 /// (mm/page-writeback.c). Recommending 0 there promises less write delay that
 /// can no longer happen, and each applied write adds a deprecation warning to
 /// the kernel log, so from 7.0 on the rule stays quiet.
+/// `current` is signed because the knob's handler is `proc_dointvec_jiffies`
+/// (v6.6 mm/page-writeback.c:2287-2293, registered with no `extra1`/`extra2`):
+/// any int is legal, and a stored negative prints back with its sign (v6.6
+/// kernel/sysctl.c:1164-1175). Every consumer tests the knob's truthiness —
+/// `sc.may_writepage = !laptop_mode` (v6.6 mm/vmscan.c:7052, :7096, :7140,
+/// :7492), `if (laptop_mode)` (v6.6 fs/sync.c:107, fs/xfs/xfs_super.c:792),
+/// `laptop_mode && ...` (v6.6 block/blk-mq.c:728) — so a negative value means
+/// the mode is ON, and the documentation spells the polarity out from the
+/// other side: "Setting the knob to 0 disables laptop mode"
+/// (Documentation/admin-guide/laptops/laptop-mode.rst). The unsigned reader
+/// turned that negative into 0, the value the guard below reads as "already
+/// off", so the rule stayed quiet on exactly the host it exists to warn
+/// about.
 fn laptop_mode_recommendation(
-    current: u64,
+    current: i64,
     memory_total_gb: u64,
     kernel_version: &str,
 ) -> Option<Recommendation> {
@@ -5209,18 +5397,44 @@ fn eval_oom_dump_tasks_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
 }
 
 fn eval_tcp_moderate_rcvbuf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_moderate_rcvbuf";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_moderate_rcvbuf_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_moderate_rcvbuf",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_moderate_rcvbuf`] (the `eval_*_at` idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered tcp_moderate_rcvbuf as
+/// a plain `proc_dointvec` int with no min/max (the same table and registration
+/// as tcp_sack and tcp_dsack), so -1 is a legal, persistent value there, and
+/// the kernel consumer is a bare truthiness test (net/ipv4/tcp_input.c:
+/// `READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_moderate_rcvbuf) && ...` arms
+/// receive-buffer auto-tuning). The unsigned reader parsed "-1" to Err and fell
+/// back to 0 — the *disabled* value — so the `== 0` gate invented a finding on
+/// a host whose auto-tuning is on. Since v5.13 the knob is u8
+/// (`proc_dou8vec_minmax`, no extra1/extra2), where negatives are rejected at
+/// write time; the signed reader keeps the truthiness contract correct on both
+/// registrations.
+fn eval_tcp_moderate_rcvbuf_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_moderate_rcvbuf".to_string(),
-            current_value: "0".to_string(),
+            current_value: current.to_string(),
             recommended_value: "1".to_string(),
             reason: "TCP 接收缓冲区自动调整被禁用，可能导致内存浪费或吞吐受限".to_string(),
             confidence: Confidence::High,
@@ -5232,12 +5446,40 @@ fn eval_tcp_moderate_rcvbuf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 }
 
 fn eval_flow_limit_table_len(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/flow_limit_table_len";
+    eval_flow_limit_table_len_at(
+        info,
+        recs,
+        "/proc/sys/net/core/flow_limit_table_len",
+        "/proc/sys/net/core/flow_limit_cpu_bitmap",
+    )
+}
+
+/// Path-injectable form of [`eval_flow_limit_table_len`] (the `eval_*_at`
+/// idiom) so the flow-limit precondition is assertable against temp files.
+///
+/// The table this rule sizes exists only on the CPUs set in
+/// `flow_limit_cpu_bitmap`: `flow_limit_cpu_sysctl()` allocates a CPU's table
+/// when its bit is written and frees it when the bit is cleared, and
+/// `skb_flow_limit()` drops nothing on a CPU whose `sd->flow_limit` is NULL
+/// (net/core/sysctl_net_core.c, net/core/dev.c). The bitmap defaults to empty —
+/// "Flow limit is compiled in by default (CONFIG_NET_FLOW_LIMIT), but not
+/// turned on" (Documentation/networking/scaling.rst) — so on a host that never
+/// enabled it no table exists and the length changes nothing. A bitmap that
+/// cannot be read is not evidence and keeps the advice.
+fn eval_flow_limit_table_len_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    bitmap_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
+        return 1;
+    }
+    if std::fs::read_to_string(bitmap_path).is_ok_and(|mask| cpumask_is_empty(&mask)) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -5257,6 +5499,12 @@ fn eval_flow_limit_table_len(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
         });
     }
     1
+}
+
+/// Whether a procfs cpumask (comma-separated hex words, as `dump_cpumask()`
+/// prints `flow_limit_cpu_bitmap` and `rps_cpus`) has no CPU set.
+fn cpumask_is_empty(mask: &str) -> bool {
+    mask.trim().chars().filter(|c| *c != ',').all(|c| c == '0')
 }
 
 fn eval_tcp_l3mdev_accept(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5445,14 +5693,40 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 }
 
 fn eval_tcp_thin_linear_timeouts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_thin_linear_timeouts";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_thin_linear_timeouts_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_thin_linear_timeouts",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_thin_linear_timeouts`] (the `eval_*_at`
+/// idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered
+/// tcp_thin_linear_timeouts as a plain `proc_dointvec` int with no min/max, so
+/// -1 is a legal, persistent value there, and the only consumer is a bare
+/// truthiness test (net/ipv4/tcp_timer.c: `tp->thin_lto ||
+/// READ_ONCE(net->ipv4.sysctl_tcp_thin_linear_timeouts)` arms the linear
+/// timeouts). The unsigned reader parsed "-1" to Err and fell back to 0 - the
+/// *disabled* value - so the `!= 0` gate withheld the finding on a host that
+/// runs the mode. Since v5.13 the knob is u8 (`proc_dou8vec_minmax`, no
+/// extra1/extra2), where negatives are rejected at write time; the signed
+/// reader keeps the truthiness contract correct on both registrations.
+fn eval_tcp_thin_linear_timeouts_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_thin_linear_timeouts".to_string(),
@@ -6718,18 +6992,44 @@ fn eval_tcp_max_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_tcp_retrans_collapse(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_retrans_collapse";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_retrans_collapse_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_retrans_collapse",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_retrans_collapse`] (the `eval_*_at`
+/// idiom).
+///
+/// The knob is documented as a BOOLEAN (Documentation/networking/
+/// ip-sysctl.rst) and the kernel tests it as one: net/ipv4/tcp_output.c
+/// `if (!READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_retrans_collapse)) return;`
+/// only lets 0 mean disabled, so every non-zero value is on. Through v5.12 it
+/// was a plain `proc_dointvec` int with no min/max in
+/// net/ipv4/sysctl_net_ipv4.c (-1 legal); from v5.13 it is u8
+/// `proc_dou8vec_minmax` with no extra1/extra2, which still accepts 0..255.
+/// Both registrations therefore hold values the `== 1` comparison drops, so
+/// the signed read and the truthiness gate together ask for 0 whenever the
+/// feature is on, whatever the stored number is.
+fn eval_tcp_retrans_collapse_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_retrans_collapse".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "TCP 重传合并已启用，可能将多个小段合并为一个大段导致接收端解析异常，建议关闭"
                 .to_string(),
@@ -6787,14 +7087,40 @@ fn eval_ip_default_ttl(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_tcp_frto(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_frto";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_frto_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_frto",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_frto`] (the `eval_*_at` idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered tcp_frto as a plain
+/// `proc_dointvec` int with no min/max (v5.10/v5.11/v5.12 sysctl_net_ipv4.c:
+/// 1184-1189), so -1 is a legal, persistent value there, and the only
+/// consumer is a truthiness test (net/ipv4/tcp_input.c:2195 in v6.6, :2596 in
+/// master: `tp->frto = READ_ONCE(net->ipv4.sysctl_tcp_frto) && ...` arms
+/// F-RTO). The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the `== 0` gate invented a finding on a host whose
+/// F-RTO is on. Since v5.13 the knob is u8 (`proc_dou8vec_minmax`, no
+/// extra1/extra2; v5.13 sysctl_net_ipv4.c:1191-1196, v6.6 :1215-1221, master
+/// :1328-1334), where negatives are rejected at write time; the signed
+/// reader keeps the truthiness contract correct on both registrations.
+fn eval_tcp_frto_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_frto".to_string(),
@@ -7287,18 +7613,42 @@ fn eval_tcp_autocorking(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_tcp_workaround_signed_windows(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_workaround_signed_windows";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_workaround_signed_windows_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_workaround_signed_windows",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_workaround_signed_windows`] (the
+/// `eval_*_at` idiom).
+///
+/// Same registration history and same kernel reading as
+/// [`eval_tcp_retrans_collapse_at`]: a documented BOOLEAN whose consumers in
+/// net/ipv4/tcp_output.c only test truthiness (`if (READ_ONCE(...))` caps the
+/// offered window at MAX_TCP_WINDOW, both on the initial window and on every
+/// window update), so any non-zero value means the workaround is on. Through
+/// v5.12 it was a plain `proc_dointvec` int (-1 legal), from v5.13 a u8
+/// `proc_dou8vec_minmax` with no bounds, so the `== 1` comparison used to drop
+/// both -1 and 2..255 and never asked the host to turn the workaround off.
+fn eval_tcp_workaround_signed_windows_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_workaround_signed_windows".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "此兼容选项限制 TCP 窗口大小，现代系统不需要，关闭可恢复大窗口传输".to_string(),
             confidence: Confidence::Medium,
@@ -7972,6 +8322,50 @@ mod tests {
         assert!(
             recs.iter().all(|r| r.param != "net.ipv4.tcp_fastopen"),
             "a host without listeners is not recommended TFO"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_moderate_rcvbuf_reads_truthiness_signed() {
+        // The reader is the defect: read_sysctl_u64 parsed "-1" to Err and
+        // fell back to 0, the *disabled* value, so the `== 0` gate invented
+        // a finding on a host whose receive-buffer auto-tuning is on.
+        // Feeding the path-injectable form a temp file keeps the branch
+        // assertable on any host, listener or not.
+        let path =
+            std::env::temp_dir().join(format!("ktuner-tcp-moderate-rcvbuf-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", false), ("0", true), ("1", false), ("2", false)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            eval_tcp_moderate_rcvbuf_at(&info, &mut recs, path_str, true);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_moderate_rcvbuf");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables auto-tuning"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "1");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "0").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_moderate_rcvbuf_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_moderate_rcvbuf"),
+            "a host without listeners is not recommended auto-tuning"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -8736,6 +9130,24 @@ mod tests {
     }
 
     #[test]
+    fn test_thp_with_valkey() {
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // valkey-server binary with the same event-loop, memory-resident
+        // cache workload, so every redis-server gate must count it. An
+        // always-THP host running it must get the madvise recommendation.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "valkey-server".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let thp_rec = recs
+            .iter()
+            .find(|r| r.param.contains("hugepage"))
+            .unwrap_or_else(|| panic!("valkey-server must get the THP recommendation"));
+        assert_eq!(thp_rec.recommended_value, "madvise");
+    }
+
+    #[test]
     fn test_thp_with_mongod_and_etcd() {
         // mongod is a database in every sibling list (swappiness, dirty_ratio,
         // classify) and MongoDB's production notes ask for THP off outright;
@@ -9130,14 +9542,63 @@ mod tests {
         );
 
         info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
         let mut recs = Vec::new();
         eval_rq_affinity_at(&info, &mut recs, cmdline, version);
         let rec = recs.iter().find(|r| r.param.contains("rq_affinity"));
         assert!(
             rec.is_some(),
-            "Should recommend rq_affinity=2 on multi-NUMA NVMe"
+            "Should recommend rq_affinity=1 on multi-NUMA NVMe"
         );
-        assert_eq!(rec.unwrap().recommended_value, "2");
+        assert_eq!(rec.unwrap().recommended_value, "1");
+    }
+
+    #[test]
+    fn rq_affinity_only_restores_a_disabled_migration() {
+        // rq_affinity=1 is the blk-mq default (QUEUE_FLAG_MQ_DEFAULT carries
+        // QUEUE_FLAG_SAME_COMP) and already sends every completion that fired
+        // outside the submitter's cache domain back to it, which covers the
+        // cross-node case; 2 adds QUEUE_FLAG_SAME_FORCE, an IPI for completions
+        // that share the cache domain too. Only 0 turns the migration off.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_rq_affinity_off_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmdline = dir.join("cmdline");
+        std::fs::write(&cmdline, "BOOT_IMAGE=/vmlinuz root=/dev/sda1\n").unwrap();
+        let version = dir.join("version");
+        std::fs::write(
+            &version,
+            "Linux version 6.6.0 (gcc) #1 SMP PREEMPT_DYNAMIC\n",
+        )
+        .unwrap();
+        let (cmdline, version) = (cmdline.to_str().unwrap(), version.to_str().unwrap());
+
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        for current in [1, 2] {
+            info.disks[0].rq_affinity = current;
+            let mut recs = Vec::new();
+            eval_rq_affinity_at(&info, &mut recs, cmdline, version);
+            assert!(
+                !recs.iter().any(|r| r.param.contains("rq_affinity")),
+                "rq_affinity={current} already migrates cross-node completions"
+            );
+        }
+
+        info.disks[0].rq_affinity = 0;
+        let mut recs = Vec::new();
+        eval_rq_affinity_at(&info, &mut recs, cmdline, version);
+        let rec = recs.iter().find(|r| r.param.contains("rq_affinity"));
+        assert_eq!(
+            rec.map(|r| r.recommended_value.as_str()),
+            Some("1"),
+            "a disabled migration is restored to the default"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -9174,8 +9635,10 @@ mod tests {
 
         let mut info = make_test_info();
         info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
 
-        // Baseline: completions are still migrated, so the advice stands.
+        // Baseline: the migration is off and threads do not pin the
+        // completion, so the advice stands.
         let mut recs = Vec::new();
         eval_rq_affinity_at(
             &info,
@@ -9204,6 +9667,112 @@ mod tests {
             assert!(
                 !recs.iter().any(|r| r.param.contains("rq_affinity")),
                 "{label} pins the completion, so rq_affinity changes nothing"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quoted_boot_parameters_preserve_rq_affinity_decisions() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cmdline_quotes_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version = dir.join("version");
+        std::fs::write(&version, "Linux version 6.6.0 #1 SMP PREEMPT_DYNAMIC\n").unwrap();
+        let cmdline = dir.join("cmdline");
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
+        let cases = [
+            (r#"foo="a threadirqs b""#, true),
+            (r#"foo="a threadirqs=0 b""#, true),
+            (r#"foo="a -- b" threadirqs"#, false),
+            (r#""threadirqs""#, false),
+            (r#""threadirqs=0""#, false),
+            (r#"foo="threadirqs""#, true),
+            (r#"threadirqs="a -- b""#, false),
+            ("-- threadirqs", true),
+            ("threadirqs=0", false),
+            ("root=/dev/sda1", true),
+            ("'threadirqs'", true),
+            (r#"foo="a \" threadirqs"#, false),
+            ("\u{000b}threadirqs\t", false),
+            (r#""--" threadirqs"#, true),
+            ("--=value threadirqs", false),
+        ];
+        for (content, expect_advice) in cases {
+            std::fs::write(&cmdline, content).unwrap();
+            let mut recs = Vec::new();
+            eval_rq_affinity_at(
+                &info,
+                &mut recs,
+                cmdline.to_str().unwrap(),
+                version.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.iter().any(|r| r.param.contains("rq_affinity")),
+                expect_advice,
+                "{content:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn threadirqs_behind_the_init_separator_is_not_a_kernel_parameter() {
+        // The kernel parses kernel parameters only up to a bare `--` and
+        // passes the rest to init (v6.6 Documentation/admin-guide/
+        // kernel-parameters.rst:12-16 and kernel/params.c:185-186; 7.3-rc6
+        // :14-18 and :182-183), so a `threadirqs` token behind the separator
+        // never reaches setup_forced_irqthreads() (v6.6 kernel/irq/manage.c:
+        // 30-35) and never enables force_irqthreads(). The guard must not
+        // drop the advice for a token the kernel ignores.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cmdline_separator_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, content: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let version = write(
+            "version",
+            "Linux version 6.6.0 (gcc) #1 SMP PREEMPT_DYNAMIC\n",
+        );
+
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
+
+        // Behind the separator both spellings are init arguments, so the
+        // migration is still off and the advice stands; before the separator,
+        // and on a command line without one, behaviour is unchanged.
+        let cases = [
+            ("after", "root=/dev/sda1 ro -- threadirqs\n", true),
+            ("after_value", "root=/dev/sda1 ro -- threadirqs=0\n", true),
+            ("before", "root=/dev/sda1 threadirqs\n", false),
+            ("none", "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro\n", true),
+        ];
+        for (name, content, expect_advice) in cases {
+            let cmdline = write(&format!("cmdline_{name}"), content);
+            let mut recs = Vec::new();
+            eval_rq_affinity_at(
+                &info,
+                &mut recs,
+                cmdline.to_str().unwrap(),
+                version.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.iter().any(|r| r.param.contains("rq_affinity")),
+                expect_advice,
+                "{name}: {content:?}"
             );
         }
 
@@ -9714,48 +10283,47 @@ mod tests {
     }
 
     #[test]
-    fn test_sched_migration_cost_minus_one_reads_signed() {
-        // -1 is task_hot()'s "every task stays cache-hot" sentinel: migration
-        // is effectively disabled (kernel/sched/fair.c special-cases it next
-        // to 0, the "always migrate" value). The unsigned reader parsed
-        // "-1" to Err and fell back to 0 — the *opposite* migration policy —
-        // so the report diagnosed a deliberately pinned host as aggressively
-        // migrating, and current_value lied about the live kernel setting.
-        let path = std::env::temp_dir().join(format!(
-            "ktuner_sched_mig_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, b"-1\n").unwrap();
+    fn test_sched_migration_cost_negative_values_are_already_pinned() {
+        // A negative value is not a migration cost below the 5 ms target.
+        // `proc_dointvec` stores it through an `int` into the table's unsigned
+        // slot, so task_hot()'s `delta < (s64)sysctl_sched_migration_cost`
+        // compares against ≈4.29e9 ns — 858 times the runtime gap the target
+        // accepts — and -1 is short-circuited to "hot" outright.
+        // The host is therefore already at least as sticky as this rule asks
+        // for; writing 5000000 could only make tasks migratable again, the
+        // opposite of the reason's promise. The signed read is what makes the
+        // value visible at all: an unsigned reader maps "-1" to 0, the
+        // "always migrate" policy, and would fire here.
         let mut info = make_test_info();
         info.cpu_cores = 32;
-        let mut recs = Vec::new();
-        let checked = eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
-        std::fs::remove_file(&path).ok();
-        assert_eq!(checked, 1);
-        assert_eq!(
-            recs.len(),
-            1,
-            "-1 is far below 5000000, so it must be reported"
-        );
-        assert_eq!(recs[0].param, "kernel.sched_migration_cost_ns");
-        assert_eq!(
-            recs[0].current_value, "-1",
-            "current must be faithful: 0 is the opposite migration policy"
-        );
-        assert_eq!(recs[0].recommended_value, "5000000");
+        for value in ["-1", "-500000"] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_sched_mig_neg_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert!(
+                recs.is_empty(),
+                "{value} already keeps tasks on their CPU; nothing to raise"
+            );
+        }
     }
 
     #[test]
     fn test_sched_migration_cost_boundaries() {
         // 5000000 (the recommendation itself) and anything above is already
-        // tuned; every lower value — including the -1 "never migrate"
-        // sentinel, 0 ("always migrate") and the 500000 default — must be
+        // tuned; every value below it except the pinned negatives — 0
+        // ("always migrate") and the 500000 default among them — must be
         // reported with a faithful signed echo.
         let mut info = make_test_info();
         info.cpu_cores = 32;
         for (value, expects_rec) in [
-            (-1, true),
+            (-1, false),
             (0, true),
             (500000, true),
             (4999999, true),
@@ -10836,6 +11404,58 @@ mod tests {
     }
 
     #[test]
+    fn flow_limit_table_len_skipped_while_flow_limit_is_off() {
+        // A flow-limit table exists only on the CPUs set in
+        // flow_limit_cpu_bitmap, which is empty by default, so sizing it
+        // changes nothing until some CPU has the feature turned on.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_flow_limit_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let table_len = dir.join("flow_limit_table_len");
+        std::fs::write(&table_len, "4096\n").unwrap();
+        let bitmap = dir.join("flow_limit_cpu_bitmap");
+
+        let mut info = make_test_info();
+        info.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 10000,
+        }];
+        let advised = |mask: Option<&str>| {
+            match mask {
+                Some(mask) => std::fs::write(&bitmap, mask).unwrap(),
+                None => {
+                    std::fs::remove_file(&bitmap).ok();
+                }
+            }
+            let mut recs = Vec::new();
+            eval_flow_limit_table_len_at(
+                &info,
+                &mut recs,
+                table_len.to_str().unwrap(),
+                bitmap.to_str().unwrap(),
+            );
+            recs.iter()
+                .any(|r| r.param == "net.core.flow_limit_table_len")
+        };
+
+        assert!(!advised(Some("000\n")), "no CPU has a table to resize");
+        assert!(
+            !advised(Some("00000000,00000000\n")),
+            "a multi-word empty mask has no table either"
+        );
+        assert!(
+            advised(Some("00000000,00000030\n")),
+            "CPUs 4 and 5 run flow limit, so the length matters"
+        );
+        assert!(advised(None), "an unreadable bitmap keeps the advice");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn rfs_flow_table_is_only_sized_where_the_queue_flow_table_is() {
         // get_rps_cpu() consults the global table only after the receive
         // queue's own flow table exists (net/core/dev.c: `if (!flow_table &&
@@ -11830,6 +12450,75 @@ mod tests {
     }
 
     #[test]
+    fn tcp_limit_output_bytes_recommendation_tracks_the_kernel_default() {
+        // Kernels whose default is at most 1 MB keep the 1 MB target, and the
+        // rule keeps its own trigger: half the target, exactly the previous
+        // 512 KB threshold, so those kernels produce what they produced
+        // before this change.
+        for version in ["4.19.0", "5.10.0", "6.6.0", "6.15.0", "custom-kernel"] {
+            let rec = tcp_limit_output_bytes_recommendation(262144, 10000, version)
+                .expect("10GbE with a value under the target is worth raising");
+            assert_eq!(rec.recommended_value, "1048576", "kernel {version}");
+            assert_eq!(rec.current_value, "262144");
+            assert_eq!(rec.param, "net.ipv4.tcp_limit_output_bytes");
+        }
+        assert!(tcp_limit_output_bytes_recommendation(524287, 10000, "6.15.0").is_some());
+        assert!(tcp_limit_output_bytes_recommendation(524288, 10000, "6.15.0").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(1048576, 10000, "6.15.0").is_none());
+        // Linux 6.16 raised the default to 4 MB, so 1 MB is a quarter of what
+        // the kernel ships and must not be the target any more; the trigger
+        // moves with the target, to half of 4 MB.
+        assert_eq!(
+            tcp_limit_output_bytes_recommendation(262144, 10000, "6.16.0")
+                .expect("256 KB is below the new default too")
+                .recommended_value,
+            "4194304"
+        );
+        // 1 MB and 1.5 MB are below the new trigger and get the new target.
+        assert_eq!(
+            tcp_limit_output_bytes_recommendation(1048576, 10000, "7.3.0-rc6")
+                .expect("1 MB is below half the 6.16 default of 4 MB")
+                .recommended_value,
+            "4194304"
+        );
+        assert!(tcp_limit_output_bytes_recommendation(2097151, 10000, "7.3.0-rc6").is_some());
+        assert!(tcp_limit_output_bytes_recommendation(2097152, 10000, "7.3.0-rc6").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(4194304, 10000, "7.3.0-rc6").is_none());
+        // The rule stays silent below 10GbE on any kernel.
+        assert!(tcp_limit_output_bytes_recommendation(262144, 1000, "7.3.0-rc6").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(262144, 1000, "6.15.0").is_none());
+    }
+
+    #[test]
+    fn tcp_limit_output_bytes_reason_names_a_default_only_where_the_target_is_one() {
+        // 6.16 raised the default to 4 MB and the target follows it, so the
+        // modern reason may name the default. The 1 MB kept for older kernels
+        // is only the default of 5.x through 6.15 -- 4.19 ships 256 KB -- so
+        // that path names the recommendation instead of a default.
+        let modern = tcp_limit_output_bytes_recommendation(262144, 10000, "7.3.0-rc6")
+            .expect("below the target");
+        assert!(
+            modern.reason.contains("内核默认 4194304"),
+            "6.16+ target is the kernel default: {}",
+            modern.reason
+        );
+        for version in ["4.19.0", "5.10.0", "6.15.0", "custom-kernel"] {
+            let legacy = tcp_limit_output_bytes_recommendation(262144, 10000, version)
+                .expect("below the target");
+            assert!(
+                !legacy.reason.contains("内核默认"),
+                "kernel {version}: the 1 MB target is not a default everywhere: {}",
+                legacy.reason
+            );
+            assert!(
+                legacy.reason.contains("1048576"),
+                "kernel {version}: the target stays visible in the reason: {}",
+                legacy.reason
+            );
+        }
+    }
+
+    #[test]
     fn test_dev_weight_10g() {
         let mut info = make_test_info();
         info.network = vec![NetInfo {
@@ -12283,6 +12972,35 @@ mod tests {
         // Already off, or not a big-memory host: no advice on any version.
         assert!(laptop_mode_recommendation(0, 64, "6.19.0").is_none());
         assert!(laptop_mode_recommendation(5, 8, "6.19.0").is_none());
+    }
+
+    #[test]
+    fn laptop_mode_signed_read_survives_the_file_reader() {
+        // The reader was the defect: the knob's handler accepts any int, a
+        // negative value means the mode is ON, and every consumer tests its
+        // truthiness. read_sysctl_u64 parsed "-1" to Err and fell back to 0 —
+        // the value the guard reads as "already off" — so the rule stayed
+        // quiet on exactly the host it warns about. The path-injectable form
+        // keeps the branch assertable on any host.
+        let path = std::env::temp_dir().join(format!("ktuner-laptop-mode-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("5", true), ("0", false)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            eval_laptop_mode_at(&info, &mut recs, path_str);
+            let rec = recs.iter().find(|r| r.param == "vm.laptop_mode");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: recommendation presence"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(rec.current_value, value);
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -12892,6 +13610,42 @@ mod tests {
         eval_tcp_frto(&info, &mut recs);
         if let Some(rec) = recs.iter().find(|r| r.param == "net.ipv4.tcp_frto") {
             assert_eq!(rec.recommended_value, "2");
+        }
+    }
+
+    #[test]
+    fn test_tcp_frto_reads_truthiness_signed() {
+        // tcp_frto was a plain proc_dointvec int with no min/max through
+        // v5.12 (net/ipv4/sysctl_net_ipv4.c:1184-1189 in v5.10/v5.11/v5.12),
+        // so -1 is a legal, persistent value there, and the only consumer is
+        // a truthiness test (net/ipv4/tcp_input.c: `tp->frto =
+        // READ_ONCE(net->ipv4.sysctl_tcp_frto) && ...` arms F-RTO). The
+        // unsigned reader parsed "-1" to Err and fell back to 0, the
+        // *disabled* value, so the `== 0` gate invented a finding on a host
+        // whose F-RTO is on. The listener gate is passed in like
+        // eval_tcp_fastopen_at so the branch stays assertable on any host.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_tcp_frto_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_frto_at(&info, &mut recs, path.to_str().unwrap(), true);
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 disables F-RTO"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_frto");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "2");
+            }
         }
     }
 
@@ -14211,6 +14965,186 @@ mod tests {
     }
 
     #[test]
+    fn tcp_dsack_reads_truthiness_signed() {
+        // tcp_dsack sat in the same net/ipv4/sysctl_net_ipv4.c table as
+        // tcp_sack through v5.10 — a plain proc_dointvec int with no
+        // min/max, so "-1" is a legal, persistent value there — and
+        // tcp_input.c consumes it as a bare truthiness test
+        // (`tcp_is_sack(tp) && READ_ONCE(...sysctl_tcp_dsack)` in
+        // tcp_dsack_set / tcp_dsack_extend). The unsigned reader parsed
+        // "-1" to Err and fell back to 0, the disabled value, so the
+        // `== 0` gate invented a finding on a host whose D-SACK is on.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_dsack_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 disables D-SACK"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_dsack");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_thin_linear_timeouts_reads_truthiness_signed() {
+        // The knob was a plain proc_dointvec int with no min/max through
+        // v5.12 (net/ipv4/sysctl_net_ipv4.c), so "-1" is a legal, persistent
+        // value, and tcp_timer.c consumes it as a bare truthiness test
+        // (`tp->thin_lto || READ_ONCE(...sysctl_tcp_thin_linear_timeouts)`).
+        // The unsigned reader parsed "-1" to Err and fell back to 0, the
+        // disabled value, so the `!= 0` gate withheld the finding on a host
+        // that runs the mode. From v5.13 the knob is a u8
+        // (proc_dou8vec_minmax, no bounds), where 2..255 stay legal.
+        let path = std::env::temp_dir().join(format!("ktuner-tcp-thin-lto-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_thin_linear_timeouts_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_thin_linear_timeouts");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: every non-zero value enables the mode"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "-1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_thin_linear_timeouts_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_thin_linear_timeouts"),
+            "a host without listeners is not recommended the linear timeouts"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_retrans_collapse_reads_truthiness_signed() {
+        // Same registration history as the other tcp option bools: a plain
+        // proc_dointvec int with no min/max through v5.12 (-1 legal), a u8
+        // proc_dou8vec_minmax with no bounds from v5.13 (0..255), and a
+        // truthiness test in tcp_output.c
+        // (`if (!READ_ONCE(...sysctl_tcp_retrans_collapse)) return;`) that
+        // makes every non-zero value "on". The `== 1` comparison dropped
+        // -1 and 2..255, so the host was never asked to turn the collapse
+        // off, and the finding that did fire hard-coded "1" as the current
+        // value.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner-tcp-retrans-collapse-{}",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_retrans_collapse_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_retrans_collapse");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables the collapse"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_retrans_collapse_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_retrans_collapse"),
+            "a host without listeners is not recommended the collapse"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_workaround_signed_windows_reads_truthiness_signed() {
+        // The workaround is a documented BOOLEAN whose consumers in
+        // tcp_output.c only test truthiness (`if (READ_ONCE(...sysctl_tcp_
+        // workaround_signed_windows))` caps the offered window), so any
+        // non-zero value means it is on. The registration is the same as
+        // tcp_retrans_collapse's (plain int through v5.12, unbounded u8 from
+        // v5.13), and the `== 1` comparison dropped the same -1 and 2..255.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner-tcp-workaround-signed-windows-{}",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_workaround_signed_windows_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_workaround_signed_windows");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables the workaround"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_workaround_signed_windows_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_workaround_signed_windows"),
+            "a host without listeners is not recommended the workaround"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn tcp_rfc1337_reads_truthiness_signed() {
         // tcp_rfc1337 was a plain proc_dointvec int through v5.10, and
         // tcp_minisocks.c consumes it as `if (!READ_ONCE(...sysctl_tcp_
@@ -14477,51 +15411,61 @@ mod tests {
     }
 
     #[test]
-    fn any_interface_forwards_reads_minus_one_as_forwarding() {
-        // The forwarding template behind ctl_forward_entry is a plain
-        // proc_dointvec int (no bounds) and IN_DEV_FORWARD is a truthiness
-        // test, so a -1 interface forwards. The unsigned reader collapsed it
-        // to 0, the whole tree read as non-forwarding, and both
-        // send_redirects rules went quiet on exactly the host where
-        // redirects can be sent.
-        let dir = std::env::temp_dir().join(format!(
-            "ktuner_any_forwards_{}_{:?}",
+    fn busy_poll_advises_the_oltp_databases() {
+        // The gate forgot the OLTP databases that every sibling latency gate
+        // includes (eval_thp's is_latency_sensitive, the swappiness /
+        // dirty_ratio db lists, classify's IoLatency): a synchronous
+        // per-query network round-trip is the classic busy-polling shape.
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_busy_poll_{}_{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("conf");
-        let knob = dir.join("send_redirects");
-        std::fs::write(&knob, "1\n").unwrap();
-
-        // Every interface at 0: nothing forwards.
-        for iface in ["all", "default", "lo", "eth0"] {
-            let p = conf.join(iface).join("forwarding");
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "0\n").unwrap();
+        std::fs::write(&path, "0\n").unwrap();
+        for name in [
+            "redis-server",
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "clickhouse",
+        ] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "net.core.busy_poll"),
+                "{name} is latency-sensitive and must get the busy_poll advice"
+            );
         }
-        let info = make_test_info();
+        // A workload without a request-path network round-trip stays out.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "make".to_string(),
+        }];
         let mut recs = Vec::new();
-        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
         assert!(
-            recs.iter()
-                .all(|r| r.param != "net.ipv4.conf.all.send_redirects"),
-            "a non-forwarding tree cannot send redirects"
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "a build job is not latency-sensitive"
         );
-
-        // One interface at -1: the tree forwards, and the enabled
-        // send_redirects knob must be flagged.
-        std::fs::write(conf.join("eth0").join("forwarding"), "-1\n").unwrap();
+        // An already-polled host is left alone.
+        std::fs::write(&path, "50\n").unwrap();
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "postgres".to_string(),
+        }];
         let mut recs = Vec::new();
-        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
-        let rec = recs
-            .iter()
-            .find(|r| r.param == "net.ipv4.conf.all.send_redirects")
-            .expect("a -1 forwarding interface makes redirects sendable");
-        assert_eq!(rec.current_value, "1");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "an already-polled knob needs no advice"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Local-model execution for Code Scanner's V1-compatible LLM mode.
 
+use std::fmt::Write as _;
 use std::time::Instant;
 
-use asc_model_client::{ModelClient, ModelOptions};
+use asc_model_client::{ConfigError, ModelClient, ModelOptions, ModelServiceError};
 use serde_json::{Value, json};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 use crate::errors::CodeScanError;
 use crate::findings::{Finding, Verdict};
@@ -154,6 +156,177 @@ pub(crate) fn unavailable(code: &str, language: Language, reason: &str) -> ScanR
     )
 }
 
+/// Renders a client initialization failure in the wording of V1's Python
+/// `model_service`, which Code Scanner used; the shared client's own wording
+/// follows the Rust `model-service` crate that V1 Prompt Scanner used.
+pub(crate) fn initialization_message(error: &ModelServiceError) -> String {
+    let ModelServiceError::Config(config) = error else {
+        return error.to_string();
+    };
+    match config {
+        ConfigError::UnsupportedBackend(backend) => {
+            format!("Unsupported model service backend: {}", py_repr(backend))
+        }
+        // V1 only checks for an `http://`/`https://` prefix and then a
+        // loopback hostname, so an unparsable URL fails one of those two.
+        ConfigError::UnsupportedScheme(base_url) | ConfigError::InvalidBaseUrl { base_url, .. }
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") =>
+        {
+            format!(
+                "base_url must use http:// or https:// scheme: {}",
+                py_repr(base_url)
+            )
+        }
+        ConfigError::InvalidBaseUrl { base_url, reason } => v1_invalid_url_message(base_url)
+            .or_else(|| v1_non_loopback_message(base_url))
+            .unwrap_or_else(|| reason.clone()),
+        ConfigError::UnsupportedScheme(base_url) | ConfigError::NonLoopbackBaseUrl(base_url) => {
+            v1_non_loopback_message(base_url).unwrap_or_else(|| {
+                format!(
+                    "base_url must use http:// or https:// scheme: {}",
+                    py_repr(base_url)
+                )
+            })
+        }
+    }
+}
+
+/// Whether V1 would have accepted a base URL that the shared client cannot parse.
+///
+/// V1 validates only the `urlsplit` hostname, which ignores a malformed port,
+/// so such a loopback URL builds a client whose availability check then fails.
+pub(crate) fn v1_accepts_unparsable_loopback(error: &ModelServiceError) -> bool {
+    let ModelServiceError::Config(ConfigError::InvalidBaseUrl { base_url, .. }) = error else {
+        return false;
+    };
+    v1_invalid_url_message(base_url).is_none()
+        && v1_hostname(base_url).is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+/// Mirrors Python's `urlsplit(base_url).hostname` for an `http(s)://` URL.
+fn v1_hostname(base_url: &str) -> Option<String> {
+    let rest = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))?;
+    // `urlsplit` drops ASCII tab and newline characters before splitting.
+    let rest: String = rest
+        .chars()
+        .filter(|character| !matches!(character, '\t' | '\r' | '\n'))
+        .collect();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    (!host.is_empty()).then(|| host.to_lowercase())
+}
+
+fn v1_non_loopback_message(base_url: &str) -> Option<String> {
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return None;
+    }
+    Some(format!(
+        "refusing non-loopback model service base_url {}: only a local model service is supported, \
+         and scanned content must not leave the host",
+        py_repr(base_url)
+    ))
+}
+
+fn v1_invalid_url_message(base_url: &str) -> Option<String> {
+    let authority = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))?
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let Some(open) = host.find('[') else {
+        return host.contains(']').then(|| "Invalid IPv6 URL".to_owned());
+    };
+    let Some(close) = host.find(']') else {
+        return Some("Invalid IPv6 URL".to_owned());
+    };
+    if open != 0 || close + 1 < host.len() && !host[close + 1..].starts_with(':') {
+        return Some("Invalid IPv6 URL".to_owned());
+    }
+    let bracketed = &host[open + 1..close];
+    if let Some(ipv_future) = bracketed.strip_prefix('v') {
+        let valid = ipv_future
+            .split_once('.')
+            .is_some_and(|(version, address)| {
+                !version.is_empty()
+                    && version
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+                    && !address.is_empty()
+            });
+        return (!valid).then(|| "IPvFuture address is invalid".to_owned());
+    }
+    if bracketed.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some("An IPv4 address cannot be in brackets".to_owned());
+    }
+    bracketed.parse::<std::net::Ipv6Addr>().err().map(|_| {
+        format!(
+            "{} does not appear to be an IPv4 or IPv6 address",
+            py_repr(bracketed)
+        )
+    })
+}
+
+/// Quotes a string the way Python's `repr` does.
+fn py_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut rendered = String::with_capacity(text.len() + 2);
+    rendered.push(quote);
+    for character in text.chars() {
+        match character {
+            '\\' => rendered.push_str("\\\\"),
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            c if c == quote => {
+                rendered.push('\\');
+                rendered.push(c);
+            }
+            c if !python_printable(c) => {
+                let code = u32::from(c);
+                // Writing to a `String` cannot fail.
+                let _ = if code < 0x100 {
+                    write!(rendered, "\\x{code:02x}")
+                } else if code < 0x1_0000 {
+                    write!(rendered, "\\u{code:04x}")
+                } else {
+                    write!(rendered, "\\U{code:08x}")
+                };
+            }
+            c => rendered.push(c),
+        }
+    }
+    rendered.push(quote);
+    rendered
+}
+
+fn python_printable(character: char) -> bool {
+    // This workspace's shared Unicode table is newer than Python 3.11's
+    // Unicode 14 table. Keep that repository-wide representation difference
+    // explicit rather than maintaining a second, stale category table here.
+    character == ' '
+        || !matches!(
+            character.general_category_group(),
+            GeneralCategoryGroup::Other | GeneralCategoryGroup::Separator
+        )
+}
+
 fn blank_input_result(code: &str, language: Language, start: Instant) -> Option<ScanResult> {
     code.trim()
         .is_empty()
@@ -211,7 +384,7 @@ fn json_candidates(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asc_model_client::{GenerateRequest, ModelServiceError};
+    use asc_model_client::GenerateRequest;
 
     struct FixedResponseClient {
         response: Value,
@@ -299,10 +472,7 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.verdict, Verdict::Error);
-        assert_eq!(
-            result.summary,
-            "scan error: LLM response unparsable: raw output: PASS and DENY"
-        );
+        assert_eq!(result.summary, "scan error: raw output: PASS and DENY");
 
         let long_output = "x".repeat(121);
         assert_eq!(extract_verdict(&long_output), Err("x".repeat(120)));
@@ -320,18 +490,129 @@ mod tests {
 
     #[test]
     fn client_initialization_failure_keeps_the_v1_error_message() {
-        let result = unavailable(
-            "echo hello",
-            Language::Bash,
-            "invalid model service configuration: unsupported backend",
-        );
+        let reason = initialization_message(&ModelServiceError::Config(
+            ConfigError::UnsupportedBackend("bogus".to_owned()),
+        ));
+        let result = unavailable("echo hello", Language::Bash, &reason);
 
         assert!(!result.ok);
         assert_eq!(result.verdict, Verdict::Error);
         assert_eq!(
             result.summary,
-            "scan error: invalid model service configuration: unsupported backend"
+            "scan error: Unsupported model service backend: 'bogus'"
         );
+    }
+
+    #[test]
+    fn base_url_rejections_use_v1_python_wording() {
+        let non_loopback = "refusing non-loopback model service base_url 'http://10.0.0.1:11434': \
+                            only a local model service is supported, and scanned content must \
+                            not leave the host";
+        for (config, message) in [
+            (
+                ConfigError::UnsupportedScheme("ftp://localhost:11434".to_owned()),
+                "base_url must use http:// or https:// scheme: 'ftp://localhost:11434'",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "not a url".to_owned(),
+                    reason: "relative URL without a base".to_owned(),
+                },
+                "base_url must use http:// or https:// scheme: 'not a url'",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "Invalid IPv6 URL",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[127.0.0.1]".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "An IPv4 address cannot be in brackets",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[v.foo]".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "IPvFuture address is invalid",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://exa mple".to_owned(),
+                    reason: "invalid domain character".to_owned(),
+                },
+                "refusing non-loopback model service base_url 'http://exa mple': only a local model service is supported, and scanned content must not leave the host",
+            ),
+            (
+                ConfigError::NonLoopbackBaseUrl("http://10.0.0.1:11434".to_owned()),
+                non_loopback,
+            ),
+        ] {
+            assert_eq!(
+                initialization_message(&ModelServiceError::Config(config)),
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn unparsable_loopback_urls_follow_v1_acceptance() {
+        let invalid = |base_url: &str| {
+            ModelServiceError::Config(ConfigError::InvalidBaseUrl {
+                base_url: base_url.to_owned(),
+                reason: "invalid port number".to_owned(),
+            })
+        };
+        for base_url in [
+            "http://localhost:notaport",
+            "http://127.0.0.1:99999",
+            "http://[::1]:x",
+            "http://localhost:-1",
+            "https://user@LOCALHOST:x/api",
+        ] {
+            assert!(
+                v1_accepts_unparsable_loopback(&invalid(base_url)),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "http://exa mple",
+            "http://10.0.0.1:x",
+            "http://[",
+            "http://[127.0.0.1]:x",
+            "http://:x",
+            "ftp://localhost:x",
+        ] {
+            assert!(
+                !v1_accepts_unparsable_loopback(&invalid(base_url)),
+                "{base_url}"
+            );
+        }
+        assert!(!v1_accepts_unparsable_loopback(&ModelServiceError::Config(
+            ConfigError::NonLoopbackBaseUrl("http://localhost:x".to_owned())
+        )));
+    }
+
+    #[test]
+    fn py_repr_matches_python_quoting() {
+        assert_eq!(py_repr(""), "''");
+        assert_eq!(py_repr("it's"), "\"it's\"");
+        assert_eq!(py_repr("a'b\"c"), "'a\\'b\"c'");
+        assert_eq!(py_repr("tab\there\\"), "'tab\\there\\\\'");
+        assert_eq!(py_repr("\u{1}"), "'\\x01'");
+        assert_eq!(
+            py_repr("\u{ad}\u{200b}\u{202e}\u{2028}\u{feff}"),
+            "'\\xad\\u200b\\u202e\\u2028\\ufeff'"
+        );
+        assert_eq!(py_repr("\u{10000}"), "'𐀀'");
+        // U+11F00 was unassigned in Unicode 14 (Python 3.11) and assigned in
+        // the workspace's newer table; this is the documented table-version edge.
+        assert_eq!(py_repr("\u{11f00}"), "'𑼀'");
     }
 
     struct UnavailableClient;

@@ -413,3 +413,52 @@ fn uncertain_operations_require_query_and_terminal_records_are_immutable() {
         .validate_operation_transition(prepared, &bad)
         .is_err());
 }
+
+#[test]
+fn delivery_ordering_claims_are_enforced_by_ledger_mode_not_invocation_mode() {
+    // Pins the semantics of validate_boundary's doc promise (formerly worded
+    // "impossible synchronous delivery claims"): the rejected class is a
+    // delivery-ordering claim the boundary cannot enforce — an observe_only
+    // boundary promising required_before_delivery — NOT any claim merely
+    // because invocation_mode is "synchronous" (a schema-legitimate mode
+    // with no mode-specific constraints).
+    let f = fixtures();
+    let base = &f["boundary-descriptor-v1"];
+
+    // observe_only with every mutation power off: the only remaining way to
+    // violate the observer arm is the ledger clause — promising
+    // required_before_delivery, i.e. delivery ordering an observer cannot
+    // enforce. Must be rejected.
+    let mut observer = base.clone();
+    observer["invocation_mode"] = json!("observe_only");
+    observer["can_replace_text"] = json!(false);
+    observer["can_deny_dispatch"] = json!(false);
+    observer["has_final_input_guard"] = json!(false);
+    assert!(
+        REGISTRY.validate_boundary(&observer).is_err(),
+        "observe_only cannot promise required_before_delivery"
+    );
+    // The same observer with a best_effort ledger is consistent.
+    observer["ledger_policy"] = json!("best_effort");
+    observer["proof_boundaries"] = json!([]);
+    REGISTRY.validate_boundary(&observer).unwrap();
+
+    // A synchronous boundary making the same delivery-ordering promise is
+    // legitimate: synchronous is an enum-valid invocation mode with no
+    // mode-specific arm, and required_before_delivery is enforceable there.
+    let mut sync = base.clone();
+    sync["invocation_mode"] = json!("synchronous");
+    assert!(
+        REGISTRY.validate_boundary(&sync).is_ok(),
+        "synchronous delivery-ordering claims must not be rejected wholesale"
+    );
+
+    // required_before_delivery without any observable proof boundary is an
+    // unverifiable delivery claim for ANY mode (awaitable here).
+    let mut unverifiable = base.clone();
+    unverifiable["proof_boundaries"] = json!([]);
+    assert!(
+        REGISTRY.validate_boundary(&unverifiable).is_err(),
+        "required ledger needs an observable delivery boundary"
+    );
+}

@@ -353,14 +353,70 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0], "stream-chunk")
         self.assertEqual(items[1].content, [_TextBlock(text="small")])
 
-    async def test_non_object_shell_arguments_are_rejected(self) -> None:
+    async def test_non_object_shell_arguments_fail_open(self) -> None:
+        """Non-object args are forwarded untransformed instead of raising.
+
+        Raising out of on_acting kills the whole agent reply (nothing in
+        the agentscope chain catches it); the host's own argument handling
+        is the agent-oriented rejection path.
+        """
         call = _Call(id="call-1", name="execute_shell_command", input='["ls"]')
+        forwarded = {}
 
-        async def next_handler(**_kwargs):
-            yield _ToolResponse(content=[])
+        async def post_tool(_request):
+            return _post_response("small")
 
-        with self.assertRaises(TypeError):
-            await _collect(self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler))
+        self.sdk.post_tool = post_tool
+
+        async def next_handler(**kwargs):
+            forwarded.update(kwargs)
+            yield _ToolResponse(content=[_TextBlock(text="big output")])
+
+        items = await _collect(
+            self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler)
+        )
+        self.assertEqual(forwarded["tool_call"].input, '["ls"]')
+        self.assertTrue(items)
+
+    async def test_malformed_json_arguments_fail_open(self) -> None:
+        """Repairable-but-invalid JSON must not kill the agent reply.
+
+        agentscope 2.x repairs e.g. single-quoted arguments upstream, but
+        the raw string still reaches the middleware; an unguarded
+        json.loads raised JSONDecodeError out of agent.reply() and the
+        tool never ran.
+        """
+        call = _Call(
+            id="call-2", name="execute_shell_command", input="{'command': 'echo hi'}"
+        )
+        seen = {}
+
+        async def pre_tool(_request):
+            seen["pre"] = _request
+            raise AssertionError("pre_tool must not run for malformed input")
+
+        async def post_tool(request):
+            seen["post"] = request
+            return _post_response("short")
+
+        self.sdk.pre_tool = pre_tool
+        self.sdk.post_tool = post_tool
+        forwarded = {}
+
+        async def next_handler(**kwargs):
+            forwarded.update(kwargs)
+            yield "stream-chunk"
+            yield _ToolResponse(content=[_TextBlock(text="big output")])
+
+        items = await _collect(
+            self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler)
+        )
+        self.assertEqual(items[0], "stream-chunk")
+        self.assertEqual(items[1].content, [_TextBlock(text="short")])
+        self.assertEqual(
+            forwarded["tool_call"].input, "{'command': 'echo hi'}"
+        )
+        self.assertEqual(seen["post"].attribution.tool_use_id, "call-2")
 
     async def test_block_and_suggest_is_rejected(self) -> None:
         async def pre_tool(_request):

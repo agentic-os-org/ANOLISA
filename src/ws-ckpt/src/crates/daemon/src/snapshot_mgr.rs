@@ -234,12 +234,30 @@ pub async fn checkpoint(
     // 2. Acquire write lock after the mutation mutex.
     let mut ws = arc.write().await;
 
-    // 2a. Check write-lock quiescence (inotify-based)
-    if !state.check_workspace_quiescent(&ws.ws_id).await {
-        return Ok(Response::Error {
-            code: ErrorCode::WriteLockConflict,
-            message: "Workspace has active write operations. Please wait and retry.".to_string(),
-        });
+    // 2a. Check write-lock quiescence (inotify-based). The workspace write
+    // lock is held here, so the registration path is handed to the check
+    // directly instead of its opportunistic (never-runnable) heal path.
+    match state
+        .check_workspace_quiescent(&ws.ws_id, Some(&ws.path))
+        .await
+    {
+        crate::state::Quiescence::Safe => {}
+        crate::state::Quiescence::Writing => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message: "Workspace has active write operations. Please wait and retry."
+                    .to_string(),
+            })
+        }
+        crate::state::Quiescence::MonitoringUnavailable => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message:
+                    "Write monitoring is unavailable (the write watcher is stale and re-arming \
+                     failed). Please retry after the watcher recovers."
+                        .to_string(),
+            })
+        }
     }
 
     // 3. Check snapshot ID uniqueness within this workspace
@@ -370,6 +388,11 @@ pub async fn rollback(
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
     state.backend.rollback(&ws.ws_id, &resolved_id).await?;
+
+    // 5a. The backend swapped the live subvolume (rename aside + snapshot
+    // recreate + delete). The inotify watch still names the retired inode,
+    // so re-arm it or every later checkpoint's quiescence check is a no-op.
+    state.rearm_watcher(&ws.ws_id, &ws.path);
 
     // 6. Update head + migrate LIVE_CHILD
     if let Some(old_head) = ws.index.head.clone() {

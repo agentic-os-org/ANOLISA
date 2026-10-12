@@ -186,33 +186,37 @@ mod tests {
 
     #[test]
     fn test_enable_collection_creates_dir_files_and_clears_marker() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
-        // Start disabled to prove enable clears the opt-out marker.
-        ch.disable_collection().unwrap();
-        assert!(!ch.is_enabled());
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
+            // Start disabled to prove enable clears the opt-out marker.
+            ch.disable_collection().unwrap();
+            assert!(!ch.is_enabled());
 
-        ch.enable_collection(false).unwrap();
+            ch.enable_collection(false).unwrap();
 
-        assert!(dir.path().join("ops").is_dir());
-        let instance_jsonl = dir.path().join("ops/instance.jsonl");
-        assert!(instance_jsonl.exists());
-        // enable populates the instance snapshot, not just an empty file.
-        let content = std::fs::read_to_string(&instance_jsonl).unwrap();
-        assert!(!content.is_empty());
-        // Unlinked: the personal instance_id must not be persisted.
-        assert!(!content.contains("instance_id"));
-        assert!(!content.contains("owner_account_id"));
-        assert!(ch.is_enabled());
+            assert!(dir.path().join("ops").is_dir());
+            let instance_jsonl = dir.path().join("ops/instance.jsonl");
+            assert!(instance_jsonl.exists());
+            // enable populates the instance snapshot, not just an empty file.
+            let content = std::fs::read_to_string(&instance_jsonl).unwrap();
+            assert!(!content.is_empty());
+            // Unlinked: the personal instance_id must not be persisted.
+            assert!(!content.contains("instance_id"));
+            assert!(!content.contains("owner_account_id"));
+            assert!(ch.is_enabled());
+        });
     }
 
     #[test]
     fn test_enable_collection_idempotent() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
-        ch.enable_collection(false).unwrap();
-        ch.enable_collection(false).unwrap();
-        assert!(ch.is_enabled());
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
+            ch.enable_collection(false).unwrap();
+            ch.enable_collection(false).unwrap();
+            assert!(ch.is_enabled());
+        });
     }
 
     #[test]
@@ -225,67 +229,75 @@ mod tests {
 
     #[test]
     fn test_ensure_ops_channel_preserves_disable_marker() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
-        ch.disable_collection().unwrap();
-        assert!(!ch.is_enabled());
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
+            ch.disable_collection().unwrap();
+            assert!(!ch.is_enabled());
 
-        // Boot-time self-heal must not resurrect a user's opt-out.
-        ch.ensure_ops_channel(false).unwrap();
-        assert!(!ch.is_enabled());
-        assert!(dir.path().join("ops/instance.jsonl").exists());
+            // Boot-time self-heal must not resurrect a user's opt-out.
+            ch.ensure_ops_channel(false).unwrap();
+            assert!(!ch.is_enabled());
+            assert!(dir.path().join("ops/instance.jsonl").exists());
+        });
     }
 
     #[test]
     fn test_ensure_ops_channel_does_not_duplicate_snapshot() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
 
-        // First call writes the initial snapshot.
-        ch.ensure_ops_channel(false).unwrap();
-        let path = dir.path().join("ops/instance.jsonl");
-        let content = std::fs::read_to_string(&path).unwrap();
-        let lines_after_first: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines_after_first.len(), 1);
+            // First call writes the initial snapshot.
+            ch.ensure_ops_channel(false).unwrap();
+            let path = dir.path().join("ops/instance.jsonl");
+            let content = std::fs::read_to_string(&path).unwrap();
+            let lines_after_first: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            assert_eq!(lines_after_first.len(), 1);
 
-        // Second call (e.g. systemd ExecStartPre=telemetry init) must not
-        // append a duplicate line.
-        ch.ensure_ops_channel(false).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        let lines_after_second: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines_after_second.len(), 1);
+            // Second call (e.g. systemd ExecStartPre=telemetry init) must not
+            // append a duplicate line.
+            ch.ensure_ops_channel(false).unwrap();
+            let content = std::fs::read_to_string(&path).unwrap();
+            let lines_after_second: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            assert_eq!(lines_after_second.len(), 1);
+        });
     }
 
     #[test]
     fn test_append_instance_snapshot_records_identity_when_linked() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
-        ch.append_instance_snapshot(true).unwrap();
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
+            ch.append_instance_snapshot(true).unwrap();
 
-        // The snapshot itself does not duplicate instance_id / region (those
-        // are uploader common dimensions). The identity cache is populated for
-        // the uploader so it can inject instance_id / uid as common dimensions.
-        let content = std::fs::read_to_string(dir.path().join("ops/instance.jsonl")).unwrap();
-        assert!(content.contains("instance.source"));
-        assert!(dir.path().join("identity.json").exists());
-        // Linking records identity but must not write an opt-out marker.
-        assert!(ch.is_enabled());
+            // The snapshot itself does not duplicate instance_id / region (those
+            // are uploader common dimensions). The identity cache is populated for
+            // the uploader so it can inject instance_id / uid as common dimensions.
+            let content = std::fs::read_to_string(dir.path().join("ops/instance.jsonl")).unwrap();
+            assert!(content.contains("instance.source"));
+            assert!(dir.path().join("identity.json").exists());
+            // Linking records identity but must not write an opt-out marker.
+            assert!(ch.is_enabled());
+        });
     }
 
     #[test]
     fn test_disable_collection_toggles_enabled() {
-        let dir = TempDir::new().unwrap();
-        let ch = channel(&dir);
-        assert!(ch.is_enabled());
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let ch = channel(&dir);
+            assert!(ch.is_enabled());
 
-        ch.disable_collection().unwrap();
-        assert!(!ch.is_enabled());
+            ch.disable_collection().unwrap();
+            assert!(!ch.is_enabled());
 
-        // idempotent
-        ch.disable_collection().unwrap();
-        assert!(!ch.is_enabled());
+            // idempotent
+            ch.disable_collection().unwrap();
+            assert!(!ch.is_enabled());
 
-        ch.enable_collection(false).unwrap();
-        assert!(ch.is_enabled());
+            ch.enable_collection(false).unwrap();
+            assert!(ch.is_enabled());
+        });
     }
 }

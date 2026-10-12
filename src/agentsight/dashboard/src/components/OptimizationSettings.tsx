@@ -137,7 +137,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   const { t } = useI18n();
   const [config, setConfig] = useState<OptimizeLlmConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ key: MessageKey; msg?: string } | null>(null);
 
   // Form fields
   const [apiKey, setApiKey] = useState('');
@@ -154,9 +154,11 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   const effectiveModel = provider === 'custom' || isKnownModel ? model : customModel;
 
   useEffect(() => {
+    let active = true;
     (async () => {
       try {
         const data = await fetchOptimizeConfig();
+        if (!active) return;
         setConfig(data);
         setBaseUrl(data.base_url);
         setModel(data.model);
@@ -172,13 +174,15 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
         }
         setError(null);
       } catch (e) {
+        if (!active) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setError(t('opt.llm.loadFailed', { msg }));
+        setError({ key: 'opt.llm.loadFailed', msg });
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     })();
-  }, [t]);
+    return () => { active = false; };
+  }, []);
 
   // When provider changes, update base URL
   function handleProviderChange(id: string) {
@@ -211,7 +215,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
 
     const timeoutSecs = Number(semanticSearchTimeoutSecs);
     if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
-      setError(t('opt.llm.semanticSearchTimeout.invalid'));
+      setError({ key: 'opt.llm.semanticSearchTimeout.invalid' });
       return false;
     }
 
@@ -236,7 +240,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
       return true;
     } catch (e2) {
       const msg = e2 instanceof Error ? e2.message : String(e2);
-      setError(t('opt.llm.saveFailed', { msg }));
+      setError({ key: 'opt.llm.saveFailed', msg });
       return false;
     }
   }
@@ -395,7 +399,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
 
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">
-              {error}
+              {t(error.key, error.msg === undefined ? undefined : { msg: error.msg })}
             </div>
           )}
 

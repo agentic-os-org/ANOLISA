@@ -3,6 +3,16 @@
 文档类型：`[TARGET V2]` 详细设计与实施计划。实现进度和验证结果由对应 PR、CI 与
 验收报告记录，本文定义架构、行为约束和验收要求。
 
+SCOPE-CR-002 已接入 process-local 实现：不可变 Scope 快照、系统 Binding 准入、停止发现后
+异步清理和 Scope 显式重试。当前协议及测试入口见上述生命周期契约；旧 changed-spec
+测试继续覆盖底层 revision/CAS 兼容能力，不表示开放用户 Binding mutation。
+
+对象模型以 [Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)
+为准：Policy 保留 revision 和单一 current 记录；Scope 是无自身 revision 的不可变
+Assignment，保存所选 Policy revision 的完整快照；Binding 由 Scope 自动生成和清理，
+不开放用户 mutation。下文旧 Binding UPDATE、Scope revision 和手动 CRUD 表仅保留
+为原实现/fixture 的迁移基线，不是新模型的公开 API；目标清理、CAS 和执行串行约束继续适用。
+
 [调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
 是后续 Runtime 集成的当前目标。其 CR-010～CR-015 替代本文中“整体聚合写入作为 SQL
 接口”“prepared 跨重启持久化”“队列去重/容量/补扫仅留 TODO”的旧提案：部署独立局部更新，
@@ -41,15 +51,18 @@ PAP API contract 修正、Binding 状态、持久化、Adapter/Client、Reconcil
 
 ### 2.1 不变量
 
-1. Policy、Scope、Binding 各自按稳定 ID 只保存一个 current 完整记录。
+1. Policy 按稳定 ID 只保存一个 current 完整记录并保留内容 revision；Scope 是不可变
+   Assignment，无 Scope revision，保存指定 Policy revision 的完整快照。Binding 按 ID
+   保存当前执行意图及状态，不为此次变更引入历史对象库。
 2. `bindingRevision` 严格标识 spec：创建为 1，仅 spec 改变时 `+1`。
    Delete、同 spec 失败重试和 worker 状态推进不增版。删除成功后移除记录，
    重新部署通过 CREATE 生成新 Binding ID、revision 1；旧 ID 不复用。
-3. Binding spec 的内容是嵌入的 Policy/Scope 完整快照，包括引用的 ID 和 revision；
-   比较内容时排除 Binding 自身的 revision、status、部署记录、错误和重试元数据。
-4. Policy/Scope 更新不会自动更新已有 Binding；已有 Binding 可继续使用其嵌入快照，
-   新 Binding 只能引用仍为 current 的来源版本。Policy/Scope 的既有增版规则不变。
-5. PAP 原子保存用户意图并快速返回；目标翻译与 PEP 操作由异步 Reconciler 完成。
+3. Binding 使用所属 Scope 保存的一个 Policy 快照、来源身份和具体执行实例。
+   不把包含全部策略快照的 Scope 重复嵌入每条 Binding；不携带 scopeRevision。
+4. Policy 更新或删除不改变既有 Scope/Binding。新 Scope 只能选择模板库当前 revision；
+   既有 Scope 为新实例生成 Binding 时使用自己的快照，不要求来源模板仍存在。
+5. PAP 原子保存 Scope 意图；系统产生和保存子 Binding 意图，目标翻译与 PEP 操作由
+   异步 Reconciler 完成。用户不直接创建、更新或删除 Binding。
 6. `APPLYING` 时允许 Delete，将 status 改为 `PENDING_DELETE`，不增加 revision。
    `APPLYING` 的 changed-spec UPDATE 被拒绝；所有删除侧状态拒绝 UPDATE，不可撤销删除。
 7. 一个逻辑 Binding 的本地目标操作串行；PAP 准入不等待整个目标调用完成。
@@ -82,6 +95,11 @@ repository 内的原子保存；文件耐久性、数据库迁移、关闭重开
 不要求先实现通用队列框架，才能交付正确的单次 `reconcile(binding_id)`。
 
 ## 3. Binding revision 与完整状态表
+
+本节是旧可变 Binding spec 的内部状态机和原公开 CRUD 基线。新 Assignment 模型不
+从用户接收 Binding UPDATE/DELETE；Apply 来自发现，Delete 来自 Scope/实例生命周期。
+保留内部 revision/status 条件写、Apply 期间删除和清理责任；Scope 本身无 revision。
+失败后的显式重试由 `policy.scopes.retry` / `scope retry` 承接，仅重试所属终态失败。
 
 ### 3.1 spec 与操作的关系
 
@@ -185,6 +203,9 @@ CR-001 至 CR-008 是已有语义修正；CR-009 是 Reconciler 引入后的新�
 
 ### 4.2 公开方法及返回语义
 
+**旧实现基线，待替换**：下表手动 create/update/delete 及 scopeRevision 不属于新
+Assignment 契约。Binding 仅保留只读查询，内部意图写入仍需原子准入和下列清理保证。
+
 保留现有五个 allowlisted Binding 方法及请求字段；请求不接受客户端指定的
 `bindingRevision`、status、worker ownership、部署记录或重试预算。
 
@@ -202,7 +223,7 @@ Delete 接受成功不表示目标已删除；删除完成后旧 ID 返回 NotFo
 
 例：`policy.bindings.delete` 作用于 revision 2 的 READY Binding 时，目标响应中的
 `result.spec` 与删除前完全相同，`result.status` 为 `{"phase":"PENDING_DELETE"}`。完整 CRUD fixture
-保留原 Policy/Scope、IR、digest，仅调整 status；`bindingPendingDelete` 固定同版响应。
+保留原 Policy/Scope 快照，仅调整 status；`bindingPendingDelete` 固定同版响应。
 
 认证继续由 kernel peer credentials 构造 Principal，经 daemon-core 准入；handler
 只解码、调用、投影，不自行修改 revision，也不等待 Client。duplicate-key/unknown-param
@@ -308,31 +329,19 @@ UNKNOWN 并保留 last_confirmed；确认 Absent 后移除部署记录。route �
 
 ### 6.2 请求准入事务
 
-现有 PAP 基础写接口显式区分创建与条件更新：
+当前生产准入以 Scope 生命周期为边界：
 
-```rust
-update_binding(expected: Option<&BindingView>, next: &BindingView)
-    -> Result<BindingView, PapError>
-```
+- `sync_scope_instances` 在事务中检查 Scope 仍为 Active，以完整进程身份去重，并从
+  Scope 的 Policy 快照创建缺失 Binding；消失实例的 Binding 转为 PendingDelete。
+- `begin_scope_delete` 关闭新 Binding 准入；Discovery 停止后，`finish_scope_discovery`
+  原子登记停止屏障并请求子 Binding 清理。
+- `retry_scope` 只重试该 Scope 下的失败 Binding，保留 spec 和 deployment 责任。
+- 提交后以 `BindingIntentReceipt` 通知队列；入队失败仅对对应 status version 的 Pending
+  记录写入失败，不能覆盖 worker 已认领或已完成的状态。
 
-`None` 为 insert-if-absent；`Some` 比较完整 Binding 后更新，记录缺失返回 NotFound，
-绝不退化为插入。CREATE 的 ID 由服务端生成，外部 UPDATE 不能指定一个已删除 ID 复活。
-
-PAP 负责选定内容和候选 revision；repository 在事务内读取 current 并验证：
-
-1. expected 与当前值一致；不一致返回 Conflict，由 PAP 重读、重新判断，沿用有界尝试。
-2. 请求符合第 3 节；Delete 直接保留库内 spec；同一部署的相同内容重试保持 revision，
-   changed spec 要求 next revision；删除侧禁止 Apply，CREATE 要求新 ID 不存在且 revision 1。
-3. no-op 返回库内当前值，不重写 retry control；新意图按表更新 spec/status、重置当前
-   操作的 retry control 和 error，保留所有部署记录。
-4. status 与 next_attempt_at 同时提交，成为 durable reconcile intent。采用 current 行
-   即可表达待执行意图，本提案不另建通用 outbox 或历史操作队列。
-5. 提交成功后才通知 worker。通知失败不回滚已提交意图，也不让请求重复创建资源；
-   由持久化补扫恢复，基础通知处理见第 8 节。
-
-幂等 no-op 返回本次一致读取的已有值，不修改运行字段；实际变更必须通过
-完整 expected Binding 的条件更新，以关闭 service 预读与 worker 变更之间的竞争。更新只触及明确拥有的字段，不能用旧 BindingView 全行覆盖
-worker 刚写入的目标记录、错误或重试次数。
+具体事务与恢复契约见 [Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
+旧 revision/CAS fixtures 使用 memory 后端的 `update_binding` 辅助方法构造状态；
+该方法不属于 `PapRepository`，SQLite 不提供直接创建或替换 Binding spec 的入口。
 
 ### 6.3 Worker 内部操作与数据库接口
 
@@ -471,7 +480,7 @@ delete(targets) -> DeploymentReport
   下一次调用重新解析当前进程身份，不保留跨次比对依据，也不保证跨次仍为同一进程。
 - `previous_targets` 含实际部署记录，必须按 target 身份去重并排除本次新目标身份。
   即使新目标已以 UNKNOWN 登记，也不能把它放入“先删除的旧目标”集合。
-- 旧 revision 记录只需可定位/可清理输入，不要求重新运行旧 Adapter 或保存旧完整 IR。
+- 旧 revision 记录只需可定位/可清理输入，不要求重新运行旧 Adapter。
   Delete 不调用 Adapter，不需要当前 PID 仍存活，也不从当前 revision 猜目标列表。
 
 调用及保存顺序为：
@@ -726,7 +735,7 @@ repository，无需等待 W5，但不能声明 W5 的耐久性已验收。W7 不
 每个 fixture 必须含：完整初始 BindingView、部署/重试记录、本次请求数据、完整输入请求
 或触发序列、可控时钟、按顺序注入的 Adapter/Client/Repository 结果、完整最终记录、
 完整外部响应或安全错误，以及严格有序 interaction trace。禁止只断言 READY 或只列
-Markdown ID；允许符号 UUID 引用，但不得删掉 spec、IR、digest 或关键请求字段。
+Markdown ID；允许符号 UUID 引用，但不得删掉 spec 或关键请求字段。
 
 trace 至少区分 read、claim commit、prepare、identity commit、Client request/response、
 observation commit、status CAS 成功/冲突、retry schedule、notification/recovery。

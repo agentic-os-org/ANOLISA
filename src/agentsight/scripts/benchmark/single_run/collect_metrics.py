@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import signal
@@ -322,8 +323,10 @@ def main() -> int:
     parser.add_argument("--min-available-memory-mb", type=int, default=2048)
     parser.add_argument("--max-agentsight-rss-mb", type=int, default=1536)
     args = parser.parse_args()
-    if args.interval <= 0:
-        raise SystemExit("interval must be positive")
+    if not math.isfinite(args.interval) or args.interval <= 0:
+        raise SystemExit("interval must be finite and positive")
+    if not math.isfinite(args.duration) or args.duration < 0:
+        raise SystemExit("duration must be finite and nonnegative (0 means until signalled)")
     for name in (
         "max_results_gb",
         "min_free_disk_gb",

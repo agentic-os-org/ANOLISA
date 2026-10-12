@@ -9,12 +9,16 @@
 pub mod config;
 pub mod error;
 mod event;
+pub mod query;
 mod schema_version;
 mod summary;
 pub mod timestamp;
 
 pub use error::{ConfigError, EventError, TimestampError};
 pub use event::{EventResult, SecurityEvent, extract_verdict};
+pub use query::{
+    EventFilters, GroupCounts, QueryError, QueryScope, SecurityEventQueries, VALID_GROUP_FIELDS,
+};
 pub use schema_version::{
     SECURITY_EVENTS_SQLITE_SCHEMA_REVISIONS, SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
     SECURITY_EVENTS_VERDICT_SCHEMA_VERSION,

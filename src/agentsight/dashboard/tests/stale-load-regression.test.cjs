@@ -309,3 +309,35 @@ test('reuse-labels: a refetch after a long action honours the active filter', ()
     'ReuseLabelsPage: the effect must re-run on a filter change now that load is stable',
   );
 });
+
+test('reuse-labels: toggling a criterion compares the selected rows', () => {
+  const source = readSource('src/pages/ReuseLabelsPage.tsx');
+  assert.match(source, /import \{ sameMembers \} from '\.\.\/utils\/setSelection';/);
+  // Comparing sizes cleared a hand-picked selection that merely had as many
+  // rows as the criterion.
+  assert.doesNotMatch(source, /current\.size === pending\.length/);
+  assert.doesNotMatch(source, /ids\.size === current\.size/);
+  assert.match(source, /sameMembers\(current, pending\) \? new Set\(\) : pending/);
+  assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
+});
+
+test('agent-sessions: a failed semantic search is not an empty result', () => {
+  const source = readSource('src/pages/AgentSessionsPage.tsx');
+  // The search catch used to clear the matches and nothing else, so the table
+  // fell through to "no matching sessions" for a backend that never answered.
+  assert.match(
+    source,
+    /\.catch\(\(\) => \{\s*if \(cancelled\) return;[\s\S]{0,400}setSemanticError\(true\);/,
+    'AgentSessionsPage: the search failure must be recorded',
+  );
+  assert.match(
+    source,
+    /const \[semanticError, setSemanticError\] = useState\(false\);/,
+    'AgentSessionsPage: the failure needs a state of its own',
+  );
+  assert.match(
+    source,
+    /: semanticError && search\s*\?\s*t\('as\.semanticSearchFailed'\)/,
+    'AgentSessionsPage: the empty state must report the failure before claiming no matches',
+  );
+});
