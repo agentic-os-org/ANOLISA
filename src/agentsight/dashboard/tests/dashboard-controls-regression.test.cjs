@@ -200,6 +200,11 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
       enforcementSupportsMode: () => true,
       enforcementViolationTotal: (violations) => violations.length,
     },
+    // The mode badge reads a binding's effective mode; these pager fixtures
+    // carry no bindings, so the stored-mode fallback is enough.
+    '../utils/enforcementMode': {
+      effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+    },
     '../components/Pagination': componentStub('Pagination'),
   };
   const pageModule = loadPageModule('src/pages/RiskEnforcementPage.tsx', moduleStubs, driver);
