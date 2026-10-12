@@ -105,7 +105,17 @@ fn lower_exec(pat: &str) -> (u8, String) {
     }
     let base = pat.rsplit('/').next().unwrap_or(pat);
     if let Some(stripped) = base.strip_suffix('*') {
-        (M_PREFIX, stripped.to_string())
+        // Only the basename reaches the exec matcher, which compares it with
+        // the process's comm, so a wildcard basename names the wildcard
+        // itself: `dir/*` and `dir/**` mean "any comm", and `git**` means the
+        // same as `git*`. Leaving the stars in the literal — or returning an
+        // empty one — installs a rule that can never fire, because
+        // `taint_prefix` needs a non-empty needle and no comm contains `*`.
+        let literal = stripped.trim_end_matches('*');
+        if literal.is_empty() {
+            return (M_ANY, String::new());
+        }
+        (M_PREFIX, literal.to_string())
     } else {
         (M_EXACT, base.to_string())
     }
@@ -462,6 +472,26 @@ mod tests {
         assert_eq!(lower_exec("*"), (M_ANY, String::new()));
         assert_eq!(lower_exec("**"), (M_ANY, String::new()));
         assert_eq!(lower_exec("**/*"), (M_ANY, String::new()));
+    }
+
+    #[test]
+    fn exec_directory_wildcard_matches_any_comm() {
+        // Only the basename reaches the exec matcher, which compares it against
+        // the process's comm, so `dir/*` wildcards the basename itself. It used
+        // to lower to an empty prefix literal, and `taint_prefix` never matches
+        // an empty needle (`test_taint.c`: "prefix: empty never matches"), so
+        // `block exec "/usr/bin/*" if AGENT` installed a rule that could never
+        // fire — no denial, no violation, no warning.
+        assert_eq!(lower_exec("/usr/bin/*"), (M_ANY, String::new()));
+        assert_eq!(lower_exec("dir/*"), (M_ANY, String::new()));
+        assert_eq!(lower_exec("**/sub/*"), (M_ANY, String::new()));
+        // A star-only prefix must not survive in the literal either: no comm
+        // contains `*`, so `M_PREFIX` on "git*" is as dead as an empty one.
+        assert_eq!(lower_exec("/usr/bin/**"), (M_ANY, String::new()));
+        assert_eq!(lower_exec("git**"), (M_PREFIX, "git".to_string()));
+        // A directory plus a real basename still narrows to the basename.
+        assert_eq!(lower_exec("/usr/bin/git*"), (M_PREFIX, "git".to_string()));
+        assert_eq!(lower_exec("/usr/bin/git"), (M_EXACT, "git".to_string()));
     }
 
     #[test]
