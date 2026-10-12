@@ -156,14 +156,19 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
         }
         let Some(end) = step.end_ts() else { continue };
 
-        for next in &steps[i + 1..] {
+        for (offset, next) in steps[i + 1..].iter().enumerate() {
             if next.is_agent() {
                 break; // interaction continued without user input
             }
             if next.is_user() {
                 // Next-turn user step: gap measured to its timestamp when
                 // recorded, else to the following agent step's request start.
-                let user_ts = next.end_ts();
+                let user_ts = next.end_ts().or_else(|| {
+                    steps[i + offset + 2..]
+                        .iter()
+                        .find(|step| step.is_agent())
+                        .and_then(|step| step.start_ts())
+                });
                 if let Some(u) = user_ts {
                     let dur = (u - end).as_seconds_f64();
                     if dur > threshold {
