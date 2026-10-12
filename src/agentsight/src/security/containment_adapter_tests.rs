@@ -511,6 +511,64 @@ fn multi_source_policy_activates_containment() {
     target.wait().expect("live test target should be reaped");
 }
 
+#[test]
+fn a_snapshot_the_caller_ordered_differently_still_activates_containment() {
+    // A snapshot persisted before the server sorted its request keeps the
+    // caller's pattern order, while the adapter compiles one sorted `source`
+    // line per pattern. Comparing the two as ordered vectors turned those
+    // bindings into `source_policy_unavailable`, so containment could never be
+    // created — or recovered — for their cases even though the policy was
+    // intact and the enforcer had accepted it.
+    let source_binding_id = Uuid::new_v4();
+    let mut target = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("live test target should start");
+    let pid = i32::try_from(target.id()).expect("test PID should fit in i32");
+    let process_start_time =
+        read_process_start_time(pid).expect("live test process should have a start time");
+    let compiled_order = ["/root/secret.txt", "/root/token.json"];
+    let caller_order = ["/root/token.json", "/root/secret.txt"];
+    let enforcer = Arc::new(ApplyingGenerationEnforcer::new_with_policy(
+        binding(
+            source_binding_id,
+            pid,
+            process_start_time,
+            audit_policy_for(&compiled_order),
+        ),
+        credential_policy_for(&caller_order, 300, PolicyMode::Audit),
+    ));
+    let (security_store, case_id) =
+        security_fixture_without_action(source_binding_id, pid, process_start_time);
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
+    let containment = ContainmentCoordinator::new(Arc::clone(&security_store), enforcer_trait);
+
+    let activated = containment
+        .contain(
+            case_id,
+            ContainmentRequest {
+                root_pid: pid,
+                duration_secs: Some(60),
+            },
+            &[],
+            "principal:test-operator",
+        )
+        .expect("a differently ordered snapshot must not block containment");
+
+    assert_eq!(activated.lifecycle_state, ContainmentLifecycle::Active);
+    assert_eq!(
+        latest_action(&security_store, case_id).lifecycle_state,
+        ContainmentLifecycle::Active
+    );
+    assert_eq!(
+        enforcer.detach_calls.load(Ordering::Acquire),
+        0,
+        "an accepted policy must not be detached"
+    );
+    target.kill().expect("live test target should stop");
+    target.wait().expect("live test target should be reaped");
+}
+
 fn security_fixture_without_action(
     source_binding_id: Uuid,
     pid: i32,
