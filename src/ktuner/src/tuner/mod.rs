@@ -1402,6 +1402,19 @@ fn persist_rollback_data_at(
         // being retired with it — and the unit is what runs the script at the
         // next boot, on a path that may by then hold something systemd fails
         // to execute, which leaves the unit failed and the boot degraded.
+        //
+        // The retire undoes both artifacts the write arm created: the files
+        // AND systemd's enablement of the unit. Deleting the unit file while
+        // multi-user.target.wants/ktuner-nonsysctl.service still pointed at it
+        // left systemd trying to start a unit that no longer exists at every
+        // boot (`systemctl is-enabled` kept answering "enabled" for it), and
+        // the terminal cleanup cannot repair that: `finalize_rollback_at`
+        // only disables while the unit file is still there, which a retire is
+        // exactly the case where it is not. The write arm's pair of calls is
+        // mirrored here (disable, then daemon-reload) and their exit statuses
+        // stay advisory, as in the cleanup a full rollback runs.
+        systemctl_quiet(systemctl, &["disable", "ktuner-nonsysctl.service"]);
+        systemctl_quiet(systemctl, &["daemon-reload"]);
         let script_removed = remove_persisted(script_path, true);
         let service_removed = remove_persisted(service_path, true);
         if !script_removed || !service_removed {
@@ -3495,6 +3508,75 @@ mod tests {
         assert!(
             !script.exists() && !service.exists(),
             "the script and its unit must be retired with the render that owns them"
+        );
+    }
+
+    /// A retire is the mirror of the write arm, so it must undo both artifacts
+    /// the write created. Deleting the unit file alone left systemd's
+    /// enablement pointing at a file that no longer exists: the unit was
+    /// started (and failed) at every boot, `systemctl is-enabled` kept
+    /// answering "enabled" for it, and the terminal cleanup cannot repair it —
+    /// `finalize_rollback_at` only disables while the unit file is still
+    /// there, and after a retire it never is.
+    #[test]
+    fn persist_retire_disables_the_unit_it_removes() {
+        let dir = AtomicTestDir::new("persist-retire-disable");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let script = dir.0.join("apply-nonsysctl.sh");
+        let service = dir.0.join("ktuner-nonsysctl.service");
+        let path = ledger.to_str().unwrap();
+
+        // The unrenderable ledger the retire arm owns: the pair an earlier
+        // generation wrote for a deny-listed recorded path.
+        let ledger_json = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "block/sda/read_ahead_kb": {
+                    "previous": "128",
+                    "applied": "2048",
+                    "path": "/proc/sys/kernel/core_pattern",
+                }
+            }
+        });
+        fs::write(&ledger, serde_json::to_string(&ledger_json).unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\n").unwrap();
+        fs::write(&service, "[Unit]\n").unwrap();
+
+        // The stand-in records its arguments: a run that reaches the host's
+        // systemctl instead writes nothing here.
+        let calls = dir.0.join("systemctl-calls");
+        let program = dir.0.join("systemctl");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
+            .expect("make the stand-in executable");
+
+        let guard = lock_ledger_at(path).unwrap();
+        persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            program.to_str().unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+
+        assert!(
+            !script.exists() && !service.exists(),
+            "the retire still removes both files"
+        );
+        assert_eq!(
+            fs::read_to_string(&calls).expect("the named program must be the one that ran"),
+            "disable ktuner-nonsysctl.service\ndaemon-reload\n",
+            "retiring the unit must undo the enablement the write arm created"
         );
     }
 
