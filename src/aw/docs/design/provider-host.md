@@ -45,6 +45,8 @@ Preparation parses configuration and calls `admission::preflight` for all enable
 requirements before starting any Provider. Each referenced structured Provider then runs
 `describe` and `validate_config` in separate processes. Native command Providers
 are admitted through the explicit native step contract without those calls.
+Boolean hooks (omitted `protocol` or `aw-hook/v1alpha1`) also skip those calls;
+local preflight admits their configured match effects without running the script.
 Disabled-only references are skipped. The checked replies become evidence for `admission::admit`; only
 fully admitted steps are retained. Failure returns no partially prepared Host,
 and earlier completed calls are not rolled back. Preparation methods should
@@ -62,6 +64,22 @@ adopted a policy. The admitted surface remains:
 Enabled unsupported events, exact tool selectors, guards, `ask`, replacement
 effects and guarantees beyond `native_hook` are rejected. The
 [protocol design](provider-protocol.md) defines the complete admission contract.
+
+## Default invoke-only hooks
+
+A boolean hook uses only `invoke`, optionally omitted from its step. The Host
+binds and validates an invocation internally, sends only its normalized event
+to the command, and requires exit 0, complete stdin delivery and one JSON boolean.
+Hook size/depth limits apply to the bare event; the internal envelope does not
+consume its quota. Structured Provider requests keep their full-message limits.
+True projects all admitted step effects with its optional configured reason code;
+false projects none. AW constructs and checks the correlated outcome itself.
+No protocol fields or effect response objects are needed in the script. The
+Host caps boolean stdout at 32 bytes as well as the configured ceiling and uses
+the ordinary executor's immediate group cleanup. Shared deadlines, cancellation,
+once-only claims and failure actions remain the existing Host rules. Explicit
+structured Providers retain their handshake and response validation; no failed
+handshake is treated as an absent method or retried as a boolean hook.
 
 ## Invoke one event
 

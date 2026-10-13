@@ -12,6 +12,8 @@ use serde_json::Value;
 
 /// Authoritative configuration shape, available to offline editor tooling.
 pub const SCHEMA: &str = include_str!("../schemas/configuration-v1alpha1.schema.json");
+/// Default command contract: one normalized event in, one JSON boolean out.
+pub const HOOK_PROTOCOL: &str = "aw-hook/v1alpha1";
 /// Maximum input and expanded JSON size in bytes.
 pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum nesting depth, including Provider-owned configuration.

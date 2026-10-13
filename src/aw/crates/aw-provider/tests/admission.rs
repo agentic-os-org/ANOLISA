@@ -166,6 +166,63 @@ fn one_policy_admits_four_explicit_adapter_boundaries_without_running_programs()
 }
 
 #[test]
+fn default_and_explicit_boolean_hooks_admit_without_provider_evidence() {
+    for explicit in [false, true] {
+        let mut document = document();
+        let provider = document["spec"]["providers"]["policy"]
+            .as_object_mut()
+            .unwrap();
+        provider.remove("protocol");
+        provider.remove("config");
+        if explicit {
+            provider.insert("protocol".into(), json!(aw_config::HOOK_PROTOCOL));
+        }
+        for event in ["tool.before", "tool.after"] {
+            let step = document["spec"]["events"][event]["steps"][0]
+                .as_object_mut()
+                .unwrap();
+            step.remove("operation");
+            if explicit {
+                step.insert("operation".into(), json!("invoke"));
+            }
+        }
+        document["spec"]["events"]["tool.before"]["steps"][0]["reason_code"] =
+            json!("rule_matched");
+        let config = configuration(&document);
+        for adapter in ["qoder", "openclaw", "hermes", "qwenpaw"] {
+            let steps = admit(&config, adapter, &capabilities(adapter), &BTreeMap::new()).unwrap();
+            assert_eq!(
+                steps,
+                preflight(&config, adapter, &capabilities(adapter)).unwrap()
+            );
+            assert_eq!(steps.len(), 2);
+            assert_eq!(
+                steps
+                    .iter()
+                    .find(|step| step.event == "tool.before")
+                    .unwrap()
+                    .execution,
+                aw_provider::admission::StepExecution::Hook {
+                    effects: vec!["observe".into(), "block".into()],
+                    reason_code: Some("rule_matched".into()),
+                }
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .find(|step| step.event == "tool.after")
+                    .unwrap()
+                    .execution,
+                aw_provider::admission::StepExecution::Hook {
+                    effects: vec!["observe".into()],
+                    reason_code: None,
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn target_and_trusted_adapter_evidence_must_agree() {
     let document = document();
     let config = configuration(&document);

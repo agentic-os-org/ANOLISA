@@ -139,9 +139,11 @@ AW 配置和 Provider 协议仍分别为 `aw/v1alpha1`、`aw-provider/v1alpha1`�
 简单规则只需从 stdin 读取一个标准化事件 JSON，在 stdout 输出 JSON 布尔值
 `true` 或 `false`，然后以退出码 0 结束。`true` 表示命中规则，AW 请求配置中的
 effect；`false` 不请求 effect，也不覆盖原生权限。诊断可写 stderr，不进入 Provider
-回复或审计。内置 `aw policy` 桥接负责 `describe`、`validate_config`、`invoke`、
-request ID 和摘要；用户脚本无需实现这些方法或字段。完整结构化 Provider 继续使用
-现有协议，不将握手方法改为可选。
+回复或审计。自定义 Hook 默认只在事件触发时调用：省略 Provider 的 `protocol`
+和步骤的 `operation` 即可。AW 在本地校验配置和效果准入，不调用脚本的
+`describe` 或 `validate_config`，只对已准入事件执行脚本。脚本不接收 method、
+request ID 或摘要，也不用构造 response 对象。显式声明
+`protocol: aw-provider/v1alpha1` 仍走完整结构化 Provider 握手。
 
 例如，将以下规则保存为 `$AW_DEMO/check.py`。Python 是这个自选脚本的依赖，
 不是 AW core 的依赖：
@@ -178,27 +180,49 @@ Provider 和步骤。只提供所需 Agent 入口；本例声明两个框架：
 
 无需 sec-core 包或 daemon。同一份生成配置可配合 `--agent openclaw` 及其已有原生
 profile 参数使用。两个框架向脚本提供相同的标准化工具字段，由 AW 将 block 翻译为
-各自的原生 Hook 回复。生成的 Provider transport 执行
-`["/absolute/prefix/bin/aw", "policy"]`；命令与命中后的 effect 位于
-`spec.providers.command.config`：
+各自的原生 Hook 回复。生成的 transport 直接执行用户命令。
+在 `spec` 内可这样声明自定义 Hook：
 
 ```yaml
-config:
-  version: 1
-  argv: [/usr/bin/python3, /absolute/path/check.py]
-  timeout_ms: 1000
-  on_true:
-    type: block
-    reason_code: parameter_contains_12345
+providers:
+  command:
+    transport:
+      type: stdio
+      location: agent
+      argv: [/usr/bin/python3, /absolute/path/check.py]
+    timeout_ms: 1000
+    max_output_bytes: 32
+events:
+  tool.before:
+    enabled: true
+    required: true
+    steps:
+      - id: check-command
+        provider: command
+        effects: [block]
+        reason_code: parameter_contains_12345
+        on_error: block
 ```
 
-`on_true.type` 支持 `block` 或 `observe`；`block` 只适用于工具前，`observe` 也可
-配置在工具后。生成器创建一个必需的工具前步骤，设置 `on_error: block`、2,000 ms
-Provider 超时和 1,000 ms 命令超时。非零退出、超时、输出超限或非布尔响应都是
-Provider 错误，不会当作 false；按步骤的失败策略处理。布尔输出含空白限 32 字节，
-stderr 限 65,536 字节。argv 按字面传递，不插入隐式 shell。握手方法校验配置，
-不执行用户命令。`aw validate` 检查期望配置文档；运行时准入还会在安装策略步骤前
-校验桥接的私有配置。
+省略 `protocol` 等同 `aw-hook/v1alpha1`，省略 `operation` 等同 `invoke`，也可
+显式声明这两个值。Hook 的 `config` 省略或填空对象，脚本选项通过字面 argv 传入。
+`true` 请求该步骤 `effects` 列表中的全部效果，可携带步骤的 `reason_code`；
+`false` 不请求效果。效果仍须满足 Adapter 能力。`block` 只用于工具前，
+`observe` 也可用于工具后。完整 Provider 步骤的 `effects` 仍是准入上限，由
+Provider 选择实际返回的效果。
+
+生成器创建一个必需的工具前步骤，设置 `on_error: block` 和 1,000 ms 命令超时。
+非零退出、超时、输出超限、stdin 未完整交付或非布尔响应均为执行错误，不当作
+false；按步骤的失败策略处理。布尔 stdout 含空白上限为 `max_output_bytes` 和
+32 字节中的较小值，服务将 stderr 限为 65,536 字节。AW 不插入隐式 shell。
+准备阶段在本地校验配置和 Adapter 能力，不执行用户脚本。
+`aw validate` 离线检查期望配置文档。
+
+已有 `aw policy` 桥接配置仍受支持，保留私有 `config.on_true` 的效果映射和完整
+Provider 协议，无需迁移。切换自定义规则时，将 transport argv 指向布尔脚本，
+省略 `protocol`、`config` 和 `operation`，将命中后的 effects 和可选 reason code
+放到步骤中。切换配置前退出旧 Agent 会话并停止旧服务。旧 AW 二进制不接受新的
+缺省形式，回滚时保留原配置。
 
 `configure` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
 （或传 `--provider none`）生成新的基础文档，退出旧 Agent、停止其服务后显式切换
@@ -286,6 +310,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent h
 
 | 协议 | 输入与结果 | 步骤字段 |
 | --- | --- | --- |
+| `aw-hook/v1alpha1`（缺省） | 命令读取一个标准化事件并返回 JSON true/false，AW 在命中时投影配置的效果，不执行脚本握手 | `effects`、`on_error`；可选 `reason_code`；省略 `operation` 或填 `invoke` |
 | `aw-provider/v1alpha1` | AW 执行 `describe`、`validate_config`、`invoke`，响应包含经校验的候选效果 | `operation`、`effects`、`on_error` |
 | `native-hook/v1alpha1` | 命令收到所选框架的原始回调 stdin，stdout、stderr 和退出状态按该 Adapter 合同处理 | `native: {}`、`on_error`；不填 `operation`、`effects` |
 

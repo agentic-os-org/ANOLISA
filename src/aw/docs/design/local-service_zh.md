@@ -182,7 +182,15 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 
 ## 布尔命令投影
 
-CLI 组合入口在 core 制品内提供 `aw policy`，作为内置 stdio Provider 桥接。
+自定义 Hook 缺省使用 `aw-hook/v1alpha1`，步骤的 `operation: invoke` 可省略。
+Host 本地校验准入，在事件发生时直接执行配置命令，不启动发现或私有配置校验
+进程。命令只返回一个 JSON 布尔值，true 时 Host 投影步骤的全部 effects 和可选
+reason code，false 不请求效果，保留关联、共享预算、一次调用声明和普通执行器
+立即清理进程组的规则。布尔 stdout 上限 32 字节。非零退出、输入未完整交付、
+超时、输出超限及非法布尔值仍是调用故障。配置生成器现在输出此形式，已有显式
+版本化的结构化和原生 Provider 行为不变。
+
+CLI 组合入口在 core 制品内仍提供 `aw policy`，作为内置 stdio Provider 桥接。
 命令读取标准化事件并返回一个 JSON 布尔值，私有配置声明命中后的
 `observe`/`block` effect，服务不内置安全引擎或业务规则。桥接实现现有三个
 Provider 方法并回显关联 invoke 的摘要。这些字段保留在 `aw-provider/v1alpha1`

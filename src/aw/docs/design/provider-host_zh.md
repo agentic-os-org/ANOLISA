@@ -37,7 +37,9 @@ Core 的最终执行约束。
 
 准备阶段先解析配置，并对全部启用需求调用 `admission::preflight`，之后才启动
 Provider。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
-`validate_config`；原生命令按显式原生步骤合同准入，不执行这两项调用。仅被禁用项
+`validate_config`；原生命令按显式原生步骤合同准入，不执行这两项调用。布尔 Hook
+（省略 `protocol` 或填写 `aw-hook/v1alpha1`）同样跳过这两项调用，preflight 在本地
+准入配置的命中效果，不执行脚本。仅被禁用项
 引用的 Provider 会跳过。已检查的响应成为
 `admission::admit` 的证据，最终只保留全部通过准入的步骤。失败时不会返回部分
 准备好的 Host，也不会回滚此前完成的调用，因此准备方法应避免副作用。
@@ -52,6 +54,18 @@ Agent 已采用策略。准入范围仍为：
 
 启用但不受支持的事件、精确工具选择器、guard、`ask`、替换效果及超出
 `native_hook` 的保证均被拒绝。完整准入合同见[协议设计](provider-protocol_zh.md)。
+
+## 缺省只调用 invoke 的 Hook
+
+布尔 Hook 只使用 `invoke`，步骤中也可省略。Host 在内部绑定并校验调用，只将
+标准化事件交给命令，并要求退出码 0、stdin 完整交付以及一个 JSON 布尔值。
+Hook 的大小和深度限制只作用于裸事件，内部封装不占用事件额度；结构化 Provider
+请求仍遵循完整消息限制。
+true 投影步骤准入的全部 effects 和可选 reason code，false 不请求效果，AW
+自行构造并校验关联 outcome。用户脚本无需协议字段或 effect 响应对象。布尔
+stdout 同时受 32 字节和配置上限约束，使用普通执行器立即清理进程组。共享
+deadline、取消、一次调用声明和失败处置沿用 Host 规则。显式结构化 Provider
+保留握手和响应校验；失败的握手不会当作缺省方法或重试为布尔 Hook。
 
 ## 调用一个事件
 

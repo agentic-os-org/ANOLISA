@@ -204,6 +204,73 @@ fn invocation_binds_config_event_budget_and_identity_without_canonical_coercion(
 }
 
 #[test]
+fn hook_binding_preserves_event_limits_without_relaxing_provider_wire_limits() {
+    let protocol = Protocol::new().unwrap();
+    let mut value = invoke("tool.before", json!(["block"]));
+    value["operation"] = json!("invoke");
+    value["config"] = json!({});
+    value["event"]["tool"]["input"] = json!("");
+    let overhead = bytes(&value["event"]).len();
+    value["event"]["tool"]["input"] = json!("I".repeat(MAX_MESSAGE_BYTES - overhead));
+    assert_eq!(bytes(&value["event"]).len(), MAX_MESSAGE_BYTES);
+    assert!(protocol.bind_invocation(value.clone()).is_err());
+    let hook = protocol.bind_hook_invocation(value.clone()).unwrap();
+    assert!(protocol.parse_request(&bytes(hook.as_value())).is_err());
+    let mut reply = response();
+    reply["input_digest"] = hook.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"block"}]);
+    assert!(matches!(
+        protocol.check_response(&hook, &bytes(&reply)),
+        Ok(Reply::Invocation(_))
+    ));
+    value["event"]["tool"]["input"] = json!("I".repeat(MAX_MESSAGE_BYTES - overhead + 1));
+    assert!(protocol.bind_hook_invocation(value.clone()).is_err());
+    let mut nested = json!("leaf");
+    for _ in 0..MAX_DEPTH - 2 {
+        nested = json!([nested]);
+    }
+    value["event"]["tool"]["input"] = nested.clone();
+    assert!(protocol.bind_invocation(value.clone()).is_err());
+    let hook = protocol.bind_hook_invocation(value.clone()).unwrap();
+    assert!(protocol.parse_request(&bytes(hook.as_value())).is_err());
+    value["event"]["tool"]["input"] = json!([nested]);
+    assert!(protocol.bind_hook_invocation(value).is_err());
+}
+
+#[test]
+fn hook_binding_keeps_request_shape_and_capability_validation() {
+    let protocol = Protocol::new().unwrap();
+    let mut value = invoke("tool.before", json!(["block"]));
+    value["operation"] = json!("invoke");
+    value["config"] = json!({});
+    let hook = protocol.bind_hook_invocation(value.clone()).unwrap();
+    let provider = protocol.bind_invocation(value.clone()).unwrap();
+    assert_eq!(
+        hook.as_value()["input_digest"],
+        provider.as_value()["input_digest"]
+    );
+    for (pointer, replacement) in [
+        ("/method", json!("describe")),
+        ("/operation", json!("check")),
+        ("/config", json!({"ignored":true})),
+        ("/request_id", json!("R".repeat(129))),
+        ("/config_revision", json!("invalid")),
+        ("/budget_ms", json!(0)),
+        ("/allowed_effects", json!(["ask"])),
+        ("/event/tool/result", json!({"unexpected":true})),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(protocol.bind_hook_invocation(invalid).is_err(), "{pointer}");
+    }
+    let mut invalid = value.clone();
+    invalid["input_digest"] = json!(format!("sha256:{}", "0".repeat(64)));
+    assert!(protocol.bind_hook_invocation(invalid).is_err());
+    value["unknown"] = json!(true);
+    assert!(protocol.bind_hook_invocation(value).is_err());
+}
+
+#[test]
 fn after_preserves_null_structured_multimodal_and_failed_results() {
     let protocol = Protocol::new().unwrap();
     for result in [

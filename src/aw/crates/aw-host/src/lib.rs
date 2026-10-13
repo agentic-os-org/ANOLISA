@@ -77,6 +77,7 @@ pub enum Error {
 
 struct Provider {
     native: bool,
+    hook: bool,
     command: CommandSpec,
     config: Value,
     timeout: Duration,
@@ -103,8 +104,9 @@ impl Host {
     /// Validate desired configuration, execute discovery/private validation, then admit.
     ///
     /// All enabled requirements are preflighted before starting any command. Each
-    /// structured Provider is prepared once; native commands skip discovery and
-    /// private validation. Disabled-only references are skipped.
+    /// structured Provider is prepared once. Boolean hooks use local effect
+    /// admission and default to invoke without discovery/private-validation calls;
+    /// native commands also skip those calls. Disabled-only references are skipped.
     /// Preparation shares the caller's absolute deadline, with each exchange also
     /// capped by the configured Provider timeout. Parsing, encoding and response
     /// validation count against it. Transport cleanup retains its separate budget.
@@ -165,7 +167,7 @@ impl Host {
     ) -> Result<(), Error> {
         let mut evidence = BTreeMap::new();
         for (name, provider) in &self.providers {
-            if provider.native {
+            if provider.native || provider.hook {
                 continue;
             }
             let mut replies = Vec::new();
@@ -294,13 +296,17 @@ fn provider(value: &Value, context: &ProcessContext) -> Result<Provider, Error> 
     let output_bytes = positive(&value["max_output_bytes"])?;
     Ok(Provider {
         native: value["protocol"] == "native-hook/v1alpha1",
+        hook: value["protocol"]
+            .as_str()
+            .unwrap_or(aw_config::HOOK_PROTOCOL)
+            == aw_config::HOOK_PROTOCOL,
         command: CommandSpec {
             program: PathBuf::from(program),
             args: args.iter().map(OsString::from).collect(),
             cwd: context.cwd.clone(),
             environment: context.environment.clone(),
         },
-        config: value["config"].clone(),
+        config: value.get("config").cloned().unwrap_or_else(|| json!({})),
         timeout: Duration::from_millis(positive(&value["timeout_ms"])?),
         limits: Limits {
             input_bytes: MAX_MESSAGE_BYTES,

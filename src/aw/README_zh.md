@@ -12,8 +12,9 @@ AW Preview提供核心包和Provider包，通过`aw-package`安装。当前包�
 AW core 可独立构建与初始化，无需 sec-core。`aw-build` 默认只构建 core；
 `--component all` 保留组合分发路径。`aw-package configure` 默认允许单 Agent、
 无 Provider；通过 `--provider sec-core` 或 `--provider command` 显式启用。
-布尔判断脚本只返回 true/false，effect 放在 YAML 中，AW 负责 Provider 握手
-和响应关联。见[布尔判断脚本](../../docs/user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
+布尔判断脚本只返回 true/false，命中后的 effects 放在 YAML 中。自定义 Hook
+省略 `protocol` 和 `operation` 即默认只执行 invoke；AW 校验准入并构造响应，
+不调用脚本的握手方法。见[布尔判断脚本](../../docs/user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
 
 `aw-package config` 查看、校验和编辑已有 YAML/JSON 文件中的 Provider 与 Hook
 步骤。编辑离线完成并保留无关配置值；添加步骤前须显式声明事件。

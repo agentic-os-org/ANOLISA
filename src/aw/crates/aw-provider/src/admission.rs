@@ -54,9 +54,16 @@ pub struct AdmittedStep {
     pub on_error: String,
 }
 
-/// Execution contract selected explicitly by the configuration.
+/// Execution contract selected by the configured protocol or its documented default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepExecution {
+    /// Invoke a boolean command once; the Host projects configured effects.
+    Hook {
+        /// Effects to request when the command returns true.
+        effects: Vec<String>,
+        /// Optional configured explanation for a match.
+        reason_code: Option<String>,
+    },
     /// Validate requests and candidate effects with aw-provider/v1alpha1.
     Provider {
         /// Operation declared by the Provider.
@@ -189,19 +196,21 @@ fn preflight_step(
     let provider = spec["providers"]
         .get(provider_name)
         .ok_or(Error::Invalid("unknown configured Provider"))?;
+    let protocol = provider["protocol"]
+        .as_str()
+        .unwrap_or(aw_config::HOOK_PROTOCOL);
     require(
         matches!(
-            provider["protocol"].as_str(),
-            Some("aw-provider/v1alpha1" | "native-hook/v1alpha1")
+            protocol,
+            "aw-provider/v1alpha1" | "native-hook/v1alpha1" | aw_config::HOOK_PROTOCOL
         ) && provider["transport"]["type"] == "stdio"
             && provider["transport"]["location"] == "agent",
         "Provider transport or protocol is not supported",
     )?;
-    let execution = if provider["protocol"] == "native-hook/v1alpha1" {
+    let execution = if protocol == "native-hook/v1alpha1" {
         require(step.get("native").is_some(), "native hook step is required")?;
         StepExecution::Native
     } else {
-        let operation = string(&step["operation"])?.to_owned();
         let mut effects = Vec::new();
         for effect in step["effects"]
             .as_array()
@@ -215,7 +224,17 @@ fn preflight_step(
             )?;
             effects.push(effect.to_owned());
         }
-        StepExecution::Provider { operation, effects }
+        if protocol == aw_config::HOOK_PROTOCOL {
+            StepExecution::Hook {
+                effects,
+                reason_code: step["reason_code"].as_str().map(str::to_owned),
+            }
+        } else {
+            StepExecution::Provider {
+                operation: string(&step["operation"])?.to_owned(),
+                effects,
+            }
+        }
     };
     let on_error = string(&step["on_error"])?;
     require(

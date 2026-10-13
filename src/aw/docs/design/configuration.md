@@ -23,6 +23,14 @@ configuration bytes, so even formatting changes select a different revision.
 
 ## Provider and native step forms
 
+An omitted Provider `protocol` selects the invoke-only `aw-hook/v1alpha1`
+contract. Its step omits `operation` or sets `invoke`, declares matched `effects`
+and may declare `reason_code`. The command receives the normalized event and
+returns one JSON boolean. Hook `config` is omitted or empty. The Host locally
+admits effects against Adapter capabilities without executing discovery or
+private-validation methods. True projects all configured step effects, false
+projects none; execution and decoding errors retain the step's failure action.
+
 A structured Provider uses `protocol: aw-provider/v1alpha1`; its step declares
 `operation` and `effects`. Preparation performs `describe` and `validate_config`
 then checks requested effects against trusted Adapter capabilities. The current

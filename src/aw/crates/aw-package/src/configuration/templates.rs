@@ -72,12 +72,10 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
                 "invalid command reason code",
             )?;
             value["spec"]["providers"]["command"] = json!({
-                "protocol":"aw-provider/v1alpha1",
-                "transport":{"type":"stdio","location":"agent","argv":[settings.prefix.join("bin/aw"),"policy"]},
-                "timeout_ms":2000,"max_output_bytes":4096,
-                "config":{"version":1,"argv":argv,"timeout_ms":1000,"on_true":{"type":effect,"reason_code":reason_code}}});
+                "transport":{"type":"stdio","location":"agent","argv":argv},
+                "timeout_ms":1000,"max_output_bytes":32});
             value["spec"]["events"] = json!({
-                "tool.before":{"enabled":true,"required":true,"steps":[{"id":"check-command","provider":"command","operation":"check","effects":[effect],"on_error":"block"}]}});
+                "tool.before":{"enabled":true,"required":true,"steps":[{"id":"check-command","provider":"command","effects":[effect],"reason_code":reason_code,"on_error":"block"}]}});
         }
     }
     Ok(value)

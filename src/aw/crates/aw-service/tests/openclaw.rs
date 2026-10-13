@@ -122,6 +122,15 @@ fn zero_provider_gateway_is_ready_and_keeps_native_tools() {
 
 #[test]
 fn same_boolean_policy_blocks_matching_inputs_and_failures_in_openclaw() {
+    check_boolean_policy(command_policy::configure);
+}
+
+#[test]
+fn default_hook_same_boolean_policy_blocks_matching_inputs_and_failures_in_openclaw() {
+    check_boolean_policy(command_policy::configure_default);
+}
+
+fn check_boolean_policy(configure: fn(&Fixture, &mut Value)) {
     for (input, blocked) in [
         ("printf control", false),
         ("printf 12345", true),
@@ -129,7 +138,7 @@ fn same_boolean_policy_blocks_matching_inputs_and_failures_in_openclaw() {
     ] {
         let fixture = Fixture::new();
         let mut config = document(&fixture);
-        command_policy::configure(&fixture, &mut config);
+        configure(&fixture, &mut config);
         let service = Service::start(&fixture, &config);
         let mut launch = command(&fixture);
         launch.env("FAKE_SCENARIO", input);

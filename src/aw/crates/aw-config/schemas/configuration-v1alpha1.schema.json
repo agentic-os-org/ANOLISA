@@ -264,18 +264,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "protocol",
         "transport",
         "timeout_ms",
-        "max_output_bytes",
-        "config"
+        "max_output_bytes"
       ],
       "properties": {
         "protocol": {
           "enum": [
             "aw-provider/v1alpha1",
-            "native-hook/v1alpha1"
-          ]
+            "native-hook/v1alpha1",
+            "aw-hook/v1alpha1"
+          ],
+          "default": "aw-hook/v1alpha1"
         },
         "transport": {
           "$ref": "#/$defs/transport"
@@ -289,7 +289,29 @@
         "config": {
           "type": "object"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "protocol"
+            ],
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "aw-provider/v1alpha1",
+                  "native-hook/v1alpha1"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "config"
+            ]
+          }
+        }
+      ]
     },
     "transport": {
       "type": "object",
@@ -458,7 +480,8 @@
           "$ref": "#/$defs/name"
         },
         "operation": {
-          "$ref": "#/$defs/name"
+          "$ref": "#/$defs/name",
+          "default": "invoke"
         },
         "effects": {
           "type": "array",
@@ -485,12 +508,20 @@
         "native": {
           "type": "object",
           "additionalProperties": false
+        },
+        "reason_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "not": {
+            "pattern": "[^A-Za-z0-9_.-]"
+          }
         }
       },
       "oneOf": [
         {
           "required": [
-            "operation",
             "effects"
           ],
           "not": {

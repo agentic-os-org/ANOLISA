@@ -562,6 +562,63 @@ fn maximum_raw_byte_arrays_round_trip_within_the_frame_limit() {
 }
 
 #[test]
+fn accepted_native_hook_events_keep_their_boolean_size_and_depth_quotas() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    let provider = &mut document["spec"]["providers"]["policy"];
+    provider.as_object_mut().unwrap().remove("protocol");
+    provider.as_object_mut().unwrap().remove("config");
+    provider["transport"]["argv"][2] = json!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../aw-host/tests/fixtures/boolean_hook.py"));
+    for name in ["tool.before", "tool.after"] {
+        document["spec"]["events"][name]["steps"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("operation");
+    }
+    let service = Running::start(&fixture, &document);
+    let binding = fixture.bind(&service.client);
+    for limit in ["size", "depth"] {
+        let mut value = event(&binding, "tool.before", "normal");
+        value["tool"]["call_id"] = json!(format!("boolean-{limit}-limit"));
+        if limit == "size" {
+            value["tool"]["input"] = json!("");
+            let overhead = serde_json::to_vec(&value).unwrap().len();
+            value["tool"]["input"] = json!(format!(
+                "{}12345",
+                "I".repeat(aw_provider::MAX_MESSAGE_BYTES - overhead - 5)
+            ));
+            assert_eq!(
+                serde_json::to_vec(&value).unwrap().len(),
+                aw_provider::MAX_MESSAGE_BYTES
+            );
+        } else {
+            let mut nested = json!("12345");
+            for _ in 0..aw_provider::MAX_DEPTH - 2 {
+                nested = json!([nested]);
+            }
+            value["tool"]["input"] = nested;
+        }
+        let handle = lease(&service.client, &binding, value.clone(), b"native input");
+        let result = service
+            .client
+            .call(invoke(&handle, "check"), Instant::now() + TIMEOUT)
+            .unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            result["effects"],
+            json!([{"type":"observe"},{"type":"block"}])
+        );
+        assert!(result["failure_action"].is_null());
+        let observed: Value =
+            serde_json::from_slice(&fs::read(fixture.0.join("hook-event.json")).unwrap()).unwrap();
+        assert_eq!(observed["request"], value);
+        terminal(&service.client, &handle.event_id);
+    }
+    fixture.assert_reaped();
+}
+
+#[test]
 fn serial_native_callbacks_reuse_the_original_budget_and_once_only_claims() {
     let fixture = Fixture::new();
     let mut document = fixture.document();

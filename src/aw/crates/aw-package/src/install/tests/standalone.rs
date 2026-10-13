@@ -133,15 +133,20 @@ fn command_template_needs_only_core_and_keeps_effects_out_of_user_argv() {
     let value = read(&config);
     assert_eq!(
         value["spec"]["providers"]["command"]["transport"]["argv"],
-        json!([f.prefix.join("bin/aw"), "policy"])
-    );
-    assert_eq!(
-        value["spec"]["providers"]["command"]["config"]["argv"],
         json!(argv)
     );
+    assert!(value["spec"]["providers"]["command"]
+        .get("protocol")
+        .is_none());
+    assert!(value["spec"]["providers"]["command"]
+        .get("config")
+        .is_none());
+    assert!(value["spec"]["events"]["tool.before"]["steps"][0]
+        .get("operation")
+        .is_none());
     assert_eq!(
-        value["spec"]["providers"]["command"]["config"]["on_true"],
-        json!({"type":"block","reason_code":"parameter_matches"})
+        value["spec"]["events"]["tool.before"]["steps"][0]["reason_code"],
+        "parameter_matches"
     );
     assert_eq!(
         value["spec"]["events"]["tool.before"]["steps"][0]["effects"],

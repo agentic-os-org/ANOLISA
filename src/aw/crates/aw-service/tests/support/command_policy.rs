@@ -32,3 +32,14 @@ else:
     document["spec"]["events"] = json!({"tool.before":{"enabled":true,"required":true,
         "steps":[{"id":"boolean-check","provider":"check","operation":"check","effects":["block"],"on_error":"block"}]}});
 }
+
+pub fn configure_default(fixture: &Fixture, document: &mut Value) {
+    configure(fixture, document);
+    let provider = &mut document["spec"]["providers"]["check"];
+    provider["transport"]["argv"] = provider["config"]["argv"].clone();
+    provider.as_object_mut().unwrap().remove("protocol");
+    provider.as_object_mut().unwrap().remove("config");
+    let step = &mut document["spec"]["events"]["tool.before"]["steps"][0];
+    step.as_object_mut().unwrap().remove("operation");
+    step["reason_code"] = json!("parameter_contains_12345");
+}

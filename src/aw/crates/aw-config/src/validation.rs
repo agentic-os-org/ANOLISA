@@ -29,11 +29,15 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     let providers = spec["providers"].as_object().ok_or(Error::InvalidSchema)?;
     let events = spec["events"].as_object().ok_or(Error::InvalidSchema)?;
     for (name, provider) in providers {
+        let protocol = provider["protocol"]
+            .as_str()
+            .unwrap_or(crate::HOOK_PROTOCOL);
         require(
-            provider["protocol"] != "native-hook/v1alpha1"
+            !matches!(protocol, "native-hook/v1alpha1" | crate::HOOK_PROTOCOL)
+                || provider.get("config").is_none()
                 || provider["config"].as_object().is_some_and(|config| config.is_empty()),
             &format!("/spec/providers/{name}/config"),
-            "native hooks have no Provider private configuration; use explicit argv and environment",
+            "command hooks have no Provider private configuration; use explicit argv and environment",
         )?;
     }
     for (name, event) in events {
@@ -88,10 +92,30 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 "unknown Provider reference",
             )?;
             let native = step.get("native").is_some();
+            let protocol = providers[provider]["protocol"]
+                .as_str()
+                .unwrap_or(crate::HOOK_PROTOCOL);
             require(
-                native == (providers[provider]["protocol"] == "native-hook/v1alpha1"),
+                native == (protocol == "native-hook/v1alpha1"),
                 &format!("{path}/provider"),
                 "step shape must match the referenced Provider protocol",
+            )?;
+            require(
+                protocol != "aw-provider/v1alpha1" || step.get("operation").is_some(),
+                &format!("{path}/operation"),
+                "structured Providers require an explicit operation",
+            )?;
+            require(
+                protocol != crate::HOOK_PROTOCOL
+                    || step.get("operation").is_none()
+                    || step["operation"] == "invoke",
+                &format!("{path}/operation"),
+                "boolean hooks support only the default invoke operation",
+            )?;
+            require(
+                step.get("reason_code").is_none() || protocol == crate::HOOK_PROTOCOL,
+                &format!("{path}/reason_code"),
+                "configured reason codes belong only to boolean hooks",
             )?;
             require(
                 !native || matches!(name.as_str(), "tool.before" | "tool.after"),

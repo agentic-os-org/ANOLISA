@@ -266,9 +266,18 @@ fn zero_provider_launch_keeps_native_tools_without_aw_policy_hooks() {
 
 #[test]
 fn boolean_command_blocks_on_match_and_errors_without_sec_core() {
+    check_boolean_policy(command_policy::configure);
+}
+
+#[test]
+fn default_hook_boolean_command_blocks_on_match_and_errors_without_sec_core() {
+    check_boolean_policy(command_policy::configure_default);
+}
+
+fn check_boolean_policy(configure: fn(&Fixture, &mut Value)) {
     let fixture = Fixture::new();
     let mut document = fixture.document();
-    command_policy::configure(&fixture, &mut document);
+    configure(&fixture, &mut document);
     let service = Service::start(&fixture, &document);
     for (id, command, blocked) in [
         ("allow", "printf control", false),

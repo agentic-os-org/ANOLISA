@@ -30,11 +30,11 @@ All fields below are inside `spec` unless stated otherwise.
 | `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw` or `hermes`; recognition is not runtime certification |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
 | `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
-| `providers.<id>.protocol` | `aw-provider/v1alpha1` for structured messages or `native-hook/v1alpha1` for native callback bytes |
+| `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
 | `providers.<id>.transport` | `{type: stdio, location: agent, argv: [...]}`; runs a one-shot process in the bound Agent context |
 | `providers.<id>.timeout_ms` | Positive per-invocation ceiling; runtime must also cap it by the event's remaining budget |
 | `providers.<id>.max_output_bytes` | Positive stdout ceiling enforced by the command executor |
-| `providers.<id>.config` | Required opaque JSON object for structured Providers, validated during preparation; native Hooks require an empty object |
+| `providers.<id>.config` | Required opaque JSON object for structured Providers; native Hooks require an empty object; boolean Hooks omit it or use an empty object |
 | `events.<name>.enabled` | Required boolean for a declared event; omitted events are disabled |
 | `events.<name>.required` | Defaults to `false`; a disabled event cannot be required |
 | `events.<name>.budget_ms` | Optional positive override of the default event budget; a nested guard also shares the parent remaining budget |
@@ -43,9 +43,10 @@ All fields below are inside `spec` unless stated otherwise.
 | `events.tool.before.guard` | Optional reference to a declared `security.violation` event, enabled when this before event is enabled |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
 | `steps[].provider` | Declared Provider ID whose protocol must match the step form |
-| `steps[].operation` | Required nonempty operation for structured steps; checked against Provider discovery |
+| `steps[].operation` | Defaults to `invoke` for boolean Hooks (the only supported value); structured Providers require an explicit operation checked against discovery |
 | `steps[].native` | Empty object selecting native callback execution; mutually exclusive with `operation` and `effects` |
-| `steps[].effects` | Required nonempty unique list for structured steps; requested upper bounds, not a permission grant; omit for native steps |
+| `steps[].effects` | Required nonempty unique list; all requested on a boolean match, an admitted upper bound for structured Providers; omit for native steps |
+| `steps[].reason_code` | Optional match reason for boolean Hooks only; 1–128 ASCII letters, digits, `.`, `_` or `-` |
 | `steps[].on_error` | `report`, `block` or `withhold_result`, constrained by event timing |
 
 Agent/Provider IDs and step/operation names use the same syntax as
@@ -58,6 +59,19 @@ Public objects reject unknown fields. Provider `config` alone accepts private
 fields. Missing Provider references and duplicate step IDs are errors even in
 disabled steps, so enabling a step does not uncover a hidden reference typo.
 Defaults are documented behavior, not values inserted into the parsed document.
+
+## Default boolean hooks
+
+Omitting a Provider's `protocol` selects `aw-hook/v1alpha1`. Its step omits
+`operation` or declares `invoke`; the Host performs local admission and makes
+no `describe`/`validate_config` calls. The command receives only the normalized
+event and returns one JSON boolean with exit 0. AW projects the step's effects
+and optional reason code on true, and no effects on false, retaining request
+correlation internally. Nonzero exit, timeout, incomplete stdin, invalid or
+oversized output remains a failure governed by `on_error`. Stdout is capped at
+32 bytes as well as the configured output ceiling. Existing explicitly declared
+structured and native protocols keep their behavior. See the
+[boolean script example](../../../user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
 
 ## Native commands and runtime support
 

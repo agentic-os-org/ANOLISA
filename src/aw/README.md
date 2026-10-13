@@ -17,8 +17,9 @@ AW core can be built and initialized without sec-core. `aw-build` defaults to
 core; select `--component all` for the existing combined distribution.
 `aw-package configure` accepts one Agent and no Provider by default; select
 `--provider sec-core` or `--provider command` explicitly. Boolean commands return
-only true/false, with effects declared in YAML; AW supplies the Provider handshake
-and response correlation. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+only true/false, with matched effects declared in YAML. Custom hooks omit
+`protocol` and `operation` to use default invoke-only execution; AW validates
+admission and constructs the response without calling script handshake methods. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
 
 `aw-package config` views, validates and edits Providers and Hook steps in an
 existing YAML/JSON file. Edits are offline and preserve unrelated values; declare

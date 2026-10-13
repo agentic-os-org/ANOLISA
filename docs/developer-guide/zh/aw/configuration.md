@@ -27,11 +27,11 @@ Provider 发现与准入，Qoder Adapter 在绑定前核实受支持的原生版
 | `agents.<id>.adapter` | `qwenpaw`、`qoder`、`openclaw` 或 `hermes`；识别名称不等于运行效果已认证 |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
 | `agents.<id>.qoder.sequential` | `adapter: qoder` 专属的可选布尔值；将生成的原生组标为顺序执行，false 不覆盖其他匹配组 |
-| `providers.<id>.protocol` | 结构化消息用 `aw-provider/v1alpha1`，原生回调字节用 `native-hook/v1alpha1` |
+| `providers.<id>.protocol` | 缺省为仅执行 invoke 的 `aw-hook/v1alpha1`；显式 `aw-provider/v1alpha1` 保留结构化消息，`native-hook/v1alpha1` 保留原生回调字节 |
 | `providers.<id>.transport` | `{type: stdio, location: agent, argv: [...]}`，在已绑定的 Agent 上下文中启动单次调用进程 |
 | `providers.<id>.timeout_ms` | 单次调用上限正整数；运行时还须受事件剩余预算约束 |
 | `providers.<id>.max_output_bytes` | stdout 上限正整数，由命令执行器落实 |
-| `providers.<id>.config` | 结构化 Provider 的必填私有 JSON 对象，准备时校验；原生 Hook 要求空对象 |
+| `providers.<id>.config` | 结构化 Provider 必填的私有 JSON 对象；原生 Hook 必填空对象；布尔 Hook 省略或填空对象 |
 | `events.<name>.enabled` | 已声明事件必填布尔值；省略事件等同关闭 |
 | `events.<name>.required` | 默认 `false`；关闭事件不能标为必需 |
 | `events.<name>.budget_ms` | 可选正整数，覆盖默认事件预算；嵌套 guard 同时共用父事件剩余预算 |
@@ -40,9 +40,10 @@ Provider 发现与准入，Qoder Adapter 在绑定前核实受支持的原生版
 | `events.tool.before.guard` | 可选引用已声明的 `security.violation`，before 启用时被引用事件也须启用 |
 | `steps[].id`、`steps[].enabled` | ID 在事件内唯一；enabled 默认 `true` |
 | `steps[].provider` | 已声明的 Provider ID，协议必须与步骤形态匹配 |
-| `steps[].operation` | 结构化步骤必填的非空操作名，与 Provider 发现结果校验 |
+| `steps[].operation` | 布尔 Hook 缺省为 `invoke`（唯一支持值）；结构化 Provider 必填操作名，与发现结果校验 |
 | `steps[].native` | 空对象，选择原生回调执行；与 `operation`、`effects` 互斥 |
-| `steps[].effects` | 结构化步骤必填的非空、不重复列表；声明请求上限，不授予权限；原生步骤不填 |
+| `steps[].effects` | 必填非空、不重复列表；布尔命中时请求全部效果，结构化 Provider 用作准入上限；原生步骤不填 |
+| `steps[].reason_code` | 仅布尔 Hook 可填的命中原因；1–128 个 ASCII 字母、数字、`.`、`_` 或 `-` |
 | `steps[].on_error` | `report`、`block` 或 `withhold_result`，受事件时机约束 |
 
 Agent/Provider ID、步骤 ID 和操作名与 `metadata.name` 使用相同语法。数值限制
@@ -52,6 +53,16 @@ Agent/Provider ID、步骤 ID 和操作名与 `metadata.name` 使用相同语法
 公共对象拒绝未知字段，仅 Provider `config` 接受私有字段。关闭的步骤同样检查
 Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误。默认值是合同语义，
 解析器不会将它们填入原始文档。
+
+## 缺省布尔 Hook
+
+Provider 省略 `protocol` 时选择 `aw-hook/v1alpha1`，步骤省略 `operation` 或填
+`invoke`。Host 在本地校验准入，不调用 `describe`/`validate_config`。命令只接收
+标准化事件，以退出码 0 返回一个 JSON 布尔值。true 时 AW 投影步骤的全部 effects
+和可选 reason code，false 时不请求效果，关联字段由 AW 内部处理。非零退出、超时、
+stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处理。stdout 同时受
+32 字节和配置上限约束。已有显式结构化和原生协议行为不变。
+见[布尔脚本示例](../../../user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
 
 ## 原生命令与运行支持
 

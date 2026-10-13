@@ -235,7 +235,18 @@ history and allocates a new generation.
 
 ## Boolean command projection
 
-The CLI composition root provides `aw policy`, a built-in stdio Provider bridge
+Custom hooks default to `aw-hook/v1alpha1`, with `operation: invoke` omitted
+or explicit. The Host performs local admission and executes the configured
+command directly for an event, without discovery/private-validation processes.
+The command returns only a JSON boolean; the Host projects all step effects and
+its optional reason code on true, and no effects on false. It retains correlation,
+shared budgets, once-only claims and ordinary immediate process-group cleanup.
+Boolean stdout is capped at 32 bytes. Nonzero exits, incomplete input, timeout,
+oversized output and invalid booleans remain invocation failures. Package
+configuration generation now emits this form; explicitly versioned structured
+and native Providers retain their existing behavior.
+
+The CLI composition root also provides `aw policy`, a built-in stdio Provider bridge
 in the core payload. Its command reads a normalized event and returns one JSON
 boolean. Private configuration declares the matched `observe`/`block` effect;
 no security engine or rule is compiled into the service. The bridge supplies

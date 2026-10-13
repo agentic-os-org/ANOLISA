@@ -234,16 +234,32 @@ impl Event<'_> {
                     .ok_or(Error::Invalid("native callback input is missing"))?;
                 transport.native(record, input, environment)
             }
-            StepExecution::Provider { operation, effects } => {
+            StepExecution::Provider { effects, .. } | StepExecution::Hook { effects, .. } => {
                 let request_id = record.request_id.clone();
-                let Exchange { record, result } = transport.exchange(record, |budget_ms| {
-                    self.host.protocol.bind_invocation(json!({
+                let operation = if let StepExecution::Provider { operation, .. } = &step.execution {
+                    operation.as_str()
+                } else {
+                    "invoke"
+                };
+                let build = |budget_ms| {
+                    let value = json!({
                         "api_version": VERSION, "method": "invoke", "request_id": request_id,
                         "operation": operation, "config_revision": self.host.revision,
                         "budget_ms": budget_ms, "allowed_effects": effects,
                         "config": provider.config, "event": self.value,
-                    }))
-                });
+                    });
+                    if matches!(step.execution, StepExecution::Hook { .. }) {
+                        self.host.protocol.bind_hook_invocation(value)
+                    } else {
+                        self.host.protocol.bind_invocation(value)
+                    }
+                };
+                let Exchange { record, result } =
+                    if let StepExecution::Hook { reason_code, .. } = &step.execution {
+                        transport.hook(record, build, reason_code.as_deref())
+                    } else {
+                        transport.exchange(record, build)
+                    };
                 let result = result.and_then(|reply| match reply {
                     Reply::Invocation(outcome) => Ok(StepOutput::Provider(outcome)),
                     _ => Err(Failure::Protocol(aw_provider::Error::Invalid(

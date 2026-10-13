@@ -3,6 +3,7 @@
 use crate::{CallRecord, Failure, NativeOutput, ProcessOutput, StepOutput};
 use aw_exec::{CommandSpec, Limits};
 use aw_provider::{Protocol, Reply, Request};
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -79,8 +80,27 @@ impl Transport<'_> {
 
     pub fn exchange(
         &self,
+        record: CallRecord,
+        build: impl FnOnce(u64) -> Result<Request, aw_provider::Error>,
+    ) -> Exchange {
+        self.exchange_using(record, build, false, None)
+    }
+
+    pub fn hook(
+        &self,
+        record: CallRecord,
+        build: impl FnOnce(u64) -> Result<Request, aw_provider::Error>,
+        reason_code: Option<&str>,
+    ) -> Exchange {
+        self.exchange_using(record, build, true, reason_code)
+    }
+
+    fn exchange_using(
+        &self,
         mut record: CallRecord,
         build: impl FnOnce(u64) -> Result<Request, aw_provider::Error>,
+        boolean: bool,
+        reason_code: Option<&str>,
     ) -> Exchange {
         let started = Instant::now();
         let result = (|| {
@@ -88,16 +108,23 @@ impl Transport<'_> {
             let budget_ms =
                 remaining_millis(self.deadline.saturating_duration_since(Instant::now()))?;
             let request = build(budget_ms)?;
-            let input = serde_json::to_vec(request.as_value())
-                .map_err(|_| aw_provider::Error::Invalid("request encoding failed"))?;
+            let input = serde_json::to_vec(if boolean {
+                &request.as_value()["event"]
+            } else {
+                request.as_value()
+            })
+            .map_err(|_| aw_provider::Error::Invalid("request encoding failed"))?;
             check(self.deadline, self.cancelled)?;
-            let output = aw_exec::run_cooperative(
-                self.command,
-                &input,
-                self.limits,
-                self.deadline,
-                self.cancelled,
-            )?;
+            let run = if boolean {
+                aw_exec::run
+            } else {
+                aw_exec::run_cooperative
+            };
+            let mut limits = self.limits;
+            if boolean {
+                limits.stdout_bytes = limits.stdout_bytes.min(32);
+            }
+            let output = run(self.command, &input, limits, self.deadline, self.cancelled)?;
             record.process = Some(ProcessOutput {
                 status: output.status,
                 stderr: output.stderr,
@@ -111,7 +138,30 @@ impl Transport<'_> {
             if output.input_bytes_written != input.len() {
                 return Err(Failure::IncompleteInput);
             }
-            let reply = self.protocol.check_response(&request, &output.stdout);
+            let response = if boolean {
+                let matched: bool = serde_json::from_slice(&output.stdout)
+                    .map_err(|_| aw_provider::Error::Invalid("expected one JSON boolean"))?;
+                let mut effects = Vec::new();
+                if matched {
+                    for effect in request.as_value()["allowed_effects"]
+                        .as_array()
+                        .ok_or(aw_provider::Error::Invalid("missing admitted hook effects"))?
+                    {
+                        let mut effect = json!({"type": effect});
+                        if let Some(reason_code) = reason_code {
+                            effect["reason_code"] = Value::String(reason_code.to_owned());
+                        }
+                        effects.push(effect);
+                    }
+                }
+                serde_json::to_vec(&json!({"api_version":aw_provider::VERSION,
+                    "request_id":request.as_value()["request_id"],"status":"ok",
+                    "input_digest":request.as_value()["input_digest"],"effects":effects}))
+                .map_err(|_| aw_provider::Error::Invalid("hook response encoding failed"))?
+            } else {
+                output.stdout
+            };
+            let reply = self.protocol.check_response(&request, &response);
             // A late validation result cannot restore an expired or cancelled call.
             check(self.deadline, self.cancelled)?;
             Ok(reply?)

@@ -143,12 +143,12 @@ fn command_options_generate_policy_and_preserve_argument_boundaries() {
     );
     let value = f.read();
     assert_eq!(
-        value["spec"]["providers"]["command"]["config"]["argv"],
+        value["spec"]["providers"]["command"]["transport"]["argv"],
         json!(["/bin/true", literal, "--socket"])
     );
     assert_eq!(
-        value["spec"]["providers"]["command"]["config"]["on_true"]["type"],
-        "block"
+        value["spec"]["events"]["tool.before"]["steps"][0]["effects"],
+        json!(["block"])
     );
 }
 

@@ -18,6 +18,12 @@ Rust 字段模型，也不隐式填入默认值。Provider 私有对象保留有
 
 ## Provider 与原生步骤形态
 
+Provider 省略 `protocol` 时选择仅执行 invoke 的 `aw-hook/v1alpha1`。步骤省略
+`operation` 或填 `invoke`，声明命中后的 `effects`，可选填写 `reason_code`。
+命令接收标准化事件并返回一个 JSON 布尔值，Hook 的 `config` 省略或填空对象。
+Host 在本地将效果与 Adapter 能力对照，不执行发现或私有配置校验方法。true
+投影步骤的全部 effects，false 不请求效果；执行或解码错误保留步骤的失败处置。
+
 结构化 Provider 使用 `protocol: aw-provider/v1alpha1`，步骤声明 `operation`
 和 `effects`。准备阶段执行 `describe` 与 `validate_config`，再将请求效果与可信
 Adapter 能力对照。当前运行时准入工具前 `observe`/`block`、工具后 `observe`。
