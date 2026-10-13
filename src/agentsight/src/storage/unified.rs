@@ -36,8 +36,8 @@
 //! ```
 
 use agentsight_sqlite_lifecycle::{
-    CheckpointOutcome, MaintenanceStatus, SizeBasis, SizePolicy, enforce_size_policy,
-    retention_cutoff_ns,
+    CheckpointOutcome, MaintenanceReport, MaintenanceStatus, SizeBasis, SizePolicy,
+    enforce_size_policy, retention_cutoff_ns,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -383,27 +383,9 @@ impl Storage {
             || self.audit_store.checkpoint_outcome(),
         )?;
 
-        match report.status {
-            MaintenanceStatus::CheckpointBusy => log::warn!(
-                "WAL checkpoint during size-based purge was busy after deleting {} rows",
-                report.deleted_rows
-            ),
-            MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => log::error!(
-                "Size-based purge stopped with {:?}: database remains {} bytes (limit {})",
-                report.status,
-                report.after.logical_bytes,
-                limit_bytes
-            ),
-            MaintenanceStatus::TargetReached => log::info!(
-                "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
-                report.deleted_rows,
-                report.rounds,
-                report.after.logical_bytes
-            ),
-            MaintenanceStatus::Disabled
-            | MaintenanceStatus::BelowTrigger
-            | MaintenanceStatus::ReusableCapacity
-            | MaintenanceStatus::NoRows => {}
+        if let Some((level, message)) = purge_report_log(&report, policy.target_bytes, limit_bytes)
+        {
+            log::log!(level, "{}", message);
         }
         Ok(())
     }
@@ -482,11 +464,63 @@ fn purge_share(rows: u64, pct: f64) -> usize {
     ((rows as f64 * pct) as usize).max(1)
 }
 
+/// Log level for a Stalled/MaxRounds purge stop: remains within the limit is a
+/// warning (short of the 0.9x convergence goal, not a failure); remains above
+/// the limit is an error.
+fn purge_stop_level(remains_logical: u64, limit_bytes: u64) -> log::Level {
+    if remains_logical <= limit_bytes {
+        log::Level::Warn
+    } else {
+        log::Level::Error
+    }
+}
+
+/// Log level and message for a finished size-based purge, or `None` for
+/// statuses not worth logging.
+///
+/// The convergence target is 0.9x limit, so a Stalled/MaxRounds stop with
+/// remains between target and limit means "short of goal", not "over limit":
+/// print both figures instead of measuring against the limit alone.
+fn purge_report_log(
+    report: &MaintenanceReport,
+    target_bytes: u64,
+    limit_bytes: u64,
+) -> Option<(log::Level, String)> {
+    match report.status {
+        MaintenanceStatus::CheckpointBusy => Some((
+            log::Level::Warn,
+            format!(
+                "WAL checkpoint during size-based purge was busy after deleting {} rows",
+                report.deleted_rows
+            ),
+        )),
+        MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => Some((
+            purge_stop_level(report.after.logical_bytes, limit_bytes),
+            format!(
+                "Size-based purge stopped with {:?}: database remains {} bytes (target {}, limit {})",
+                report.status, report.after.logical_bytes, target_bytes, limit_bytes
+            ),
+        )),
+        MaintenanceStatus::TargetReached => Some((
+            log::Level::Info,
+            format!(
+                "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
+                report.deleted_rows, report.rounds, report.after.logical_bytes
+            ),
+        )),
+        MaintenanceStatus::Disabled
+        | MaintenanceStatus::BelowTrigger
+        | MaintenanceStatus::ReusableCapacity
+        | MaintenanceStatus::NoRows => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::analyzer::HttpRecord;
     use crate::analyzer::token::TokenRecord;
+    use agentsight_sqlite_lifecycle::SizeSnapshot;
 
     #[test]
     fn test_noop_storage_is_noop() {
@@ -821,6 +855,75 @@ mod tests {
 
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn purge_stop_level_warns_within_limit_and_errors_above() {
+        // Boundary: remains equal to the limit is still "within".
+        assert_eq!(purge_stop_level(90, 100), log::Level::Warn);
+        assert_eq!(purge_stop_level(100, 100), log::Level::Warn);
+        assert_eq!(purge_stop_level(101, 100), log::Level::Error);
+    }
+
+    fn purge_report(status: MaintenanceStatus, remains_logical: u64) -> MaintenanceReport {
+        let snapshot = |logical: u64| SizeSnapshot {
+            database_bytes: logical,
+            wal_bytes: 0,
+            shm_bytes: 0,
+            freelist_bytes: 0,
+            physical_bytes: logical,
+            logical_bytes: logical,
+        };
+        MaintenanceReport {
+            status,
+            rounds: 3,
+            deleted_rows: 42,
+            before: snapshot(200),
+            after: snapshot(remains_logical),
+        }
+    }
+
+    #[test]
+    fn purge_report_log_speaks_only_for_noteworthy_statuses() {
+        for status in [
+            MaintenanceStatus::Disabled,
+            MaintenanceStatus::BelowTrigger,
+            MaintenanceStatus::ReusableCapacity,
+            MaintenanceStatus::NoRows,
+        ] {
+            assert_eq!(purge_report_log(&purge_report(status, 100), 90, 100), None);
+        }
+        let (level, message) = purge_report_log(
+            &purge_report(MaintenanceStatus::CheckpointBusy, 150),
+            90,
+            100,
+        )
+        .expect("CheckpointBusy must log");
+        assert_eq!(level, log::Level::Warn);
+        assert!(message.contains("busy"), "message was: {message}");
+        let (level, message) =
+            purge_report_log(&purge_report(MaintenanceStatus::TargetReached, 80), 90, 100)
+                .expect("TargetReached must log");
+        assert_eq!(level, log::Level::Info);
+        assert!(message.contains("42 rows"), "message was: {message}");
+    }
+
+    #[test]
+    fn purge_report_log_grades_stalled_stop_by_limit_not_target() {
+        // Remains between target and limit: short of goal, not over limit.
+        let (level, message) =
+            purge_report_log(&purge_report(MaintenanceStatus::Stalled, 95), 90, 100)
+                .expect("Stalled must log");
+        assert_eq!(level, log::Level::Warn);
+        assert!(
+            message.contains("remains 95 bytes (target 90, limit 100)"),
+            "message was: {message}"
+        );
+        // Remains above the limit: the purge genuinely failed to enforce it.
+        let (level, _) =
+            purge_report_log(&purge_report(MaintenanceStatus::MaxRounds, 150), 90, 100)
+                .expect("MaxRounds must log");
+        assert_eq!(level, log::Level::Error);
     }
 
     /// When another connection holds a read snapshot, the truncating WAL
