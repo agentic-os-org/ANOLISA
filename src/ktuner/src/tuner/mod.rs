@@ -277,14 +277,21 @@ pub struct AppliedFix {
 /// rollback record, mirroring apply_import, and reports no original.
 pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
-    load_rollback()?;
+    // The ledger's own record of this kernel path, when there is one: a later
+    // write of an already-recorded knob keeps the FIRST `previous`
+    // (merge_entries' keep-original invariant), so the pre-write read is then
+    // an intermediate value that neither the ledger holds nor a rollback
+    // restores. Reporting it made a second `fix` of the same parameter
+    // contradict the ledger and `rollback --list` on the very knob it had just
+    // fixed — the same contradiction #6280 fixed for the first write.
+    let pristine = recorded_previous_value(&load_rollback()?, &rec.param);
     // Snapshot the twin before the write: a mutually exclusive knob disables
     // it as a kernel side effect, and only the ledger can bring the original
     // back on rollback.
     let sibling = cleared_sibling_entry(&rec.param);
     let (previous, outcome) = apply_recordable(rec)?;
     let mut batch = Vec::new();
-    if let Some(recorded) = &previous {
+    if let Some(recorded) = pristine.as_ref().or(previous.as_ref()) {
         let mut applied = rec_with_effective(rec, &outcome);
         applied.current_value = recorded.clone();
         batch.push(applied);
@@ -300,10 +307,25 @@ pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
         boot_unit_enabled = persist_from_rollback(&guard)?;
     }
     Ok(AppliedFix {
-        recorded_previous: previous,
+        recorded_previous: pristine.or(previous),
         outcome,
         boot_unit_enabled,
     })
+}
+
+/// The ledger's own record of `param`'s kernel file, for the original a
+/// rollback restores, or `None` when the ledger does not record it yet.
+///
+/// Keyed exactly like [`merge_entries`] keys a record — the canonicalized
+/// path, so the alias spellings of one file resolve to the same entry — so the
+/// answer is the value the record keeps: merge refreshes `applied`/`category`
+/// on the latest write and never the original `previous`.
+fn recorded_previous_value(data: &RollbackData, param: &str) -> Option<String> {
+    let identity = canonicalize_path(&param_to_path(param));
+    data.entries
+        .values()
+        .find(|entry| canonicalize_path(&entry.path) == identity)
+        .map(|entry| entry.previous.clone())
 }
 
 /// Render an option-list reading, with whitespace-separated fields collapsed.
@@ -5525,6 +5547,46 @@ mod tests {
         assert_eq!(e.previous, "10", "pristine previous must survive re-tuning");
         assert_eq!(e.applied, "30", "applied must refresh to the latest");
         assert_eq!(e.path, "/proc/sys/vm/swappiness");
+    }
+
+    /// `fix` reports its original through `apply_one`, which must answer with
+    /// the record the merge above keeps: the pristine `previous`, not a fresh
+    /// read of the knob. Once a parameter is recorded, the pre-write read is an
+    /// intermediate value the ledger does not hold and a rollback does not
+    /// restore, so reporting it made a second `fix` of one knob contradict the
+    /// ledger and `rollback --list` on the very knob it had just fixed — the
+    /// contradiction #6280 fixed for the first write only.
+    #[test]
+    fn the_recorded_original_wins_over_a_reread() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "vm.swappiness".to_string(),
+            RollbackEntry {
+                previous: "10".to_string(),
+                applied: "30".to_string(),
+                path: "/proc/sys/vm/swappiness".to_string(),
+                category: None,
+            },
+        );
+        let data = RollbackData {
+            version: 1,
+            entries,
+        };
+        assert_eq!(
+            recorded_previous_value(&data, "vm.swappiness").as_deref(),
+            Some("10"),
+            "the ledger's pristine previous is what rollback restores"
+        );
+        // The alias spelling resolves to the same record: merge_entries keys
+        // on the canonicalized path, so the reported original must come from
+        // the record that write refreshes.
+        assert_eq!(
+            recorded_previous_value(&data, "vm/swappiness").as_deref(),
+            Some("10")
+        );
+        // A knob the ledger does not record yet has no recorded original: the
+        // caller's under-lock pre-write read is then the value to report.
+        assert_eq!(recorded_previous_value(&data, "vm.dirty_ratio"), None);
     }
 
     /// Acquire the exclusive lock on `fd`, retrying while it is briefly

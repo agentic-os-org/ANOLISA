@@ -52,6 +52,23 @@ fn body() {
     assert_eq!(ledger["entries"][PARAM]["previous"], "1024");
     assert_eq!(ledger["entries"][PARAM]["applied"], "65535");
 
+    // A second fix of the same knob must report the same original: the ledger
+    // keeps the FIRST previous (merge_entries' keep-original invariant), so the
+    // value read before the second write is an intermediate one that neither
+    // the ledger holds nor a rollback restores. Reporting it contradicted the
+    // ledger and `rollback --list` on the very knob just fixed.
+    fs::write(LIVE, "4096").unwrap();
+    let again = tuner::apply_one(&stale_rec()).unwrap();
+    assert_eq!(
+        again.recorded_previous.as_deref(),
+        Some("1024"),
+        "a re-fix reports the ledger's pristine original, not the re-read value"
+    );
+    let ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(LEDGER).unwrap()).unwrap();
+    assert_eq!(ledger["entries"][PARAM]["previous"], "1024");
+    assert_eq!(ledger["entries"][PARAM]["applied"], "65535");
+
     // And the rollback brings the under-lock original back, not the stale one.
     assert!(tuner::rollback_quiet().unwrap().is_complete());
     assert_eq!(fs::read_to_string(LIVE).unwrap(), "1024");
