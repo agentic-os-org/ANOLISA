@@ -143,6 +143,23 @@ impl ParsedSseEvent {
                 if Self::is_dashscope_native_done(&v) {
                     return true;
                 }
+                // Gemini style: no sentinel frame — the terminal chunk is the
+                // one whose candidates carry a non-empty finishReason. Middle
+                // chunks omit the field or send an explicit null, both of
+                // which must keep the stream open.
+                if v.get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate
+                                .get("finishReason")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|reason| !reason.is_empty())
+                        })
+                    })
+                {
+                    return true;
+                }
             }
         }
         false
@@ -888,6 +905,35 @@ mod tests {
         container.events.push(SSEEvent::new("e2"));
         let traces = container.to_chrome_trace_events(1, 1, 0);
         assert_eq!(traces.len(), 2);
+    }
+
+    #[test]
+    fn test_is_done_gemini_terminal_finish_reason() {
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            parsed.is_done(),
+            "a chunk whose candidate carries a non-empty finishReason is the Gemini terminator"
+        );
+    }
+
+    #[test]
+    fn test_is_done_gemini_middle_chunks_keep_stream_open() {
+        // No finishReason field at all.
+        let data =
+            br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(!parsed.is_done());
+        // An explicit null finishReason is a middle chunk, not a terminator.
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"finishReason":null,"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            !parsed.is_done(),
+            "explicit null finishReason must keep the stream open"
+        );
     }
 
     #[test]

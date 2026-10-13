@@ -579,6 +579,9 @@ impl GenAIBuilder {
             if let Some(merged) = Self::merge_anthropic_sse_chunks(chunks) {
                 return merged;
             }
+            if let Some(merged) = Self::merge_gemini_sse_chunks(chunks) {
+                return merged;
+            }
         }
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
@@ -967,6 +970,89 @@ impl GenAIBuilder {
             }
         }
 
+        Some((parts, finish_reason))
+    }
+
+    /// Merge Gemini `streamGenerateContent` SSE chunks into parts.
+    ///
+    /// Each chunk is a standalone generation payload — there is no sentinel
+    /// frame and no `choices` array. Text streams as
+    /// `candidates[].content.parts[].text`, calls as whole
+    /// `parts[].functionCall` objects (not deltas), thinking as parts marked
+    /// `thought: true`, and only the terminal chunk carries a non-empty
+    /// `candidates[].finishReason`. `usageMetadata` rides the terminal chunk
+    /// but is a token concern, not a message part. Returns `None` when no
+    /// chunk is Gemini-shaped so the remaining mergers still run.
+    pub(super) fn merge_gemini_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut tool_calls: Vec<MessagePart> = Vec::new();
+        let mut finish_reason: Option<String> = None;
+        let mut saw_gemini = false;
+
+        for chunk in chunks {
+            let Some(candidates) = chunk
+                .get("candidates")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for candidate in candidates {
+                if let Some(reason) = candidate
+                    .get("finishReason")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    saw_gemini = true;
+                    finish_reason = Some(reason.to_string());
+                }
+                let Some(parts) = candidate
+                    .get("content")
+                    .and_then(|c| c.get("parts"))
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        saw_gemini = true;
+                        if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
+                            reasoning_buf.push_str(text);
+                        } else {
+                            text_buf.push_str(text);
+                        }
+                    }
+                    if let Some(call) = part.get("functionCall") {
+                        saw_gemini = true;
+                        tool_calls.push(MessagePart::ToolCall {
+                            id: None,
+                            name: call
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            arguments: call.get("args").cloned(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if !saw_gemini {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !reasoning_buf.is_empty() {
+            parts.push(MessagePart::Reasoning {
+                content: reasoning_buf,
+            });
+        }
+        if !text_buf.is_empty() {
+            parts.push(MessagePart::Text { content: text_buf });
+        }
+        parts.extend(tool_calls);
         Some((parts, finish_reason))
     }
 
@@ -1943,6 +2029,52 @@ mod tests {
             MessagePart::ToolCall { arguments, .. }
                 if arguments == &Some(serde_json::json!({"city": "Paris"}))
         ));
+    }
+
+    /// A Gemini `streamGenerateContent` body carries no `choices` and no
+    /// sentinel frame: each chunk is a standalone generation payload. The
+    /// merger must merge text parts across chunks, map whole `functionCall`
+    /// parts to tool calls, and take the terminal chunk's finishReason —
+    /// previously the body fell through every merger and the call persisted
+    /// with no output at all.
+    #[test]
+    fn test_merge_gemini_sse_chunks_text_calls_and_finish() {
+        let body = r#"[
+            {"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}]},
+            {"candidates":[{"content":{"role":"model","parts":[{"text":"lo"},{"functionCall":{"name":"read_file","args":{"path":"/tmp/a.md"}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "hello"));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCall { name, arguments, .. }
+                if name == "read_file" && arguments == &Some(serde_json::json!({"path": "/tmp/a.md"}))
+        ));
+        assert_eq!(finish.as_deref(), Some("STOP"));
+    }
+
+    /// Gemini thinking models mark reasoning parts with `thought: true`;
+    /// those must become Reasoning parts, not body text. An explicit null
+    /// finishReason on a middle chunk must not be mistaken for a terminator.
+    #[test]
+    fn test_merge_gemini_sse_chunks_thought_parts_become_reasoning() {
+        let body = r#"[
+            {"candidates":[{"content":{"role":"model","parts":[{"text":"thinking aloud","thought":true}]},"finishReason":null,"index":0}]},
+            {"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP","index":0}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content } if content == "thinking aloud")
+        );
+        assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+        assert_eq!(finish.as_deref(), Some("STOP"));
+    }
+
+    /// Non-Gemini shapes must not be claimed by the Gemini merger.
+    #[test]
+    fn test_merge_gemini_sse_chunks_ignores_foreign_shapes() {
+        let chunks = vec![serde_json::json!({"output": {"text": "dashscope"}})];
+        assert!(GenAIBuilder::merge_gemini_sse_chunks(&chunks).is_none());
     }
 
     /// Mixed protocol bodies cannot happen (one stream is one protocol), but a
