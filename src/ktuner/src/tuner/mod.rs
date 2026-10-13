@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
@@ -1078,7 +1078,21 @@ fn lock_ledger_with(path: &str, operation: i32) -> Result<LedgerLock> {
     let dir = Path::new(path)
         .parent()
         .context("rollback path has no parent")?;
-    fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
+    // The ledger is 0600 inside a 0700 root-owned directory (README), and the
+    // directory is created here — on every command that takes the lock, not
+    // only on a save. Creating it with the umask default instead left
+    // /var/lib/ktuner world-listable (0755) for good on any host whose first
+    // lock-taking command never merged: `rollback` with no ledger, a refused
+    // import, a save that failed after the live write. `merge_rollback_locked`
+    // already re-hardens an existing directory; a mode that only that path
+    // applies is not enough. DirBuilder (not `set_permissions`) so a directory
+    // that already exists is left untouched: `rollback --list` is documented
+    // read-only and must not chmod what it did not create.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .context("创建 rollback 目录失败")?;
     let lock_path = format!("{path}.lock");
     // 0600 like the ledger itself; contents never matter, only the flock on
     // the descriptor, so an existing file from an earlier run is fine.
@@ -5584,6 +5598,58 @@ mod tests {
         unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_UN) };
         drop(second);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The ledger directory is created by the lock, not by the save, and it is
+    /// documented as 0700 root-owned (README: "the ledger is 0600 under a 0700
+    /// root-owned dir"). A first `rollback` on a fresh host takes the lock,
+    /// finds no ledger and fails; the directory it created stays behind, so
+    /// the mode must be set on creation — a mode applied only by a successful
+    /// merge left it at the umask's 0755.
+    #[test]
+    fn test_ledger_lock_creates_the_directory_private() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ledger_dir_mode_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        let ledger = dir.join("varlib/rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        let mode = fs::metadata(dir.join("varlib"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        drop(guard);
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(mode, 0o700, "the ledger directory must be created 0700");
+    }
+
+    /// The create-only mode above is deliberate: `rollback --list` is
+    /// documented read-only ("nothing is written or deleted"), so a shared
+    /// acquisition must not chmod a directory it did not create. A save
+    /// (`merge_rollback_locked`) still re-hardens an existing one.
+    #[test]
+    fn test_ledger_lock_leaves_an_existing_directory_mode_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ledger_dir_keep_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        let ledger = dir.join("varlib/rollback.json");
+        fs::create_dir_all(dir.join("varlib")).unwrap();
+        fs::set_permissions(dir.join("varlib"), fs::Permissions::from_mode(0o755)).unwrap();
+        let guard = lock_ledger_shared_at(ledger.to_str().unwrap()).unwrap();
+        let mode = fs::metadata(dir.join("varlib"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        drop(guard);
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(mode, 0o755, "a shared lock must not chmod the directory");
     }
 
     /// A held-over second lock is what the runners' lagging flock release
