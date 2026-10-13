@@ -35,6 +35,9 @@ use crate::state_store::StateStore;
 /// bind the API socket, and run the accept loop until SIGTERM/SIGINT.
 pub async fn run(config_path: &Path) -> Result<()> {
     let loaded = load_daemon_config(config_path)?;
+    // The shipped example config documents daemon.log_level; apply it now
+    // that the value is known (RUST_LOG, when set, still wins).
+    crate::apply_configured_log_level(&loaded.config.daemon.log_level);
     run_loaded_config(loaded).await
 }
 
