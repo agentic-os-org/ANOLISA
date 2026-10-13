@@ -434,8 +434,23 @@ fn read_kernel_version() -> Result<String> {
 }
 
 fn read_os_distro() -> String {
-    fs::read_to_string("/etc/os-release")
-        .map_or_else(|_| "Unknown".to_string(), |c| parse_os_release(&c))
+    read_os_distro_from(&["/etc/os-release", "/usr/lib/os-release"])
+}
+
+/// The distro from the first os-release file that exists, in os-release(5)
+/// order: `/etc/os-release` takes precedence and is used exclusively when it
+/// exists; `/usr/lib/os-release`, the vendor tree's copy, is read only when the
+/// former is missing. A file that exists but cannot be read is not a reason to
+/// read the other one, so it answers "Unknown".
+fn read_os_distro_from(paths: &[&str]) -> String {
+    for path in paths {
+        match fs::read_to_string(path) {
+            Ok(content) => return parse_os_release(&content),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => break,
+        }
+    }
+    "Unknown".to_string()
 }
 
 /// Pure /etc/os-release parsing: PRETTY_NAME wins; otherwise NAME + VERSION;
@@ -2086,6 +2101,34 @@ mod tests {
         // Empty or unrelated content.
         assert_eq!(parse_os_release(""), "Unknown");
         assert_eq!(parse_os_release("ID=alinux\nHOME_URL=\"x\"\n"), "Unknown");
+    }
+
+    #[test]
+    fn os_distro_falls_back_to_the_vendor_os_release() {
+        // os-release(5): read /etc/os-release when it exists, otherwise
+        // /usr/lib/os-release — never both. Minimal images often ship only the
+        // vendor copy.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_os_release_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let etc = dir.join("etc-os-release");
+        let usr_lib = dir.join("usr-lib-os-release");
+        fs::write(&usr_lib, "PRETTY_NAME=\"Vendor 9\"\n").unwrap();
+        let paths = [etc.to_str().unwrap(), usr_lib.to_str().unwrap()];
+
+        assert_eq!(read_os_distro_from(&paths), "Vendor 9");
+
+        // The /etc file takes precedence whenever it exists.
+        fs::write(&etc, "PRETTY_NAME=\"Local 1\"\n").unwrap();
+        assert_eq!(read_os_distro_from(&paths), "Local 1");
+
+        fs::remove_file(&usr_lib).unwrap();
+        fs::remove_file(&etc).unwrap();
+        assert_eq!(read_os_distro_from(&paths), "Unknown");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
