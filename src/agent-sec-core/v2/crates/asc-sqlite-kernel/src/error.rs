@@ -215,9 +215,12 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_path_has_a_stable_error_type() {
+    fn unsafe_path_has_a_stable_error_type_and_classifies_as_none_of_the_soft_kinds() {
         let err = KernelError::UnsafePath(PathBuf::from("/tmp/database.db"));
         assert_eq!(err.error_type(), "UnsafePath");
+        assert!(!is_corruption(&err));
+        assert!(!is_busy(&err));
+        assert!(!is_schema(&err));
     }
 
     #[test]
