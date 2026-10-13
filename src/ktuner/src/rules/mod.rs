@@ -14319,6 +14319,26 @@ mod tests {
         }
     }
 
+    /// The two sibling switches the rule consults before it may report a
+    /// hardening gap, read exactly the way the rule reads them: a failed read
+    /// fails open (it is not evidence that the switch is off).
+    ///
+    /// `bpf_jit_enable == 0` leaves every program's `jit_requested` false, so
+    /// nothing can be blinded; a non-zero `unprivileged_bpf_disabled` leaves
+    /// only `bpf_capable()` loaders, and hardening level 1 does not blind
+    /// those. Either switch voids the advice, which is why the live assertion
+    /// below has to model them.
+    fn bpf_jit_harden_is_voided_by_a_switch() -> bool {
+        let switch = |path: &str| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|raw| raw.trim().to_string())
+        };
+        switch("/proc/sys/net/core/bpf_jit_enable").as_deref() == Some("0")
+            || switch("/proc/sys/kernel/unprivileged_bpf_disabled")
+                .is_some_and(|value| value != "0")
+    }
+
     #[test]
     fn test_bpf_jit_harden() {
         let info = make_test_info();
@@ -14330,9 +14350,21 @@ mod tests {
         // so an unprivileged run cannot read it at all. Distinguish a
         // readable 0 (a finding) from a failed read (no value, no finding) —
         // read_sysctl_u64 maps the failure to 0 and cannot tell them apart.
+        //
+        // A readable 0 is a finding only while the rule's two sibling gates
+        // leave the advice meaningful: with the JIT off or unprivileged BPF
+        // denied the write would change nothing and the rule stays silent by
+        // design (#6829), so the expectation has to follow. Without them this
+        // assertion fails on every stock Ubuntu 24.04 host, where
+        // `kernel.unprivileged_bpf_disabled` defaults to 2.
+        let voided = bpf_jit_harden_is_voided_by_a_switch();
         match std::fs::read_to_string("/proc/sys/net/core/bpf_jit_harden") {
             Ok(raw) => {
-                assert_eq!(triggered, raw.trim() == "0", "readable value {raw:?}");
+                assert_eq!(
+                    triggered,
+                    raw.trim() == "0" && !voided,
+                    "readable value {raw:?}, voided by a sibling switch: {voided}"
+                );
                 if triggered {
                     assert_eq!(recs.last().unwrap().category, Category::Security);
                 }
