@@ -454,19 +454,19 @@ fn read_os_distro_from(paths: &[&str]) -> String {
 }
 
 /// Pure /etc/os-release parsing: PRETTY_NAME wins; otherwise NAME + VERSION;
-/// quotes are stripped; anything else yields "Unknown" (the value shown in
-/// every check output).
+/// values are unquoted the way [`os_release_value`] reads them; anything else
+/// yields "Unknown" (the value shown in every check output).
 fn parse_os_release(content: &str) -> String {
     let mut pretty_name = None;
     let mut name = None;
     let mut version = None;
     for line in content.lines() {
         if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
-            pretty_name = Some(val.trim_matches('"').to_string());
+            pretty_name = Some(os_release_value(val));
         } else if let Some(val) = line.strip_prefix("NAME=") {
-            name = Some(val.trim_matches('"').to_string());
+            name = Some(os_release_value(val));
         } else if let Some(val) = line.strip_prefix("VERSION=") {
-            version = Some(val.trim_matches('"').to_string());
+            version = Some(os_release_value(val));
         }
     }
     if let Some(pn) = pretty_name {
@@ -476,6 +476,46 @@ fn parse_os_release(content: &str) -> String {
         return format!("{n} {v}");
     }
     "Unknown".to_string()
+}
+
+/// One os-release value, read the way os-release(5) writes it: a value may be
+/// enclosed in double or single quotes, and the shell special characters
+/// (`$`, quotes, backslash, backtick) are escaped with a backslash, "following
+/// shell style". Inside double quotes a backslash escapes only those four
+/// characters and is literal before anything else; single quotes take every
+/// byte literally; an unquoted value drops the backslash of every escape.
+fn os_release_value(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(inner) = raw
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return inner.to_string();
+    }
+    let (body, quoted) = match raw
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        Some(inner) => (inner, true),
+        None => (raw, false),
+    };
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(next) if !quoted || matches!(next, '$' | '"' | '\\' | '`') => out.push(next),
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn read_cpu_info() -> Result<(String, usize)> {
@@ -2101,6 +2141,31 @@ mod tests {
         // Empty or unrelated content.
         assert_eq!(parse_os_release(""), "Unknown");
         assert_eq!(parse_os_release("ID=alinux\nHOME_URL=\"x\"\n"), "Unknown");
+    }
+
+    #[test]
+    fn parse_os_release_reads_quotes_and_escapes_like_the_shell() {
+        // os-release(5): values may be enclosed in double or single quotes,
+        // and "$", quotes, backslash and backtick are escaped with a
+        // backslash following shell style.
+        assert_eq!(parse_os_release("PRETTY_NAME='Alinux 3'\n"), "Alinux 3");
+        assert_eq!(
+            parse_os_release("PRETTY_NAME=\"Acme \\\"Edge\\\" 2\"\n"),
+            "Acme \"Edge\" 2"
+        );
+        assert_eq!(
+            parse_os_release("PRETTY_NAME=\"Cost \\$0 \\\\ \\`x\\`\"\n"),
+            "Cost $0 \\ `x`"
+        );
+        // A backslash before any other character is literal inside double
+        // quotes, and single quotes take everything literally.
+        assert_eq!(parse_os_release("PRETTY_NAME=\"a\\nb\"\n"), "a\\nb");
+        assert_eq!(parse_os_release("PRETTY_NAME='a\\$b'\n"), "a\\$b");
+        // Unquoted values are optional for plain words.
+        assert_eq!(
+            parse_os_release("NAME=Alinux\nVERSION='3 (Hupo)'\n"),
+            "Alinux 3 (Hupo)"
+        );
     }
 
     #[test]
