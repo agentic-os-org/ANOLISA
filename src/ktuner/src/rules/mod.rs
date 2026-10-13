@@ -1396,14 +1396,25 @@ fn is_qdisc_module_available(module: &str) -> bool {
     if std::path::Path::new(&format!("/sys/module/{module}")).exists() {
         return true;
     }
+    running_module_tree().is_some_and(|tree| module_in_tree(&tree, "kernel/net/sched", module))
+}
+
+/// The running kernel's module tree, `/lib/modules/<release>`, or `None`
+/// inside a container: the container's `/lib/modules` (if any) is not the
+/// host kernel's, so nothing under it says what that kernel can load.
+fn running_module_tree() -> Option<std::path::PathBuf> {
     if crate::detect::detect_runtime_env() == crate::detect::RuntimeEnv::Container {
-        return false;
+        return None;
     }
     let uname = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
-    let sched_dir = std::path::Path::new("/lib/modules")
-        .join(uname.trim())
-        .join("kernel/net/sched");
-    qdisc_module_in(&sched_dir, module)
+    Some(std::path::Path::new("/lib/modules").join(uname.trim()))
+}
+
+/// Whether the module tree `tree` ships `module` under `subdir` (e.g.
+/// `kernel/net/sched`), so the kernel can load it on demand. Pure filesystem
+/// lookup over a caller-supplied tree so tests need no real `/lib/modules`.
+fn module_in_tree(tree: &std::path::Path, subdir: &str, module: &str) -> bool {
+    qdisc_module_in(&tree.join(subdir), module)
 }
 
 /// Whether `module` is present in a `kernel/net/sched`-style directory under
