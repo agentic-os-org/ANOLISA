@@ -473,6 +473,17 @@ pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
     if is_forbidden_param(param) {
         anyhow::bail!("拒绝写入可执行代码的内核参数 {param}（core_pattern / modprobe 等）");
     }
+    // The structural guard belongs here for the same reason the deny-list does:
+    // this is the choke point every live write routes through, while
+    // `is_safe_param` was enforced only by `apply_import` — its one caller.
+    // `apply` / `apply_one` / `apply_quiet` take a caller-built Recommendation,
+    // and `param_to_path` translates `..` segments straight into the path it
+    // hands to `fs::write`, so a name like
+    // `net/ipv4/conf/../../../../../../tmp/x` wrote outside /proc/sys as the
+    // caller (root under sudo) instead of being refused.
+    if !is_safe_param(param) {
+        anyhow::bail!("拒绝写入非法参数名 {param}（路径穿越或空路径段）");
+    }
     // The runtime-dangerous policy tune and fix enforce (tune filters the
     // knob out of the plan and names it in would_skip; fix refuses with the
     // advice to persist instead) holds here too: a library import routes
@@ -4115,6 +4126,52 @@ mod tests {
         assert!(!is_safe_param("/etc/passwd"));
         assert!(!is_safe_param(""));
         assert!(!is_safe_param(".."));
+    }
+
+    #[test]
+    fn write_and_verify_rejects_an_unsafe_param() {
+        // The choke point every live write routes through must enforce the
+        // structural guard, not only the callers that remember it: `apply`,
+        // `apply_one` and `apply_quiet` take a caller-built Recommendation, and
+        // the conf/neigh branch of `param_to_path` keeps the interface segment
+        // verbatim by design, so a `..` segment there survives into the path
+        // `fs::write` gets. `apply_import` is the only caller that checks — this
+        // one has to hold on its own.
+        let dir = std::env::temp_dir().join(format!("ktuner-write-unsafe-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "original").unwrap();
+        // /proc/sys/net/ipv4/conf/../../../../../<dir>/victim resolves outside
+        // /proc/sys entirely (five components back from conf reach the root).
+        let param = format!("net/ipv4/conf/../../../../..{}", victim.display());
+        assert!(
+            !is_safe_param(&param),
+            "the name validator already rejects this spelling"
+        );
+        let error = write_and_verify(&param, "pwned")
+            .expect_err("an unsafe name must not reach the filesystem");
+        assert!(
+            error.to_string().contains("拒绝写入非法参数名"),
+            "the refusal must name the reason: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "original",
+            "the write must not have escaped /proc/sys"
+        );
+        // The refusal is the name guard's, not a blanket one: a legitimate
+        // spelling still reaches path resolution. The knob is deliberately
+        // nonexistent so the check holds unprivileged and never touches a live
+        // sysctl — a real `vm.swappiness` write needs root and would mutate
+        // the host running the tests.
+        let err = write_and_verify("vm.ktuner_no_such_param", "1").unwrap_err();
+        assert!(
+            !err.to_string().contains("拒绝写入非法参数名"),
+            "an ordinary name must not hit the name guard: {err}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
