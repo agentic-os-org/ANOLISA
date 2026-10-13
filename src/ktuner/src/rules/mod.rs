@@ -9418,13 +9418,25 @@ mod tests {
     }
 
     #[test]
-    fn test_vfs_cache_pressure_with_mongod_and_mariadbd() {
-        // The vfs_cache_pressure gate forgot mongod (in every sibling db list)
-        // and mariadbd (added to the sibling gates by 73bdd5835/51913a79b but
-        // missed here). The valkey sweep of 0b55cba16 missed this gate too,
-        // although valkey-server is the Redis 7.2.4 fork in the same cache
-        // family. All three must trigger the recommendation; a build job must not.
-        for name in ["mongod", "mariadbd", "valkey-server"] {
+    fn test_vfs_cache_pressure_covers_the_whole_service_gate() {
+        // The whole gate list, not only the names a fix touched: the gate
+        // forgot mongod (in every sibling db list), mariadbd (added to the
+        // sibling gates by 73bdd5835/51913a79b but missed here), and
+        // valkey-server (the Redis 7.2.4 fork the sweep of 0b55cba16 added
+        // everywhere else). Every service the rule accepts must trigger the
+        // recommendation, and a build job must not.
+        for name in [
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "clickhouse",
+            "redis-server",
+            "valkey-server",
+            "memcached",
+            "etcd",
+            "elasticsearch",
+        ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
                 name: name.to_string(),
