@@ -503,6 +503,14 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // installation guide's pre-install step of the same name): khugepaged's
     // collapse/split stalls are exactly the latency spikes this rule heads
     // off, so a host running it must not be left on always.
+    //
+    // tidb-server/tikv-server and zookeeper/consul are the remaining members of
+    // the two classes `classify` already puts on the latency side - OLTP
+    // databases and KV stores (IoLatency), and the in-memory coordination-KV
+    // family etcd belongs to (MemoryIntensive). The sibling rules that share
+    // this gate (eval_swappiness, eval_dirty_ratio) take the classification
+    // itself, so those hosts were advised to lower swappiness and dirty_ratio
+    // while this list - the only place THP's stalls are gated - stayed silent.
     let is_latency_sensitive = info.has_process("redis-server")
         // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
         // `valkey-server` binary with the same event-loop, memory-resident
@@ -516,7 +524,15 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("oracle")
-        || info.has_process("etcd");
+        || info.has_process("etcd")
+        // TiDB is an OLTP database and TiKV its distributed KV store; both are
+        // services the engine already detects and classifies as IoLatency.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
+        // ZooKeeper and Consul are the coordination-KV classmates of etcd
+        // `classify` groups with it.
+        || info.has_process("zookeeper")
+        || info.has_process("consul");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
         recs.push(Recommendation {
@@ -9417,6 +9433,51 @@ mod tests {
         assert!(
             recs.iter().all(|r| !r.param.contains("hugepage")),
             "a streaming workload is not latency-sensitive"
+        );
+    }
+
+    #[test]
+    fn test_thp_covers_the_classifier_latency_classes() {
+        // The gate and `classify` are two definitions of one thing: the
+        // workloads whose lookup stalls THP's collapse/split cause. classify
+        // calls TiDB and TiKV (an OLTP database and its distributed KV store)
+        // IoLatency, and ZooKeeper and Consul (the in-memory coordination-KV
+        // family it groups with etcd) MemoryIntensive; the sibling rules that
+        // share this gate (eval_swappiness, eval_dirty_ratio) take that verdict
+        // directly, so those hosts were told to lower swappiness and
+        // dirty_ratio while this list — the only place THP is gated — stayed
+        // silent.
+        for name in ["tidb-server", "tikv-server", "zookeeper", "consul"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            assert!(
+                matches!(
+                    crate::profile::classify(&info),
+                    crate::profile::WorkloadType::IoLatency
+                        | crate::profile::WorkloadType::MemoryIntensive
+                ),
+                "{name} must be a latency workload for the classifier"
+            );
+            let recs = evaluate(&info).unwrap().recommendations;
+            let rec = recs
+                .iter()
+                .find(|r| r.param.contains("hugepage"))
+                .unwrap_or_else(|| panic!("{name} must get the THP recommendation"));
+            assert_eq!(rec.recommended_value, "madvise");
+        }
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "make".to_string(),
+        }];
+        assert!(
+            evaluate(&info)
+                .unwrap()
+                .recommendations
+                .iter()
+                .all(|r| !r.param.contains("hugepage")),
+            "a build job is neither a database nor a cache"
         );
     }
 
