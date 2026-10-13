@@ -186,6 +186,14 @@ test('roundStats: a round with no content reports empty stats', () => {
   assert.equal(stats.firstTs, undefined);
 });
 
+test('roundStats: an empty user message falls back to visible agent content', () => {
+  const rounds = groupIntoRounds(deepFreeze([
+    step(1, 'user', { message: '' }),
+    step(2, 'agent', { message: 'agent detail' }),
+  ]), t);
+  assert.equal(roundStats(rounds[0]).preview, 'agent detail');
+});
+
 // ─── 3. Compiled production viewer integration ───────────────────────────────
 //
 // The REAL AtifViewerPage is transpiled with the dashboard's own babel
