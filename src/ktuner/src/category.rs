@@ -115,6 +115,14 @@ pub fn validate_category(cat: &str) -> anyhow::Result<()> {
 /// [`Recommendation`] is what lets a stored record ask the same question: the
 /// rollback ledger keeps exactly these two facts per entry, and the answer
 /// must be the one the same parameter would get from the live plan.
+///
+/// Every value the vocabulary accepts has an arm of its own (the aliases of
+/// one category share theirs, and [`validate_category`] gates the set), so the
+/// fallback only ever answers for a value that names no category at all — and
+/// nothing belongs to a category that does not exist. It answered `true` once:
+/// an unrecognized value then kept every entry, and the rollback selection
+/// runs on this same predicate, so a typo selected the whole categorized
+/// ledger instead of nothing.
 pub fn category_matches(param: &str, category: &Category, cat_lower: &str) -> bool {
     match cat_lower {
         "network" | "net" | "网络" => {
@@ -129,7 +137,7 @@ pub fn category_matches(param: &str, category: &Category, cat_lower: &str) -> bo
         }
         "cpu" | "调度" => *category != Category::Security && param_subcategory(param) == "cpu",
         "security" | "sec" | "安全" => *category == Category::Security,
-        _ => true,
+        _ => false,
     }
 }
 
@@ -458,6 +466,51 @@ mod tests {
         );
         assert_eq!(
             filter_by_categories(vec![security], &["security".to_string()]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_category_matches_nothing() {
+        // Every value the vocabulary accepts has its own arm above
+        // (`validate_category` gates it), so the fallback only ever answers
+        // for a value that names no category at all — and a value that names
+        // no category holds no entry. The fallback used to answer `true`: an
+        // unknown category kept every entry, and the rollback selection runs
+        // on this same predicate, so a typo selected (and restored) every
+        // categorized ledger entry instead of none.
+        let performance = rec("vm.swappiness");
+        for cat in ["garbage", "", "netwok", "sec urity", "网络 "] {
+            assert!(
+                !category_matches(&performance.param, &performance.category, cat),
+                "{cat:?} names no category, so nothing belongs to it"
+            );
+            assert!(
+                !matches_any_category(
+                    &performance.param,
+                    &performance.category,
+                    &[cat.to_string()]
+                ),
+                "{cat:?} in a union selects nothing"
+            );
+            assert!(
+                filter_by_categories(vec![performance.clone()], &[cat.to_string()]).is_empty(),
+                "{cat:?} keeps no entry"
+            );
+            assert!(
+                filter_by_category(vec![performance.clone()], cat).is_empty(),
+                "{cat:?} keeps no entry"
+            );
+        }
+        // The fallback carries no documented value: a category the validator
+        // accepts keeps its own arm's answer, unchanged.
+        assert!(category_matches(
+            &performance.param,
+            &performance.category,
+            "mem"
+        ));
+        assert_eq!(
+            filter_by_categories(vec![performance], &["mem".to_string()]).len(),
             1
         );
     }
