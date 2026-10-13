@@ -17,8 +17,9 @@
 //! `OpenOptions::append`, and `query` is a sequential scan with simple
 //! filters. Rotation, indexing, and follow-mode are future work.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -296,7 +297,7 @@ impl CentralLog {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|source| CentralLogError::Io {
+            create_install_dir_all(parent).map_err(|source| CentralLogError::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -592,6 +593,7 @@ fn record_matches(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     fn operation_record(
         started_at: &str,

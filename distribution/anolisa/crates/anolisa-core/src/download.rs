@@ -9,6 +9,7 @@
 //! same URL cannot share a temporary writer and a partial fetch never
 //! leaves a half-written entry visible at the cached path.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -151,7 +152,7 @@ impl DownloadCache {
             .parent()
             .expect("cached_path always has a parent under <root>/downloads")
             .to_path_buf();
-        fs::create_dir_all(&downloads_dir).map_err(|source| DownloadError::Io {
+        create_install_dir_all(&downloads_dir).map_err(|source| DownloadError::Io {
             path: downloads_dir.clone(),
             source,
         })?;
@@ -237,7 +238,7 @@ impl CacheEntryLock {
         let thread_lock = InProcessEntryLock::acquire(lock_path.to_path_buf());
 
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| DownloadError::Io {
+            create_install_dir_all(parent).map_err(|source| DownloadError::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;

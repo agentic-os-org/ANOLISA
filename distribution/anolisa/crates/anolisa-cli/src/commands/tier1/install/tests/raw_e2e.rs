@@ -24,6 +24,107 @@ const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
 const JSON_END: &str = "ANOLISA_TEST_JSON_END";
 
 #[test]
+fn raw_install_directories_ignore_restrictive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "ANOLISA_RAW_INSTALL_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        struct ChildGuard(Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let module = module_path!().split_once("::").expect("test module").1;
+        let test = format!("{module}::raw_install_directories_ignore_restrictive_umask");
+        let mut child = ChildGuard(
+            Command::new("sh")
+                .args(["-c", "umask 077; exec \"$@\"", "raw-install-umask"])
+                .arg(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .spawn()
+                .expect("isolated umask test"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.0.try_wait().expect("wait for umask test") {
+                assert!(status.success(), "umask test failed: {status}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "umask test exceeded 30 seconds");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn assert_directory_modes(path: &std::path::Path) {
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "{} must be traversable under umask 077",
+            path.display()
+        );
+        for entry in std::fs::read_dir(path).expect("installed directory") {
+            let entry = entry.expect("directory entry");
+            if entry.file_type().expect("file type").is_dir() {
+                assert_directory_modes(&entry.path());
+            }
+        }
+    }
+
+    let tmp = tempdir().expect("tmpdir");
+    let repo = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo);
+    let manifest = format!(
+        "{}\n{}",
+        component_manifest_toml("agentsight", "0.2.0", &["system"]),
+        r#"[[component.layout.files]]
+source = "assets/"
+target = "{datadir}/assets/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "{bindir}/agentsight"
+target = "{libexecdir}/links/agentsight"
+type = "symlink"
+"#
+    );
+    let artifact = build_tar_gz(&[
+        (".anolisa/component.toml", manifest.as_bytes()),
+        ("bin/agentsight", b"#!/bin/sh\necho umask-ok\n"),
+        ("assets/nested/data.txt", b"shared data\n"),
+    ]);
+    replace_repo_artifact(&repo, "agentsight", &artifact);
+    let parent = tmp.path().join("fresh/parent");
+    let prefix = parent.join("system");
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let mut request = args("agentsight");
+    request.backend = Some("raw".to_string());
+    request.repo = Some(repo_url);
+    handle_with_fake_rpm(request, &ctx).expect("raw install under umask 077");
+
+    assert_directory_modes(&tmp.path().join("fresh"));
+    // The pre-existing private ancestor must not be widened by installation.
+    assert_eq!(
+        std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let layout = FsLayout::system(Some(prefix));
+    let output = Command::new(layout.libexec_dir.join("links/agentsight"))
+        .output()
+        .expect("execute the installed tool");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"umask-ok\n");
+}
+
+#[test]
 #[ignore = "invoked as an isolated child by the missing-index regression"]
 fn render_missing_index_error_json_child() {
     let reason = std::env::var(JSON_REASON_ENV)

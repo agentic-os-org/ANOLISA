@@ -1,6 +1,7 @@
 //! File-system and IO helpers: atomic writes, rollback, state snapshots,
 //! and timestamp formatting for the `install` command.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -479,7 +480,7 @@ pub(crate) fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<(
 
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_install_dir_all(parent)?;
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path

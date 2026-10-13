@@ -44,6 +44,7 @@
 //! config only when every local source is missing. Callers do not need separate
 //! first-run handling around repo config reads.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -920,7 +921,7 @@ fn write_repo_config(dest: &Path, body: &str) -> Result<(), RepoConfigProvisionE
     use std::io::Write;
 
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| RepoConfigProvisionError::Io {
+        create_install_dir_all(parent).map_err(|source| RepoConfigProvisionError::Io {
             path: parent.to_path_buf(),
             source,
         })?;

@@ -14,6 +14,7 @@
 //! create files outside those roots, so a failed install can roll back by
 //! deleting just the paths it returns.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -607,7 +608,7 @@ impl<'a> InstallRunner<'a> {
     /// not acquire a fixed directory owned by whichever user installs first.
     fn staging_parent(&self) -> Result<&Path, InstallError> {
         let cache_dir = &self.layout.cache_dir;
-        fs::create_dir_all(cache_dir).map_err(|source| InstallError::Io {
+        create_install_dir_all(cache_dir).map_err(|source| InstallError::Io {
             path: cache_dir.clone(),
             source,
         })?;
@@ -1287,7 +1288,7 @@ fn create_symlink(link: &PreparedSymlink) -> Result<InstalledFile, InstallError>
         });
     }
     if let Some(parent) = link.dest.parent() {
-        fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+        create_install_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
@@ -1351,7 +1352,7 @@ fn write_dest_atomic(
     let parsed_mode = parse_unix_mode(file.mode.as_deref(), dest)?;
 
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+        create_install_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
             source,
         })?;

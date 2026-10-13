@@ -9,7 +9,8 @@
 //! Acquisition fails fast (no blocking) so a second ANOLISA invocation
 //! sees a clear error rather than hanging.
 
-use std::fs::{self, File, OpenOptions};
+use anolisa_platform::fs_layout::create_install_dir_all;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +51,7 @@ impl InstallLock {
         if let Some(parent) = lock_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|source| LockError::Io {
+            create_install_dir_all(parent).map_err(|source| LockError::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;
