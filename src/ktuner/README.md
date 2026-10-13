@@ -250,8 +250,15 @@ typo cannot drop the rest of the batch behind a successful exit.
 ### tune output
 
 ```json
-{"applied": 5, "score_after": 35, "score_before": 30}
+{"applied": 5, "boot_unit_enabled": true, "score_after": 35, "score_before": 30}
 ```
+
+`boot_unit_enabled` reports whether the non-sysctl boot replay is armed. A run
+that persisted block-device or THP values but could not `systemctl enable
+ktuner-nonsysctl.service` answers `false`: the values are live now but will not
+be replayed after a reboot, and `applied` on its own would not say so. It is
+`true` when the unit is enabled, and when the run had nothing outside
+`/proc/sys` to persist. `fix`'s body carries the same key.
 
 When this environment filters recommendations out (unwritable, or
 runtime-dangerous), a real `tune` names them in `would_skip` with the same

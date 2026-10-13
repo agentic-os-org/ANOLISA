@@ -720,6 +720,14 @@ fn tune_output<'a>(
         "score_before": score_before,
         "score_after": score_after,
         "would_skip": would_skip_json(in_scope, selection),
+        // The boot replay's verdict must be readable: `tune` applies through
+        // the quiet path, so the warning `apply_locked` prints for a failed
+        // `systemctl enable` never reaches this command's output, and a run
+        // that dropped block/THP values out of the boot replay would report
+        // nothing but success. False means those values will not be replayed
+        // after a reboot; true also covers a run with nothing non-sysctl to
+        // persist.
+        "boot_unit_enabled": outcome.boot_unit_enabled,
     });
     if let Some((key, unmatched)) = selection.unmatched_report(in_scope) {
         body[key] = unmatched;
@@ -926,6 +934,11 @@ fn fix_with(param: &str, dry_run: bool, is_root: bool, eval: &rules::EvalResult)
         "applied": fix.outcome.effective,
         "score_after": eval_after.score(),
         "remaining": eval_after.recommendations.len(),
+        // `fix` persists through the same choke point as `tune`, so a refused
+        // `systemctl enable` must be reportable here too: the clamped note
+        // below claims the fix was persisted, and a non-sysctl parameter
+        // whose unit is not enabled is not replayed after a reboot.
+        "boot_unit_enabled": fix.boot_unit_enabled,
     });
     if fix.outcome.clamped {
         output["requested"] = json!(rec.recommended_value);
@@ -1925,6 +1938,7 @@ mod tests {
             applied: 1,
             failed: vec![],
             clamped: vec![],
+            boot_unit_enabled: true,
         };
         let output = tune_output(&in_scope, &outcome, 30, 35, &[]);
         assert_eq!(output["applied"], json!(1));
@@ -2230,6 +2244,35 @@ mod tests {
     }
 
     #[test]
+    fn tune_output_reports_an_unarmed_boot_replay() {
+        // The warning added for #6887 sits inside `if !quiet`, but the only
+        // production caller is `apply_quiet`, so a tune whose unit could not
+        // be enabled reported nothing at all. The verdict must reach the body:
+        // the block/THP values were written yet will not be replayed after a
+        // reboot.
+        let in_scope = vec![rec("vm.swappiness", true)];
+        let unarmed = tuner::ApplyOutcome {
+            applied: 1,
+            failed: vec![],
+            clamped: vec![],
+            boot_unit_enabled: false,
+        };
+        let output = tune_output(&in_scope, &unarmed, 30, 34, &[]);
+        assert_eq!(
+            output["boot_unit_enabled"],
+            json!(false),
+            "a tune whose boot replay is not armed must say so: {output}"
+        );
+
+        let armed = tuner::ApplyOutcome {
+            boot_unit_enabled: true,
+            ..unarmed
+        };
+        let output = tune_output(&in_scope, &armed, 30, 34, &[]);
+        assert_eq!(output["boot_unit_enabled"], json!(true));
+    }
+
+    #[test]
     fn tune_output_names_excluded_entries() {
         // The real-run body lists the excluded entries in the preview's
         // shape: a partial tune answers exit 0 while check keeps exiting 1 on
@@ -2239,6 +2282,7 @@ mod tests {
             applied: 1,
             failed: vec![],
             clamped: vec![],
+            boot_unit_enabled: true,
         };
         let output = tune_output(&in_scope, &outcome, 30, 35, &["fs/file-max".to_string()]);
         assert_eq!(output["applied"], json!(1));
@@ -2585,6 +2629,7 @@ mod tests {
             applied: 1,
             failed: vec![],
             clamped: vec![],
+            boot_unit_enabled: true,
         };
         let output = tune_output(
             &in_scope,
@@ -2719,6 +2764,7 @@ mod tests {
             applied: 1,
             failed: vec![],
             clamped: vec![],
+            boot_unit_enabled: true,
         };
         let real = tune_output(&in_scope, &outcome, 30, 35, &[]);
         assert_eq!(real["would_skip"], skip);

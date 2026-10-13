@@ -105,6 +105,14 @@ pub struct ApplyOutcome {
     pub applied: usize,
     pub failed: Vec<ApplyFailure>,
     pub clamped: Vec<ClampNote>,
+    /// Whether the boot replay is armed: false when a non-sysctl entry was
+    /// persisted but `systemctl enable` did not succeed, so the block/THP
+    /// values will not be replayed at the next boot. True when the unit is
+    /// enabled, and when this batch had nothing outside /proc/sys to persist.
+    /// The verdict belongs to the caller: a failed enable is not a write
+    /// failure (`applied` and the exit code stay per-write), but a run that
+    /// cannot report it promises a replay it never armed.
+    pub boot_unit_enabled: bool,
 }
 
 pub fn apply(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
@@ -132,6 +140,8 @@ fn apply_locked(
     let mut applied = 0usize;
     let mut failed: Vec<ApplyFailure> = Vec::new();
     let mut clamped: Vec<ClampNote> = Vec::new();
+    // Nothing outside /proc/sys was applied, so nothing needs a boot replay.
+    let mut boot_unit_enabled = true;
     for (i, rec) in recommendations.iter().enumerate() {
         // A mutually exclusive knob disables its twin as a side effect;
         // snapshot the twin before the write or its original is unrecorded
@@ -210,7 +220,7 @@ fn apply_locked(
 
     if !applied_recs.is_empty() {
         save_rollback(guard, &applied_recs)?;
-        let boot_unit_enabled = persist_from_rollback(guard)?;
+        boot_unit_enabled = persist_from_rollback(guard)?;
         if !quiet {
             progress!();
             // Count writes, not ledger records: a *_bytes knob also records
@@ -233,6 +243,7 @@ fn apply_locked(
         applied,
         failed,
         clamped,
+        boot_unit_enabled,
     })
 }
 
@@ -251,6 +262,10 @@ pub struct AppliedFix {
     /// The write outcome: the value the kernel actually took and whether it
     /// clamped the request.
     pub outcome: WriteOutcome,
+    /// Whether the boot replay is armed, with [`ApplyOutcome`]'s meaning: a
+    /// refused `systemctl enable` means a non-sysctl fix will not survive the
+    /// next boot, and `fix` persists through the same choke point as `tune`.
+    pub boot_unit_enabled: bool,
 }
 
 /// Apply a single recommendation with rollback recording and persistence, but
@@ -279,13 +294,15 @@ pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     // the batch regardless. It records the knob's own category: the pair is
     // one unit for every later selection.
     batch.extend(sibling.map(|entry| sibling_rec(entry, rec.category.clone())));
+    let mut boot_unit_enabled = true;
     if !batch.is_empty() {
         save_rollback(&guard, &batch)?;
-        persist_from_rollback(&guard)?;
+        boot_unit_enabled = persist_from_rollback(&guard)?;
     }
     Ok(AppliedFix {
         recorded_previous: previous,
         outcome,
+        boot_unit_enabled,
     })
 }
 

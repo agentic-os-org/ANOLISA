@@ -231,8 +231,13 @@ sysfs/sysctl 文件读值）的参数输出当前值并以 `0` 退出：
 ### tune 输出
 
 ```json
-{"applied": 5, "score_after": 35, "score_before": 30}
+{"applied": 5, "boot_unit_enabled": true, "score_after": 35, "score_before": 30}
 ```
+
+`boot_unit_enabled` 报告非 sysctl 配置的启动重放是否已就绪。若本次运行写入了块设备或
+THP 参数、但 `systemctl enable ktuner-nonsysctl.service` 未成功，该键为 `false`：
+值当前已生效，重启后却不会重放，只看 `applied` 无法看出这一点。单元启用成功、或本次
+没有 `/proc/sys` 之外的持久化内容时为 `true`。`fix` 的返回体携带同一个键。
 
 当本环境过滤掉了部分建议（不可写，或运行时危险）时，真实 `tune` 会在
 `would_skip` 中列出这些项及原因，形状与 dry-run 预览一致，便于与 `check`
