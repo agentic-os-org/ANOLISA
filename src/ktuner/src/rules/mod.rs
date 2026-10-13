@@ -1531,28 +1531,48 @@ fn eval_tcp_keepalive_time(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_tcp_congestion_control(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_congestion_control";
+    eval_tcp_congestion_control_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_congestion_control`] (the `eval_*_at`
+/// idiom): the two sysctls come from test files and the module tree from a
+/// synthetic directory, `None` standing for a container.
+fn eval_tcp_congestion_control_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     let current = read_sysctl_string(path);
-    if current != "bbr" {
-        let avail_path = "/proc/sys/net/ipv4/tcp_available_congestion_control";
-        if info.param_exists(avail_path) {
-            let available = read_sysctl_string(avail_path);
-            if congestion_algo_available(&available, "bbr") {
-                recs.push(Recommendation {
-                    param: "net.ipv4.tcp_congestion_control".to_string(),
-                    current_value: current,
-                    recommended_value: "bbr".to_string(),
-                    reason:
-                        "BBR 拥塞控制在云网络环境下比 cubic 表现更好，尤其是高延迟和有丢包的链路"
-                            .to_string(),
-                    confidence: Confidence::Medium,
-                    category: Category::Performance,
-                    writable: true,
-                });
-            }
+    if current != "bbr" && info.param_exists(avail_path) {
+        let available = read_sysctl_string(avail_path);
+        // The available list names registered algorithms only, but a
+        // write of an unregistered name loads `tcp_<name>` first
+        // (`tcp_ca_find_autoload`, v6.6 net/ipv4/tcp_cong.c:49-58), so a
+        // tcp_bbr module that is not loaded yet is just as usable.
+        let bbr_loadable =
+            module_tree.is_some_and(|tree| module_in_tree(tree, "kernel/net/ipv4", "tcp_bbr"));
+        if congestion_algo_available(&available, "bbr") || bbr_loadable {
+            recs.push(Recommendation {
+                param: "net.ipv4.tcp_congestion_control".to_string(),
+                current_value: current,
+                recommended_value: "bbr".to_string(),
+                reason: "BBR 拥塞控制在云网络环境下比 cubic 表现更好，尤其是高延迟和有丢包的链路"
+                    .to_string(),
+                confidence: Confidence::Medium,
+                category: Category::Performance,
+                writable: true,
+            });
         }
     }
     1
@@ -9432,6 +9452,61 @@ mod tests {
         // A different qdisc's module does not make sch_fq available.
         let other = SchedDir::new(&["sch_fq_codel.ko.zst"]);
         assert!(!qdisc_module_in(&other.0, "sch_fq"));
+    }
+
+    #[test]
+    fn congestion_control_offers_a_loadable_bbr_module() {
+        // tcp_available_congestion_control lists registered algorithms only:
+        // with tcp_bbr built as a module and not loaded yet it reads
+        // "reno cubic", while writing "bbr" loads the module and succeeds.
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cc_loadable_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        std::fs::write(&cc, "cubic\n").unwrap();
+        std::fs::write(&available, "reno cubic\n").unwrap();
+        let tree = dir.join("modules");
+        std::fs::create_dir_all(tree.join("kernel/net/ipv4")).unwrap();
+        let eval = |tree: Option<&std::path::Path>| {
+            let mut recs = Vec::new();
+            eval_tcp_congestion_control_at(
+                &info,
+                &mut recs,
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                tree,
+            );
+            recs
+        };
+
+        // No tcp_bbr anywhere: nothing to offer.
+        assert!(eval(Some(&tree)).is_empty());
+
+        // A loadable module, and a built-in one, are both offered.
+        std::fs::write(tree.join("kernel/net/ipv4/tcp_bbr.ko.xz"), b"").unwrap();
+        let recs = eval(Some(&tree));
+        assert_eq!(recs.len(), 1, "a loadable tcp_bbr must be offered");
+        assert_eq!(recs[0].param, "net.ipv4.tcp_congestion_control");
+        assert_eq!(recs[0].current_value, "cubic");
+        assert_eq!(recs[0].recommended_value, "bbr");
+        std::fs::remove_file(tree.join("kernel/net/ipv4/tcp_bbr.ko.xz")).unwrap();
+        std::fs::write(tree.join("modules.builtin"), "kernel/net/ipv4/tcp_bbr.ko\n").unwrap();
+        assert_eq!(
+            eval(Some(&tree)).len(),
+            1,
+            "a built-in tcp_bbr must be offered"
+        );
+
+        // Inside a container the tree is not the host kernel's.
+        assert!(eval(None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
