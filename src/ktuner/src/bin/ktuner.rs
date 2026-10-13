@@ -742,6 +742,25 @@ fn tune_output<'a>(
     body
 }
 
+/// The gates `tune` applies before it reads the system: the argument errors
+/// first, then the root requirement.
+///
+/// An unknown category is an argument error like the flag pair, and the README
+/// states the rule for the whole family — a usage error is "refused before the
+/// root gate like the other argument errors" — so `tune` answers it the way
+/// `check` and `rollback` answer it. `is_root` is a parameter so a test can
+/// drive both callers' verdicts without an euid of its own, the way
+/// [`fix_root_gate`] does.
+fn tune_gates(cats: &[String], dry_run: bool, is_root: bool) -> Result<()> {
+    for cat in cats {
+        category::validate_category(cat)?;
+    }
+    if !dry_run && !is_root {
+        anyhow::bail!("tune requires root (sudo ktuner tune)");
+    }
+    Ok(())
+}
+
 fn cmd_tune(
     dry_run: bool,
     conservative: bool,
@@ -765,16 +784,7 @@ fn cmd_tune(
     } else {
         Selection::All
     };
-    if !dry_run {
-        let is_root = unsafe { libc::geteuid() } == 0;
-        if !is_root {
-            anyhow::bail!("tune requires root (sudo ktuner tune)");
-        }
-    }
-
-    for cat in &cats {
-        category::validate_category(cat)?;
-    }
+    tune_gates(&cats, dry_run, unsafe { libc::geteuid() } == 0)?;
     let (_info, eval) = gather()?;
     let score_before = eval.score();
     let mut recs = eval.recommendations;
@@ -3088,6 +3098,32 @@ mod tests {
             format!("{err:#}").contains("no_such_category"),
             "the category check must be the one that fires without the pair: {err:#}"
         );
+    }
+
+    #[test]
+    fn tune_rejects_an_unknown_category_before_the_root_gate() {
+        // `check` and `rollback` answer an unknown category as an argument
+        // error, and the README's rollback section states the rule for the
+        // family: a usage error is "refused before the root gate like the
+        // other argument errors", with "an unknown category ... refused there
+        // too". A real `tune` ran its root gate first, so a non-root caller
+        // who mistyped a category was told to use sudo instead of which value
+        // was wrong — while the same command with `--dry-run` answered the
+        // category error.
+        let err = tune_gates(&["no_such_category".to_string()], false, false)
+            .expect_err("an unknown category is an argument error");
+        assert!(
+            format!("{err:#}").contains("no_such_category"),
+            "the category must be the error a non-root caller sees: {err:#}"
+        );
+        // The root error still fires when the arguments are well formed, so
+        // the assertion above cannot hold for the wrong reason.
+        let err = tune_gates(&["net".to_string()], false, false)
+            .expect_err("a real run without root is refused");
+        assert_eq!(format!("{err:#}"), "tune requires root (sudo ktuner tune)");
+        // `--dry-run` needs no root, with or without a category.
+        assert!(tune_gates(&["net".to_string()], true, false).is_ok());
+        assert!(tune_gates(&[], true, false).is_ok());
     }
 
     #[test]
