@@ -9,6 +9,7 @@ pub mod diff;
 pub mod home;
 pub mod path_policy;
 pub mod query;
+pub mod reader;
 pub mod record;
 pub mod recorder;
 pub mod sls;
