@@ -1040,6 +1040,17 @@ fn why_with(
     eval: &rules::EvalResult,
     read_current: impl FnOnce(&str) -> Result<Option<String>, std::io::Error>,
 ) -> Result<(serde_json::Value, i32)> {
+    // A degenerate separator spelling is not a parameter identity, and must not
+    // reach the filesystem: `param_to_path` turns dots into slashes and the
+    // kernel collapses the empty segment such a name carries, so
+    // `vm..swappiness` resolved to the real file and answered "optimal" (exit
+    // 0) — contradicting `check` and `fix`, which treat the same spelling as an
+    // unmatched name, and the README's refusal of a parameter that cannot be
+    // found. The engine already owns this predicate (`tuner::is_safe_param`);
+    // it was wired into the import path only.
+    if !tuner::is_safe_param(param) {
+        anyhow::bail!("parameter not found: {param}");
+    }
     // sysfs names are filesystem identities, while sysctl names accept aliases.
     let normalized = normalize_param(param);
     if let Some(rec) = find_recommendation(eval, param) {
@@ -3509,6 +3520,50 @@ mod tests {
             })
             .expect_err("only the exact existing sysfs spelling may be accepted");
             assert_eq!(error.to_string(), format!("parameter not found: {param}"));
+        }
+    }
+
+    #[test]
+    fn why_rejects_degenerate_separator_spellings() {
+        // `vm..swappiness` and friends used to resolve: the dot-to-slash
+        // translation produced a doubled separator, the kernel collapsed it, and
+        // `why` answered "optimal" (exit 0) for a name `check --only` reports as
+        // unmatched and `fix` refuses. The spelling is not a parameter identity
+        // (`tuner::is_safe_param` rejects the empty segment), so it must get the
+        // documented not-found error instead of a verdict about the file it
+        // happens to collide with.
+        let eval = evaluation(Vec::new());
+        let current = CurrentFile::new("60\n");
+        // The kernel collapses repeated and trailing separators, so a reader
+        // comparing the raw path verbatim would hide the very collision this
+        // test is about: model the resolution.
+        fn collapse(path: &str) -> String {
+            let joined = path
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("/{joined}")
+        }
+        let reader = |path: &str| Ok(current.read_for(&collapse(path), "/proc/sys/vm/swappiness"));
+        for param in [
+            "vm..swappiness",
+            "vm//swappiness",
+            "vm/swappiness/",
+            "/vm.swappiness",
+            "net/ipv4//tcp_rfc1337",
+        ] {
+            let error = why_with(param, &eval, reader)
+                .expect_err("a degenerate spelling must not resolve to a parameter");
+            assert_eq!(error.to_string(), format!("parameter not found: {param}"));
+        }
+        // The canonical and the documented slash alias still answer.
+        for param in ["vm.swappiness", "vm/swappiness"] {
+            let (output, code) =
+                why_with(param, &eval, reader).expect("the aliases must keep resolving");
+            assert_eq!(output["param"], json!("vm.swappiness"), "{param}");
+            assert_eq!(output["status"], json!("optimal"), "{param}");
+            assert_eq!(code, 0);
         }
     }
 
