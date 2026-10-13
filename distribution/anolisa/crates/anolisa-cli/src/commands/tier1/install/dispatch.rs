@@ -2715,6 +2715,31 @@ scope = "@anolisa"
         assert!(err.reason().contains("ftp"), "got: {}", err.reason());
     }
 
+    #[test]
+    fn install_repo_variables_are_rejected_before_fetch() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let tmp = tempdir().expect("tmpdir");
+        for url in [
+            format!("file://{}/$arch", tmp.path().display()),
+            format!("http://{}/$arch", listener.local_addr().expect("address")),
+        ] {
+            let mut a = args("fixture-comp");
+            a.backend = Some("raw".to_string());
+            a.version = Some("1.0.0".to_string());
+            a.repo = Some(url);
+            let err =
+                handle_with_fake_rpm(a, &ctx_with_prefix(true, Some(tmp.path().to_path_buf())))
+                    .expect_err("variables must be rejected");
+            assert_eq!(err.code(), "INVALID_ARGUMENT");
+            assert!(err.reason().contains("not substituted"), "{}", err.reason());
+        }
+        assert!(matches!(
+            listener.accept(),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
     /// A `--repo` override replaces the DNF source's base URL — the same
     /// repository that resolved identity and package also serves queries and
     /// the native transaction — while backend-scoped settings (gpgcheck)

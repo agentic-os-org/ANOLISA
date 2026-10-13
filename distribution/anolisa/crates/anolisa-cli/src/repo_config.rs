@@ -591,8 +591,16 @@ impl RepoConfig {
 /// rules as configured base_urls, except plaintext `http://` is allowed:
 /// typing the flag is itself the explicit opt-in that `insecure = true`
 /// provides in the file. Returns the URL with any trailing slash trimmed.
+/// Variable references are rejected because overrides are used verbatim.
 pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
     validate_base_url("<cli-override>", url, true)?;
+    if url.contains('$') {
+        return Err(RepoConfigError::InvalidBaseUrl {
+            backend: "<cli-override>".to_string(),
+            url: url.to_string(),
+            reason: "variable references ('$') are not substituted in --repo overrides; pass the resolved URL instead".to_string(),
+        });
+    }
     Ok(url.trim_end_matches('/').to_string())
 }
 
@@ -1545,6 +1553,34 @@ base_url = "file:///tmp/repo $channel/v1/"
             normalize_override_url("file:///tmp/repo dir").expect("override with space"),
             "file:///tmp/repo dir"
         );
+    }
+
+    #[test]
+    fn override_url_with_dollar_is_rejected() {
+        for url in [
+            "file:///tmp/repo/$arch",
+            "http://example.com/anolisa/$arch/v1/",
+            "https://example.com/anolisa/$arch/v1/",
+            "https://example.com/${arch}/",
+            "https://example.com/$typo/",
+            "file:///tmp/repo/$",
+        ] {
+            let err = normalize_override_url(url).expect_err("override must reject '$'");
+            assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
+            let reason = err.to_string();
+            assert!(reason.contains("not substituted"), "{reason}");
+            assert!(reason.contains("pass the resolved URL"), "{reason}");
+        }
+        for url in [
+            "file:///tmp/repo/",
+            "http://example.com/anolisa/x86_64/v1/",
+            "https://example.com/anolisa/x86_64/v1/",
+        ] {
+            assert_eq!(
+                normalize_override_url(url).expect("resolved override"),
+                url.trim_end_matches('/')
+            );
+        }
     }
 
     #[test]
