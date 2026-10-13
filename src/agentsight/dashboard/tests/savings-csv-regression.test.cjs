@@ -40,6 +40,23 @@ test('empty results produce a valid header-only CSV', () => {
   assert.equal(serializeSavingsCsv([]).split('\r\n').length, 2);
 });
 
+test('a session without a resolved agent name exports an empty cell', () => {
+  // The savings query resolves the label as COALESCE(MAX(agent_name),
+  // MAX(process_name)); a session whose rows carry neither resolves to NULL.
+  // The backend models that as Option<String> and the agent-activity query
+  // filters such rows out, so the export has to tolerate it here instead of
+  // throwing on the missing value.
+  for (const missing of [null, undefined]) {
+    const csv = serializeSavingsCsv([session({ agent_name: missing })]);
+    const rows = csv.slice(1).split('\r\n');
+    assert.equal(
+      rows[1],
+      '"session-1","",3,1234,56,1290,2000,710,800,0.355,0.4,200,510',
+      `agent_name=${String(missing)}`,
+    );
+  }
+});
+
 test('download uses the supplied snapshot and releases browser resources', async () => {
   const originalDocument = global.document;
   const originalCreate = URL.createObjectURL;

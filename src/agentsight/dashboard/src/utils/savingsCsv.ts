@@ -7,7 +7,10 @@ const COLUMNS = [
   'mcp_saved',
 ] as const;
 
-function csvCell(value: string | number): string {
+function csvCell(value: string | number | null | undefined): string {
+  // A session can carry no resolved label: the savings query falls back to the
+  // process name and both columns are nullable, so the cell stays empty.
+  if (value == null) return '""';
   if (typeof value === 'number') return String(value);
   // Identifiers can begin with spreadsheet formula prefixes.
   const text = /^[\s]*[=+\-@\t\r\n]/.test(value) ? `'${value}` : value;
