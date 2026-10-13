@@ -138,6 +138,16 @@ impl StatsReader {
         Ok(Self { conn, columns })
     }
 
+    /// Check the native tool index without migrating an older source.
+    #[cfg(feature = "query-server")]
+    pub(crate) fn has_tool_index(&self) -> Result<bool, ReadError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_list('stats') WHERE name='idx_tool_use_id')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Query a bounded metadata page without loading stored content.
     ///
     /// # Errors
