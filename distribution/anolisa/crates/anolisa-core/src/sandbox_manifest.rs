@@ -165,25 +165,22 @@ impl ScenarioConfig {
             return Ok(());
         }
 
-        let running = match running_kernel {
-            Some(k) => k,
-            None => return Err("cannot determine running kernel version".to_string()),
-        };
+        let min_version = requirement.strip_prefix(">=").unwrap_or("").trim();
 
-        // Parse requirement: ">=X.Y" or ">=X.Y.Z"
-        let min_version = requirement
-            .trim_start_matches(">=")
-            .trim_start_matches('>')
-            .trim();
-
-        // A requirement without at least one numeric release component (or
-        // with a component beyond u32) is a manifest error: the comparator
-        // would silently treat it as "always satisfied".
-        if parse_kernel_release(min_version).is_none() {
+        // Requirements must not use the running release parser's tolerance
+        // for vendor suffixes and arbitrary separators.
+        if min_version.split('.').count() > 3
+            || min_version.split('.').any(|part| {
+                !part.bytes().all(|b| b.is_ascii_digit()) || part.parse::<u32>().is_err()
+            })
+        {
             return Err(format!(
-                "invalid requires_kernel requirement {requirement:?}: expected >=X.Y or >=X.Y.Z"
+                "invalid requires_kernel requirement {requirement:?}: expected >=X, >=X.Y or >=X.Y.Z"
             ));
         }
+
+        let running =
+            running_kernel.ok_or_else(|| "cannot determine running kernel version".to_string())?;
 
         if compare_kernel_versions(running, min_version) {
             Ok(())
@@ -363,11 +360,27 @@ mod tests {
     }
 
     #[test]
-    fn kernel_requirement_without_digits_is_rejected() {
-        // A garbage requirement used to compare as "always satisfied".
-        let s = scenario_with_kernel(">=cloud-native");
-        let err = s.check_kernel(Some("6.6.30")).expect_err("must reject");
-        assert!(err.contains("invalid requires_kernel"), "{err}");
+    fn malformed_kernel_requirements_are_rejected() {
+        for requirement in [
+            ">=cloud-native",
+            ">=4..0",
+            ">=4.",
+            ">=4.a",
+            ">=4.0.0.1",
+            ">=4.0-custom",
+            ">=+4.0",
+            "<=4.0",
+            ">4.0",
+            "4.0",
+            ">=>=4.0",
+        ] {
+            let s = scenario_with_kernel(requirement);
+            for running in [Some("6.6.30"), None] {
+                let err = s.check_kernel(running).expect_err("must reject");
+                assert!(err.contains("invalid requires_kernel"), "{err}");
+                assert!(err.contains(requirement), "{err}");
+            }
+        }
     }
 
     #[test]
