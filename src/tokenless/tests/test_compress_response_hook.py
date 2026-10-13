@@ -548,6 +548,64 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn("additionalContext", hso,
                          "Qoder compressed content must not be additive")
 
+    def test_qwenwork_replaces_shell_and_mcp_outputs(self):
+        large_payload = _make_large_json_payload()
+        for tool in ("Bash", "mcp__office__list_rows"):
+            for response in (large_payload, json.dumps(large_payload)):
+                with self.subTest(tool=tool, response_type=type(response).__name__):
+                    result = _run_hook(
+                        {
+                            "tool_name": tool,
+                            "tool_response": response,
+                            "session_id": "test-session",
+                            "tool_use_id": "toolu_test",
+                        },
+                        agent_id="qwenwork",
+                        mock_tokenless_path=self.mock_bin,
+                        isolated_home=self.isolated_home,
+                    )
+                    hso = result["hookSpecificOutput"]
+                    self.assertEqual(hso["hookEventName"], "PostToolUse")
+                    replacement = hso["updatedToolOutput"]
+                    self.assertIsInstance(replacement, type(response))
+                    if isinstance(replacement, str):
+                        replacement = json.loads(replacement)
+                    self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
+                    self.assertNotIn("additionalContext", hso)
+
+    def test_qwenwork_mcp_telemetry_cannot_replace_real_output(self):
+        telemetry = {
+            "mcp_operation": "call",
+            "mcp_invocation_path": "lazy",
+            "mcp_operation_outcome": "success",
+            "mcp_tool_name": "synthetic_tool_" * 40,
+        }
+        for tool in ("mcp_list", "mcp_get", "mcp_call"):
+            with self.subTest(tool=tool):
+                result = _run_hook(
+                    {"tool_name": tool, "tool_response": telemetry},
+                    agent_id="qwenwork",
+                    mock_tokenless_path=self.mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), [])
+
+        for agent, tool, response in (
+            ("claude-code", "mcp_call", telemetry),
+            ("qwenwork", "mcp__office__list_rows", telemetry),
+            ("qwenwork", "mcp_call", {"records": "x" * 500}),
+            ("qwenwork", "mcp_call", json.dumps({"records": "x" * 500})),
+        ):
+            with self.subTest(agent=agent, tool=tool):
+                result = _run_hook(
+                    {"tool_name": tool, "tool_response": response},
+                    agent_id=agent,
+                    mock_tokenless_path=self.mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertIn("updatedToolOutput", result["hookSpecificOutput"])
+
     def test_opencode_uses_string_replacement(self):
         """OpenCode should receive a replacement that its plugin can apply."""
         large_payload = _make_large_json_payload()
@@ -1000,6 +1058,22 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertIsInstance(updated, str,
                               "Qoder requires a string updatedToolOutput")
         self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+
+    def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
+        log = "npm verbose progress line\n" * 150
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, "warning"),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope(log[:40], "warning"))
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

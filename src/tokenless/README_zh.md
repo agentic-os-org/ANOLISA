@@ -341,6 +341,25 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
+### 千问办公插件（macOS 本地模式）
+
+`qwenwork` Adapter 面向千问办公 QwenWorkCN 的本地会话。PreToolUse **只改写 Bash 输入**；
+PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
+`mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
+保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
+与 Qoder CLI、Qwen Code、QwenPaw 独立。
+
+安装 Adapter 资源后，先预览，再显式旁加载插件：
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+```
+
+重启千问办公并开启新的本地会话，在应用内检查插件已启用。旁加载不会修改 settings，也不会
+自动启用已禁用的插件。当前不支持安全工作区／VM 会话或 `anolisa adapter enable`。
+安装、卸载及 1.2.5 验证范围参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+
 ### QwenPaw 安装
 
 QwenPaw 适配器是一个原生 QwenPaw 插件：`plugin.py` 通过 `api.register_middleware` 注册

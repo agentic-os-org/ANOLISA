@@ -113,6 +113,7 @@ def verify_versions(root: Path, contract: Path) -> str:
         adapters / "openclaw" / "openclaw.plugin.json",
         adapters / "dsh" / "package.json",
         adapters / "qoder" / ".qoder-plugin" / "plugin.json",
+        adapters / "qwenwork" / ".qoder-plugin" / "plugin.json",
         adapters / "claude-code" / ".claude-plugin" / "plugin.json",
         adapters / "codex" / ".codex-plugin" / "plugin.json",
         adapters / "qwencode" / "qwen-extension.json",

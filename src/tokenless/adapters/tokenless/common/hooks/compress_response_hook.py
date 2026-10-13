@@ -24,6 +24,7 @@ Output contract per agent:
   - qoder-cli: the compressed payload replaces the response via the string
     field ``hookSpecificOutput.updatedToolOutput``. Structured responses are
     serialized as compact JSON because Qoder rejects object and array values.
+  - qwenwork: ``updatedToolOutput`` preserves structured response types.
   - opencode: the adapter translates ``updatedToolOutput`` to OpenCode's
     mutable ``tool.execute.after`` output.
   - cosh-ng: the compressed payload replaces the response via
@@ -95,6 +96,7 @@ _COMPRESS_TIMEOUT = 8
 _CLAUDE_AGENT_ID = "claude-code"
 _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
 _QODER_AGENT_ID = "qoder-cli"
+_QWENWORK_AGENT_ID = "qwenwork"
 _OPENCODE_AGENT_ID = "opencode"
 
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
@@ -263,6 +265,14 @@ def main() -> None:
     tool_response_raw = input_data.get("tool_response", "")
     if not tool_response_raw or tool_response_raw == "{}":
         skip()
+    if (
+        agent_id == _QWENWORK_AGENT_ID
+        and tool_name in {"mcp_list", "mcp_get", "mcp_call"}
+        and isinstance(tool_response_raw, dict)
+        and {"mcp_operation", "mcp_invocation_path"} <= tool_response_raw.keys()
+    ):
+        # Desktop MCP wrappers expose telemetry here, not their model-visible result.
+        skip()
 
     # 5. For Cosh-NG, extract only llmContent from the wrapped response.
     #    Never include returnDisplay in the provider-visible replacement.
@@ -320,7 +330,7 @@ def main() -> None:
     if cosh_ng_detected:
         can_replace = True
         replace_with_text = True  # updatedToolResponse accepts any text
-    elif agent_id in {_QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
+    elif agent_id in {_QODER_AGENT_ID, _QWENWORK_AGENT_ID, _OPENCODE_AGENT_ID}:
         can_replace = True
         # An unwrapped shell field is plain text regardless of its envelope.
         replace_with_text = text_field is not None or not isinstance(

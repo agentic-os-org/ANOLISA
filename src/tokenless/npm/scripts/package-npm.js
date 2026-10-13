@@ -417,6 +417,8 @@ function copyAdapters(rootPkgDir) {
       src !== legacyAgentscopeSrc &&
       !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&
       !src.split(sep).includes('node_modules') &&
+      !src.split(sep).includes('__pycache__') &&
+      !/\.py[co]$/.test(src) &&
       !src.endsWith(`${sep}package-lock.json`) &&
       !src.endsWith(`${sep}.gitignore`),
   });

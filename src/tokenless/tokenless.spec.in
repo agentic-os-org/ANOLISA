@@ -107,6 +107,9 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
@@ -187,6 +190,19 @@ install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadi
 install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 
+# Ship QwenWork resources only; macOS sideloading is an explicit user action.
+# Materialize shared hooks so a copied native plugin has no external symlinks.
+install -m 0644 adapters/tokenless/qwenwork/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin/
+install -m 0644 adapters/tokenless/qwenwork/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/
+install -m 0755 adapters/tokenless/qwenwork/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/
+install -m 0755 adapters/tokenless/common/hooks/*.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
+install -m 0755 adapters/tokenless/common/hooks/*.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
+install -m 0644 adapters/tokenless/common/hooks/*.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/
+install -m 0755 adapters/tokenless/qwenwork/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
+install -m 0755 adapters/tokenless/qwenwork/scripts/lifecycle.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/
+
 # Install Claude Code plugin (marketplace + plugin manifest + wrapper hook + scripts).
 # plugin.json is stamped from .in by `make stamp-adapter-templates` during %build
 # (transitive dep of build-openclaw-plugin); shipped as a regular file here.
@@ -266,6 +282,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/hooks
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
@@ -316,6 +337,17 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
+
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/.qoder-plugin/plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/run-hook.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.py
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/hooks/shared/*.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenwork/scripts/lifecycle.py
 
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/marketplace.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/plugin.json

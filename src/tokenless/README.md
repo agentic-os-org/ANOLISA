@@ -676,6 +676,29 @@ compression so the recovered payload reaches the model unchanged.
 make qoder-install
 ```
 
+## QwenWork Plugin (macOS Local Mode)
+
+The `qwenwork` adapter targets QwenWorkCN (千问办公) local sessions. PreToolUse
+rewrites **Bash input only**; PostToolUse observes **all tools** and compresses
+eligible full results through the shared policy. Metadata-only callbacks from
+`mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
+output; full MCP responses remain compressible. File-content protection and RTK
+deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
+and QwenPaw.
+
+After installing the adapter resources, preview and explicitly sideload the plugin:
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+```
+
+Restart QwenWorkCN and open a new local session; check that the plugin is enabled
+in the application. Sideloading does not change settings or enable a disabled
+plugin. This adapter does not support security-workspace/VM sessions or
+`anolisa adapter enable`. Installation, removal, and the 1.2.5 validation scope are
+covered in [QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos-local-mode).
+
 ## Claude Code Plugin
 
 The plugin registers hooks at two Claude Code events, covering four strategies:

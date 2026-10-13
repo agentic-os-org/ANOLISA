@@ -14,6 +14,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
+| QwenWorkCN (macOS local) | `qwenwork` | — | Replaces Bash input | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
@@ -34,7 +35,7 @@ smaller, not by itself that the host removed the original from its model request
 
 ## Adapter processing rules
 
-The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one
+The shared Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode PostTool hook sends one
 `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
 with the existing shell tool. Otherwise Core accepts only lossless candidates. Every non-`applied`
@@ -83,6 +84,62 @@ RTK wrapper from the command Hermes actually executed. All three therefore bypas
 compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
+
+### QwenWork (macOS local mode)
+
+The `qwenwork` adapter targets QwenWorkCN (千问办公), independently of Qoder CLI,
+Qwen Code, and QwenPaw. QwenWorkCN 1.2.5 macOS local sessions have been tested for
+Bash rewriting, full MCP response replacement, JSON-to-TOON output, and Read
+passthrough. Security-workspace/Linux VM sessions are unsupported and the hook
+dispatcher passes through outside macOS.
+
+PreToolUse matches **Bash only** and rewrites supported commands through RTK.
+PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
+the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
+pass through because replacing their real output with telemetry would lose content;
+full `mcp_call` responses still use normal compression. Accepted results replace
+the original through `updatedToolOutput`; objects and arrays retain their types,
+while text slots can use TOON. File-content protection, unsupported-content
+passthrough, and RTK deduplication still apply. Statistics use the separate Agent
+ID `qwenwork`. Tool Ready and Schema hooks are not registered.
+
+Install Tokenless with an existing supported installation route first; this
+adapter needs Bash, Python 3.9+, and the Tokenless binary. RTK is required for
+command rewriting but not for response compression. Ensure these binaries are
+available to the desktop session, not only to an interactive terminal.
+
+The adapter is **not** automatically activated, and there is no ANOLISA built-in
+`qwenwork` driver yet. The generic `anolisa adapter enable` commands below do not
+apply to this target. Use its bundled scripts after installing a package that
+includes the adapter, adjusting the resource path for your installation:
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+```
+
+Quit QwenWorkCN before installation or upgrade, then restart it and open a new
+**local** session. Check the plugin's enabled status in the application: successful
+sideloading alone does not prove loading or activation. The installer copies a
+self-contained plugin into `~/.qwenworkcn/plugins-custom/tokenless`, without
+changing settings, permissions, databases, or disabled/blocked plugin lists.
+It refuses foreign or modified installations rather than overwriting them.
+
+`TOKENLESS_QWENWORK_APP` selects a non-default QwenWorkCN application bundle;
+`TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults look for the app
+under `/Applications` or `~/Applications` and use `~/.qwenworkcn` for data.
+Do not point this adapter at Qoder CLI or Qwen Code configuration directories.
+
+To remove only the managed, unmodified plugin, then restart the application:
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+```
+
+Source checkouts also expose `make qwenwork-install` and `make qwenwork-uninstall`
+for already-installed adapter resources. Neither installation nor removal needs
+to invoke the embedded Qoder CLI or an undocumented desktop API.
 
 ### DeepSeek Harness native processing
 

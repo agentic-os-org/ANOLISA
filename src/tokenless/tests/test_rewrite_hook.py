@@ -209,6 +209,26 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(requests[-1]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
 
+    def test_qwenwork_rewrite_and_response_share_rtk_state(self) -> None:
+        rewritten = self.run_hook(
+            corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "qwenwork"
+        )
+        self.assertEqual(
+            rewritten["hookSpecificOutput"]["updatedInput"],
+            {"command": "/mock/rtk grep error log", "timeout": 30},
+        )
+        output = self.run_hook(
+            RESPONSE_HOOK, post_tool_payload("call-1"), "--agent-id", "qwenwork"
+        )
+        self.assertEqual(output, {})
+        requests = self.requests()
+        self.assertEqual(len(requests), 2)
+        for request in requests:
+            self.assertEqual(request["attribution"]["agent_id"], "qwenwork")
+            self.assertEqual(request["attribution"]["tool_use_id"], "call-1")
+        self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
+        self.assertEqual(requests[-1]["input"]["capabilities"]["recovery"]["kind"], "none")
+
     def test_abandoned_state_is_bounded_on_next_rewrite(self) -> None:
         state_dir = self.home / ".tokenless" / "hook-state"
         state_dir.mkdir(parents=True)

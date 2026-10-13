@@ -13,6 +13,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
+| 千问办公（macOS 本地模式） | `qwenwork` | — | 替换 Bash 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
@@ -32,7 +33,7 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 ## Adapter 处理规则
 
-共享 Cosh-NG、Qoder、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
+共享 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
 解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；否则 Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
@@ -77,6 +78,53 @@ Common Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用。H
 Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
+
+### 千问办公（macOS 本地模式）
+
+`qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。
+已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 改写、完整 MCP 响应替换、
+JSON 转 TOON 输出及 Read 透传。不支持安全工作区／Linux VM，Hook 会在非 macOS
+环境直接透传。
+
+PreToolUse **仅匹配 Bash**，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
+符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
+仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
+被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
+文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
+不注册 Tool Ready 或 Schema Hook。
+
+先通过已有受支持的安装方式安装 Tokenless；本 Adapter 需要 Bash、Python 3.9+ 和
+Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK。确保桌面会话能够找到这些
+二进制，而不只是交互式终端能够找到。
+
+Adapter **不会自动启用**，ANOLISA 目前也没有内置 `qwenwork` driver，因此下文通用的
+`anolisa adapter enable` 命令不适用于此目标。安装包含该 Adapter 的软件包后，使用随包
+脚本，并按实际安装位置调整资源路径：
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+```
+
+安装或升级前退出千问办公，完成后重启并开启新的**本地**会话。在应用内检查插件启用状态：
+旁加载成功不代表已经加载或激活。安装器把自包含插件复制到
+`~/.qwenworkcn/plugins-custom/tokenless`，不修改 settings、权限、数据库或插件禁用／阻止
+列表；遇到外来安装或已修改的文件会拒绝覆盖。
+
+`TOKENLESS_QWENWORK_APP` 用于指定非默认的千问办公应用 Bundle；
+`TOKENLESS_QWENWORK_HOME` 用于指定其数据目录。默认在 `/Applications` 或
+`~/Applications` 查找应用，并使用 `~/.qwenworkcn` 存放数据。
+不要将本 Adapter 指向 Qoder CLI 或 Qwen Code 配置目录。
+
+卸载只移除未被修改的受管理插件，完成后同样需要重启应用：
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+```
+
+源码 Checkout 也提供 `make qwenwork-install` 和 `make qwenwork-uninstall`，操作已经安装的
+Adapter 资源。安装和卸载都不需要调用内嵌 Qoder CLI 或未公开的桌面 API。
 
 ### DeepSeek Harness 原生处理路径
 
