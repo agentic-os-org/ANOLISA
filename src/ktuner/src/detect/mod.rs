@@ -1296,14 +1296,6 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
             .iter()
             .filter_map(|entry| read_sysfs_u64(&entry.path().join("ifindex")))
             .collect();
-        // ...and the subset that are veth ends. A veth end's peer is always
-        // another veth end, so only one of these can be the local device an
-        // `iflink` resolves to (see `link_peer_leaves_namespace`).
-        let local_veth_ifindexes: Vec<u64> = entries
-            .iter()
-            .filter(|entry| is_veth_end(&entry.path(), read_speed_mbps(&entry.path())))
-            .filter_map(|entry| read_sysfs_u64(&entry.path().join("ifindex")))
-            .collect();
         for entry in &entries {
             let name = entry.file_name().to_string_lossy().to_string();
             // The tun driver creates tun/tap devices and reports a fixed
@@ -1327,25 +1319,27 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
             // link either.
             let is_tun_device = entry.path().join("tun_flags").exists();
             // The veth driver reports the same fixed SPEED_10000
-            // (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-132;
-            // master:129-135) for every device it registers, and its devices
-            // are the container plumbing: the host end of a pair is named by
-            // the CNI rather than `veth*` (Calico's `cali*`, Cilium's
-            // `lxc<id>` and `cilium_host`), and inside a container the same
-            // driver backs the workload's own `eth0`. The pair is identified
-            // from this side by `iflink`, which names the peer's ifindex
-            // (`veth_get_iflink` returns it, 0 once the peer is gone): a peer
-            // in another namespace is not one of THIS namespace's interfaces,
-            // while the link handlers that report a negotiated rate point at a
-            // device inside it - a VLAN its parent (`vlan_dev_get_iflink`), a
-            // bridge port its bridge, an attached tunnel the device it runs
-            // over - so their readings stay.
-            let peer_is_external = link_peer_leaves_namespace(
-                &entry.path(),
-                &local_ifindexes,
-                &local_veth_ifindexes,
-                read_speed_mbps(&entry.path()),
-            );
+            // (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-134) for
+            // every device it registers, and its devices are the container
+            // plumbing: the host end of a pair is named by the CNI rather than
+            // `veth*` (Calico's `cali*`, Cilium's `lxc<id>` and
+            // `cilium_host`). A pair whose two ends share one namespace is
+            // plumbing just the same — both ends carry the same fixed default —
+            // and `dev_valid_name` lets whoever creates the pair pick both
+            // names (`ip link add h1 type veth peer name h2`), so the name
+            // prefixes above cannot be the whole guard. Skip on the marker,
+            // like the tun marker above.
+            let speed_mbps = read_speed_mbps(&entry.path());
+            let is_veth_end = is_veth_end(&entry.path(), speed_mbps);
+            // The link shapes that derive a reading from another device (a VLAN
+            // its parent, a bridge port its bridge, an attached tunnel the
+            // device it runs over) are told apart by `iflink`: one that names
+            // an interface of this namespace keeps its reading, one that names
+            // a device outside it — or nothing at all — does not. A veth end is
+            // already skipped above and never reaches this test, because its
+            // peer's index names a device of the PEER's namespace and could
+            // collide with a local one.
+            let peer_is_external = link_peer_leaves_namespace(&entry.path(), &local_ifindexes);
             if name == "lo"
                 || name.starts_with("veth")
                 || name.starts_with("br-")
@@ -1355,12 +1349,11 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
                 || name.starts_with("tun")
                 || name.starts_with("tap")
                 || is_tun_device
+                || is_veth_end
                 || peer_is_external
             {
                 continue;
             }
-
-            let speed_mbps = read_speed_mbps(&entry.path());
 
             nets.push(NetInfo {
                 name: name.clone(),
@@ -1378,34 +1371,22 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
 /// `iflink` names the ifindex of the device an interface is linked to, and
 /// `dev_get_iflink`'s contract is that a physical interface links to itself
 /// (net/core/dev.c). A link target that is not one of `local_ifindexes`
-/// identifies a device whose peer sits on the other side of a namespace - the
-/// veth pair the container runtimes create, whose driver reports a fixed
-/// SPEED_10000 for both ends whatever the host link is - or no device at all
-/// (`veth_get_iflink` returns 0 once the peer is gone, an unattached tunnel
-/// keeps iflink 0), which carries no negotiated rate either. The shapes that
-/// derive a real reading keep it: a VLAN links to its parent
-/// (`vlan_dev_get_iflink`), a bridge port to its bridge, an attached tunnel to
-/// the device it runs over, a bond to itself for the lack of a link handler. A
-/// veth pair whose ends share one namespace links locally and is already
-/// skipped by name. An unreadable `iflink` or `ifindex` is not evidence, and
-/// keeps the interface.
+/// identifies a device whose peer sits on the other side of a namespace - an
+/// unattached tunnel keeps `iflink` 0, a `macvlan`/`ipvlan` names a device
+/// outside the namespace it was moved to - or no device at all, so the
+/// reading it would report is not this host's link. The shapes that derive a
+/// real reading keep it: a VLAN links to its parent (`vlan_dev_get_iflink`),
+/// a bridge port to its bridge, an attached tunnel to the device it runs
+/// over, a bond to itself for the lack of a link handler. An unreadable
+/// `iflink` or `ifindex` is not evidence, and keeps the interface.
 ///
-/// A veth end needs more than the list: an ifindex only names a device inside
-/// its own namespace, so comparing the peer's index against every local one
-/// misreads a cross-namespace pair whose peer index happens to collide. A
+/// A veth end never reaches this test: its peer is always another veth end and
+/// its `iflink` therefore names a device of that PEER's namespace - a
 /// container's `eth0` is the first device of its own namespace, so its ifindex
-/// is 2, and the host end of that pair therefore reports `iflink = 2` - which
-/// on the host is the first real NIC. The pair was kept as a local interface
-/// and the driver's fixed 10000 Mbps counted as the host's link speed. Since a
-/// veth end's peer is always another veth end, a local device can only be the
-/// peer when it is one too (`local_veth_ifindexes`); every other match is the
-/// collision above.
-fn link_peer_leaves_namespace(
-    dir: &Path,
-    local_ifindexes: &[u64],
-    local_veth_ifindexes: &[u64],
-    speed_mbps: u64,
-) -> bool {
+/// is 2 and the host end of the pair reports `iflink = 2`, which on the host is
+/// the first real NIC. The caller skips every veth end by its driver marker
+/// before asking, so no local index is ever compared against a foreign one.
+fn link_peer_leaves_namespace(dir: &Path, local_ifindexes: &[u64]) -> bool {
     let (Some(ifindex), Some(iflink)) = (
         read_sysfs_u64(&dir.join("ifindex")),
         read_sysfs_u64(&dir.join("iflink")),
@@ -1415,14 +1396,11 @@ fn link_peer_leaves_namespace(
     if iflink == ifindex {
         return false;
     }
-    if is_veth_end(dir, speed_mbps) {
-        return !local_veth_ifindexes.contains(&iflink);
-    }
     !local_ifindexes.contains(&iflink)
 }
 
 /// The link speed the veth driver reports for every device it registers
-/// (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-132): a driver
+/// (`veth_get_link_ksettings`, v6.6 drivers/net/veth.c:126-134): a driver
 /// default, not a negotiated rate.
 const VETH_SPEED_MBPS: u64 = 10_000;
 
@@ -1436,23 +1414,41 @@ fn read_speed_mbps(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether `dir` is a veth end, one side of the pair container runtimes and
-/// CNIs stretch across a namespace boundary.
+/// Whether `dir` is a veth end, one side of a pair whose driver default says
+/// nothing about this host's link — the two ends share one namespace or are
+/// split across two, and both report the same fixed rate.
 ///
 /// veth carries no name the kernel guarantees (the host end is named by the
-/// CNI: Calico's `cali*`, Cilium's `lxc<id>` and `cilium_host`) and no bus
-/// device, so it is recognised by what it lacks: no `device` symlink (it is not
-/// backed by a bus device), no `DEVTYPE=` line in its uevent (every driver that
-/// derives a reading from another device declares one: `DEVTYPE=vlan`,
-/// `bridge`, `bond`, `macvlan`, `wireguard`), and the driver's fixed
-/// [`VETH_SPEED_MBPS`]. The speed condition keeps the DEVTYPE-less devices that
-/// report no rate at all out of this branch (a sit/ip6tnl tunnel, a macvlan:
-/// `ip6_tnl_get_iflink` returns the underlying link and their `speed` is
-/// unreadable), and the caller's `iflink == ifindex` precondition keeps the
-/// DEVTYPE-less devices that link to themselves out of it (dummy, ifb, team).
+/// CNI: Calico's `cali*`, Cilium's `lxc<id>` and `cilium_host`; a pair created
+/// by hand carries whatever names its creator passed) and no bus device, so it
+/// is recognised by what it lacks: no `device` symlink (it is not backed by a
+/// bus device), no `DEVTYPE=` line in its uevent (every driver that derives a
+/// reading from another device declares one: `DEVTYPE=vlan`, `bridge`, `bond`,
+/// `macvlan`, `wireguard`), and the driver's fixed [`VETH_SPEED_MBPS`]. The
+/// speed condition keeps the DEVTYPE-less devices that report no rate at all
+/// out of this branch (a sit/ip6tnl tunnel, a macvlan: `ip6_tnl_get_iflink`
+/// returns the underlying link and their `speed` is unreadable), and the
+/// link test below keeps the DEVTYPE-less devices that link to themselves out
+/// of it (dummy, ifb, team).
+///
+/// The link test is `iflink`, which names the interface's peer inside the
+/// PEER's namespace (`veth_get_iflink`, v6.6 drivers/net/veth.c:1538-1550,
+/// 0 once the peer is gone). A veth end therefore never names itself - its
+/// `iflink` is its peer's index, a different device - so an interface that
+/// links to itself cannot be one. That is the test a pair sharing one
+/// namespace passes just like the cross-namespace pair; the index is not
+/// compared with anything here, because it belongs to the peer's namespace.
 fn is_veth_end(dir: &Path, speed_mbps: u64) -> bool {
     if speed_mbps != VETH_SPEED_MBPS || dir.join("device").exists() {
         return false;
+    }
+    if let (Some(ifindex), Some(iflink)) = (
+        read_sysfs_u64(&dir.join("ifindex")),
+        read_sysfs_u64(&dir.join("iflink")),
+    ) {
+        if iflink == ifindex {
+            return false;
+        }
     }
     match fs::read_to_string(dir.join("uevent")) {
         Ok(uevent) => !uevent.lines().any(|line| line.starts_with("DEVTYPE=")),
@@ -3086,14 +3082,14 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// The same list, with the collision the local-index comparison cannot
-    /// see: an ifindex only names a device inside its own namespace, so a
+    /// The same list, with the collision no local-index comparison could see:
+    /// an ifindex only names a device inside its own namespace, so a
     /// container's `eth0` (ifindex 2 - the first device of the namespace it was
     /// created in) makes the host end of its pair report `iflink = 2`, which on
     /// the host is the first NIC. The pair was kept as a local interface and its
-    /// driver's fixed 10000 Mbps decided the host's link speed. A veth end's
-    /// peer is always another veth end, so the local device an `iflink`
-    /// resolves to must be one too.
+    /// driver's fixed 10000 Mbps decided the host's link speed. The veth marker
+    /// is what skips it now: whether an `iflink` names a device here or in
+    /// another namespace, the driver default is not this host's link.
     #[test]
     fn network_info_ignores_a_cni_host_end_whose_peer_index_collides() {
         let dir = std::env::temp_dir().join(format!(
@@ -3153,9 +3149,10 @@ mod tests {
 
     /// The controls the veth marker must not catch: a DEVTYPE-less link that
     /// reports a real negotiated rate (a team of 10 GbE ports, which like a
-    /// bond links to itself) and a DEVTYPE-less link whose `speed` cannot be
-    /// read at all (a macvlan or a sit/ip6tnl tunnel, whose `iflink` names the
-    /// device it runs over). Neither is a veth end, so neither may be dropped.
+    /// bond links to itself and so fails the marker's link test) and a
+    /// DEVTYPE-less link whose `speed` cannot be read at all (a macvlan or a
+    /// sit/ip6tnl tunnel, whose `iflink` names the device it runs over).
+    /// Neither is a veth end, so neither may be dropped.
     #[test]
     fn network_info_keeps_a_ten_gigabit_link_that_is_not_a_veth_end() {
         let dir = std::env::temp_dir().join(format!(
@@ -3197,6 +3194,65 @@ mod tests {
             "an unreadable speed is not evidence of a veth end: {names:?}"
         );
         assert_eq!(info.max_net_speed(), 10000);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A veth pair whose two ends stay in ONE namespace is plumbing just like
+    /// the cross-namespace pair: each end's `iflink` names the other end's
+    /// ifindex, both of which are local, so the peer test kept both and the
+    /// driver's fixed SPEED_10000 decided the host's link speed. The kernel
+    /// gives a veth no name it must keep — `dev_valid_name` allows anything
+    /// but `/`, `:` and whitespace — and a caller picks the names it asks for
+    /// (`ip link add h1 type veth peer name h2`), so "a pair inside one
+    /// namespace is already skipped by name" only holds for a pair someone
+    /// happened to call `veth*`.
+    #[test]
+    fn network_info_ignores_a_veth_pair_that_stays_inside_the_namespace() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_local_veth_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // The one real NIC, backed by a bus device.
+        let eth0 = dir.join("eth0");
+        fs::create_dir_all(&eth0).expect("create eth0");
+        fs::write(eth0.join("speed"), "1000\n").expect("write speed");
+        fs::write(eth0.join("ifindex"), "2\n").expect("write ifindex");
+        fs::write(eth0.join("iflink"), "2\n").expect("write iflink");
+        fs::create_dir_all(eth0.join("device")).expect("create the bus-device link");
+
+        // A veth pair created in this namespace under names of the caller's
+        // choosing: no bus device, no DEVTYPE, the driver's fixed 10000, and
+        // each end's iflink naming the other end.
+        for (name, ifindex, iflink) in [("h1", 7, 8), ("h2", 8, 7)] {
+            let end = dir.join(name);
+            fs::create_dir_all(&end).expect("create the veth end");
+            fs::write(end.join("speed"), "10000\n").expect("write speed");
+            fs::write(end.join("ifindex"), format!("{ifindex}\n")).expect("write ifindex");
+            fs::write(end.join("iflink"), format!("{iflink}\n")).expect("write iflink");
+            fs::write(
+                end.join("uevent"),
+                format!("INTERFACE={name}\nIFINDEX={ifindex}\n"),
+            )
+            .expect("write uevent");
+        }
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        let names: Vec<&str> = info.network.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["eth0"],
+            "a locally paired veth is not the host's uplink: {names:?}"
+        );
+        assert_eq!(
+            info.max_net_speed(),
+            1000,
+            "the driver's fixed rate must not decide the host link speed: {names:?}"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
