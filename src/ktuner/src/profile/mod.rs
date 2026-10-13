@@ -45,7 +45,11 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("tidb-server")
         || info.has_process("tikv-server")
         || info.has_process("mongod")
-        || info.has_process("clickhouse");
+        || info.has_process("clickhouse")
+        // oracle is the one OLTP database the canonical predicate already
+        // counts (is_database_present); the THP rule counted it in 64bd828e0.
+        // An Oracle-only host is an io-latency workload, not mixed.
+        || info.has_process("oracle");
     let has_cache = info.has_process("redis-server")
         // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
         // `valkey-server` binary with the same event-loop, memory-resident
@@ -243,6 +247,19 @@ mod tests {
     fn test_classify_clickhouse() {
         assert_eq!(
             classify(&make_info(vec!["clickhouse"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn oracle_gates_the_profile_classifier() {
+        // oracle is the one OLTP database the canonical predicate already
+        // counts (is_database_present gates the IPC rules on it) and the THP
+        // latency list counts since 64bd828e0; the classifier's has_db list
+        // still skipped it, so an Oracle-only host classified mixed and every
+        // has_db consumer stayed quiet.
+        assert_eq!(
+            classify(&make_info(vec!["oracle"])),
             WorkloadType::IoLatency
         );
     }
