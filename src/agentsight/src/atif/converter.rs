@@ -761,16 +761,29 @@ fn collect_tool_responses(
 }
 
 /// Compute aggregated final metrics.
+///
+/// The counters come from `genai_events` as `i64` and are only added when they
+/// are positive, the guard the per-step [`Metrics`] use: a non-positive value
+/// is corrupt data (the events writer stores the provider's `u64` with
+/// `as i64`, so a count above `i64::MAX` lands negative), and adding it as a
+/// `u64` wrapped `total_prompt_tokens` to about 1.8e19 — or panicked on the
+/// next addend in a build with overflow checks.
 fn compute_final_metrics(events: &[TraceEventDetail], total_steps: usize) -> FinalMetrics {
     let mut total_prompt: u64 = 0;
     let mut total_completion: u64 = 0;
     let mut total_cached: u64 = 0;
 
     for e in events {
-        total_prompt += e.input_tokens as u64;
-        total_completion += e.output_tokens as u64;
+        if e.input_tokens > 0 {
+            total_prompt += e.input_tokens as u64;
+        }
+        if e.output_tokens > 0 {
+            total_completion += e.output_tokens as u64;
+        }
         if let Some(c) = e.cache_read_tokens {
-            total_cached += c as u64;
+            if c > 0 {
+                total_cached += c as u64;
+            }
         }
     }
 
@@ -1042,6 +1055,38 @@ pub(crate) mod tests {
         assert_eq!(fm.total_completion_tokens, Some(40));
         assert_eq!(fm.total_cached_tokens, Some(160));
         assert_eq!(fm.total_steps, Some(4));
+    }
+
+    #[test]
+    fn final_metrics_ignore_a_non_positive_token_counter() {
+        // A stored counter can be non-positive: the events writer stores the
+        // provider's u64 with `as i64`, so a count above i64::MAX lands
+        // negative, and the summary report clamps these same counters to 0 for
+        // that reason. The per-step metrics of this converter already omit a
+        // non-positive value; the document totals added it as a wrapped u64, so
+        // one such row reported about 1.8e19 prompt tokens while its own step
+        // reported none at all.
+        let corrupt = || {
+            let mut event = call_event(1, 0, None, None, None);
+            event.input_tokens = -5;
+            event.output_tokens = -7;
+            event.cache_read_tokens = Some(-9);
+            event
+        };
+        let good = call_event(2, 1_000_000_000, None, None, None);
+
+        let metrics = compute_final_metrics(&[corrupt(), good], 2);
+        assert_eq!(metrics.total_prompt_tokens, Some(100));
+        assert_eq!(metrics.total_completion_tokens, Some(20));
+        assert_eq!(metrics.total_cached_tokens, Some(80));
+
+        // With nothing positive to sum, the document reports no tokens rather
+        // than a wrapped total — the answer the step metrics give for the same
+        // row.
+        let metrics = compute_final_metrics(&[corrupt()], 1);
+        assert_eq!(metrics.total_prompt_tokens, Some(0));
+        assert_eq!(metrics.total_completion_tokens, Some(0));
+        assert_eq!(metrics.total_cached_tokens, None);
     }
 
     #[test]
