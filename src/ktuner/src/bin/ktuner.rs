@@ -922,6 +922,21 @@ fn fix_with(param: &str, dry_run: bool, is_root: bool, eval: &rules::EvalResult)
     }
     let fix = tuner::apply_one(rec)?;
     let (_, eval_after) = gather()?;
+    print_json(&fix_output(param, &fix, &eval_after, rec))?;
+    Ok(0)
+}
+
+/// JSON body of a real `fix` run — the shape `fix --dry-run` previews and
+/// `rollback` reverses. Split out like [`fix_dry_run_output`] so the body is
+/// assertable without a live write: every field comes from the recorded
+/// original, the write outcome and the re-gathered diagnosis, never from the
+/// plan.
+fn fix_output(
+    param: &str,
+    fix: &tuner::AppliedFix,
+    eval_after: &rules::EvalResult,
+    rec: &Recommendation,
+) -> serde_json::Value {
     let mut output = json!({
         "fixed": param,
         // The original the ledger recorded under the transaction lock — the
@@ -944,8 +959,7 @@ fn fix_with(param: &str, dry_run: bool, is_root: bool, eval: &rules::EvalResult)
         output["requested"] = json!(rec.recommended_value);
         output["note"] = json!("内核实际生效值与推荐值不同（已按实际生效值记录并持久化，可回滚）");
     }
-    print_json(&output)?;
-    Ok(0)
+    output
 }
 
 /// JSON body of `fix --dry-run` — the `tune --dry-run` shape scoped to one
@@ -3085,6 +3099,62 @@ mod tests {
             recommendations,
             total_checked: 1,
         }
+    }
+
+    #[test]
+    fn fix_output_reports_the_boot_replay_verdict() {
+        // `fix` persists through the same choke point as `tune`, so the
+        // verdict must be in this body too: the clamp note in the same body
+        // claims the write was persisted, and a refused `systemctl enable`
+        // means a non-sysctl fix is not replayed after a reboot. Every field
+        // comes from the recorded original, the write outcome and the
+        // re-gathered diagnosis, so the body is asserted through its seam
+        // instead of a live write.
+        let rec = rec("vm.swappiness", true);
+        let unarmed = tuner::AppliedFix {
+            recorded_previous: Some("60".to_string()),
+            outcome: tuner::WriteOutcome {
+                effective: "10".to_string(),
+                clamped: false,
+            },
+            boot_unit_enabled: false,
+        };
+        let after = evaluation(vec![rec.clone()]);
+        let output = fix_output("vm.swappiness", &unarmed, &after, &rec);
+        assert_eq!(output["fixed"], json!("vm.swappiness"));
+        assert_eq!(
+            output["previous"],
+            json!("60"),
+            "the recorded original, not the recommendation's gathered current"
+        );
+        assert_eq!(output["applied"], json!("10"));
+        assert_eq!(output["score_after"], json!(after.score()));
+        assert_eq!(output["remaining"], json!(1));
+        assert_eq!(
+            output["boot_unit_enabled"],
+            json!(false),
+            "an unarmed boot replay must be visible here too: {output}"
+        );
+        assert!(output.get("note").is_none(), "no clamp, no note: {output}");
+
+        let clamped = tuner::AppliedFix {
+            outcome: tuner::WriteOutcome {
+                effective: "2".to_string(),
+                clamped: true,
+            },
+            boot_unit_enabled: true,
+            ..unarmed
+        };
+        let output = fix_output("vm.swappiness", &clamped, &after, &rec);
+        assert_eq!(output["boot_unit_enabled"], json!(true));
+        assert_eq!(output["applied"], json!("2"));
+        assert_eq!(output["requested"], json!(rec.recommended_value));
+        assert!(
+            output["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("持久化")),
+            "a clamped write keeps its note: {output}"
+        );
     }
 
     #[test]
