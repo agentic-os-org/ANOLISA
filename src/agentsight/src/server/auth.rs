@@ -389,14 +389,16 @@ fn normalize_path(mut path: String) -> String {
 ///
 /// Loopback is a network location, not an authorization boundary, so the
 /// endpoints that put the server's privileges or credentials to work require a
-/// credential of their own even from the local machine. That covers the
+/// credential of their own even from the local machine. Tokenless detail reads
+/// also proxy a stored service credential and therefore require authentication.
+/// That covers the
 /// kernel-policy mutations plus the two that are equally consequential and were
 /// missing: rewriting where the server sends its stored LLM credential
 /// (`POST /api/optimize/config`) and killing and re-execing an agent process as
 /// root (`POST /api/agent-health/{pid}/restart`). Data-plane writes (labels,
 /// triage, evaluations) stay on the loopback path: they change what the
 /// dashboard shows, not what the host does.
-fn is_privileged_mutation_path(method: &actix_web::http::Method, path: &str) -> bool {
+fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> bool {
     match *method {
         actix_web::http::Method::POST => {
             matches!(
@@ -415,6 +417,12 @@ fn is_privileged_mutation_path(method: &actix_web::http::Method, path: &str) -> 
                         .and_then(|case_id| case_id.strip_suffix(suffix))
                         .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
                 })
+        }
+        actix_web::http::Method::GET => {
+            path == "/api/tokenless/records"
+                || path
+                    .strip_prefix("/api/tokenless/records/")
+                    .is_some_and(|id| !id.is_empty() && !id.contains('/'))
         }
         actix_web::http::Method::DELETE => path
             .strip_prefix("/api/enforcement/bindings/")
@@ -511,7 +519,18 @@ where
         // Privileged mutations always require an explicit credential. Loopback is a
         // network location, not an authorization boundary: unprivileged local processes
         // must not be able to use the root server as a confused deputy.
-        if path.matches(|value| is_privileged_mutation_path(req.method(), value)) {
+        let tokenless_query = *req.method() == actix_web::http::Method::GET
+            && req
+                .app_data::<actix_web::web::Data<super::tokenless::QueryClient>>()
+                .is_some()
+            && path.matches(|value| {
+                value == "/api/token-savings"
+                    || value
+                        .strip_prefix("/api/token-savings/session/")
+                        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+            });
+        if tokenless_query || path.matches(|value| is_credential_required_path(req.method(), value))
+        {
             let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
                 let fut = self.service.call(req);

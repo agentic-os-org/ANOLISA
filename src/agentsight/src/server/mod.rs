@@ -286,6 +286,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(token_savings::get_token_savings)
                 .service(tokenless::refresh)
                 .service(tokenless::get_records)
+                .service(tokenless::get_record)
                 .service(token_savings::get_session_savings)
                 // AgentSight local security and system-audit API routes
                 .service(handlers::security_status)

@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::GenAISqliteStore;
+use crate::storage::sqlite::tokenless::TokenlessStatRow;
 
 /// Persistence or validation failure for a queried statistics record.
 #[derive(Debug, thiserror::Error)]
@@ -118,8 +119,13 @@ impl GenAISqliteStore {
         session: Option<&str>,
         tool: Option<&str>,
         limit: usize,
+        before_cache_id: Option<i64>,
     ) -> Result<Vec<SavedTokenlessRecord>, TokenlessRecordError> {
-        if start_ns > end_ns || limit == 0 || limit > 100 {
+        if start_ns > end_ns
+            || limit == 0
+            || limit > 100
+            || before_cache_id.is_some_and(|id| id <= 0)
+        {
             return Err(TokenlessRecordError::Invalid("query range or limit"));
         }
         let conn = self
@@ -130,10 +136,17 @@ impl GenAISqliteStore {
             "SELECT cache_id,source,record_json FROM tokenless_statistics
             WHERE timestamp_ns >= ?1 AND timestamp_ns <= ?2
             AND (?3 IS NULL OR session_id=?3) AND (?4 IS NULL OR tool_use_id=?4)
-            ORDER BY timestamp_ns DESC,cache_id DESC LIMIT ?5",
+            AND (?6 IS NULL OR cache_id < ?6) ORDER BY cache_id DESC LIMIT ?5",
         )?;
         let rows = stmt.query_map(
-            params![start_ns, end_ns, session, tool, limit as i64],
+            params![
+                start_ns,
+                end_ns,
+                session,
+                tool,
+                limit as i64,
+                before_cache_id
+            ],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -158,6 +171,76 @@ impl GenAISqliteStore {
             })
         })
         .collect()
+    }
+
+    /// Read applied statistics, optionally restricted to the source records returned by this query.
+    /// Previously saved records remain available separately when the source removes them.
+    ///
+    /// # Errors
+    /// Returns serialization, database, or poisoned-lock failures.
+    pub fn tokenless_applied_stats(
+        &self,
+        source: &str,
+        ids: &[&str],
+        start_ns: i64,
+        end_ns: i64,
+        current: Option<&[Value]>,
+    ) -> Result<Vec<TokenlessStatRow>, TokenlessRecordError> {
+        if start_ns > end_ns {
+            return Err(TokenlessRecordError::Invalid("query range"));
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenlessRecordError::Poisoned)?;
+        let current = current
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| (&row["id"], &row["timestamp"]))
+                    .collect::<Vec<_>>()
+            })
+            .map(|keys| serde_json::to_string(&keys))
+            .transpose()?;
+        let mut stmt = conn.prepare(
+            "SELECT record_json FROM tokenless_statistics
+            WHERE source=?1 AND timestamp_ns >= ?2 AND timestamp_ns <= ?3
+            AND json_extract(record_json,'$.mode')='active'
+            AND tool_use_id IN (SELECT value FROM json_each(?4))
+            AND (?5 IS NULL OR EXISTS (SELECT 1 FROM json_each(?5) fresh
+                WHERE json_extract(fresh.value,'$[0]')=record_id
+                AND json_extract(fresh.value,'$[1]')=record_timestamp))",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                source,
+                start_ns,
+                end_ns,
+                serde_json::to_string(ids)?,
+                current
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let record: Value = serde_json::from_str(&row?)?;
+            let Some(session_id) = associated_session(&conn, &record)? else {
+                continue;
+            };
+            result.push(TokenlessStatRow {
+                session_id,
+                tool_use_id: record["tool_use_id"].as_str().unwrap_or_default().into(),
+                operation: record["operation"].as_str().unwrap_or("unknown").into(),
+                before_tokens: record["before_tokens"]
+                    .as_i64()
+                    .ok_or(TokenlessRecordError::Invalid("before tokens"))?,
+                after_tokens: record["after_tokens"]
+                    .as_i64()
+                    .ok_or(TokenlessRecordError::Invalid("after tokens"))?,
+                before_text: record["before_text"].as_str().map(str::to_owned),
+                after_text: record["after_text"].as_str().map(str::to_owned),
+            });
+        }
+        Ok(result)
     }
 
     /// Read one saved record, including previously requested content.
@@ -219,7 +302,7 @@ mod tests {
             .save_tokenless_records("fixture", &[metadata.clone(), metadata.clone()])
             .unwrap();
         let list = store
-            .list_tokenless_records(0, i64::MAX, Some("s"), Some("t"), 100)
+            .list_tokenless_records(0, i64::MAX, Some("s"), Some("t"), 100, None)
             .unwrap();
         assert_eq!(list.len(), 1);
         let cache_id = list[0].cache_id;
@@ -262,7 +345,7 @@ mod tests {
                 .is_err()
         );
         let rows = store
-            .list_tokenless_records(0, i64::MAX, None, None, 100)
+            .list_tokenless_records(0, i64::MAX, None, None, 100, None)
             .unwrap();
         assert_eq!(rows.len(), 1);
         let mut reused = metadata;
@@ -272,11 +355,11 @@ mod tests {
         let reopened =
             GenAISqliteStore::new_with_path(&path, PeriodicStoragePolicy::default()).unwrap();
         let rows = reopened
-            .list_tokenless_records(0, i64::MAX, None, None, 100)
+            .list_tokenless_records(0, i64::MAX, None, None, 100, None)
             .unwrap();
         assert_eq!(rows.len(), 2);
         let excluded = reopened
-            .list_tokenless_records(0, 1, None, None, 100)
+            .list_tokenless_records(0, 1, None, None, 100, None)
             .unwrap();
         assert!(excluded.is_empty());
         assert_eq!(
@@ -304,7 +387,7 @@ mod tests {
         store.maintain().unwrap();
         assert!(
             store
-                .list_tokenless_records(0, i64::MAX, None, None, 100)
+                .list_tokenless_records(0, i64::MAX, None, None, 100, None)
                 .unwrap()
                 .is_empty()
         );
@@ -313,7 +396,7 @@ mod tests {
         assert_eq!(store.prune_old_records().unwrap(), 1);
         assert!(
             store
-                .list_tokenless_records(0, i64::MAX, None, None, 100)
+                .list_tokenless_records(0, i64::MAX, None, None, 100, None)
                 .unwrap()
                 .is_empty()
         );
@@ -379,6 +462,105 @@ mod tests {
                 .delete_maintenance_batch(PruneTable::Tokenless, Some(i64::MAX), usize::MAX)
                 .unwrap(),
             1
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn applied_modes_sources_filters_and_pagination() {
+        let dir = std::env::temp_dir().join(format!("stats-modes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai.db"),
+            PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        for (id, mode) in [
+            (1, json!("active")),
+            (2, json!("dry-run")),
+            (3, Value::Null),
+            (4, json!("future")),
+        ] {
+            let record = json!({"id":id,"timestamp":"2026-01-01T00:00:00Z","mode":mode,
+                "session_id":"source-session","tool_use_id":"tool","before_tokens":10,"after_tokens":2,"content_included":false});
+            store
+                .save_tokenless_records("source", std::slice::from_ref(&record))
+                .unwrap();
+            store
+                .save_tokenless_records("other-source", &[record])
+                .unwrap();
+        }
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO genai_events
+            (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+            VALUES ('llm_call','call','local',1,'[\"tool\"]','{}')",
+                [],
+            )
+            .unwrap();
+        let rows = store
+            .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].before_tokens - rows[0].after_tokens, 8);
+        assert!(
+            store
+                .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, Some(&[]))
+                .unwrap()
+                .is_empty()
+        );
+        let current = json!({"id":1,"timestamp":"2026-01-01T00:00:00Z"});
+        assert_eq!(
+            store
+                .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, Some(&[current]))
+                .unwrap()
+                .len(),
+            1
+        );
+        let replaced = json!({"id":1,"timestamp":"2026-01-02T00:00:00Z"});
+        assert!(
+            store
+                .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, Some(&[replaced]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .tokenless_applied_stats("source", &["tool' OR 1=1"], 0, i64::MAX, None)
+                .unwrap()
+                .is_empty()
+        );
+        let first = store
+            .list_tokenless_records(0, i64::MAX, None, None, 1, None)
+            .unwrap();
+        let second = store
+            .list_tokenless_records(0, i64::MAX, None, None, 1, Some(first[0].cache_id))
+            .unwrap();
+        assert!(second[0].cache_id < first[0].cache_id);
+        assert!(
+            store
+                .list_tokenless_records(0, i64::MAX, None, None, 1, Some(0))
+                .is_err()
+        );
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO genai_events
+            (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+            VALUES ('llm_call','other-call','ambiguous',2,'[\"tool\"]','{}')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store
+                .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, None)
+                .unwrap()
+                .is_empty()
         );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();

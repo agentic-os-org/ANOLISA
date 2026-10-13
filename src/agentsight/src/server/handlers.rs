@@ -133,11 +133,14 @@ pub async fn auth_login(
 /// dashboard should render (probed from installed companion components).
 /// Exempt from auth middleware.
 #[get("/status")]
-pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
+pub async fn auth_status(
+    data: web::Data<AppState>,
+    client: Option<web::Data<super::tokenless::QueryClient>>,
+) -> impl Responder {
     HttpResponse::Ok().json(json!({
         "auth_enabled": data.auth.enabled,
         "mode": "linux",
-        "capabilities": super::capabilities::app_capabilities(),
+        "capabilities": super::tokenless::capabilities(client.as_ref().map(|client| client.get_ref())),
     }))
 }
 

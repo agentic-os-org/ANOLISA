@@ -1,13 +1,12 @@
 //! Token Savings API handlers
 //!
-//! Provides endpoints that cross-reference genai_events.db with the external
-//! ~/.tokenless/stats.db to compute token savings metrics.
+//! Join captured tool calls with Tokenless API statistics or the local statistics database.
 
 use actix_web::{HttpResponse, Responder, get, web};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
+use super::tokenless::{QueryClient, savings_rows};
 
 // ─── Query parameters ────────────────────────────────────────────────────────
 
@@ -475,12 +474,12 @@ pub(crate) fn generate_optimization_tips(
 
 /// GET /api/token-savings?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
 ///
-/// Returns token savings data by cross-referencing genai_events.db
-/// with the external ~/.tokenless/stats.db.
+/// Refresh configured API statistics for captured tool IDs before computing savings.
 #[get("/token-savings")]
 pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
+    client: Option<web::Data<QueryClient>>,
 ) -> impl Responder {
     if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
@@ -509,11 +508,6 @@ pub async fn get_token_savings(
         }
     };
 
-    // Step 2: Open stats.db (read-only, graceful if absent)
-    let stats_path = tokenless::default_stats_path();
-    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
-    let stats_available = stats_store.is_some();
-
     // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
     // This gives us all known tool_use_ids and their session membership.
     let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
@@ -521,10 +515,13 @@ pub async fn get_token_savings(
         .get_tool_call_turn_indices(&session_ids)
         .unwrap_or_default();
 
-    // Step 4: Query stats.db by tool_use_ids (instead of session_ids)
-    let stats_by_session = if let Some(ref store) = stats_store {
-        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
+    // Refresh and read statistics using the source tool IDs, not local session IDs.
+    let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let stats_by_session = {
         // Group by session: use turn_indices to determine session, fallback to row.session_id
         let mut map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
         for row in rows {
@@ -535,8 +532,6 @@ pub async fn get_token_savings(
             map.entry(sid).or_default().push(row);
         }
         map
-    } else {
-        std::collections::HashMap::new()
     };
 
     // Step 5: Build response
@@ -758,6 +753,7 @@ pub async fn get_token_savings(
 pub async fn get_session_savings(
     data: web::Data<AppState>,
     path: web::Path<String>,
+    client: Option<web::Data<QueryClient>>,
 ) -> impl Responder {
     let session_id = path.into_inner();
 
@@ -795,18 +791,14 @@ pub async fn get_session_savings(
         .get_tool_call_turn_indices(&session_ids)
         .unwrap_or_default();
 
-    // Step 3: Open stats.db
-    let stats_path = tokenless::default_stats_path();
-    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
-    let stats_available = stats_store.is_some();
-
+    let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let mut items = Vec::new();
     let mut total_compounded_saved: i64 = 0;
-
-    if let Some(ref store) = stats_store {
-        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
-
+    {
         for row in &rows {
             // Only include rows belonging to this session
             let sid = turn_indices
