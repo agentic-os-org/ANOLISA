@@ -151,6 +151,13 @@ fn apply_locked(
         let sibling = cleared_sibling_entry(&rec.param);
         match apply_recordable(rec) {
             Ok((previous, outcome)) => {
+                // The write cleared the twin only when the kernel's handler
+                // for this pair clears it under this write: the snapshot above
+                // says what to record, `cleared_by` says whether the write
+                // really cleared anything. Taken before `previous` moves into
+                // the ledger record below — the pre-write read is what the
+                // decision compares against.
+                let twin = sibling.filter(|twin| twin.cleared_by(previous.as_deref(), &outcome));
                 if !quiet {
                     progress!(
                         "    {} [{}/{}] {} → {}",
@@ -195,8 +202,8 @@ fn apply_locked(
                 // rollback can ever bring that original back. The twin is a
                 // live change of the pair even when the knob itself was
                 // unrecordable, so it lands outside the branch.
-                if let Some(entry) = sibling {
-                    applied_recs.push(sibling_rec(entry, rec.category.clone()));
+                if let Some(twin) = twin {
+                    applied_recs.push(sibling_rec(twin.entry, rec.category.clone()));
                 }
             }
             Err(e) => {
@@ -298,9 +305,15 @@ pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     }
     // The disabled twin is a live change of the pair even when the knob
     // itself was unrecordable (no readable pristine value), so it extends
-    // the batch regardless. It records the knob's own category: the pair is
-    // one unit for every later selection.
-    batch.extend(sibling.map(|entry| sibling_rec(entry, rec.category.clone())));
+    // the batch regardless — as long as the write really cleared it: a no-op
+    // write leaves the dirty foreground twin alone, and the record would
+    // otherwise claim a kernel state that never existed. It records the
+    // knob's own category: the pair is one unit for every later selection.
+    batch.extend(
+        sibling
+            .filter(|twin| twin.cleared_by(previous.as_deref(), &outcome))
+            .map(|twin| sibling_rec(twin.entry, rec.category.clone())),
+    );
     let mut boot_unit_enabled = true;
     if !batch.is_empty() {
         save_rollback(&guard, &batch)?;
@@ -424,19 +437,87 @@ pub fn cleared_sibling(param: &str) -> Option<&'static str> {
     }
 }
 
-/// Ledger tuple for the twin a mutually exclusive write is about to disable:
-/// `(twin, live value, "0")`, read BEFORE the write lands — after it the
-/// kernel has already zeroed the twin and the original is gone forever.
+/// A twin a mutually exclusive write is about to disable: the ledger triple
+/// to record for it, plus the clearing condition of the pair's kernel handler.
+struct ClearedSibling {
+    /// `(twin, live value, "0")`, the record [`sibling_rec`] turns into a
+    /// ledger entry.
+    entry: (String, String, String),
+    /// True for the pairs whose handler zeroes the twin on every accepted
+    /// write; false for the dirty foreground pair, whose handler zeroes it
+    /// only inside its changed-value branch. See [`ClearedSibling::cleared_by`].
+    on_any_write: bool,
+}
+
+impl ClearedSibling {
+    /// Whether the write that just landed actually cleared the twin.
+    ///
+    /// `previous` is the knob's own pre-write read and `outcome` the verified
+    /// result, so together they say whether the value changed. The background
+    /// and overcommit handlers clear the twin on every accepted write
+    /// (`if (ret == 0 && write)`: v6.6 mm/page-writeback.c
+    /// dirty_background_ratio_handler / dirty_background_bytes_handler,
+    /// mm/util.c overcommit_ratio_handler / overcommit_kbytes_handler), while
+    /// the dirty foreground handlers clear it only inside their changed-value
+    /// branch (`if (ret == 0 && write && vm_dirty_bytes != old_bytes)` and its
+    /// ratio twin, mm/page-writeback.c:518-544). A no-op write therefore
+    /// leaves vm.dirty_ratio / vm.dirty_bytes alone, and recording the twin
+    /// then claims a state the kernel never entered: the false record is what
+    /// `is_cleared_twin` keys persistence's skip on, so it hides the twin's
+    /// own line from the boot config as well.
+    ///
+    /// An unreadable original (`previous` is `None`) keeps the record: the
+    /// change cannot be ruled out, and a missing record would lose the twin's
+    /// original for good.
+    fn cleared_by(&self, previous: Option<&str>, outcome: &WriteOutcome) -> bool {
+        if self.on_any_write {
+            return true;
+        }
+        match previous {
+            Some(previous) => previous != outcome.effective,
+            None => true,
+        }
+    }
+}
+
+/// Ledger triple for the twin a mutually exclusive write is about to disable —
+/// `(twin, live value, "0")`, read BEFORE the write lands, after which the
+/// kernel has already zeroed the twin and the original is gone forever —
+/// together with the condition the pair's handler clears it under, so the
+/// caller can drop the record when the write did not clear anything.
 /// None when `param` disables nothing, the twin is unreadable, or it holds
 /// no configured value. The recorded `applied` is "0" because that is the
 /// value the kernel puts live, exactly like a clamped read-back (#4160): the
 /// ledger must describe live reality for both knobs of the pair, or a
 /// rollback restores `dirty_bytes = 0` and leaves the host with a zeroed
 /// `dirty_ratio` — writeback throttling silently disabled.
-fn cleared_sibling_entry(param: &str) -> Option<(String, String, String)> {
+fn cleared_sibling_entry(param: &str) -> Option<ClearedSibling> {
     let sibling = cleared_sibling(param)?;
     let live = read_previous(sibling).ok()?;
-    sibling_cleared_record(sibling, &live)
+    sibling_cleared_record(sibling, &live).map(|entry| ClearedSibling {
+        entry,
+        on_any_write: clears_twin_on_any_write(param),
+    })
+}
+
+/// Whether the kernel handler that owns `param` zeroes its mutually exclusive
+/// twin on every accepted write, rather than only on a write that changes the
+/// knob. The dirty pair is the changing one (v6.6 mm/page-writeback.c:518-544:
+/// the twin is zeroed inside the `vm_dirty_bytes != old_bytes` /
+/// `vm_dirty_ratio != old_ratio` branch), so a write that leaves the value
+/// where it was leaves the twin alone; the background pair and the overcommit
+/// pair clear theirs whenever the write is accepted (see
+/// [`ClearedSibling::cleared_by`]). The table is keyed on the dotted spelling
+/// but callers pass the spelling they were given, which
+/// [`cleared_sibling`] already normalizes.
+fn clears_twin_on_any_write(param: &str) -> bool {
+    matches!(
+        param.replace('/', ".").as_str(),
+        "vm.dirty_background_bytes"
+            | "vm.dirty_background_ratio"
+            | "vm.overcommit_kbytes"
+            | "vm.overcommit_ratio"
+    )
 }
 
 /// Pure decision core of [`cleared_sibling_entry`]: whether a write that
@@ -1232,9 +1313,12 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
     };
     // A mutually exclusive knob disables its twin as a kernel side effect;
     // snapshot it before the write so the imported change records both knobs
-    // of the pair and stays reversible.
+    // of the pair and stays reversible — and drop the record when the write
+    // did not clear the twin (a no-op write leaves the dirty foreground twin
+    // alone), which would otherwise claim a kernel state that never existed.
     let sibling = cleared_sibling_entry(param);
     let outcome = write_and_verify(param, value)?;
+    let sibling = sibling.filter(|twin| twin.cleared_by(previous.as_deref(), &outcome));
     if let Some(previous) = previous {
         // No category: the value came from an imported file, not from a rule
         // recommendation, and a later `rollback --category` must not pretend
@@ -1243,7 +1327,7 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
             &guard,
             ROLLBACK_PATH,
             std::iter::once((param.to_string(), previous, outcome.effective, None))
-                .chain(sibling.map(|(param, previous, applied)| (param, previous, applied, None))),
+                .chain(sibling.map(|twin| (twin.entry.0, twin.entry.1, twin.entry.2, None))),
         )?;
         persist_from_rollback(&guard)?;
     }
@@ -3162,6 +3246,73 @@ mod tests {
             "the disabled twin's original is what a rollback writes back"
         );
         assert_eq!(data.entries["vm.overcommit_kbytes"].applied, "0");
+    }
+
+    /// Which pairs clear their twin on any accepted write, and which only on a
+    /// write that changes the knob. This is the decision `ClearedSibling::cleared_by`
+    /// makes before a twin record is published, pinned per pair so a
+    /// regression in either direction — recording a twin the kernel never
+    /// cleared, or dropping one it did clear — fails here, without a writable
+    /// /proc/sys: the integration test for the no-op case needs root and mount
+    /// namespaces, this one does not.
+    #[test]
+    fn twin_clearing_follows_the_handler_of_each_pair() {
+        let unchanged = WriteOutcome {
+            effective: "0".to_string(),
+            clamped: false,
+        };
+        let changed = WriteOutcome {
+            effective: "1073741824".to_string(),
+            clamped: false,
+        };
+        for param in ["vm.dirty_bytes", "vm.dirty_ratio", "vm/dirty_ratio"] {
+            // The dirty foreground handlers zero the twin inside their
+            // changed-value branch (v6.6 mm/page-writeback.c:518-544).
+            assert!(!clears_twin_on_any_write(param), "{param}");
+            let twin = ClearedSibling {
+                entry: (
+                    "vm.dirty_ratio".to_string(),
+                    "20".to_string(),
+                    "0".to_string(),
+                ),
+                on_any_write: clears_twin_on_any_write(param),
+            };
+            assert!(
+                !twin.cleared_by(Some("0"), &unchanged),
+                "{param}: a write that changes nothing clears nothing"
+            );
+            assert!(
+                twin.cleared_by(Some("0"), &changed),
+                "{param}: a changed write clears the twin"
+            );
+            assert!(
+                twin.cleared_by(None, &unchanged),
+                "{param}: an unreadable original cannot rule the clear out"
+            );
+        }
+        for param in [
+            "vm.dirty_background_bytes",
+            "vm.dirty_background_ratio",
+            "vm.overcommit_kbytes",
+            "vm.overcommit_ratio",
+            "vm/overcommit_ratio",
+        ] {
+            // These handlers clear on every accepted write (`if (ret == 0 &&
+            // write)`), so a no-op write still records the twin.
+            assert!(clears_twin_on_any_write(param), "{param}");
+            let twin = ClearedSibling {
+                entry: (
+                    "vm.overcommit_kbytes".to_string(),
+                    "8589934592".to_string(),
+                    "0".to_string(),
+                ),
+                on_any_write: clears_twin_on_any_write(param),
+            };
+            assert!(
+                twin.cleared_by(Some("0"), &unchanged),
+                "{param}: these handlers clear the twin on any write"
+            );
+        }
     }
 
     #[test]

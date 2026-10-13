@@ -92,6 +92,80 @@ fn body() {
     tuner::rollback_quiet().unwrap();
 }
 
+/// A write that leaves a dirty knob where it was does not clear its twin: the
+/// foreground handlers zero the other half only inside their changed-value
+/// branch (`vm_dirty_bytes != old_bytes` / `vm_dirty_ratio != old_ratio`,
+/// v6.6 mm/page-writeback.c:518-544). Recording the twin for a no-op write
+/// claims a kernel state that never existed — and because that record is what
+/// `is_cleared_twin` keys persistence's skip on, it also hides the twin's own
+/// line from the boot config.
+fn no_op_body() {
+    fs::create_dir_all("/var/lib/ktuner").unwrap();
+    let _ = fs::remove_file(LEDGER);
+    // Ratio mode, with the bytes knob already holding the value the import
+    // asks for: the write does not change it.
+    fs::write(sysctl_path("vm.dirty_bytes"), "0").unwrap();
+    fs::write(sysctl_path("vm.dirty_ratio"), "20").unwrap();
+
+    tuner::apply_import("vm.dirty_bytes", "0", None).unwrap();
+
+    let data = ledger();
+    assert_eq!(data["entries"]["vm.dirty_bytes"]["applied"], "0");
+    assert!(
+        data["entries"].get("vm.dirty_ratio").is_none(),
+        "a write that changes nothing must not record a cleared twin: {data}"
+    );
+
+    // Control: the same knob with a value that does change records the twin.
+    tuner::apply_import("vm.dirty_bytes", "1073741824", None).unwrap();
+    let data = ledger();
+    assert_eq!(
+        data["entries"]["vm.dirty_ratio"]["previous"], "20",
+        "a changed write records the twin's live value: {data}"
+    );
+    assert_eq!(data["entries"]["vm.dirty_ratio"]["applied"], "0");
+}
+
+#[test]
+#[ignore = "requires root and private mount namespaces; only fixture files are written"]
+fn a_no_op_write_records_no_cleared_twin() {
+    if std::env::var_os("KTUNER_TWIN_NOOP_CHILD").is_some() {
+        no_op_body();
+        return;
+    }
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("ktuner-twin-noop-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(dir.join("varlib")).unwrap();
+    fs::create_dir_all(dir.join("etc/sysctl.d")).unwrap();
+    fs::write(dir.join("dirty_bytes"), "0").unwrap();
+    fs::write(dir.join("dirty_ratio"), "20").unwrap();
+    let before_bytes = fs::read_to_string("/proc/sys/vm/dirty_bytes").unwrap();
+    let before_ratio = fs::read_to_string("/proc/sys/vm/dirty_ratio").unwrap();
+    let out = Command::new("unshare").args(["--mount", "--propagation", "private", "sh", "-ec",
+        "mount --bind \"$1/varlib\" /var/lib; mount --bind \"$1/etc\" /etc; mount --bind \"$1/dirty_bytes\" /proc/sys/vm/dirty_bytes; mount --bind \"$1/dirty_ratio\" /proc/sys/vm/dirty_ratio; KTUNER_TWIN_NOOP_CHILD=1 exec \"$2\" --exact a_no_op_write_records_no_cleared_twin --ignored --nocapture",
+        "twin-noop-test"]).arg(&dir).arg(std::env::current_exe().unwrap()).output().unwrap();
+    // The live host knobs are untouched: everything happened on fixtures.
+    assert_eq!(
+        fs::read_to_string("/proc/sys/vm/dirty_bytes").unwrap(),
+        before_bytes
+    );
+    assert_eq!(
+        fs::read_to_string("/proc/sys/vm/dirty_ratio").unwrap(),
+        before_ratio
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 #[ignore = "requires root and private mount namespaces; only fixture files are written"]
 fn dirty_sibling_roundtrip() {
