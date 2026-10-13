@@ -6727,17 +6727,74 @@ fn eval_accept_ra_at(
         if current != 2 && any_interface_forwards(conf_root) {
             return 1;
         }
+        let mut reason = "服务器不应接受 IPv6 路由通告，防止路由被外部覆盖导致网络异常".to_string();
+        // This writes the `default` template, and the kernel consumes that
+        // template once per device, at registration (`addrconf_dev_config`
+        // copies `devconf_dflt` into the device's cnf, v6.6
+        // net/ipv6/addrconf.c:387). Unlike IPv4 there is no fan-out from a
+        // `conf/default/*` write to the devices that already exist
+        // (`devinet_copy_dflt_conf` is IPv4-only, net/ipv4/devinet.c:2413),
+        // and the `all` template is no alternative: `ipv6_accept_ra()` reads
+        // the per-device slot only (include/net/ipv6.h:537-544). So name the
+        // interfaces this write leaves accepting Router Advertisements —
+        // otherwise the advice promises a host-level fix, the next run reads
+        // this template and goes silent, and the interfaces keep
+        // autoconfiguring from RAs.
+        let accepting = interfaces_accepting_ra(conf_root);
+        if !accepting.is_empty() {
+            let shown = accepting
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("、");
+            let rest = accepting.len().saturating_sub(3);
+            let uncovered = if rest > 0 {
+                format!("{shown} 等 {} 个接口", accepting.len())
+            } else {
+                shown
+            };
+            reason.push_str(&format!(
+                "；该写入只对之后创建的接口生效，现有接口 {uncovered} 仍在接受 RA，需逐个写入 net.ipv6.conf.<接口>.accept_ra=0"
+            ));
+        }
         recs.push(Recommendation {
             param: "net.ipv6.conf.default.accept_ra".to_string(),
             current_value: current.to_string(),
             recommended_value: "0".to_string(),
-            reason: "服务器不应接受 IPv6 路由通告，防止路由被外部覆盖导致网络异常".to_string(),
+            reason,
             confidence: Confidence::High,
             category: Category::Security,
             writable: true,
         });
     }
     1
+}
+
+/// Interfaces (excluding the `all`/`default` templates) that still accept
+/// Router Advertisements, in name order, for the reason of a `default` template
+/// write: the kernel copies the template into a device only when that device is
+/// created, so every interface that already exists keeps the value it was
+/// registered with.
+fn interfaces_accepting_ra(conf_root: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(conf_root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "all" || name == "default" {
+            continue;
+        }
+        // The per-device slot is a plain proc_dointvec (net/ipv6/addrconf.c)
+        // read as a truthiness test when forwarding is off, so -1 counts as
+        // accepting; an unreadable file is not evidence and does not.
+        if read_sysctl_i64(&entry.path().join("accept_ra").to_string_lossy()) != 0 {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names
 }
 
 fn eval_tcp_recovery(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -13581,6 +13638,77 @@ mod tests {
                 "interface forwarding={forwarding} accept_ra={accept_ra}"
             );
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn accept_ra_names_the_interfaces_the_template_write_cannot_reach() {
+        // The recommendation writes the `default` template, which the kernel
+        // copies into a device only at registration (v6.6
+        // net/ipv6/addrconf.c:387) and never fans out for IPv6 (unlike IPv4's
+        // devinet_copy_dflt_conf). An interface that already exists keeps
+        // accepting Router Advertisements, so the reason must name it: without
+        // the names the advice reads as a host-level fix, and the next run
+        // reads this very template and reports nothing while the interface
+        // still autoconfigures from RAs.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_accept_ra_names_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let conf = dir.join("conf");
+        for iface in ["default", "all", "eth0", "eth1", "veth2", "veth3", "veth4"] {
+            std::fs::create_dir_all(conf.join(iface)).unwrap();
+            std::fs::write(conf.join(iface).join("forwarding"), "0\n").unwrap();
+        }
+        let path = conf.join("default/accept_ra");
+        std::fs::write(&path, "1\n").unwrap();
+        // Every interface but eth1 accepts Router Advertisements; `all` and
+        // `default` are templates, not interfaces.
+        for iface in ["all", "default", "eth0", "veth2", "veth3", "veth4"] {
+            std::fs::write(conf.join(iface).join("accept_ra"), "-1\n").unwrap();
+        }
+        std::fs::write(conf.join("eth1").join("accept_ra"), "0\n").unwrap();
+
+        let mut recs = Vec::new();
+        eval_accept_ra_at(&make_test_info(), &mut recs, path.to_str().unwrap(), &conf);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "net.ipv6.conf.default.accept_ra")
+            .expect("an accepting template on a non-forwarding host is a finding");
+        assert!(
+            rec.reason.contains("eth0、veth2、veth3 等 4 个接口"),
+            "the reason must name the interfaces the write cannot reach, capped with a count: {}",
+            rec.reason
+        );
+        assert!(
+            !rec.reason.contains("eth1"),
+            "an interface that already ignores RAs is not named: {}",
+            rec.reason
+        );
+        assert!(
+            rec.reason.contains("net.ipv6.conf.<接口>.accept_ra=0"),
+            "and the per-interface step must be actionable: {}",
+            rec.reason
+        );
+
+        // A host where every interface already refuses RAs keeps the plain
+        // reason (only new interfaces get the template) but stays a finding:
+        // the write still arms the template.
+        for iface in ["eth0", "veth2", "veth3", "veth4"] {
+            std::fs::write(conf.join(iface).join("accept_ra"), "0\n").unwrap();
+        }
+        let mut recs = Vec::new();
+        eval_accept_ra_at(&make_test_info(), &mut recs, path.to_str().unwrap(), &conf);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "net.ipv6.conf.default.accept_ra")
+            .expect("the template write is still worth advising");
+        assert_eq!(
+            rec.reason,
+            "服务器不应接受 IPv6 路由通告，防止路由被外部覆盖导致网络异常"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
