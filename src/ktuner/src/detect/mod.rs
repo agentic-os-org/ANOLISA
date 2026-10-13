@@ -1485,14 +1485,14 @@ fn read_speed_mbps(dir: &Path) -> u64 {
 /// CNI: Calico's `cali*`, Cilium's `lxc<id>` and `cilium_host`; a pair created
 /// by hand carries whatever names its creator passed) and no bus device, so it
 /// is recognised by what it lacks: no `device` symlink (it is not backed by a
-/// bus device), no `DEVTYPE=` line in its uevent (every driver that derives a
-/// reading from another device declares one: `DEVTYPE=vlan`, `bridge`, `bond`,
-/// `macvlan`, `wireguard`), and the driver's fixed [`VETH_SPEED_MBPS`]. The
-/// speed condition keeps the DEVTYPE-less devices that report no rate at all
-/// out of this branch (a sit/ip6tnl tunnel, a macvlan: `ip6_tnl_get_iflink`
-/// returns the underlying link and their `speed` is unreadable), and the
-/// link test below keeps the DEVTYPE-less devices that link to themselves out
-/// of it (dummy, ifb, team).
+/// bus device), no `DEVTYPE=` line in its uevent (the drivers that declare one:
+/// `DEVTYPE=vlan`, `bridge`, `bond`, `wireguard`), no `lower_` adjacency link
+/// (see below), and the driver's fixed [`VETH_SPEED_MBPS`]. The speed
+/// condition keeps the DEVTYPE-less devices that report no rate at all out of
+/// this branch (a sit/ip6tnl tunnel: `ip6_tnl_get_iflink` returns the
+/// underlying link and their `speed` is unreadable), and the link test below
+/// keeps the DEVTYPE-less devices that link to themselves out of it (dummy,
+/// ifb, team).
 ///
 /// The link test is `iflink`, which names the interface's peer inside the
 /// PEER's namespace (`veth_get_iflink`, v6.6 drivers/net/veth.c:1538-1550,
@@ -1501,8 +1501,20 @@ fn read_speed_mbps(dir: &Path) -> u64 {
 /// links to itself cannot be one. That is the test a pair sharing one
 /// namespace passes just like the cross-namespace pair; the index is not
 /// compared with anything here, because it belongs to the peer's namespace.
+///
+/// The adjacency link is what separates a veth end from the macvlan/ipvlan/
+/// macvtap family. Those declare no `DEVTYPE=` either, have no bus device, and
+/// on a 10 GbE parent they show 10000 Mbps — but that is the parent's
+/// negotiated rate, which the driver forwards
+/// (`macvlan_ethtool_get_link_ksettings` reads the lower device's ksettings,
+/// v6.6 drivers/net/macvlan.c:1077-1082; `ipvlan_ethtool_get_link_ksettings`,
+/// v6.6 drivers/net/ipvlan/ipvlan_main.c:402-407), not a driver default. They
+/// record the parent relationship as a `lower_<name>` symlink
+/// (`netdev_upper_dev_link()`, v6.6 net/core/dev.c:7509-7510), and no veth code
+/// creates one (`drivers/net/veth.c` never calls it), so a device with a
+/// `lower_` link reports the lower device's reading and is not a pair end.
 fn is_veth_end(dir: &Path, speed_mbps: u64) -> bool {
-    if speed_mbps != VETH_SPEED_MBPS || dir.join("device").exists() {
+    if speed_mbps != VETH_SPEED_MBPS || dir.join("device").exists() || has_lower_link(dir) {
         return false;
     }
     if let (Some(ifindex), Some(iflink)) = (
@@ -1518,6 +1530,19 @@ fn is_veth_end(dir: &Path, speed_mbps: u64) -> bool {
         // An unreadable uevent is not evidence of a veth end.
         Err(_) => false,
     }
+}
+
+/// Whether `dir` lists a `lower_<name>` adjacency link: the kernel's record
+/// that another device runs over this one, whose link state this device
+/// reports (`netdev_upper_dev_link()` creates the symlink pair, v6.6
+/// net/core/dev.c:7509-7510). A veth end never has one; a macvlan, ipvlan or
+/// macvtap always does.
+fn has_lower_link(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("lower_"))
+    })
 }
 
 /// A sysfs attribute holding one unsigned number, `None` when the file is
@@ -3270,9 +3295,10 @@ mod tests {
     /// The controls the veth marker must not catch: a DEVTYPE-less link that
     /// reports a real negotiated rate (a team of 10 GbE ports, which like a
     /// bond links to itself and so fails the marker's link test) and a
-    /// DEVTYPE-less link whose `speed` cannot be read at all (a macvlan or a
-    /// sit/ip6tnl tunnel, whose `iflink` names the device it runs over).
-    /// Neither is a veth end, so neither may be dropped.
+    /// DEVTYPE-less link whose `speed` cannot be read at all (the attribute
+    /// reads nothing while a device is down; a sit/ip6tnl tunnel has none
+    /// either, and its `iflink` names the device it runs over). Neither is a
+    /// veth end, so neither may be dropped.
     #[test]
     fn network_info_keeps_a_ten_gigabit_link_that_is_not_a_veth_end() {
         let dir = std::env::temp_dir().join(format!(
@@ -3296,11 +3322,11 @@ mod tests {
         fs::write(team0.join("iflink"), "3\n").expect("write iflink");
         fs::write(team0.join("uevent"), "INTERFACE=team0\nIFINDEX=3\n").expect("write uevent");
 
-        let macro_vlan = dir.join("mv0");
-        fs::create_dir_all(&macro_vlan).expect("create mv0");
-        fs::write(macro_vlan.join("ifindex"), "4\n").expect("write ifindex");
-        fs::write(macro_vlan.join("iflink"), "2\n").expect("write iflink");
-        fs::write(macro_vlan.join("uevent"), "INTERFACE=mv0\nIFINDEX=4\n").expect("write uevent");
+        let down = dir.join("sit0");
+        fs::create_dir_all(&down).expect("create sit0");
+        fs::write(down.join("ifindex"), "4\n").expect("write ifindex");
+        fs::write(down.join("iflink"), "2\n").expect("write iflink");
+        fs::write(down.join("uevent"), "INTERFACE=sit0\nIFINDEX=4\n").expect("write uevent");
 
         let mut info = info_with_processes(&[]);
         info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
@@ -3310,7 +3336,7 @@ mod tests {
             "a DEVTYPE-less link that links to itself keeps its own reading: {names:?}"
         );
         assert!(
-            names.contains(&"mv0"),
+            names.contains(&"sit0"),
             "an unreadable speed is not evidence of a veth end: {names:?}"
         );
         assert_eq!(info.max_net_speed(), 10000);
@@ -3373,6 +3399,70 @@ mod tests {
             1000,
             "the driver's fixed rate must not decide the host link speed: {names:?}"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A macvlan on a 10 GbE parent reports its parent's rate: the driver
+    /// forwards the lower device's link ksettings
+    /// (`macvlan_ethtool_get_link_ksettings`, v6.6
+    /// drivers/net/macvlan.c:1077-1082). It also declares no `DEVTYPE=` in its
+    /// uevent, has no bus device, and names its parent through `iflink`
+    /// (`macvlan_dev_get_iflink`) — every shape the veth marker tests — so the
+    /// 10000 Mbps it shows was taken for a pair's default and the interface was
+    /// dropped. That left `network.len()` one interface short on a
+    /// multi-homed host, and the ARP-tuning family, which qualifies hosts by
+    /// `network.len() >= 2`, treated it as single-homed. The kernel records the
+    /// parent relationship as a `lower_<name>` adjacency link
+    /// (`netdev_upper_dev_link()`, v6.6 net/core/dev.c:7509-7510), and a veth
+    /// end never has one.
+    #[test]
+    fn network_info_keeps_a_macvlan_that_reads_its_parent_rate() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_macvlan_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // The 10 GbE NIC the macvlan runs over: a real link backed by a bus
+        // device, linked to itself.
+        let nic = dir.join("eth10g");
+        fs::create_dir_all(&nic).expect("create the NIC");
+        fs::write(nic.join("speed"), "10000\n").expect("write speed");
+        fs::write(nic.join("ifindex"), "2\n").expect("write ifindex");
+        fs::write(nic.join("iflink"), "2\n").expect("write iflink");
+        fs::create_dir_all(nic.join("device")).expect("create the bus-device link");
+
+        // The macvlan: the parent's 10000 Mbps, no DEVTYPE, and the adjacency
+        // link naming what it runs over.
+        let macvlan = dir.join("mv0");
+        fs::create_dir_all(&macvlan).expect("create the macvlan");
+        fs::write(macvlan.join("speed"), "10000\n").expect("write speed");
+        fs::write(macvlan.join("ifindex"), "7\n").expect("write ifindex");
+        fs::write(macvlan.join("iflink"), "2\n").expect("write iflink");
+        fs::write(macvlan.join("uevent"), "INTERFACE=mv0\nIFINDEX=7\n").expect("write uevent");
+        std::os::unix::fs::symlink(&nic, macvlan.join("lower_eth10g"))
+            .expect("link the lower device");
+
+        // Control: a veth end of the same shape, with no adjacency link.
+        let veth = dir.join("h1");
+        fs::create_dir_all(&veth).expect("create the veth end");
+        fs::write(veth.join("speed"), "10000\n").expect("write speed");
+        fs::write(veth.join("ifindex"), "8\n").expect("write ifindex");
+        fs::write(veth.join("iflink"), "9\n").expect("write iflink");
+        fs::write(veth.join("uevent"), "INTERFACE=h1\nIFINDEX=8\n").expect("write uevent");
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        let mut names: Vec<&str> = info.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["eth10g", "mv0"],
+            "the macvlan keeps its parent's reading, the pair end stays out: {names:?}"
+        );
+        assert_eq!(info.max_net_speed(), 10000);
 
         fs::remove_dir_all(&dir).ok();
     }
