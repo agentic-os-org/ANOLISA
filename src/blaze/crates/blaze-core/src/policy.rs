@@ -583,7 +583,15 @@ impl PolicyEngine {
     /// Construct an engine pre-populated with `policies`. Sorted so that
     /// higher priority is evaluated first.
     pub fn with_policies(mut policies: Vec<PolicyFile>) -> Self {
-        policies.sort_by_key(|p| std::cmp::Reverse(p.priority));
+        // Higher priority first; ties are broken by policy name so the
+        // selected policy never depends on directory enumeration order
+        // (read_dir order varies by filesystem and changes when
+        // config-management tooling replaces files via rename).
+        policies.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.policy_name.cmp(&b.policy_name))
+        });
         Self { policies }
     }
 
@@ -848,6 +856,40 @@ sequence = ["template-reg:bind-mm-template"]
         let decision = engine.evaluate(&labels, &img).expect("matches");
         assert_eq!(decision.policy_name, "agent-rl-override");
         assert_eq!(decision.backend_priority, vec![BackendKind::Rund]);
+    }
+
+    #[test]
+    fn equal_priority_policies_are_evaluated_in_a_deterministic_order() {
+        // With only a priority key the stable sort preserves read_dir order,
+        // so two same-priority overlapping policies win depending on the
+        // filesystem. The name tie-break must decide regardless of input
+        // order.
+        let base: PolicyFile = toml::from_str(sample_toml()).expect("parse");
+        let mut zeta = base.clone();
+        zeta.policy_name = "agent-rl-zeta".into();
+        zeta.select.backend_priority = vec![BackendKind::KataFc];
+        let mut alpha = base.clone();
+        alpha.policy_name = "agent-rl-alpha".into();
+        alpha.select.backend_priority = vec![BackendKind::Rund];
+
+        let labels = HashMap::from([("ai.anolisa.workload".into(), "rl-rollout".into())]);
+        let img = ImageMetadata {
+            digest: "sha256:abc".into(),
+            workload_class: Some(WorkloadClass::AgentRl),
+            kernel_version: None,
+        };
+
+        // Insert in the opposite of name order to prove the sort, not the
+        // input order, decides between equal priorities.
+        let engine = PolicyEngine::with_policies(vec![zeta.clone(), alpha.clone()]);
+        let decision = engine.evaluate(&labels, &img).expect("matches");
+        assert_eq!(decision.policy_name, "agent-rl-alpha");
+
+        // The same policies in the opposite input order must yield the same
+        // decision — the actual invariant being protected.
+        let engine = PolicyEngine::with_policies(vec![alpha, zeta]);
+        let decision = engine.evaluate(&labels, &img).expect("matches");
+        assert_eq!(decision.policy_name, "agent-rl-alpha");
     }
 
     #[test]
