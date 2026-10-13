@@ -858,12 +858,7 @@ fn write_atomic_with(
     write_content: impl FnOnce(&mut fs::File) -> Result<()>,
 ) -> Result<()> {
     let tmp = format!("{path}.tmp.{}", std::process::id());
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .with_context(|| format!("create private temporary file {tmp}"))?;
+    let mut file = create_temporary(&tmp)?;
 
     let result = (|| {
         write_content(&mut file)?;
@@ -877,6 +872,49 @@ fn write_atomic_with(
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Create the private temporary file for `tmp`, reclaiming a leftover that can
+/// only be stale.
+///
+/// The name embeds the pid, so a file left behind by a process killed between
+/// the create and the rename carries the pid of a dead process: with pid reuse
+/// the next writer of the same target picks the same name and, without a
+/// reclaim, every later save fails — the live kernel write already landed, so
+/// the ledger loses the only record of the original and persistence never
+/// happens. A name is unique per live pid and same-process writers to one path
+/// are serialized by the ledger lock, so a file at *our* pid's name cannot be
+/// in flight: it is unreachable state.
+///
+/// Only a regular file is reclaimed. A symlink (or anything else) at the name
+/// keeps the refusal that exclusive creation exists for: the temporary must
+/// never be an inode another user chose.
+fn create_temporary(tmp: &str) -> Result<fs::File> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(tmp)
+    {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(tmp)
+                .with_context(|| format!("inspect temporary file {tmp}"))?;
+            if !metadata.file_type().is_file() {
+                anyhow::bail!(
+                    "create private temporary file {tmp}: the name exists and is not a regular file"
+                );
+            }
+            fs::remove_file(tmp).with_context(|| format!("remove stale temporary file {tmp}"))?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(tmp)
+                .with_context(|| format!("create private temporary file {tmp}"))
+        }
+        Err(error) => Err(error).with_context(|| format!("create private temporary file {tmp}")),
+    }
 }
 
 fn save_rollback(guard: &LedgerLock, recommendations: &[Recommendation]) -> Result<()> {
@@ -6404,32 +6442,56 @@ mod tests {
         }
     }
 
+    /// A non-regular file at the temporary's name keeps the refusal that
+    /// exclusive creation exists for: the temporary must never be an inode
+    /// another user chose, and a symlink there would redirect the private
+    /// contents (and later the rename) to a file of the attacker's choosing.
     #[test]
-    fn test_write_atomic_rejects_existing_temporary() {
+    fn test_write_atomic_rejects_a_non_regular_temporary() {
         use std::os::unix::fs::symlink;
 
-        let dir = AtomicTestDir::new("existing");
-        for symlinked in [false, true] {
-            let target = dir.0.join(format!("target-{symlinked}"));
-            let path = target.to_str().unwrap();
-            let tmp = format!("{path}.tmp.{}", std::process::id());
-            let victim = dir.0.join(format!("victim-{symlinked}"));
-            fs::write(&target, b"original target").unwrap();
-            if symlinked {
-                fs::write(&victim, b"original temporary").unwrap();
-                symlink(&victim, &tmp).unwrap();
-            } else {
-                fs::write(&tmp, b"original temporary").unwrap();
-                fs::set_permissions(&tmp, fs::Permissions::from_mode(0o666)).unwrap();
-            }
-            assert!(write_atomic(path, b"replacement", 0o644).is_err());
-            assert_eq!(fs::read(&target).unwrap(), b"original target");
-            assert_eq!(fs::read(&tmp).unwrap(), b"original temporary");
-            assert_eq!(
-                fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink(),
-                symlinked
-            );
-        }
+        let dir = AtomicTestDir::new("existing-nonregular");
+        let target = dir.0.join("target");
+        let path = target.to_str().unwrap();
+        let tmp = format!("{path}.tmp.{}", std::process::id());
+        let victim = dir.0.join("victim");
+        fs::write(&target, b"original target").unwrap();
+        fs::write(&victim, b"original temporary").unwrap();
+        symlink(&victim, &tmp).unwrap();
+
+        assert!(write_atomic(path, b"replacement", 0o644).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original target");
+        assert_eq!(fs::read(&victim).unwrap(), b"original temporary");
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+    }
+
+    /// A regular file at the temporary's name is a leftover from a process
+    /// killed between the create and the rename; with pid reuse it blocks every
+    /// later save of that target forever. The name carries the writer's pid and
+    /// same-process writers to one path are serialized by the ledger lock, so a
+    /// file at *our* pid's name cannot be in flight and is reclaimed instead.
+    #[test]
+    fn test_write_atomic_reclaims_a_stale_regular_temporary() {
+        let dir = AtomicTestDir::new("existing-regular");
+        let target = dir.0.join("target");
+        let path = target.to_str().unwrap();
+        let tmp = format!("{path}.tmp.{}", std::process::id());
+        fs::write(&target, b"original target").unwrap();
+        fs::write(&tmp, b"leftover from a killed run").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_atomic(path, b"replacement", 0o644)
+            .expect("a stale leftover must not block the save");
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(
+            !Path::new(&tmp).exists(),
+            "the reclaimed temporary is renamed onto the target, not left behind"
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the published file carries the requested mode, not the leftover's"
+        );
     }
 
     #[test]
