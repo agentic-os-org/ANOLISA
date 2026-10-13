@@ -21,6 +21,7 @@ edition = "2024"
 # reference these via `{ workspace = true }`; the root crate is being
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
+url = "2"
 anyhow = "1.0.86"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
@@ -68,6 +69,7 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
+url = { workspace = true }
 agentsight-audit = { path = "crates/agentsight-audit" }
 agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }

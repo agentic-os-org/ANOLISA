@@ -141,6 +141,10 @@ async fn privileged_mutations_fail_closed_without_credentials() {
         App::new()
             .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
             .route(
+                "/api/tokenless/refresh",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
                 "/api/optimize/config",
                 web::post().to(|| async { HttpResponse::Ok().finish() }),
             )
@@ -156,7 +160,11 @@ async fn privileged_mutations_fail_closed_without_credentials() {
     .await;
     let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
 
-    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+    for uri in [
+        "/api/optimize/config",
+        "/api/agent-health/4242/restart",
+        "/api/tokenless/refresh",
+    ] {
         let response = awtest::call_service(
             &app,
             awtest::TestRequest::post()
@@ -198,6 +206,10 @@ async fn privileged_mutations_accept_a_valid_credential() {
         App::new()
             .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
             .route(
+                "/api/tokenless/refresh",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
                 "/api/optimize/config",
                 web::post().to(|| async { HttpResponse::Ok().finish() }),
             )
@@ -209,7 +221,11 @@ async fn privileged_mutations_accept_a_valid_credential() {
     .await;
     let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
 
-    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+    for uri in [
+        "/api/optimize/config",
+        "/api/agent-health/4242/restart",
+        "/api/tokenless/refresh",
+    ] {
         let response = awtest::call_service(
             &app,
             awtest::TestRequest::post()

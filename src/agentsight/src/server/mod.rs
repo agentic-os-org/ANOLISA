@@ -17,6 +17,7 @@ mod secret;
 pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
+mod tokenless;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -283,6 +284,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 )
                 .service(handlers::get_interruption)
                 .service(token_savings::get_token_savings)
+                .service(tokenless::refresh)
+                .service(tokenless::get_records)
                 .service(token_savings::get_session_savings)
                 // AgentSight local security and system-audit API routes
                 .service(handlers::security_status)
@@ -954,6 +957,9 @@ pub async fn run_server(
     config_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
+    let tokenless_client = tokenless::QueryClient::from_config_path(config_path.as_deref())
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .map(web::Data::new);
     let storage_base = storage_data_dir(&storage_path);
     let database_manager = Arc::new(
         DatabaseManager::new(
@@ -1198,7 +1204,7 @@ pub async fn run_server(
             .allowed_headers(vec!["Content-Type", "Authorization"])
             .max_age(3600);
 
-        App::new()
+        let mut app = App::new()
             .wrap(cors)
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
@@ -1207,7 +1213,11 @@ pub async fn run_server(
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
             .app_data(query_extractor_config())
-            .configure(configure_routes)
+            .configure(configure_routes);
+        if let Some(client) = &tokenless_client {
+            app = app.app_data(client.clone());
+        }
+        app
     })
     .bind((host, port))
     {

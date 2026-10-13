@@ -17,6 +17,7 @@ mod session;
 mod stats;
 #[cfg(test)]
 mod tests;
+mod tokenless;
 
 use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::Connection;
@@ -66,6 +67,7 @@ pub use stats::{
     AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
     ModelTimeseriesBucket, TimeseriesBucket,
 };
+pub use tokenless::{SavedTokenlessRecord, TokenlessRecordError};
 
 /// SQLite-backed GenAI event storage
 pub struct GenAISqliteStore {

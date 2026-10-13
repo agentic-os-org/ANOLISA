@@ -1,0 +1,386 @@
+//! AgentSight-owned copies of queried Tokenless statistics in the GenAI database.
+
+use rusqlite::{Connection, params};
+use serde::Serialize;
+use serde_json::Value;
+
+use super::GenAISqliteStore;
+
+/// Persistence or validation failure for a queried statistics record.
+#[derive(Debug, thiserror::Error)]
+pub enum TokenlessRecordError {
+    /// SQLite read or transaction failed.
+    #[error(transparent)]
+    Database(#[from] rusqlite::Error),
+    /// A saved JSON record cannot be encoded or decoded.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// Source data does not satisfy the statistics contract.
+    #[error("invalid Tokenless record: {0}")]
+    Invalid(&'static str),
+    /// The store mutex was poisoned.
+    #[error("Tokenless statistics store lock is poisoned")]
+    Poisoned,
+}
+
+/// Saved record with an AgentSight-local identifier for detail queries.
+#[derive(Debug, Serialize)]
+pub struct SavedTokenlessRecord {
+    /// Local identifier; distinct from the source record ID.
+    pub cache_id: i64,
+    /// Configured query endpoint that supplied the record.
+    pub source: String,
+    /// Original source fields, including content availability and missing values.
+    pub record: Value,
+    /// Local session matched by a unique captured tool-call ID; absent or ambiguous stays null.
+    pub agentsight_session_id: Option<String>,
+}
+
+pub(super) fn init_tables(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS tokenless_statistics (
+        cache_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL, record_id INTEGER NOT NULL, record_timestamp TEXT NOT NULL,
+        timestamp_ns INTEGER NOT NULL, session_id TEXT, tool_use_id TEXT,
+        content_included INTEGER NOT NULL, record_json TEXT NOT NULL,
+        UNIQUE(source, record_id, record_timestamp));
+        CREATE INDEX IF NOT EXISTS idx_tokenless_statistics_time ON tokenless_statistics(timestamp_ns);
+        CREATE INDEX IF NOT EXISTS idx_tokenless_statistics_tool ON tokenless_statistics(tool_use_id);")
+}
+
+impl GenAISqliteStore {
+    /// Save a query result atomically; metadata refreshes preserve already fetched content.
+    ///
+    /// # Errors
+    /// Rejects invalid records and returns lock, serialization, or transaction errors.
+    pub fn save_tokenless_records(
+        &self,
+        source: &str,
+        records: &[Value],
+    ) -> Result<(), TokenlessRecordError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenlessRecordError::Poisoned)?;
+        let tx = conn.transaction()?;
+        for record in records {
+            let id = record["id"]
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or(TokenlessRecordError::Invalid("source ID"))?;
+            let timestamp = record["timestamp"]
+                .as_str()
+                .ok_or(TokenlessRecordError::Invalid("timestamp"))?;
+            let timestamp_ns = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .and_then(|time| time.timestamp_nanos_opt())
+                .ok_or(TokenlessRecordError::Invalid("timestamp range"))?;
+            for field in ["before_tokens", "after_tokens"] {
+                if record[field].as_i64().is_none_or(|count| count < 0) {
+                    return Err(TokenlessRecordError::Invalid("token counts"));
+                }
+            }
+            for field in ["session_id", "tool_use_id", "mode"] {
+                if !record[field].is_null() && !record[field].is_string() {
+                    return Err(TokenlessRecordError::Invalid("attribution or mode"));
+                }
+            }
+            let content = record["content_included"]
+                .as_bool()
+                .ok_or(TokenlessRecordError::Invalid("content availability"))?;
+            tx.execute("INSERT INTO tokenless_statistics
+                (source,record_id,record_timestamp,timestamp_ns,session_id,tool_use_id,content_included,record_json)
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                ON CONFLICT(source,record_id,record_timestamp) DO UPDATE SET
+                record_json=CASE WHEN excluded.content_included=1 OR tokenless_statistics.content_included=0
+                    THEN excluded.record_json ELSE json_set(excluded.record_json,
+                        '$.before_text',json_extract(tokenless_statistics.record_json,'$.before_text'),
+                        '$.after_text',json_extract(tokenless_statistics.record_json,'$.after_text'),
+                        '$.before_output',json_extract(tokenless_statistics.record_json,'$.before_output'),
+                        '$.after_output',json_extract(tokenless_statistics.record_json,'$.after_output'),
+                        '$.content_included',json('true')) END,
+                session_id=excluded.session_id,tool_use_id=excluded.tool_use_id,
+                content_included=MAX(tokenless_statistics.content_included,excluded.content_included)",
+                params![source,id,timestamp,timestamp_ns,record["session_id"].as_str(),
+                    record["tool_use_id"].as_str(),content,serde_json::to_string(record)?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// List saved statistics in a time range, with optional exact attribution filters.
+    ///
+    /// # Errors
+    /// Rejects invalid limits/ranges and returns lock, SQLite, or stored JSON errors.
+    pub fn list_tokenless_records(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        session: Option<&str>,
+        tool: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SavedTokenlessRecord>, TokenlessRecordError> {
+        if start_ns > end_ns || limit == 0 || limit > 100 {
+            return Err(TokenlessRecordError::Invalid("query range or limit"));
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenlessRecordError::Poisoned)?;
+        let mut stmt = conn.prepare(
+            "SELECT cache_id,source,record_json FROM tokenless_statistics
+            WHERE timestamp_ns >= ?1 AND timestamp_ns <= ?2
+            AND (?3 IS NULL OR session_id=?3) AND (?4 IS NULL OR tool_use_id=?4)
+            ORDER BY timestamp_ns DESC,cache_id DESC LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![start_ns, end_ns, session, tool, limit as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (cache_id, source, payload) = row?;
+            let mut record: Value = serde_json::from_str(&payload)?;
+            // List responses must not disclose cached content implicitly.
+            for field in ["before_text", "after_text", "before_output", "after_output"] {
+                record[field] = Value::Null;
+            }
+            record["content_included"] = Value::Bool(false);
+            Ok(SavedTokenlessRecord {
+                cache_id,
+                source,
+                agentsight_session_id: associated_session(&conn, &record)?,
+                record,
+            })
+        })
+        .collect()
+    }
+
+    /// Read one saved record, including previously requested content.
+    ///
+    /// # Errors
+    /// Returns lock, SQLite, or stored JSON failures; absent local IDs return `None`.
+    pub fn tokenless_record(
+        &self,
+        cache_id: i64,
+    ) -> Result<Option<SavedTokenlessRecord>, TokenlessRecordError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenlessRecordError::Poisoned)?;
+        let mut stmt =
+            conn.prepare("SELECT source,record_json FROM tokenless_statistics WHERE cache_id=?1")?;
+        let mut rows = stmt.query([cache_id])?;
+        rows.next()?
+            .map(|row| {
+                let record: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+                Ok(SavedTokenlessRecord {
+                    cache_id,
+                    source: row.get(0)?,
+                    agentsight_session_id: associated_session(&conn, &record)?,
+                    record,
+                })
+            })
+            .transpose()
+    }
+}
+
+fn associated_session(conn: &Connection, record: &Value) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT CASE WHEN COUNT(DISTINCT session_id)=1 THEN MIN(session_id) END
+        FROM genai_events WHERE event_type='llm_call' AND session_id IS NOT NULL
+        AND (?1=call_id OR EXISTS (SELECT 1 FROM json_each(
+            CASE WHEN json_valid(tool_call_ids) THEN tool_call_ids ELSE '[]' END) WHERE value=?1))",
+        [record["tool_use_id"].as_str()],
+        |row| row.get(0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PeriodicStoragePolicy;
+    use serde_json::json;
+
+    #[test]
+    fn deduplication_atomicity_content_and_restart() {
+        let dir = std::env::temp_dir().join(format!("agentsight-stats-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("genai.db");
+        let store =
+            GenAISqliteStore::new_with_path(&path, PeriodicStoragePolicy::default()).unwrap();
+        let metadata = json!({"id":1,"timestamp":"2026-01-01T00:00:00Z","session_id":"s","tool_use_id":"t",
+            "before_tokens":6,"after_tokens":2,"mode":null,"content_included":false});
+        store
+            .save_tokenless_records("fixture", &[metadata.clone(), metadata.clone()])
+            .unwrap();
+        let list = store
+            .list_tokenless_records(0, i64::MAX, Some("s"), Some("t"), 100)
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        let cache_id = list[0].cache_id;
+        let mut detail = metadata.clone();
+        detail["content_included"] = json!(true);
+        detail["before_text"] = json!("sensitive fixture");
+        store.save_tokenless_records("fixture", &[detail]).unwrap();
+        store
+            .save_tokenless_records("fixture", std::slice::from_ref(&metadata))
+            .unwrap();
+        let mut refreshed = metadata.clone();
+        refreshed["after_tokens"] = json!(1);
+        store
+            .save_tokenless_records("fixture", &[refreshed])
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO genai_events
+            (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+            VALUES ('llm_call','call','local-session',1,'[\"t\"]','{}')",
+                [],
+            )
+            .unwrap();
+        let saved = store.tokenless_record(cache_id).unwrap().unwrap();
+        assert_eq!(saved.record["before_text"], "sensitive fixture");
+        assert_eq!(saved.record["after_tokens"], 1);
+        assert_eq!(
+            saved.agentsight_session_id.as_deref(),
+            Some("local-session")
+        );
+        let mut invalid = metadata.clone();
+        invalid["id"] = json!(2);
+        invalid["before_tokens"] = json!(-1);
+        assert!(
+            store
+                .save_tokenless_records("other", &[metadata.clone(), invalid])
+                .is_err()
+        );
+        let rows = store
+            .list_tokenless_records(0, i64::MAX, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let mut reused = metadata;
+        reused["timestamp"] = json!("2026-01-02T00:00:00Z");
+        store.save_tokenless_records("fixture", &[reused]).unwrap();
+        drop(store);
+        let reopened =
+            GenAISqliteStore::new_with_path(&path, PeriodicStoragePolicy::default()).unwrap();
+        let rows = reopened
+            .list_tokenless_records(0, i64::MAX, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let excluded = reopened
+            .list_tokenless_records(0, 1, None, None, 100)
+            .unwrap();
+        assert!(excluded.is_empty());
+        assert_eq!(
+            reopened.tokenless_record(cache_id).unwrap().unwrap().record["before_text"],
+            "sensitive fixture"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn saved_statistics_follow_retention_and_capacity_cleanup() {
+        let directory =
+            std::env::temp_dir().join(format!("stats-retention-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &directory.join("genai.db"),
+            PeriodicStoragePolicy::new(1, 0, 60),
+        )
+        .unwrap();
+        let mut record = json!({"id":1,"timestamp":"2020-01-01T00:00:00Z",
+            "before_tokens":6,"after_tokens":2,"content_included":false});
+        store
+            .save_tokenless_records("fixture", std::slice::from_ref(&record))
+            .unwrap();
+        store.maintain().unwrap();
+        assert!(
+            store
+                .list_tokenless_records(0, i64::MAX, None, None, 100)
+                .unwrap()
+                .is_empty()
+        );
+        record["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+        store.save_tokenless_records("fixture", &[record]).unwrap();
+        assert_eq!(store.prune_old_records().unwrap(), 1);
+        assert!(
+            store
+                .list_tokenless_records(0, i64::MAX, None, None, 100)
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn tokenless_maintenance_obeys_row_byte_and_expiry_bounds() {
+        use super::super::schema::PruneTable;
+        let dir = std::env::temp_dir().join(format!("stats-batches-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("stats.db"),
+            PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        let records: Vec<_> = (1..=260)
+            .map(|id| {
+                json!({"id":id,
+            "timestamp":"2020-01-01T00:00:00Z", "before_tokens":6,"after_tokens":2,"content_included":false})
+            })
+            .collect();
+        store.save_tokenless_records("fixture", &records).unwrap();
+        assert_eq!(
+            store
+                .delete_maintenance_batch(PruneTable::Tokenless, Some(1), usize::MAX)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .delete_maintenance_batch(PruneTable::Tokenless, None, usize::MAX)
+                .unwrap(),
+            128
+        );
+        assert_eq!(
+            store
+                .delete_maintenance_batch(PruneTable::Tokenless, None, 2)
+                .unwrap(),
+            2
+        );
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM tokenless_statistics", [])
+            .unwrap();
+        let oversized = json!({"id":1,"timestamp":"2020-01-01T00:00:00Z",
+            "before_tokens":6,"after_tokens":2,"content_included":true,"before_text":"x".repeat(5*1024*1024)});
+        store
+            .save_tokenless_records("fixture", &[oversized])
+            .unwrap();
+        let small = json!({"id":2,"timestamp":"2020-01-01T00:00:00Z","before_tokens":6,"after_tokens":2,"content_included":false});
+        store.save_tokenless_records("fixture", &[small]).unwrap();
+        assert_eq!(
+            store
+                .delete_maintenance_batch(PruneTable::Tokenless, None, usize::MAX)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .delete_maintenance_batch(PruneTable::Tokenless, Some(i64::MAX), usize::MAX)
+                .unwrap(),
+            1
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

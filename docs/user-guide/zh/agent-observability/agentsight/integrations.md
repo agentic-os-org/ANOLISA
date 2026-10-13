@@ -130,3 +130,14 @@ curl -s http://127.0.0.1:7396/metrics
 - [配置](configuration.md)——为自己的 Agent 添加规则
 - [Dashboard 指南](dashboard.md#导航与页面可见性)——哪些页面在什么条件下出现
 - [数据与存储](data-and-storage.md#http-api)——API 细节
+
+### 通过 API 记录统计数据
+
+配置 `tokenless_api` 后，已认证的 `POST /api/tokenless/refresh` 接收
+`{"session_id":"source-session"}` 或 `{"tool_use_id":"captured-tool-id"}`，以事务保存
+有界查询结果（最多 1,000 条 / 8 MiB）。超限时整体失败，不保存部分结果；请缩小过滤
+范围。即使从 loopback 访问，刷新也需要 AgentSight 凭据。`GET /api/tokenless/records`
+列出已保存的元数据，支持 `start_ns`、`end_ns`、`session_id`、`tool_use_id` 和 `limit`
+（1–100），默认查询最近 24 小时。网络或查询失败会明确返回，已保存的数据仍可查看。
+原始字段保持不变。仅当采集到的 tool-call ID 唯一对应本地会话时填充
+`agentsight_session_id`；缺失或歧义关联保持 null。

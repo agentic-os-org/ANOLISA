@@ -402,6 +402,7 @@ fn is_privileged_mutation_path(method: &actix_web::http::Method, path: &str) -> 
             matches!(
                 path,
                 "/api/enforcement/bindings"
+                    | "/api/tokenless/refresh"
                     | "/api/enforcement/file-bindings"
                     | "/api/enforcement/credential-bindings"
                     | "/api/optimize/config"

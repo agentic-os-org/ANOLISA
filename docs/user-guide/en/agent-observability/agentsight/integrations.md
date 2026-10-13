@@ -143,3 +143,15 @@ report, or import the session into another AgentSight instance through the Traje
 - [Configuration](configuration.md) — add rules for your own Agent
 - [Dashboard guide](dashboard.md#navigation-and-page-availability) — which pages appear when
 - [Data and storage](data-and-storage.md#http-api) — API details
+
+### Record statistics through the API
+
+With `tokenless_api` configured, authenticated `POST /api/tokenless/refresh` accepts
+`{"session_id":"source-session"}` or `{"tool_use_id":"captured-tool-id"}`. It records a
+bounded query (at most 1,000 records / 8 MiB) atomically. An oversized query fails without
+saving a partial result; narrow the filter. Refresh requires an AgentSight credential,
+even from loopback. `GET /api/tokenless/records` lists saved metadata with optional
+`start_ns`, `end_ns`, `session_id`, `tool_use_id`, and `limit` (1–100); the default window
+is the last 24 hours. Network/query failures are explicit, and saved records remain readable.
+Original fields are preserved. `agentsight_session_id` is populated only when a captured
+tool-call ID uniquely matches a local session; missing or ambiguous associations remain null.

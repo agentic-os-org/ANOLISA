@@ -260,3 +260,7 @@ sudo systemctl start agentsight.service
 - [CLI 参考](cli-reference.md)——用命令行查同一批数据
 - [Dashboard 指南](dashboard.md)——这些数据库之上的界面
 - [配置](configuration.md)——存储与保留相关开关
+
+查询到的 Tokenless 统计数据保存在现有 GenAI store 的 `genai_events.db` 中。同一端点、
+源 ID 和原始时间戳的重复查询更新元数据，保留显式获取的完整内容与原始源会话 ID。
+这些副本遵循 `storage.genai` 的保留期限和容量清理策略，不修改 Tokenless 数据库。

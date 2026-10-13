@@ -291,3 +291,8 @@ Stopping the service first ensures the WAL is checkpointed, so the archive is co
 - [CLI reference](cli-reference.md) — query the same data from the shell
 - [Dashboard guide](dashboard.md) — the UI over these databases
 - [Configuration](configuration.md) — storage and retention switches
+
+Queried Tokenless statistics are saved in `genai_events.db` alongside the existing GenAI
+store. Repeating a query replaces metadata for the same endpoint, source ID and original
+timestamp, preserving explicitly fetched content. Original source session IDs are retained.
+These copies follow `storage.genai` age and capacity cleanup; they do not modify Tokenless's database.
