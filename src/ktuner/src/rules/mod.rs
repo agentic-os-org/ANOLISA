@@ -1389,10 +1389,7 @@ fn is_qdisc_module_available(module: &str) -> bool {
     // writing the candidate qdisc to net.core.default_qdisc and reading it
     // back, which mutated live kernel state as a side effect of read-only
     // commands (check/status/list/why/tune --dry-run) — the same bug class
-    // fixed for is_param_writable in e9425244. Trade-off: qdiscs built
-    // statically into the kernel (no loadable module, no .ko file) are not
-    // detected here and won't be recommended, same as before that qdisc
-    // ever ships as non-modular on the kernels ktuner targets.
+    // fixed for is_param_writable in e9425244.
     if std::path::Path::new(&format!("/sys/module/{module}")).exists() {
         return true;
     }
@@ -1413,8 +1410,18 @@ fn running_module_tree() -> Option<std::path::PathBuf> {
 /// Whether the module tree `tree` ships `module` under `subdir` (e.g.
 /// `kernel/net/sched`), so the kernel can load it on demand. Pure filesystem
 /// lookup over a caller-supplied tree so tests need no real `/lib/modules`.
+///
+/// A module built into the kernel (=y) has no file in the tree, and one
+/// without parameters gets no `/sys/module` entry either — sch_fq_codel is
+/// built in on Fedora/RHEL kernels. The tree records those in
+/// `modules.builtin`, one `<subdir>/<module>.ko` path per line, so a module
+/// listed there is available too.
 fn module_in_tree(tree: &std::path::Path, subdir: &str, module: &str) -> bool {
     qdisc_module_in(&tree.join(subdir), module)
+        || std::fs::read_to_string(tree.join("modules.builtin")).is_ok_and(|list| {
+            let entry = format!("{subdir}/{module}.ko");
+            list.lines().any(|line| line.trim() == entry)
+        })
 }
 
 /// Whether `module` is present in a `kernel/net/sched`-style directory under
@@ -9425,6 +9432,26 @@ mod tests {
         // A different qdisc's module does not make sch_fq available.
         let other = SchedDir::new(&["sch_fq_codel.ko.zst"]);
         assert!(!qdisc_module_in(&other.0, "sch_fq"));
+    }
+
+    #[test]
+    fn module_probe_counts_a_built_in_module() {
+        // A module built into the kernel (=y) has no file under the tree, and
+        // without parameters no /sys/module entry either: sch_fq_codel is
+        // built in on Fedora/RHEL kernels. modules.builtin is the tree's own
+        // record of it, one `<subdir>/<module>.ko` path per line.
+        let tree = SchedDir::new(&[]);
+        std::fs::write(
+            tree.0.join("modules.builtin"),
+            "kernel/net/ipv4/tcp_cubic.ko\nkernel/net/sched/sch_fq_codel.ko\n",
+        )
+        .unwrap();
+        assert!(module_in_tree(&tree.0, "kernel/net/sched", "sch_fq_codel"));
+        assert!(module_in_tree(&tree.0, "kernel/net/ipv4", "tcp_cubic"));
+
+        // Listed elsewhere or under another name is not this module.
+        assert!(!module_in_tree(&tree.0, "kernel/net/sched", "sch_fq"));
+        assert!(!module_in_tree(&tree.0, "kernel/net/ipv4", "sch_fq_codel"));
     }
 
     #[test]
