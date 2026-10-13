@@ -962,13 +962,32 @@ where
         let identity = canonicalize_path(&path);
         // Equivalent spellings must share the first rollback record, or a
         // later alias would restore an intermediate value over the original.
-        if let Some(entry) = data
-            .entries
-            .values_mut()
-            .find(|entry| canonicalize_path(&entry.path) == identity)
-        {
-            entry.applied = applied;
-            entry.category = category;
+        // The record this write belongs to is the one whose recorded path is
+        // that kernel file — or, when that path is stale and gone (see the
+        // insert branch below), the one whose own KEY resolves to the same
+        // identity: the key names the same knob, so the record is this write's.
+        // Matching by path alone inserted a second record for one kernel file
+        // — the pristine `previous` then sat in a record no restore can reach,
+        // while the restore wrote the new record's intermediate value and the
+        // ledger could never clear.
+        let matched = data.entries.iter().find_map(|(key, entry)| {
+            let same_path = canonicalize_path(&entry.path) == identity;
+            let stale = !same_path
+                && !Path::new(&entry.path).exists()
+                && canonicalize_path(&param_to_path(key)) == identity;
+            (same_path || stale).then(|| (key.clone(), same_path))
+        });
+        if let Some((key, same_path)) = matched {
+            if let Some(entry) = data.entries.get_mut(&key) {
+                if !same_path {
+                    // The recorded path is gone: re-point it at what the
+                    // entry's own parameter resolves to now. `previous` stays
+                    // the original.
+                    entry.path = path.clone();
+                }
+                entry.applied = applied;
+                entry.category = category;
+            }
             continue;
         }
         // The key may already exist under a path an older `param_to_path`
@@ -5180,6 +5199,48 @@ mod tests {
         assert_eq!(
             entry.path, "/proc/sys/net/ipv4/conf/Br0.100/forwarding",
             "the recorded path must be the one this parameter resolves to now"
+        );
+    }
+
+    /// The same stale path, but under the OTHER spelling of the knob: a merge
+    /// arriving as `net/ipv4/conf/Br0.100/forwarding` compared the recorded
+    /// path only, so the dotted entry above was not recognized as the record
+    /// this write belongs to — a second record for one kernel file was
+    /// inserted. The pristine `previous` then sat in a record no restore can
+    /// reach (its path is gone), the restore wrote the new record's
+    /// intermediate value, and the ledger never cleared. The key names the same
+    /// knob, so the merge adopts it and re-points the path.
+    #[test]
+    fn test_merge_adopts_a_stale_path_under_the_other_spelling() {
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "net.ipv4.conf.Br0.100.forwarding":{
+                    "previous":"0","applied":"1",
+                    "path":"/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+                }}}"#,
+        )
+        .unwrap();
+        let data = merge_entries(
+            data,
+            [(
+                "net/ipv4/conf/Br0.100/forwarding".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+                None,
+            )],
+        );
+        assert_eq!(
+            data.entries.len(),
+            1,
+            "one kernel file stays one record: {:?}",
+            data.entries.keys().collect::<Vec<_>>()
+        );
+        let entry = &data.entries["net.ipv4.conf.Br0.100.forwarding"];
+        assert_eq!(entry.previous, "0", "the pristine value survives");
+        assert_eq!(entry.applied, "1");
+        assert_eq!(
+            entry.path, "/proc/sys/net/ipv4/conf/Br0.100/forwarding",
+            "the stale path is re-pointed at what the knob resolves to"
         );
     }
 
