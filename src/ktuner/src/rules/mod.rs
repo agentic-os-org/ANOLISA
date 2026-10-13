@@ -4638,9 +4638,22 @@ fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
         let Some(name) = area.strip_prefix(b"/dev/") else {
             return false;
         };
-        info.disks
-            .iter()
-            .any(|disk| disk.disk_type == DiskType::HDD && name.starts_with(disk.name.as_bytes()))
+        // A whole device or one of its partitions: nothing after the disk name
+        // (`/dev/sdb`), or a partition suffix (`2`, and `p2` as nvme/mmcblk
+        // write it). A bare prefix match would attribute `/dev/sdaa2` to a disk
+        // named `sda` and `/dev/sdb2bak` to `sdb`, and quietly drop the advice
+        // for the disk the area is really on.
+        info.disks.iter().any(|disk| {
+            disk.disk_type == DiskType::HDD
+                && name.strip_prefix(disk.name.as_bytes()).is_some_and(|rest| {
+                    rest.is_empty()
+                        || rest
+                            .strip_prefix(b"p")
+                            .unwrap_or(rest)
+                            .iter()
+                            .all(|byte| byte.is_ascii_digit())
+                })
+        })
     })
 }
 
@@ -12775,6 +12788,39 @@ mod tests {
             .concat(),
         )
         .unwrap();
+        // Two near-misses the area must not resolve through: a partition of a
+        // LONGER disk name that merely starts with a rotational disk's name,
+        // and a partition suffix that is not one.
+        let on_a_longer_name = dir.join("swaps-longer-name");
+        std::fs::write(
+            &on_a_longer_name,
+            [
+                header.as_slice(),
+                b"/dev/sdaa2                               partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let with_a_junk_suffix = dir.join("swaps-junk-suffix");
+        std::fs::write(
+            &with_a_junk_suffix,
+            [
+                header.as_slice(),
+                b"/dev/sdb2bak                             partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let whole_device = dir.join("swaps-whole-device");
+        std::fs::write(
+            &whole_device,
+            [
+                header.as_slice(),
+                b"/dev/sdb                                 partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
         // The HDD area next to an area whose path is not UTF-8: /proc/swaps
         // escapes only " \t\n\\", so the table as a whole is undecodable and
         // the rotational area must still be resolved through its raw bytes.
@@ -12791,28 +12837,46 @@ mod tests {
         .unwrap();
         assert!(std::str::from_utf8(&std::fs::read(&mixed_encoding).unwrap()).is_err());
 
-        // make_test_info carries one NVMe disk; add the rotational disk the
-        // HDD fixture's area names.
+        // make_test_info carries one NVMe disk; add the rotational disks the
+        // HDD fixtures' areas name (`sda` is the shorter name `sdaa2` merely
+        // starts with).
         let mut info = make_test_info();
-        info.disks.push(DiskInfo {
-            name: "sdb".to_string(),
-            disk_type: DiskType::HDD,
-            scheduler: "mq-deadline".to_string(),
-            available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
-            nr_requests: 128,
-            read_ahead_kb: 128,
-            rq_affinity: 1,
-            hidden: false,
-            holders: vec![],
-        });
+        for name in ["sdb", "sda"] {
+            info.disks.push(DiskInfo {
+                name: name.to_string(),
+                disk_type: DiskType::HDD,
+                scheduler: "mq-deadline".to_string(),
+                available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
+                nr_requests: 128,
+                read_ahead_kb: 128,
+                rq_affinity: 1,
+                hidden: false,
+                holders: vec![],
+            });
+        }
 
         for (swaps, expected, why) in [
             (&on_nvme, true, "the swap area is on the NVMe disk"),
             (&on_hdd, false, "the swap area is on the rotational disk"),
             (
+                &whole_device,
+                false,
+                "a whole rotational device is not a partition",
+            ),
+            (
                 &on_a_file,
                 true,
                 "a swap file names no disk, so no medium is claimed",
+            ),
+            (
+                &on_a_longer_name,
+                true,
+                "sdaa2 is a partition of sdaa, not of sda",
+            ),
+            (
+                &with_a_junk_suffix,
+                true,
+                "sdb2bak is not a partition of sdb",
             ),
             (
                 &mixed_encoding,
