@@ -1787,6 +1787,10 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the redis-server gates must count it too.
+        || info.has_process("valkey-server")
         || info.has_process("memcached")
         || info.has_process("etcd")
         || info.has_process("elasticsearch");
@@ -9417,8 +9421,10 @@ mod tests {
     fn test_vfs_cache_pressure_with_mongod_and_mariadbd() {
         // The vfs_cache_pressure gate forgot mongod (in every sibling db list)
         // and mariadbd (added to the sibling gates by 73bdd5835/51913a79b but
-        // missed here). Both must trigger the recommendation; a build job must not.
-        for name in ["mongod", "mariadbd"] {
+        // missed here). The valkey sweep of 0b55cba16 missed this gate too,
+        // although valkey-server is the Redis 7.2.4 fork in the same cache
+        // family. All three must trigger the recommendation; a build job must not.
+        for name in ["mongod", "mariadbd", "valkey-server"] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
                 name: name.to_string(),
