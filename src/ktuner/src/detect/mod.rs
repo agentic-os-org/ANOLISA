@@ -721,7 +721,8 @@ fn cgroup_v1_relative_path(content: &[u8]) -> Option<PathBuf> {
 
 /// Walk the cgroup chain from `rel` up to `root`, reading `file` at every
 /// level; the effective value is the smallest real one seen. A v1 memory walk
-/// stops before a parent that disables hierarchical accounting. Levels with no
+/// skips a parent that disables hierarchical accounting — the charge continues
+/// at the mount root, so the root's limit stays in the chain. Levels with no
 /// value (the v2 `max` sentinel, the v1 unlimited constant, unparsable content)
 /// are skipped.
 /// `None` when no level of the chain offers the file at all, so the caller
@@ -741,15 +742,27 @@ fn chain_min_value(root: &Path, rel: &Path, file: &str, parse: fn(&str) -> u64) 
     let mut dir = own_dir.clone();
     let mut saw_limit_file = false;
     let mut best: u64 = 0;
+    // Set once the walk met a level that disables legacy v1 hierarchical
+    // accounting, so the jump below happens at most once.
+    let mut charged_to_root = false;
     loop {
         // Legacy v1 children are charged to a parent only while that parent
         // enables hierarchy. Unknown state keeps the existing ancestor walk.
         if file == "memory.limit_in_bytes"
             && dir != own_dir
+            && !charged_to_root
             && fs::read_to_string(dir.join("memory.use_hierarchy"))
                 .is_ok_and(|state| state.trim() == "0")
         {
-            break;
+            // The child of that level is not charged to it but to the ROOT
+            // memcg's counter (`page_counter_init(&memcg->memory,
+            // &root_mem_cgroup->memory)`, v5.10 mm/memcontrol.c:5366), whose
+            // limit `page_counter_try_charge` still enforces on the way up. The
+            // disabled level's own limit drops out of the chain; the mount
+            // root's does not. Ending the walk here skipped the root too and
+            // reported a leaf limit a root-limited host cannot reach.
+            charged_to_root = true;
+            dir = root.to_path_buf();
         }
         if let Ok(content) = fs::read_to_string(dir.join(file)) {
             saw_limit_file = true;

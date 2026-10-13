@@ -61,6 +61,35 @@ fn disabled_v1_parent_does_not_bind_the_leaf() {
     assert_eq!(t.read("11:memory:/parent/leaf\n"), 0);
 }
 
+/// A limited v1 root keeps binding through a subtree that disables
+/// hierarchical accounting. The child of a level with `use_hierarchy` 0 is
+/// charged to the ROOT memcg's counter (`page_counter_init(&memcg->memory,
+/// &root_mem_cgroup->memory)`, v5.10 mm/memcontrol.c:5366), and
+/// `page_counter_try_charge` walks that chain, so the root's limit is enforced
+/// on every charge below it. Only the disabled level's own limit leaves the
+/// chain; ending the walk there dropped the root's with it and reported a limit
+/// the process cannot reach.
+#[test]
+fn a_limited_v1_root_still_binds_through_a_disabled_ancestor() {
+    let t = Tree::new();
+    t.v1_limit("", "1073741824");
+    t.hierarchy("", "1");
+    t.v1_limit("parent", "8589934592");
+    t.hierarchy("parent", "0");
+    t.v1_limit("parent/leaf", "4294967296");
+    t.hierarchy("parent/leaf", "1");
+
+    // The leaf accounts to the root: 1 GiB binds, the disabled 8 GiB level's
+    // own limit and the leaf's 4 GiB do not lower it further.
+    assert_eq!(t.read("11:memory:/parent/leaf\n"), 1024 * 1024);
+
+    // Control: the disabled level's limit is still excluded when it is the
+    // narrowest one and the root is unlimited.
+    t.v1_limit("", "9223372036854775807");
+    t.v1_limit("parent", "2147483648");
+    assert_eq!(t.read("11:memory:/parent/leaf\n"), 4 * 1024 * 1024);
+}
+
 #[test]
 fn v1_accounting_stops_before_a_disabled_ancestor() {
     let t = Tree::new();
