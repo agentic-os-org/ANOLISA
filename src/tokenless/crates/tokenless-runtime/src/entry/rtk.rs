@@ -119,7 +119,7 @@ impl OwnedChild {
         Ok(unsafe { info.si_pid() } != 0)
     }
 
-    fn signal_group(&self) -> io::Result<()> {
+    fn signal_group(&mut self) -> io::Result<()> {
         if self.reaped {
             return Ok(());
         }
@@ -127,6 +127,11 @@ impl OwnedChild {
         // reserves the PGID. No signal is sent after try_wait releases its PID.
         if unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) } < 0 {
             let error = io::Error::last_os_error();
+            #[cfg(target_os = "macos")]
+            if error.raw_os_error() == Some(libc::EPERM) && self.is_exited_group_leader()? {
+                // Darwin excludes zombies from group signals, returning EPERM for an empty match.
+                return Ok(());
+            }
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
@@ -134,9 +139,27 @@ impl OwnedChild {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    fn is_exited_group_leader(&mut self) -> io::Result<bool> {
+        if !self.observe_exit()? {
+            return Ok(false);
+        }
+        let pid = self.child.id() as libc::pid_t;
+        let mut members = [0 as libc::pid_t; 2];
+        // SAFETY: the buffer holds two PIDs, and WNOWAIT still reserves the group leader.
+        let count = unsafe {
+            libc::proc_listpgrppids(
+                pid,
+                members.as_mut_ptr().cast(),
+                std::mem::size_of_val(&members) as libc::c_int,
+            )
+        };
+        Ok(count == 1 && members[0] == pid)
+    }
+
     fn cleanup(&mut self) -> io::Result<ExitStatus> {
-        self.signal_group()?;
         let started = Instant::now();
+        self.signal_group()?;
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
@@ -169,5 +192,83 @@ impl Drop for OwnedChild {
             let _ = self.signal_group();
             let _ = self.child.try_wait();
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+
+    fn waiter(group: libc::pid_t) -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "read -r value; exit 3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(group)
+            .spawn()
+            .unwrap()
+    }
+
+    fn finish_leader(owned: &mut OwnedChild) {
+        drop(owned.child.stdin.take());
+        let started = Instant::now();
+        while !owned.observe_exit().unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    #[test]
+    fn singleton_zombie_retains_ownership_until_reaped() {
+        let mut owned = OwnedChild {
+            child: waiter(0),
+            reaped: false,
+        };
+        finish_leader(&mut owned);
+        assert!(owned.is_exited_group_leader().unwrap());
+        assert!(!owned.reaped);
+        assert_eq!(owned.cleanup().unwrap().code(), Some(3));
+        assert!(owned.reaped);
+        assert!(owned.signal_group().is_ok());
+    }
+
+    #[test]
+    fn live_leader_cannot_bypass_group_signalling() {
+        let mut owned = OwnedChild {
+            child: waiter(0),
+            reaped: false,
+        };
+        assert!(!owned.is_exited_group_leader().unwrap());
+        assert_eq!(owned.cleanup().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn exited_leader_with_closed_stdout_still_cleans_live_members() {
+        let mut owned = OwnedChild {
+            child: waiter(0),
+            reaped: false,
+        };
+        let mut member = waiter(owned.child.id() as libc::pid_t);
+        finish_leader(&mut owned);
+        let is_singleton = owned.is_exited_group_leader().unwrap();
+        let status = owned.cleanup();
+        let started = Instant::now();
+        let member_status = loop {
+            if let Some(status) = member.try_wait().unwrap() {
+                break Some(status);
+            }
+            if started.elapsed() >= CLEANUP_TIMEOUT {
+                member.kill().unwrap();
+                member.wait().unwrap();
+                break None;
+            }
+            thread::sleep(POLL_INTERVAL);
+        };
+        assert!(!is_singleton);
+        assert_eq!(status.unwrap().code(), Some(3));
+        assert_eq!(member_status.unwrap().signal(), Some(libc::SIGKILL));
     }
 }
