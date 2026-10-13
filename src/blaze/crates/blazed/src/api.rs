@@ -204,7 +204,15 @@ fn health(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
 }
 
 fn metrics(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let body = state.metrics.render();
+    metrics_response(&state.metrics)
+}
+
+/// Build the Prometheus exposition response shared by the `GET /v1/metrics`
+/// API route and the dedicated scrape socket.
+pub(crate) fn metrics_response(
+    metrics: &Arc<crate::metrics::Metrics>,
+) -> Result<Response<Full<Bytes>>> {
+    let body = metrics.render();
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain; version=0.0.4")
