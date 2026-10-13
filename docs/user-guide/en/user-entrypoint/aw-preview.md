@@ -6,6 +6,15 @@ Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec
 
 This Preview is not yet published through `anolisa install` or RPM. Download artifacts from a successful manual **CI / AW Packages** run of the reviewed source commit. PR artifacts ending in `-validation` are merge-candidate checks, not distributable releases.
 
+For source-to-integration steps, including a backend-free policy, see the
+[component walkthrough](../../../developer-guide/en/aw/integration.md). To use
+QwenPaw or Hermes with the same Providers, copy the
+[four-framework configuration](aw.md#use-one-configuration-for-four-frameworks)
+and set the installed binary paths. `aw-package configure` below generates
+Qoder/OpenClaw entries only; it does not initialize native Agent profiles.
+Container state and volume requirements are covered in the
+[runtime guide](aw.md#containers-and-persistent-data).
+
 ## 1. Install the package
 
 Use Linux with glibc 2.39 or newer (Ubuntu 24.04), on the matching CPU architecture. CI builds x86_64; the same native build supports aarch64. Extract the downloaded Actions artifact ZIP first.
@@ -41,6 +50,20 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 ```
 
 For OpenClaw alone, replace `--qoder "$AW_QODER"` with `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`; supply the native settings and state options described in step 5 when launching. You can also provide both Agent entrypoints. No sec-core socket or Provider package is required. Empty `providers` and `events` mean no AW policy checks or per-tool AW audit; native permissions and existing Hooks/plugins still apply. AW still creates an instance and starts/reuses its shared service. Exit the Agent and stop that service with `aw stop --config "$AW_DEMO/aw-core.yaml"`.
+
+`configure` is the initialization command: after core installation, it creates
+a complete `aw.yaml` with Agent, daemon, execution and audit settings. Omitting
+`--provider` (or passing `--provider none`) leaves `providers` and `events` empty.
+It creates a new file and refuses to overwrite an existing one. To initialize a
+policy in one command, select `--provider command` as shown in the
+[boolean script guide](aw.md#boolean-policy-commands). To add rules later, follow
+`configure` → `config add-provider` → `config add-event` → `config add-hook` →
+`config validate`. Every `config` action, including `add-*`, needs an existing
+valid file; it does not initialize one. Only an absent event needs `add-event`.
+For QwenPaw/Hermes or all four targets, copy the
+[shared template](../../../developer-guide/en/aw/integration.md#2-prepare-one-configuration-for-four-frameworks)
+and fill its paths instead; `configure` currently generates Qoder/OpenClaw
+entries only and never initializes framework profiles.
 
 ## Edit existing Provider and Hook configuration
 
@@ -98,33 +121,43 @@ Each mutating command publishes one operation atomically. Several commands are
 separate publications, so earlier successful commands remain applied if a later
 command fails.
 
-For example, add a native before-tool Hook to the empty core configuration above.
-Replace `/opt/company/bin/tool-audit` with your own Hook executable, which must
-follow the selected Agent's native response contract.
+For example, add a default boolean before-tool Hook to the empty core
+configuration created above. Complete initialization first, then exit any Agent
+and stop its service before editing. The demonstration script reads a normalized
+event and returns JSON true when input contains `AW_DENY_TEST`; it does not
+execute the input. Python 3 is this optional script's dependency. The shell
+expands `AW_DEMO` while writing the Provider definition, so the saved argv has an
+absolute script path; AW does not interpolate variables in YAML.
 
 ```bash
-cat > "$AW_DEMO/provider.yaml" <<'YAML'
-protocol: native-hook/v1alpha1
+cat > "$AW_DEMO/check-tool.py" <<'PYTHON'
+import json
+import sys
+
+event = json.load(sys.stdin)
+print(json.dumps("AW_DENY_TEST" in json.dumps(event["tool"]["input"], ensure_ascii=False)))
+PYTHON
+cat > "$AW_DEMO/provider.yaml" <<YAML
 transport:
   type: stdio
   location: agent
-  argv: [/opt/company/bin/tool-audit]
+  argv: [/usr/bin/python3, "$AW_DEMO/check-tool.py"]
 timeout_ms: 1000
-max_output_bytes: 4096
-config: {}
+max_output_bytes: 32
 YAML
 cat > "$AW_DEMO/event.yaml" <<'YAML'
 enabled: true
-required: false
+required: true
 steps: []
 YAML
 cat > "$AW_DEMO/hook.yaml" <<'YAML'
-id: company-before
+id: check-marker
 provider: company
-native: {}
-on_error: report
+effects: [block]
+reason_code: demo_marker_denied
+on_error: block
 YAML
-chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+chmod 600 "$AW_DEMO/check-tool.py" "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company --definition "$AW_DEMO/provider.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
@@ -132,10 +165,26 @@ chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
-  --event tool.before --id company-before
+  --event tool.before --id check-marker
 "$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+```
+
+The omitted Provider `protocol` selects `aw-hook/v1alpha1`, and the omitted step
+`operation` defaults to `invoke`. AW calls the script only for admitted events;
+it needs no method dispatcher or response object. True requests the step's
+`block` effect and reason code; false requests no effect. Errors follow
+`on_error: block`. Replace the script with your own boolean rule. Existing
+native scripts use the explicit [native Hook form](aw.md#connect-your-programs).
+Use the `aw run` command above with the edited configuration to test native
+behavior; offline validation does not execute the script.
+
+To remove this demonstration policy later, stop its Agent/service first, remove
+the referencing step, then its Provider. The empty event is retained. The script
+remains on disk until you finish using it or clean up the demo directory.
+
+```bash
 "$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
-  --event tool.before --id company-before
+  --event tool.before --id check-marker
 "$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company
 rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"

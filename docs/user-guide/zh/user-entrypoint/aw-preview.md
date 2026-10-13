@@ -6,6 +6,12 @@
 
 此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请下载已评审提交上手动运行成功的 **CI / AW Packages** 产物。PR 自动产物带 `-validation` 后缀，仅用于合并候选验收，不作为发布包分发。
 
+从源码到组件接入的连续步骤及无需后端的策略示例见
+[组件教程](../../../developer-guide/zh/aw/integration.md)。需要 QwenPaw 或 Hermes 共用
+Provider 时，复制[四框架配置](aw.md#四框架使用同一份配置)，填写已安装的二进制路径。
+下方 `aw-package configure` 仅生成 Qoder/OpenClaw 条目，不初始化原生 Agent profile。
+容器状态目录与卷要求见[运行指南](aw.md#容器与持久化数据)。
+
 ## 1. 安装包
 
 需要 Linux、glibc 2.39 或更新版本（Ubuntu 24.04），选择与 CPU 架构匹配的包。CI 构建 x86_64，同一原生构建命令支持 aarch64。先解压下载的 Actions artifact ZIP。
@@ -41,6 +47,17 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 ```
 
 只使用 OpenClaw 时，将 `--qoder "$AW_QODER"` 换成 `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`；启动时按第 5 步提供原生配置和状态目录。也可同时提供两个 Agent 入口。不需要 sec-core socket 或 Provider 包。空 `providers` 和 `events` 表示没有 AW 策略检查或每次工具调用的 AW 审计；原生权限和已有 Hook/插件继续生效。AW 仍创建实例并启动或复用共享服务。退出 Agent 后用 `aw stop --config "$AW_DEMO/aw-core.yaml"` 停止该服务。
+
+`configure` 就是初始化命令：安装 core 后，它生成包含 Agent、daemon、execution
+和 audit 设置的完整 `aw.yaml`。不传 `--provider`（或传 `--provider none`），
+`providers` 和 `events` 都为空。它只创建新文件，拒绝覆盖已有配置。若要一次生成
+带策略的配置，按[布尔脚本指南](aw.md#布尔判断脚本)选择 `--provider command`。
+后续逐项添加规则则按 `configure` → `config add-provider` → `config add-event` →
+`config add-hook` → `config validate` 执行。所有 `config` 命令（包括 `add-*`）都要求
+已有合法文件，不会自动初始化；只有事件不存在时才需要 `add-event`。
+QwenPaw/Hermes 或四框架共用配置则复制
+[共用模板](../../../developer-guide/zh/aw/integration.md#2-准备四框架共用配置)并填写路径；
+当前 `configure` 只生成 Qoder/OpenClaw 条目，不初始化框架原生 profile。
 
 ## 编辑已有 Provider 与 Hook 配置
 
@@ -87,32 +104,41 @@ Provider 私有 `config` 中的键保持不透明。
 每条修改命令原子发布一个操作。多条命令分别发布，后续命令失败时，先前已成功的
 命令仍然生效。
 
-例如，在上述空 core 配置中添加原生工具前 Hook。将 `/opt/company/bin/tool-audit`
-替换为自己的 Hook 可执行文件，并遵守所选 Agent 的原生响应合同。
+例如，在上方创建的空 core 配置中添加缺省布尔工具前 Hook。先完成初始化；若已
+启动 Agent，退出并停止服务后再编辑。演示脚本读取标准化事件，输入包含
+`AW_DENY_TEST` 时返回 JSON true，不执行输入。Python 3 是这个可选脚本的依赖。
+写 Provider 定义时由 shell 展开 `AW_DEMO`，保存的 argv 已是绝对脚本路径；
+AW 不会对 YAML 中的变量进行插值。
 
 ```bash
-cat > "$AW_DEMO/provider.yaml" <<'YAML'
-protocol: native-hook/v1alpha1
+cat > "$AW_DEMO/check-tool.py" <<'PYTHON'
+import json
+import sys
+
+event = json.load(sys.stdin)
+print(json.dumps("AW_DENY_TEST" in json.dumps(event["tool"]["input"], ensure_ascii=False)))
+PYTHON
+cat > "$AW_DEMO/provider.yaml" <<YAML
 transport:
   type: stdio
   location: agent
-  argv: [/opt/company/bin/tool-audit]
+  argv: [/usr/bin/python3, "$AW_DEMO/check-tool.py"]
 timeout_ms: 1000
-max_output_bytes: 4096
-config: {}
+max_output_bytes: 32
 YAML
 cat > "$AW_DEMO/event.yaml" <<'YAML'
 enabled: true
-required: false
+required: true
 steps: []
 YAML
 cat > "$AW_DEMO/hook.yaml" <<'YAML'
-id: company-before
+id: check-marker
 provider: company
-native: {}
-on_error: report
+effects: [block]
+reason_code: demo_marker_denied
+on_error: block
 YAML
-chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+chmod 600 "$AW_DEMO/check-tool.py" "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company --definition "$AW_DEMO/provider.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
@@ -120,10 +146,23 @@ chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/hook.yaml"
 "$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
-  --event tool.before --id company-before
+  --event tool.before --id check-marker
 "$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+```
+
+Provider 省略 `protocol` 就使用 `aw-hook/v1alpha1`，步骤省略 `operation` 就默认
+`invoke`。AW 只在已准入事件触发时调用脚本，脚本无需 method 分发或 response
+对象。true 请求步骤中的 `block` 效果与原因码，false 不请求效果；错误按
+`on_error: block` 处理。将脚本替换为自己的布尔规则即可。已有原生脚本使用显式
+[原生 Hook 形式](aw.md#接入自己的程序)。用上方的 `aw run` 命令和编辑后的配置
+验证原生行为；离线校验不执行脚本。
+
+后续撤销演示策略时，先退出 Agent 并停止服务，再删除引用步骤及 Provider。
+空事件会保留；脚本保留到不再使用它或清理演示目录时。
+
+```bash
 "$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
-  --event tool.before --id company-before
+  --event tool.before --id check-marker
 "$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company
 rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"

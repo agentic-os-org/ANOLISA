@@ -9,7 +9,8 @@ workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw.
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
 between fields. The local Host performs Provider discovery and admission; the
-Qoder adapter verifies the supported native version before binding.
+selected Adapter verifies its supported native version before binding. For a
+working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
 
@@ -89,8 +90,9 @@ Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
 with `observe`, plus native steps at these points. Qoder CLI 1.1.64 maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, exact selectors, guards, replacement effects and
-stronger execution guarantees are not runtime support. The first launcher
-adapter is Qoder; the other three IDs remain configuration vocabulary.
+stronger execution guarantees are not runtime support. Qoder, OpenClaw, QwenPaw
+and Hermes have launch Adapters; their supported versions, entrypoints and
+after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
 
 ## Events, effects and tool selection
 

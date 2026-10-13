@@ -12,6 +12,12 @@ sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调�
 完整的 AW 服务、Qoder 和 sec-core 预编译集成见 [Preview 包指南](aw-preview.md)。
 以下仍可单独从源码使用 Provider 桥接。
 
+通用的组件接入路径见 [AW 教程](../../../developer-guide/zh/aw/integration.md)。sec-core
+CLI 和 daemon 仍是独立管理的后端，AW 审计存储由 AW 服务负责，见
+[容器持久化说明](aw.md#容器与持久化数据)。Preview 生成器映射 Qoder `Bash` 和
+OpenClaw `exec` 输入。使用 QwenPaw 或 Hermes 前，须在 `config.tools` 中补充并
+验证其实际工具名称和输入指针；未映射工具只观察，不扫描。
+
 ## 前置条件与构建
 
 按 [sec-core 指南](../agent-security/agent-sec-core/QUICKSTART.md) 安装 sec-core。

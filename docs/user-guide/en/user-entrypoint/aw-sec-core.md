@@ -15,6 +15,14 @@ For a prebuilt AW service + Qoder + sec-core integration, use the
 [Preview package guide](aw-preview.md). The standalone source bridge below
 is also available.
 
+For the general component integration path, start with the
+[AW walkthrough](../../../developer-guide/en/aw/integration.md). sec-core's CLI
+and daemon remain an independently managed backend; the AW service owns AW
+audit storage. See [container persistence](aw.md#containers-and-persistent-data).
+The Preview generator maps Qoder `Bash` and OpenClaw `exec` inputs. Before using
+QwenPaw or Hermes, add and validate their actual tool names and input pointers
+in `config.tools`; an unmapped tool is observed without scanning.
+
 ## Prerequisites and build
 
 Install sec-core using the [sec-core guide](../agent-security/agent-sec-core/QUICKSTART.md).

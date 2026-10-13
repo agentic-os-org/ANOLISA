@@ -3,49 +3,47 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI, OpenClaw, QwenPaw and Hermes through verified native
-entrypoints,
-runs external Providers and keeps execution metadata independently of an Agent
-session. Native scheduling and permissions remain with the framework; the
-current interfaces are experimental.
+Linux, it starts Qoder CLI, OpenClaw, QwenPaw and Hermes through supported native
+entrypoints, runs external Providers and retains execution metadata after Agent
+sessions end. Frameworks keep their native interfaces, model configuration,
+scheduling and permissions. The current release is a Preview.
 
-AW Preview provides core and Provider packages installed with `aw-package`. It
-currently includes the sec-core Provider and an example sharing one configuration
-between Qoder and OpenClaw; see [Preview installation and demo](../../docs/user-guide/en/user-entrypoint/aw-preview.md).
+## Start here
 
-AW core can be built and initialized without sec-core. `aw-build` defaults to
-core; select `--component all` for the existing combined distribution.
-`aw-package configure` accepts one Agent and no Provider by default; select
-`--provider sec-core` or `--provider command` explicitly. Boolean commands return
-only true/false, with matched effects declared in YAML. Custom hooks omit
-`protocol` and `operation` to use default invoke-only execution; AW validates
-admission and constructs the response without calling script handshake methods. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
-
-`aw-package config` views, validates and edits Providers and Hook steps in an
-existing YAML/JSON file. Edits are offline and preserve unrelated values; declare
-events explicitly before adding steps. See the [editing reference](../../docs/user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration).
-
-## Available today
-
-| Capability | Availability |
+| Task | Guide |
 | --- | --- |
-| Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
-| View, validate, add or remove Providers and Hook steps in an existing file | ✅ Offline `aw-package config`; no service reload |
-| Start Qoder CLI 1.1.64 and connect before/after tool Hooks | ✅ Linux source build |
-| Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
-| Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |
-| Start or reuse a standalone service and query execution metadata | ✅ |
-| Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
-| Start QwenPaw through AW | ✅ the official App/API entrypoint |
-| Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
-| Start the remaining first-release frameworks | ❌ Separate adapter delivery |
-| Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
+| Install prebuilt core and optional sec-core packages | [Preview installation](../../docs/user-guide/en/user-entrypoint/aw-preview.md) |
+| Build from source and connect your component | [Integration walkthrough](../../docs/developer-guide/en/aw/integration.md) |
+| Write and validate configuration | [Configuration reference](../../docs/developer-guide/en/aw/configuration.md) |
+| Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
+| Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
+| Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
-## Run Qoder
+AW is not yet distributed through `anolisa install` or RPM. Preview package
+installation uses `aw-package`; it does not install an Agent or its model
+credentials. Core works without sec-core or any Provider. The source walkthrough
+includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
+[boolean policy](crates/aw-service/examples/check-tool.py) that need no backend.
 
-AW is not yet available through `anolisa install` or an RPM. On Linux, install
-rustup and Qoder CLI 1.1.64, then build from the repository root. Update the
-example's `spec.agents.qoder.argv` if that Qoder version is outside `PATH`.
+## Supported native entrypoints
+
+| Framework | Verified version | Entrypoint |
+| --- | --- | --- |
+| Qoder CLI | 1.1.64 | Interactive or print |
+| OpenClaw | 2026.9.6 | A new Gateway |
+| QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
+| Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
+
+Runtime supports tool-before `observe`/`block` and tool-after `observe`, plus
+framework-specific native commands. After-event coverage varies by framework.
+The configuration vocabulary includes more events/effects than the runtime
+supports; static validation alone does not certify native adoption. Cross-Agent
+approval, input/result rewriting and OS enforcement are outside this Preview.
+See the user guide for each Adapter's profile requirements and coexistence.
+
+## Basic use
+
+From the repository root on Linux with rustup and Qoder CLI 1.1.64 available:
 
 ```bash
 cd src/aw
@@ -54,116 +52,34 @@ target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-The example runs a neutral command before and after successful tools. It
-demonstrates Hook execution; it does not install security rules. AW starts or
-reuses the configured service and opens Qoder's normal interface. Exiting Qoder
-returns to the original terminal and releases that session; the shared service
-and audit history remain available.
+This neutral example connects Hooks without security rules. After exiting Qoder:
 
 ```bash
 target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
-The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains native
-settings coexistence, serial/parallel Hooks, Provider configuration, explicit
-service startup and record queries. Native Hooks retain their framework's
-limits; service status alone does not prove that Qoder adopted a policy.
+Initialize Qoder/OpenClaw YAML with `aw-package configure`; omit `--provider`
+for an empty policy, or select `--provider command` / `--provider sec-core`.
+For four targets, copy the shared template. Simple scripts omit `protocol` and
+`operation`, return JSON true/false and declare matched effects in each YAML
+step. AW validates admission and constructs results without script handshake
+methods. Follow the [initialization and editing flow](../../docs/user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration)
+before adding rules. `aw-package config` views,
+validates and edits Providers and Hook steps in existing YAML/JSON offline.
+Neither edits a running service; exit Agents and stop the original service
+before changing its configuration. `aw install` is the separate, explicit
+Hermes native-plugin installation command; it does not install software.
 
-`aw --help` lists the launcher commands and adapter-specific options. Qoder
-accepts `--native-settings` with `aw run`; it rejects `--native-profile`,
-`--native-state-dir` and `aw install`. The `install` command dispatches persistent
-native Hook setup, supported by Hermes; it does not install
-AW or an Agent. See the user guide for the command and option support table.
-Before upgrading, stop old daemon instances with the old AW executable; the
-current CLI rejects the previous local protocol. See the user guide for upgrade steps.
+## Development references
 
-## sec-core Provider
+Component integrations normally use the Provider protocol; they do not need an
+AW crate dependency. Adapter and service-client developers can use the detailed
+contracts below. Configuration, Provider messages and local service messages
+are independently versioned.
 
-The Linux `aw-provider-sec-core` binary maps configured tool inputs to the public
-`agent-sec-cli scan-code` command. It supplies candidate before-tool observe/block
-and after-tool observation through the AW Provider protocol. It requires an
-existing sec-core CLI and daemon; no AW code is installed inside sec-core.
-See the [sec-core Provider guide](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md)
-for source builds, configuration and a local Host example.
-
-## Run OpenClaw
-
-Use OpenClaw 2026.9.6 with its existing native model configuration.
-The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
-required working directory and supported tool lifecycle. From `src/aw`:
-
-```bash
-target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
-  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
-```
-
-## Run QwenPaw
-
-Use QwenPaw 2.2.2b4 / AgentScope 2.0.8 with its existing native model configuration.
-The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
-required working directory and supported tool lifecycle. From `src/aw`:
-
-```bash
-QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
-  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
-  -- --host 127.0.0.1 --port 8096
-```
-
-## Run Hermes
-
-Use Hermes official revision `952c941e` with no tracked file changes and its existing
-native model configuration. An existing profile `.env` must be a caller-owned
-regular file without group/other write permission.
-Keep Git PATH candidates protected and unset `GIT_DIR`/`GIT_COMMON_DIR`, including
-profile dotenv overrides. Git system/global overrides, HOME and XDG_CONFIG_HOME
-must use absolute paths. Git must resolve to the same executable from cwd and checkout. Both native Git directories
-receive the same effective-configuration checks, including local/conditional includes. Use UTF-8 paths for cwd, profile, venv, editable checkout, the AW executable and launch state.
-The Agent executable must be its installed Python console script, with an absolute
-Python shebang; shell wrappers are unsupported. AW requires plugin registration
-before chat starts and rejects effective `HERMES_SAFE_MODE` settings.
-With AW before callbacks configured, native Hook and tool-execution middleware
-argument rewrites are refused, including nested `execute_code` calls. With AW callbacks,
-forced plugin reload during before checks or tool execution is refused before teardown to retain
-pending audit callbacks; reload between tools keeps native behavior. Installation
-retains both the initial backup and the displaced configuration inode; review
-them before rollback, and stop native config writers during installation. Profile
-ancestors must prevent replacement by other users; interrupted installation
-cleans up its native writers and staging files. Interrupted install/run probes
-report their errors before restoring the signal status. Installation rejects
-unsupported configured entrypoints/options before probing or changing the profile;
-an executable-only `argv` can supply `chat` through `aw run --`.
-AW rejects chat `--help`/`-h` before native probes; run `hermes chat --help` directly.
-For a mismatched or incomplete bundled plugin, stop Hermes sessions, move `plugins/aw-native-hooks`
-to a backup outside the profile's `plugins` directory, then rerun `aw install`.
-The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
-required profile options and supported tool lifecycle. From `src/aw`:
-
-```bash
-target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
-  --native-profile /absolute/hermes-profile
-target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
-  --native-profile /absolute/hermes-profile
-```
-
-## Integration and development
-
-The reusable `aw-service::Client` binds to one service generation and configuration
-revision. Adapters normalize callbacks and retain native scheduling. Related
-callbacks share one event deadline, and each step may be attempted once. The
-service records execution metadata before returning results and never retries
-an uncertain call automatically.
-
-`aw-host` supports both structured Provider messages and explicitly selected
-native Hook byte transport. `aw-core` provides a separate pinned-plan execution
-API and the durable `FileJournal` storage reused by the service. These boundaries
-leave cosh, desktop clients and Herdr independent of the service implementation.
-
-- [User guide](../../docs/user-guide/en/user-entrypoint/aw.md) and
-  [configuration reference](../../docs/developer-guide/en/aw/configuration.md)
-- [Local service and client contract](docs/design/local-service.md)
-- [Provider protocol](docs/design/provider-protocol.md),
-  [Provider Host](docs/design/provider-host.md) and
-  [bounded command execution](docs/design/bounded-execution.md)
-- [Core execution and storage](docs/design/core-execution.md)
-- [Development setup, crate boundaries and tests](CONTRIBUTING.md)
+- [Development environment, crate responsibilities and tests](CONTRIBUTING.md)
+- [Provider protocol](docs/design/provider-protocol.md) and [Host](docs/design/provider-host.md)
+- [Local service and client](docs/design/local-service.md)
+- [Bounded command execution](docs/design/bounded-execution.md)
+- [Core execution and durable journal](docs/design/core-execution.md)

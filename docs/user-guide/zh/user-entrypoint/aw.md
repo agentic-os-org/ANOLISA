@@ -11,6 +11,10 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
+安装请从 [Preview 包指南](aw-preview.md)开始；源码构建与无需模型的策略验证见
+[组件接入教程](../../../developer-guide/zh/aw/integration.md)。随后使用下方共用配置验证
+原生工具行为。字段定义集中在[配置参考](../../../developer-guide/zh/aw/configuration.md)。
+
 ## 安装 Preview
 
 使用 [Preview 包](aw-preview.md) 安装并演示 AW + sec-core，无需编译。
@@ -37,6 +41,130 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
 是独立事件，本 Adapter 尚未接入。原生 Hook 命令仍按 Qoder 的响应语义处理。
 透传原生审批响应不代表 AW 已提供跨框架审批支持；交互式审批不在本期验收范围内。
+
+## 四框架使用同一份配置
+
+[共用 YAML](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/aw.shared.yaml)与
+[布尔脚本](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/check-tool.py)让四个目标共用工具前
+阻断、工具后观察策略。按[教程](../../../developer-guide/zh/aw/integration.md)复制文件、
+替换绝对路径并验证 Provider。这里沿用其 `AW_BIN`、`AW_CONFIG` 和 `AW_DEMO`
+变量。包安装用户也可使用这两个文件，将 `AW_BIN` 指向已安装的二进制；Python 3
+是该示例脚本的依赖。
+
+先准备各 Agent 的受支持版本与原生模型配置。运行时只需安装所选目标。各框架使用
+独立原生 profile，显式选择工具工作目录，并从 `$AW_DEMO/workspace` 启动。
+共用 YAML 不修改模型凭据或原生权限，起步时逐个测试目标。
+
+| 目标 | 原生前置条件 | 启动差异 |
+| --- | --- | --- |
+| Qoder | CLI 1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
+| OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
+| QwenPaw | 2.2.2b4 / AgentScope 2.0.8，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
+| Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
+
+启动 Qoder：
+
+```bash
+cd "$AW_DEMO/workspace"
+"$AW_BIN" run --config "$AW_CONFIG" --agent qoder
+```
+
+使用已有原生绝对路径启动 OpenClaw：
+
+```bash
+"$AW_BIN" run --config "$AW_CONFIG" --agent openclaw \
+  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
+
+使用已初始化目录启动 QwenPaw：
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home "$AW_BIN" run \
+  --config "$AW_CONFIG" --agent qwenpaw -- --host 127.0.0.1 --port 8096
+```
+
+阅读 Hermes 的 [profile 要求](#启动-hermes)后，安装并启动：
+
+```bash
+"$AW_BIN" install --config "$AW_CONFIG" --agent hermes \
+  --native-profile /absolute/hermes-profile
+"$AW_BIN" run --config "$AW_CONFIG" --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
+
+OpenClaw 和 QwenPaw 的服务终端保持运行，等 AW 输出原生 Hook 就绪信息后，再向
+对应 Gateway 或 App 发起请求。OpenClaw 使用连接该 Gateway 的客户端，不使用
+`agent --local`；QwenPaw 使用 App UI/API，不改用其他 CLI 入口。Qoder 和 Hermes
+使用已启动的原生 chat。下方各框架章节说明共存方式与支持的生命周期范围。
+
+### 验证原生行为
+
+在另一个终端恢复教程中的 `AW_BIN`、`AW_CONFIG` 和 `AW_DEMO`，将 `AW_TARGET`
+设为正在测试的目标。开始时标记文件应不存在；重复测试时换一个新名称。打印下述
+两个提示词，分两轮发送到该目标的原生界面：
+
+```bash
+export AW_TARGET=qoder
+printf 'Use your shell tool exactly once to run `printf AW_OK > "%s/%s.allowed"`. Report the result; do not retry or use another tool.\n' "$AW_DEMO/workspace" "$AW_TARGET"
+printf 'Use your shell tool exactly once to run `printf AW_DENY_TEST > "%s/%s.blocked"`. Report the result; do not retry or use another tool.\n' "$AW_DEMO/workspace" "$AW_TARGET"
+```
+
+这些命令即使执行也只写入演示标记。第二条输入包含策略的拒绝标记。完成两轮后检查：
+
+```bash
+cat "$AW_DEMO/workspace/$AW_TARGET.allowed"
+test ! -e "$AW_DEMO/workspace/$AW_TARGET.blocked"
+"$AW_BIN" status --config "$AW_CONFIG"
+ls "$AW_DEMO/state/journal"
+```
+
+预期读到 `AW_OK`，第二轮收到 AW 策略拒绝，且 blocked 标记不存在。通过 AW
+读取对应 journal：从列出的目录选择文件，将去掉 `.jsonl` 的 64 字符文件名作为
+`AW_AUDIT_KEY`。
+
+```bash
+export AW_AUDIT_KEY=REPLACE_WITH_EVENT_KEY
+printf '{"method":"audit","key":"%s"}\n' "$AW_AUDIT_KEY" | \
+  "$AW_BIN" request --socket "$AW_DEMO/state/aw.sock"
+```
+
+目录同时包含准备与事件 journal。事件的 `result.records[0].record.plan` 中，
+`kind` 为 `event`，instance 和 binding 应与启动时输出的 `AW instance` 对应。before
+拒绝调用应有 `policy_block: true`；完成的 after 步骤应指向 Provider
+`check-tool` 且 `status: ok`。审计保存元数据，不保存原始输入/结果或效果的原因
+文本。已闭合事件有 `terminal: true`。以下检查共同组成验收记录：
+
+| 检查项 | 证据 |
+| --- | --- |
+| 允许工具 | 工具已执行、allowed 标记存在、before 及受支持的 after 步骤成功 |
+| 策略阻断 | AW 返回拒绝、blocked 标记不存在、before 审计记录策略命中 |
+| Provider 失败 | 停止旧会话/服务后，使用 before 脚本路径不存在的配置副本启动；调用失败，`on_error: block` 阻止标记生成，审计记录故障而非策略命中 |
+| 共存 | 保留一个已有原生 Hook/插件，确认其预期行为与 AW 一起生效 |
+| 重启 | 退出 Agent、停止 AW、使用原配置重新启动；新工具仍受检查，旧审计键仍可查询 |
+
+记录框架版本、AW 提交、实际命令与审计键。合成 Host 测试与启动就绪不能替代该表。
+模型拒绝、未调用工具或原生权限拒绝不算 AW 阻断。各框架的 after 覆盖不同，例如
+Qoder 仅报告成功工具，不应要求为每次被拒绝的调用补造 after 事件。
+
+### 停止与清理
+
+退出 Qoder/Hermes，在自己启动的 OpenClaw/QwenPaw 服务终端按 Ctrl-C。等待这些
+进程退出后，再停止共享 AW 服务：
+
+```bash
+"$AW_BIN" stop --config "$AW_CONFIG"
+```
+
+停止响应只确认收到请求；等待记录的 daemon PID 退出且 `aw.sock` 消失。
+QwenPaw 正常退出时删除自己的临时插件。Hermes 保留已安装插件；没有 AW 绑定的
+普通 Hermes 启动不会启用 AW 回调。撤销安装时，停止 Hermes 与原生配置写入，
+核对安装时报告的 `backup` 和 `displaced` 文件，将 `plugins/aw-native-hooks`
+移到 profile 的 `plugins` 目录之外，再恢复选定的安装前配置。保留安装后有意
+进行的原生修改，不要盲目整文件覆盖。AW 没有原生插件卸载命令。
+
+保留审计证据后，按[教程的清理步骤](../../../developer-guide/zh/aw/integration.md#5-验证原生效果并清理)
+删除演示目录。框架 profile 单独保留。包卸载见
+[Preview 指南](aw-preview.md#6-停止升级与卸载)。
 
 ## 构建并启动 Qoder
 
@@ -407,6 +535,54 @@ Hermes 支持持久化插件安装，Qoder、OpenClaw 和 QwenPaw 拒绝此命�
 无需用户手写。服务记录包含执行元数据，不包含工具输入或结果、Provider 私有配置
 和原始 stdout/stderr。服务运行或调用完成不能证明原生策略已采用。原生回调被杀
 或禁用时可能缺失检查，本版本不提供 final/protected 执行或 OS 兜底。
+
+## 容器与持久化数据
+
+在镜像中准备 AW 二进制、受支持框架版本、策略程序和默认配置。运行时提供原生
+profile，并通过 `aw run` 启动所选 Agent；Dockerfile 无法保留活跃服务或可复用的
+会话绑定。Hermes 须在启动前将匹配插件安装到**实际运行的 profile**。挂载到镜像
+目录可能遮住构建镜像时安装的文件，参见 Docker 的
+[挂载行为](https://docs.docker.com/engine/storage/bind-mounts/#bind-mounting-over-existing-data)。
+
+| 数据 | 容器中的处理方式 |
+| --- | --- |
+| AW 二进制、脚本、固定 `aw.yaml` | 放入镜像或只读提供；可编辑配置保存在临时容器层之外 |
+| `<state_dir>/journal/` | 需要跨容器重建保留执行历史时持久化；本版本审计固定开启且仅保存元数据 |
+| Socket、锁、`launch-*` 和会话绑定 | 属于运行时产物，不能恢复会话；每次服务/Agent 启动建立新的运行状态 |
+| 原生 profile、凭据、会话与工作区 | 按所选框架的要求保留，不属于 AW 审计数据 |
+| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](aw-preview.md#2-按需安装并启动-sec-core) |
+
+即使不跨容器保留历史，AW 也需要可写的本地状态目录。需要持久历史时，将
+`daemon.state_dir` 设置为支持 `fsync` 的本地持久文件系统上的绝对路径，保留
+`endpoint: auto` 即使用该目录的 `aw.sock`。目录须属于运行 UID，权限为 0700；
+直接父目录也须属于该 UID，且其他用户不可写。启动 AW 前，按实际容器 UID 准备
+卷的属主。默认 `auto` 位于 `XDG_RUNTIME_DIR` 或 `/tmp` 下，属于临时存储。
+
+长期运行的 Gateway/App 须按本 Preview 的上限安排生命周期：每个 AW 实例最多
+保留 1,024 个不同的关联原生事件，同时启用 before 和 after 时，每次完成的工具
+调用占用两个条目。耗尽后，打开新的关联事件以 `native_event_limit` 失败，此时
+尚未运行步骤脚本。这是事件打开失败，不是 Provider 结果。AW 回调桥接将故障
+转换为所选框架的原生响应；配置 `on_error: block` 的 before 回调请求拒绝执行。
+工具的最终行为遵循该框架的原生 Hook 语义。退出并重新启动 AW 管理的 Agent 才会
+建立新实例，另开原生会话不会重置上限。
+
+当前状态目录同时包含 journal 与运行时产物。整体挂载持久卷时，正常停止会删除
+所属 socket，强制终止容器则可能留下它。复用前确认旧服务已经退出，只清理该
+遗留 `aw.sock`，不要删除活跃端点或 journal。独立 AW daemon 不共用一个状态目录。
+容器关闭流程应先退出 Agent，再停止 AW 并等待所属进程。保留 journal 可以查询
+历史，不会恢复或重放中断工具。Docker 卷在容器删除后继续保留，删除卷是单独
+操作，见[卷生命周期](https://docs.docker.com/engine/storage/volumes/#a-volumes-lifecycle)。
+
+## 常见接入问题
+
+| 现象 | 下一步检查 |
+| --- | --- |
+| 静态校验通过但启动失败 | 检查所选原生版本/入口、程序路径和 Provider 私有配置；静态校验不执行它们 |
+| 状态/profile 路径不安全 | 检查运行 UID、目录权限与显式原生路径，使用该用户拥有的私有目录 |
+| 修改配置后行为不变 | 退出旧 Agent，用原配置/socket 停止旧服务，再启动编辑后的文件 |
+| Hook 就绪失败 | 阅读原生启动错误，确认 profile/插件及受支持版本后再发请求 |
+| 模型回答后没有审计 | 确认受支持工具确实到达回调；原生权限或模型拒绝可能阻止调用 |
+| 强制终止后已有 socket | 确认旧服务退出，再按上文清理其遗留 socket |
 
 ## 运行本地服务演示
 
