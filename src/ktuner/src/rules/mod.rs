@@ -4568,6 +4568,16 @@ fn eval_page_cluster_at(
     if !swap_configured(swaps_path) {
         return 1;
     }
+    // The reason claims the swap is on an SSD, and this knob sizes the readahead
+    // of the swap area itself, not of the disks the host happens to have: with a
+    // rotational swap area, collapsing the readahead window to one page turns
+    // every swap-in run into one seek per page. Only a resolved area can falsify
+    // the premise — `info.disks` is the whole-disk inventory, so an area that is
+    // a file, zram or a device-mapper node names none of its disks and nothing
+    // is claimed about it.
+    if swap_on_a_rotational_disk(info, swaps_path) {
+        return 1;
+    }
     let current = read_sysctl_u64(path);
     if current > 0 {
         recs.push(Recommendation {
@@ -4600,6 +4610,37 @@ fn swap_configured(path: &str) -> bool {
             .split(|&byte| byte == b'\n')
             .skip(1)
             .any(|line| !line.trim_ascii().is_empty())
+    })
+}
+
+/// Whether a swap area listed in `/proc/swaps` sits on a rotational disk this
+/// host reported, i.e. the advice's "on an SSD" premise is provably false for
+/// the area it sizes.
+///
+/// The area's device field is resolved against the whole-disk names in
+/// `info.disks` (`/dev/sdb2` against `sdb`, `/dev/nvme0n1p2` against
+/// `nvme0n1`); anything else — a swap file, a zram node, a device-mapper path —
+/// resolves to no disk and is left alone, so a medium this inventory cannot see
+/// keeps today's advice instead of losing it.
+///
+/// Read as bytes, like [`swap_configured`]: one area whose path is not UTF-8
+/// would fail a strict decode of the whole table, and "no rotational area"
+/// would then hand the harmful advice back to every other area on the host —
+/// the HDD one this gate exists for included.
+fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
+    let Ok(content) = std::fs::read(swaps_path) else {
+        return false;
+    };
+    content.split(|&byte| byte == b'\n').skip(1).any(|line| {
+        let Some(area) = line.split(|byte: &u8| byte.is_ascii_whitespace()).next() else {
+            return false;
+        };
+        let Some(name) = area.strip_prefix(b"/dev/") else {
+            return false;
+        };
+        info.disks
+            .iter()
+            .any(|disk| disk.disk_type == DiskType::HDD && name.starts_with(disk.name.as_bytes()))
     })
 }
 
@@ -12684,6 +12725,111 @@ mod tests {
             recs.iter().any(|r| r.param == "vm.page-cluster"),
             "an active swap area keeps the rule"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn page_cluster_gates_on_the_swap_areas_own_medium() {
+        // The reason promises a saving "on an SSD", but this knob sizes the
+        // readahead of the swap AREA, not of the disks the host happens to own:
+        // a machine with an NVMe root and its swap on an HDD was told to set it
+        // to 0, which turns one sequential read into one seek per page. The
+        // area's own device decides.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_page_cluster_medium_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let param = dir.join("page-cluster");
+        std::fs::write(&param, b"3\n").unwrap();
+        let header = b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
+        let on_nvme = dir.join("swaps-nvme");
+        std::fs::write(
+            &on_nvme,
+            [
+                header.as_slice(),
+                b"/dev/nvme0n1p2                           partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let on_hdd = dir.join("swaps-hdd");
+        std::fs::write(
+            &on_hdd,
+            [
+                header.as_slice(),
+                b"/dev/sdb2                                partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let on_a_file = dir.join("swaps-file");
+        std::fs::write(
+            &on_a_file,
+            [
+                header.as_slice(),
+                b"/swapfile                                file\t\t16776188\t0\t\t-3\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        // The HDD area next to an area whose path is not UTF-8: /proc/swaps
+        // escapes only " \t\n\\", so the table as a whole is undecodable and
+        // the rotational area must still be resolved through its raw bytes.
+        let mixed_encoding = dir.join("swaps-non-utf8-sibling");
+        std::fs::write(
+            &mixed_encoding,
+            [
+                header.as_slice(),
+                b"/dev/sdb2                                partition\t16776188\t0\t\t-2\n",
+                b"/swap\xff\xfe.img                          file\t\t1048572\t\t0\t\t-3\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        assert!(std::str::from_utf8(&std::fs::read(&mixed_encoding).unwrap()).is_err());
+
+        // make_test_info carries one NVMe disk; add the rotational disk the
+        // HDD fixture's area names.
+        let mut info = make_test_info();
+        info.disks.push(DiskInfo {
+            name: "sdb".to_string(),
+            disk_type: DiskType::HDD,
+            scheduler: "mq-deadline".to_string(),
+            available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
+            nr_requests: 128,
+            read_ahead_kb: 128,
+            rq_affinity: 1,
+            hidden: false,
+            holders: vec![],
+        });
+
+        for (swaps, expected, why) in [
+            (&on_nvme, true, "the swap area is on the NVMe disk"),
+            (&on_hdd, false, "the swap area is on the rotational disk"),
+            (
+                &on_a_file,
+                true,
+                "a swap file names no disk, so no medium is claimed",
+            ),
+            (
+                &mixed_encoding,
+                false,
+                "a non-UTF-8 sibling name does not hide the HDD area",
+            ),
+        ] {
+            let mut recs = Vec::new();
+            eval_page_cluster_at(
+                &info,
+                &mut recs,
+                param.to_str().unwrap(),
+                swaps.to_str().unwrap(),
+            );
+            let fired = recs.iter().any(|r| r.param == "vm.page-cluster");
+            assert_eq!(fired, expected, "{why}: {}", swaps.display());
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
