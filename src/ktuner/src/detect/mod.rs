@@ -873,25 +873,48 @@ fn cgroup_cpu_quota_cores_from(root: &Path, self_cgroup: &[u8]) -> u64 {
         .unwrap_or(0)
 }
 
-/// The CPUs the cpuset controller grants this process: the smallest mask on
-/// the chain from its own cgroup up to the mount root, 0 when no readable mask
-/// exists on that chain (the controller lives on the other hierarchy, or no
-/// mask is set) — 0 clamps nothing, exactly like an unlimited quota.
+/// The CPUs the cpuset controller grants this process: the process's own
+/// effective mask when it is readable, otherwise the smallest mask on the chain
+/// from its cgroup up to the mount root, 0 when no readable mask exists at all
+/// (the controller lives on the other hierarchy, or no mask is set) — 0 clamps
+/// nothing, exactly like an unlimited quota.
 ///
 /// cgroup v2 keeps the mask in `cpuset.cpus.effective` of the cgroup itself: a
 /// read-only file the kernel fills with the CPUs the parent actually grants,
 /// so it already folds in the ancestors. cgroup v1 keeps the matching
 /// `cpuset.effective_cpus` under the controller's own mount. Reading the
 /// process's own cgroup (rather than the root file) is what makes a container
-/// or a unit with a narrower mask bind: the effective file of every ancestor
-/// above it is wider.
+/// or a unit with a narrower mask bind.
+///
+/// The own file is authoritative, not merely the narrowest: a cgroup v2
+/// partition root hands CPUs to a child partition by REMOVING them from its own
+/// `cpuset.cpus.effective` (`cpumask_andnot(cp->effective_cpus,
+/// cp->effective_cpus, cp->subparts_cpus)`, v6.6 kernel/cgroup/cpuset.c
+/// `update_cpumasks_hier`), while the child's mask is `(parent.effective_cpus U
+/// parent.subparts_cpus) ∩ cpus_allowed` (`compute_effective_cpumask`,
+/// cpuset.c:1255-1267) — wider than its parent's. Taking the smallest count of
+/// the chain then reported the parent's smaller count for a process that runs
+/// on the child's larger set: an 8-CPU partition root above a 120-CPU child
+/// answered 8. The ancestor walk stays as the fallback for a cgroup whose own
+/// file is absent or empty (an empty mask means "inherit", not "no CPUs").
 fn cgroup_cpuset_core_count_from(root: &Path, self_cgroup: &[u8]) -> u64 {
     if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
+        // The membership path is absolute-looking and relative to the mount
+        // (cgroup_membership_dir strips the leading separators); joining it
+        // verbatim would read the host's root instead of the fixture's.
+        let own_dir = root.join(cgroup_membership_dir(&rel));
+        if let Some(cpus) = own_cpuset_mask(&own_dir, "cpuset.cpus.effective") {
+            return cpus;
+        }
         if let Some(cpus) = chain_min_value(root, &rel, "cpuset.cpus.effective", cpuset_mask_cpus) {
             return cpus;
         }
     }
     if let Some(rel) = cgroup_v1_controller_relative_path(self_cgroup, "cpuset") {
+        let own_dir = root.join("cpuset").join(cgroup_membership_dir(&rel));
+        if let Some(cpus) = own_cpuset_mask(&own_dir, "cpuset.effective_cpus") {
+            return cpus;
+        }
         if let Some(cpus) = chain_min_value(
             &root.join("cpuset"),
             &rel,
@@ -919,6 +942,15 @@ fn cgroup_cpuset_core_count_from(root: &Path, self_cgroup: &[u8]) -> u64 {
         cpuset_mask_cpus,
     )
     .unwrap_or(0)
+}
+
+/// The cgroup's own effective cpuset mask, `None` when the file is absent,
+/// unreadable or empty. An empty mask means the cgroup inherits its parent's
+/// set rather than running on zero CPUs, and a malformed mask is no evidence of
+/// a restriction, so both fall back to the ancestor walk.
+fn own_cpuset_mask(cgroup_dir: &Path, file: &str) -> Option<u64> {
+    let count = cpuset_mask_cpus(&fs::read_to_string(cgroup_dir.join(file)).ok()?);
+    (count > 0).then_some(count)
 }
 
 /// A cpuset mask (`cpuset.cpus`, cpuset v1's `cpuset.effective_cpus`, and v2's

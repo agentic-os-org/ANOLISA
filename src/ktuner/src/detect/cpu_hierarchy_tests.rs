@@ -127,6 +127,27 @@ fn cpuset_mask_bounds_the_effective_cpu_count() {
     assert_eq!(t.read("0::/app"), 4);
 }
 
+/// A cgroup v2 partition root hands CPUs to a child partition by removing them
+/// from its own `cpuset.cpus.effective` (`cpumask_andnot(cp->effective_cpus,
+/// cp->effective_cpus, cp->subparts_cpus)`, v6.6 kernel/cgroup/cpuset.c
+/// `update_cpumasks_hier`), while the child's mask is `(parent.effective_cpus U
+/// parent.subparts_cpus) ∩ cpus_allowed` (`compute_effective_cpumask`,
+/// cpuset.c:1255-1267) — wider than its parent's. The process runs on the
+/// child's set, so the smallest count of the chain under-reported it (8 CPUs
+/// for a partition that may use 120).
+#[test]
+fn a_child_partition_is_not_capped_by_its_parents_effective_mask() {
+    let t = Tree::new();
+    t.write("cpuset.cpus.effective", "0-127");
+    t.write("system.slice/cpuset.cpus.effective", "120-127");
+    t.write("system.slice/workload.slice/cpuset.cpus.effective", "0-119");
+    assert_eq!(t.read("0::/system.slice/workload.slice"), 120);
+
+    // The own mask stays subject to the quota beside it.
+    t.write("system.slice/workload.slice/cpu.max", "200000 100000");
+    assert_eq!(t.read("0::/system.slice/workload.slice"), 2);
+}
+
 #[test]
 fn cpuset_mask_counts_ranges_and_singles() {
     let t = Tree::new();
