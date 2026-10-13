@@ -605,21 +605,9 @@ pub fn run_client(
                 mountpoint = %normalized.display(),
                 "found orphan managed worker without a live supervisor; replacing it"
             );
-            send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-            while pid_alive(pid) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if pid_alive(pid) {
-                send_signal(pid, libc::SIGKILL);
-            }
         }
-        let _ = std::fs::remove_file(&paths.worker_pid);
     }
-    if is_mounted(&normalized) {
-        clear_mount(&normalized)?;
-    }
-    let _ = std::fs::remove_file(&paths.supervisor_pid);
+    teardown_instance(&paths, &normalized)?;
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
@@ -823,7 +811,16 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     "stopping managed worker (desired state cleared)"
                 );
                 send_signal(worker_pid as i32, libc::SIGTERM);
-                let _ = wait_child_timeout(&mut child, Duration::from_millis(STOP_TIMEOUT_MS));
+                if let Err(e) = wait_for_shutdown(&mountpoint, || {
+                    child.try_wait().map(|status| status.is_some())
+                }) {
+                    warn!(error = %e, "managed worker shutdown failed");
+                }
+                if matches!(child.try_wait(), Ok(None)) {
+                    warn!(worker_pid, "managed worker shutdown timed out; forcing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 let _ = std::fs::remove_file(&paths.worker_pid);
                 finish(&paths, &mountpoint);
                 return Ok(());
@@ -927,6 +924,11 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
     }
 
+    // No worker is alive on this path (shutdown during backoff or crash-loop
+    // exhaustion), so only a stale endpoint can need cleanup.
+    if let Err(e) = clear_mount(&mountpoint) {
+        warn!(error = %e, "failed to unmount during supervisor cleanup");
+    }
     finish(&paths, &mountpoint);
     Ok(())
 }
@@ -939,30 +941,36 @@ fn current_desired_state(state_path: &Path) -> DesiredState {
         .unwrap_or(DesiredState::Stopped)
 }
 
-fn wait_child_timeout(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<()> {
-    let deadline = Instant::now() + timeout;
+// Keep retrying while the worker owns backing cleanup. After a successful
+// unmount, wait only for its exit; never unmount after forcing that owner out.
+fn wait_for_shutdown(
+    mountpoint: &Path,
+    mut exited: impl FnMut() -> std::io::Result<bool>,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
+    let mut unmounted = false;
     loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(()),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(WORKER_POLL_MS));
-            }
+        let processes_gone = exited()?;
+        if !unmounted {
+            unmounted = !is_mounted(mountpoint) || unmount_once(mountpoint);
         }
+        if (unmounted && processes_gone) || Instant::now() >= deadline {
+            return if unmounted {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to unmount '{}' via fusermount3 and umount",
+                    mountpoint.display()
+                )
+                .into())
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Final cleanup: ensure the mount is gone and remove instance state.
+/// Remove instance state after worker shutdown or crash-loop exhaustion.
 fn finish(paths: &ManagedPaths, mountpoint: &Path) {
-    if is_mounted(mountpoint) {
-        if let Err(e) = clear_mount(mountpoint) {
-            warn!(error = %e, "failed to unmount during supervisor cleanup");
-        }
-    }
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
@@ -974,12 +982,12 @@ fn finish(paths: &ManagedPaths, mountpoint: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Tear down a managed instance: mark it stopped, signal the supervisor
-/// (falling back to the worker), wait for exit, unmount, and remove residual
+/// (falling back to the worker), unmount, wait for exit, and remove residual
 /// pid/state files. Returns the unmount result so callers can surface a cleanup
 /// failure; every other step is best-effort.
 ///
 /// Shared by `stop` and by the client's startup-abort path so neither has to
-/// duplicate the signal/wait/unmount sequence.
+/// duplicate the signal/unmount/wait sequence.
 fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
@@ -1008,40 +1016,17 @@ fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<
         }
     }
 
-    // Wait for the managed processes to exit. The supervisor unmounts cleanly
-    // on SIGTERM, so once it is gone the mount is normally already down; any
-    // remaining endpoint is cleared explicitly below.
-    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-    loop {
-        let sup_gone = sup_pid.is_none_or(|p| !pid_alive(p));
-        let worker_gone = worker_pid.is_none_or(|p| !pid_alive(p));
-        if sup_gone && worker_gone {
-            break;
-        }
-        if Instant::now() >= deadline {
-            warn!("teardown timed out waiting for clean shutdown; forcing");
-            if let Some(p) = sup_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
+    let processes_gone =
+        || sup_pid.is_none_or(|p| !pid_alive(p)) && worker_pid.is_none_or(|p| !pid_alive(p));
+    let unmount_result = wait_for_shutdown(mountpoint, || Ok(processes_gone()));
+    if !processes_gone() {
+        warn!("teardown timed out waiting for clean shutdown; forcing");
+        for p in [sup_pid, worker_pid].into_iter().flatten() {
+            if pid_alive(p) {
+                send_signal(p, libc::SIGKILL);
             }
-            if let Some(p) = worker_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
-            }
-            break;
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-
-    // Ensure the mount is gone, clearing any stale/dead endpoint a killed
-    // worker left behind. The error is surfaced after state cleanup.
-    let unmount_result = if is_mounted(mountpoint) {
-        clear_mount(mountpoint)
-    } else {
-        Ok(())
-    };
 
     // Best-effort final cleanup of any residual state files.
     let _ = std::fs::remove_file(&paths.worker_pid);

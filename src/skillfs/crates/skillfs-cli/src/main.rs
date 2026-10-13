@@ -1715,7 +1715,7 @@ async fn cmd_mount(
         let br = LedgerBackingRoot::setup(
             source_roots.physical_source_root(),
             br_path,
-            &mount_canon,
+            &mountpoint.canonicalize()?,
             in_place,
         )
         .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
@@ -2575,10 +2575,9 @@ async fn cmd_mount(
     // SIGTERM). We wrap it in spawn_blocking and race against OS signals
     // so that SIGTERM triggers the same clean unmount path as Ctrl+C.
     //
-    // A6/B1: `backing_root` stays in this scope and is dropped when
-    // cmd_mount returns. The Drop impl calls cleanup(), which unmounts
-    // the bind mount and removes the temp dir. The bind mount is
-    // independent of the FUSE mount, so cleanup order does not matter.
+    // Keep backing_root owned until the FUSE session exits, including signal
+    // shutdown. Managed stop releases FUSE before waiting for this worker so
+    // successful teardown still runs backing cleanup in the owning process.
 
     // --- Session stats: create collector before mount starts ---
     let session_stats = Arc::new(SkillfsSessionStats::new());
@@ -2692,7 +2691,7 @@ async fn cmd_mount(
     // Clone for the FUSE runtime; the original stays in this scope for the
     // lifecycle events (mount_start / heartbeat / mount_end / mount_error).
     let mount_runtime_metrics = runtime_metrics.clone();
-    let mount_task = tokio::task::spawn_blocking(move || {
+    let mut mount_task = tokio::task::spawn_blocking(move || {
         mount_configured(
             &mountpoint,
             runtime_roots.physical_source_root(),
@@ -2809,14 +2808,17 @@ async fn cmd_mount(
     /// mount would stay live, and the blocking FUSE task would keep the
     /// process from exiting after the handler returns.
     fn trigger_unmount(mountpoint: &std::path::Path) {
-        let _ = std::process::Command::new("fusermount3")
+        let output = std::process::Command::new("fusermount3")
             .arg("-u")
             .arg(mountpoint.as_os_str())
             .output();
+        if !output.as_ref().is_ok_and(|output| output.status.success()) {
+            warn!(mountpoint = %mountpoint.display(), ?output, "signal-triggered FUSE unmount failed");
+        }
     }
 
     let result = tokio::select! {
-        res = mount_task => {
+        res = &mut mount_task => {
             match res {
                 Ok(inner) => inner,
                 Err(e) => Err(FuseErr::MountFailed(e.to_string())),
@@ -2837,6 +2839,7 @@ async fn cmd_mount(
                 h.shutdown();
             }
             cleanup_pid_file(&pid_file_for_signal);
+            mount_task.await??;
             return Ok(());
         }
         _ = async {
@@ -2858,6 +2861,7 @@ async fn cmd_mount(
                 h.shutdown();
             }
             cleanup_pid_file(&pid_file_for_signal);
+            mount_task.await??;
             return Ok(());
         }
     };

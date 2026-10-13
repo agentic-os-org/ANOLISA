@@ -3811,3 +3811,248 @@ fn mount_file_aggregates_whole_skills_read_only() {
     drop(child);
     assert!(!is_mounted(&mount));
 }
+
+#[test]
+#[ignore = "requires CAP_SYS_ADMIN and FUSE; run in a disposable Linux container"]
+fn managed_stop_preserves_backing_root_when_fuse_is_busy() {
+    assert!(fuse_available(), "this regression requires FUSE");
+
+    struct ManagedMount {
+        root: tempfile::TempDir,
+        mount: std::path::PathBuf,
+        backing: std::path::PathBuf,
+        replacement_backing: std::path::PathBuf,
+        holder: Option<Child>,
+        stopper: Option<Child>,
+    }
+    impl Drop for ManagedMount {
+        fn drop(&mut self) {
+            if let Some(mut holder) = self.holder.take() {
+                let _ = holder.kill();
+                let _ = holder.wait();
+            }
+            if let Some(mut stopper) = self.stopper.take() {
+                let _ = stopper.kill();
+                let _ = stopper.wait();
+            }
+            let _ = Command::new(bin_path())
+                .arg("stop")
+                .arg(&self.mount)
+                .env("XDG_RUNTIME_DIR", self.root.path().join("runtime"))
+                .output();
+            force_unmount(&self.mount);
+            for backing in [&self.backing, &self.replacement_backing] {
+                if is_mounted(backing) {
+                    let _ = Command::new("umount").arg(backing).output();
+                }
+                assert!(!is_mounted(backing), "test backing bind leaked");
+            }
+            assert!(!is_mounted(&self.mount), "test FUSE mount leaked");
+        }
+    }
+
+    // Delay release past clear_mount's old three-second retry window.
+    for (busy, release_after_failure) in [
+        (false, None),
+        (true, Some(Duration::ZERO)),
+        (true, Some(Duration::from_secs(4))),
+        (true, None),
+    ] {
+        for operation in ["stop", "orphan", "supervisor"] {
+            let root = non_tmp_dir();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let source = root.path().join("source");
+            let mount = root.path().join("mount");
+            let backing = root.path().join("backing");
+            std::fs::create_dir_all(source.join("demo")).unwrap();
+            std::fs::create_dir(root.path().join("runtime")).unwrap();
+            let skill = "---\nname: demo\ndescription: stop probe\n---\nbody\n";
+            std::fs::write(source.join("demo/SKILL.md"), skill).unwrap();
+            let mut instance = ManagedMount {
+                root,
+                mount,
+                backing,
+                replacement_backing: source.parent().unwrap().join("replacement-backing"),
+                holder: None,
+                stopper: None,
+            };
+            let output = Command::new(bin_path())
+                .arg("mount")
+                .arg(&source)
+                .arg("mount")
+                .current_dir(instance.root.path())
+                .args([
+                    "--security",
+                    "--activation-mode",
+                    "file",
+                    "--skill-layout",
+                    "flat",
+                ])
+                .arg("--ledger-backing-root")
+                .arg(&instance.backing)
+                .arg("--managed")
+                .env("XDG_RUNTIME_DIR", instance.root.path().join("runtime"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(is_mounted(&instance.mount));
+            assert!(is_mounted(&instance.backing));
+
+            if busy {
+                // Command::spawn returns only after the child's chdir succeeds,
+                // so the mount is already held when stop starts (no timing sleep).
+                instance.holder = Some(
+                    Command::new("sleep")
+                        .arg("60")
+                        .current_dir(instance.mount.join("skills"))
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            let runtime = instance.root.path().join("runtime/skillfs");
+            let supervisor_file = std::fs::read_dir(&runtime)
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|e| e.file_name().to_string_lossy().ends_with(".supervisor.pid"))
+                .unwrap()
+                .path();
+            let supervisor = std::fs::read_to_string(&supervisor_file).unwrap();
+            if operation == "orphan" {
+                assert!(
+                    Command::new("kill")
+                        .args(["-KILL", supervisor.trim()])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                // pid_alive also sees zombies; wait for the container init to
+                // reap this supervisor before requesting orphan replacement.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::path::Path::new(&format!("/proc/{}", supervisor.trim())).exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "supervisor did not die"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            let mut command = Command::new(bin_path());
+            if operation == "orphan" {
+                command
+                    .arg("mount")
+                    .arg(&source)
+                    .arg(&instance.mount)
+                    .args([
+                        "--security",
+                        "--activation-mode",
+                        "file",
+                        "--skill-layout",
+                        "flat",
+                    ])
+                    .arg("--ledger-backing-root")
+                    .arg(&instance.replacement_backing)
+                    .arg("--managed");
+            } else if operation == "supervisor" {
+                command = Command::new("kill");
+                command.args(["-TERM", supervisor.trim()]);
+            } else {
+                command.arg("stop").arg(&instance.mount);
+            }
+            let started = std::time::Instant::now();
+            instance.stopper = Some(
+                command
+                    .env("XDG_RUNTIME_DIR", instance.root.path().join("runtime"))
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            if let Some(delay) = release_after_failure {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let logs: String =
+                        std::fs::read_dir(instance.root.path().join("runtime/skillfs"))
+                            .unwrap()
+                            .filter_map(Result::ok)
+                            .filter(|e| e.file_name().to_string_lossy().ends_with(".worker.log"))
+                            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                            .collect();
+                    // The old early-Drop warning and the retained worker's failed
+                    // unmount warning both prove the first unmount was attempted.
+                    if logs.contains("leaving backing root in place: FUSE mount still active")
+                        || logs.contains("signal-triggered FUSE unmount failed")
+                    {
+                        assert!(is_mounted(&instance.mount));
+                        assert!(is_mounted(&instance.backing));
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "no failed unmount observed: {logs}"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if let Some(remaining) = delay.checked_sub(started.elapsed()) {
+                    std::thread::sleep(remaining);
+                }
+                assert!(is_mounted(&instance.mount));
+                assert!(is_mounted(&instance.backing));
+                let mut holder = instance.holder.take().unwrap();
+                holder.kill().unwrap();
+                holder.wait().unwrap();
+            }
+            let output = instance.stopper.take().unwrap().wait_with_output().unwrap();
+            if operation == "supervisor" {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                while supervisor_file.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "supervisor shutdown timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if busy && release_after_failure.is_none() {
+                if operation != "supervisor" {
+                    assert_eq!(output.status.code(), Some(1));
+                    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to unmount"));
+                }
+                assert!(is_mounted(&instance.mount), "busy FUSE mount must remain");
+                assert!(
+                    is_mounted(&instance.backing),
+                    "live backing alias must remain"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(instance.backing.join("demo/SKILL.md")).unwrap(),
+                    skill
+                );
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(is_mounted(&instance.mount), operation == "orphan");
+                assert_eq!(
+                    is_mounted(&instance.replacement_backing),
+                    operation == "orphan"
+                );
+                assert!(!is_mounted(&instance.backing));
+                assert!(
+                    !instance.backing.exists(),
+                    "successful stop must remove created backing"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(source.join("demo/SKILL.md")).unwrap(),
+                skill
+            );
+            drop(instance);
+        }
+    }
+}

@@ -212,6 +212,8 @@ impl std::error::Error for BackingRootError {
 pub struct LedgerBackingRoot {
     /// The daemon-facing root path.
     path: PathBuf,
+    /// Agent-visible mount that must be released before removing its live alias.
+    mountpoint: PathBuf,
     /// Whether SkillFS created a bind mount that needs unmount on cleanup.
     created_bind_mount: bool,
     /// If SkillFS created the backing root directory, the path to remove
@@ -304,6 +306,7 @@ impl LedgerBackingRoot {
             );
             return Ok(Self {
                 path: source_canon.to_path_buf(),
+                mountpoint: mount_canon.to_path_buf(),
                 created_bind_mount: false,
                 created_temp_dir: None,
             });
@@ -372,6 +375,7 @@ impl LedgerBackingRoot {
             }
             return Ok(Self {
                 path: source_canon.to_path_buf(),
+                mountpoint: mount_canon.to_path_buf(),
                 created_bind_mount: false,
                 created_temp_dir: None,
             });
@@ -458,6 +462,7 @@ impl LedgerBackingRoot {
                 }
                 Ok(Self {
                     path: backing_canon,
+                    mountpoint: mount_canon.to_path_buf(),
                     created_bind_mount: true,
                     created_temp_dir,
                 })
@@ -490,6 +495,7 @@ impl LedgerBackingRoot {
                         );
                         Ok(Self {
                             path: backing_canon,
+                            mountpoint: mount_canon.to_path_buf(),
                             created_bind_mount: false,
                             created_temp_dir,
                         })
@@ -527,11 +533,51 @@ impl LedgerBackingRoot {
 
     /// Clean up resources created by [`Self::setup`].
     ///
-    /// Unmounts the bind mount if SkillFS created it, then removes the
-    /// temporary directory if SkillFS created it. Errors are logged but
-    /// do not propagate — this runs on the shutdown path and should not
-    /// block process exit.
+    /// Preserves the live alias while the agent-visible FUSE mount remains
+    /// active or its state cannot be read. Otherwise unmounts the bind mount
+    /// and removes the empty temporary directory created by SkillFS. Errors
+    /// are logged but do not propagate — cleanup must not block process exit.
     pub fn cleanup(&self) {
+        self.cleanup_with_mounts(std::fs::read("/proc/mounts"));
+    }
+
+    fn cleanup_with_mounts(&self, mounts: std::io::Result<Vec<u8>>) {
+        if !self.created_bind_mount && self.created_temp_dir.is_none() {
+            return;
+        }
+        let mounts = match mounts {
+            Ok(mounts) => mounts,
+            Err(e) => {
+                warn!(
+                    backing_root = %self.path.display(),
+                    error = %e,
+                    "leaving backing root in place: cannot read FUSE mount state"
+                );
+                return;
+            }
+        };
+        // A worker can exit before managed stop discovers that FUSE is busy.
+        // Keep the live alias, not merely its empty directory, for recovery.
+        let fuse_active = mounts.split(|&b| b == b'\n').any(|line| {
+            let fs_type = line
+                .split(|b| b.is_ascii_whitespace())
+                .filter(|field| !field.is_empty())
+                .nth(2)
+                .unwrap_or_default();
+            (fs_type == b"fuse" || fs_type.starts_with(b"fuse."))
+                && crate::proc_mounts::mounts_contain_target(
+                    line,
+                    self.mountpoint.as_os_str().as_bytes(),
+                )
+        });
+        if fuse_active {
+            warn!(
+                backing_root = %self.path.display(),
+                mountpoint = %self.mountpoint.display(),
+                "leaving backing root in place: FUSE mount still active"
+            );
+            return;
+        }
         // The temp dir IS the bind mount point. Removing it while the mount
         // is still live would make remove_dir_all recurse through the bind
         // and unlink the source tree it aliases (the mount point itself
@@ -801,6 +847,7 @@ mod tests {
         let path = temp.path().to_path_buf();
         let root = LedgerBackingRoot {
             path: path.clone(),
+            mountpoint: temp.path().join("mount"),
             created_bind_mount: true,
             created_temp_dir: Some(path.clone()),
         };
@@ -818,11 +865,41 @@ mod tests {
         std::fs::create_dir(&inner).expect("create dir");
         let root = LedgerBackingRoot {
             path: inner.clone(),
+            mountpoint: temp.path().join("mount"),
             created_bind_mount: false,
             created_temp_dir: Some(inner.clone()),
         };
         root.cleanup();
         assert!(!inner.exists(), "empty created dir must be removed");
+    }
+
+    #[test]
+    fn cleanup_preserves_backing_until_fuse_is_released() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("backing");
+        std::fs::create_dir(&path).unwrap();
+        let root = LedgerBackingRoot {
+            path: path.clone(),
+            mountpoint: PathBuf::from("/mnt/my skills"),
+            created_bind_mount: false,
+            created_temp_dir: Some(path.clone()),
+        };
+        for mounts in [
+            b"skillfs /mnt/my\\040skills fuse rw 0 0\n".as_slice(),
+            b"skillfs /mnt/my\\040skills fuse.skillfs rw 0 0\n".as_slice(),
+        ] {
+            root.cleanup_with_mounts(Ok(mounts.to_vec()));
+            assert!(path.is_dir(), "backing must survive an active FUSE mount");
+        }
+        root.cleanup_with_mounts(Err(std::io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(path.is_dir(), "unknown mount state must preserve backing");
+
+        // An underlying source mount is not the FUSE over-mount. It must not
+        // prevent cleanup after an in-place FUSE mount has been released.
+        root.cleanup_with_mounts(Ok(b"/dev/root /mnt/my\\040skills ext4 rw 0 0\n\
+                                     skillfs /mnt/other fuse rw 0 0\n"
+            .to_vec()));
+        assert!(!path.exists(), "released FUSE must allow normal cleanup");
     }
 
     // -----------------------------------------------------------------------
