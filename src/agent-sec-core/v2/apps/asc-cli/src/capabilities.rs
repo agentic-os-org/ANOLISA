@@ -225,7 +225,7 @@ fn normalize(
     let Some(value) = value else {
         return Ok(None);
     };
-    let normalized = value.trim().to_lowercase();
+    let normalized = resolve::v1_strip(value).to_lowercase();
     allowed
         .iter()
         .find(|candidate| **candidate == normalized)
@@ -322,6 +322,16 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].agent, "qoder");
         assert_eq!(records[0].capability, "prompt-scan");
+
+        // V1 strips the information separators too; see `resolve::v1_strip`.
+        let records = query(
+            &empty(),
+            Some("\u{1c}qoder\u{1f}"),
+            Some("prompt-scan\u{1e}"),
+        )
+        .expect("filters");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].agent, "qoder");
     }
 
     #[test]
