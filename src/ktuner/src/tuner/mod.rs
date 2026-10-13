@@ -1678,11 +1678,15 @@ pub fn rollback_preview_categories(
 /// `--list`'s param order. An absent ledger selects nothing — every
 /// `--exclude` name is unrecorded there and the listing is empty — and, like
 /// every preview, it creates neither the ledger directory nor its lock file.
+/// An unknown category is refused here for the same reason the restore
+/// refuses it (see [`refuse_unknown_categories`]): the preview must not
+/// promise a set the selection would never be allowed to build.
 fn rollback_preview_categories_at(
     cats: &[String],
     excluded: &[String],
     path: &str,
 ) -> Result<CategoryPreview> {
+    refuse_unknown_categories(cats)?;
     let data = read_pending_at(path)?.unwrap_or(RollbackData {
         version: 1,
         entries: BTreeMap::new(),
@@ -2017,6 +2021,7 @@ fn rollback_categories_at(
     service_path: &str,
     script_path: &str,
 ) -> Result<CategoryRollback> {
+    refuse_unknown_categories(cats)?;
     let guard = lock_ledger_at(ledger)?;
     if !Path::new(ledger).exists() {
         anyhow::bail!("没有找到 rollback 文件 ({ledger})，可能尚未执行过 tune");
@@ -2082,6 +2087,29 @@ struct CategorySelection {
     unclassified: Vec<String>,
     /// The restore units to restore, in the ledger's param order.
     units: Vec<BTreeMap<String, RollbackEntry>>,
+}
+
+/// Refuse a category value no rule category names, with the message `check`,
+/// `tune` and `rollback --category` answer: the vocabulary is closed
+/// ([`category::validate_category`]), and a name outside it is an argument
+/// error, never a selection.
+///
+/// The CLI validates its own `--category` values before it calls in, which is
+/// a guard at a *caller*; [`rollback_categories`] and
+/// [`rollback_preview_categories`] are library entry points reachable without
+/// that caller, so the rule has to hold here too. An unrecognized value must
+/// not reach the selection: the predicate it would be compared against holds
+/// no entry for a name that is not in the vocabulary, and treating the name as
+/// "matches every entry" turned a typo into a restore of the whole categorized
+/// ledger.
+///
+/// Both callers run this before they take the ledger lock, so a refused
+/// command leaves nothing behind — no ledger directory, no lock file.
+fn refuse_unknown_categories(cats: &[String]) -> Result<()> {
+    for cat in cats {
+        category::validate_category(cat)?;
+    }
+    Ok(())
 }
 
 /// The restore units a category-scoped rollback selects, and the reports its
@@ -9260,6 +9288,69 @@ mod tests {
         assert!(report.outcome.is_complete());
         assert_eq!(fs::read(&ledger).unwrap(), ledger_before);
         assert_eq!(fs::read(&conf).unwrap(), persisted_before);
+    }
+
+    /// A category value no rule category names is a command error, exactly the
+    /// one `check`, `tune` and `rollback --category` answer: the CLI validates
+    /// its own argument before the call, and the library entry is reachable
+    /// without that caller. Without the refusal the predicate's fallback
+    /// answered "everything" for such a value, so a typo restored every
+    /// categorized record instead of none. The refusal comes before the lock,
+    /// so a refused command creates neither the ledger directory nor its lock
+    /// file.
+    #[test]
+    fn rollback_categories_refuses_an_unknown_category() {
+        let dir = AtomicTestDir::new("rollback-categories-unknown");
+        let (conf, service, script) = fixture_paths(&dir);
+        let somaxconn = dir.0.join("somaxconn");
+        let swappiness = dir.0.join("swappiness");
+        fs::write(&somaxconn, "4096").unwrap();
+        fs::write(&swappiness, "10").unwrap();
+        let ledger = fixture_category_ledger(
+            &dir,
+            &[
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                    Some(Category::Performance),
+                ),
+                (
+                    "vm.swappiness",
+                    "60",
+                    "10",
+                    swappiness.to_str().unwrap(),
+                    Some(Category::Performance),
+                ),
+            ],
+        );
+        let ledger_before = fs::read(&ledger).unwrap();
+
+        for spelling in ["garbage", "netwok", "", "Network "] {
+            let error = rollback_categories_at(
+                &[spelling.to_string()],
+                &[],
+                &ledger,
+                &conf,
+                &service,
+                &script,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{spelling:?} must refuse the command"));
+            assert!(error.to_string().contains("未知分类"), "{error:#}");
+            // The preview walks the same selection, so it refuses it too.
+            let preview = rollback_preview_categories_at(&[spelling.to_string()], &[], &ledger);
+            assert!(preview.is_err(), "{spelling:?} must refuse the preview");
+            // A refused command restored nothing and left no trace.
+            assert_eq!(fs::read_to_string(&somaxconn).unwrap(), "4096");
+            assert_eq!(fs::read_to_string(&swappiness).unwrap(), "10");
+            assert_eq!(fs::read(&ledger).unwrap(), ledger_before);
+            assert!(
+                !Path::new(&format!("{ledger}.lock")).exists(),
+                "{spelling:?} must be refused before the ledger lock is taken"
+            );
+        }
     }
 
     /// The preview lists exactly the entries the restore then retires, in the
