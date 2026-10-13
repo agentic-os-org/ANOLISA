@@ -10376,6 +10376,59 @@ mod tests {
         }
     }
 
+    /// An md array is a mountable device like any other: `/dev/md0` carries the
+    /// filesystem, and `queue/read_ahead_kb` reaches the window it reads with —
+    /// `setup_bdev_super()` takes `sb->s_bdi` from the block device's disk
+    /// (v6.6 fs/super.c:1518) and the attribute sits in the general queue group
+    /// (v6.6 block/blk-sysfs.c; only the mq-only group is hidden from bio-based
+    /// queues). Nothing in md recomputes the window either: the only
+    /// `disk_update_readahead()` caller under drivers/md is dm, and it runs on
+    /// every table load (v6.6 drivers/md/dm-table.c:2029). Filtering `md*` out
+    /// of the block-device read left an md host with no read-ahead advice at
+    /// all, because the members are exactly the disks the `holders` gate
+    /// excludes.
+    #[test]
+    fn read_ahead_advice_reaches_an_md_array() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_block_tree_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        // An all-SSD array under the database, plus one entry of each shape the
+        // filter must still drop. Only the array's attributes matter here.
+        for name in ["md0", "dm-0", "loop0"] {
+            let disk = dir.join(name);
+            std::fs::create_dir_all(disk.join("queue")).expect("create queue");
+            std::fs::create_dir_all(disk.join("holders")).expect("create holders");
+            std::fs::write(disk.join("queue/rotational"), "0\n").expect("write rotational");
+            std::fs::write(disk.join("queue/read_ahead_kb"), "256\n").expect("write read_ahead_kb");
+            std::fs::write(disk.join("hidden"), "0\n").expect("write hidden");
+        }
+
+        let mut info = info_with_processes(&["postgres"]);
+        info.disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        let names: Vec<&str> = info.disks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["md0"],
+            "an md array is a disk; a dm member and a loop image are not: {names:?}"
+        );
+        assert_eq!(info.disks[0].disk_type, DiskType::SSD);
+
+        let mut recs = Vec::new();
+        eval_read_ahead_kb(&info, &mut recs);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "block/md0/read_ahead_kb")
+            .unwrap_or_else(|| panic!("the array carrying the database must be sized: {names:?}"));
+        assert_eq!(rec.current_value, "256");
+        assert_eq!(rec.recommended_value, "128");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_hdd_no_read_ahead_without_streaming() {
         let mut info = make_test_info();

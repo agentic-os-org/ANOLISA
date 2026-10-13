@@ -1114,13 +1114,21 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().to_string();
 
+            // Storage that is not a disk of its own: loop is a file, ram and
+            // zram are memory, sr a removable CD, nbd a remote block device
+            // whose userspace server does the reading, and dm-* recomputes its
+            // window from the stacked limits on every table load
+            // (`disk_update_readahead()` from `dm_table_set_restrictions`,
+            // v6.6 drivers/md/dm-table.c:2029). An md array stays: it is the
+            // device its filesystem is mounted on, its members are the ones
+            // `holders` excludes, and no md code recomputes its window (that
+            // dm call is the only one in drivers/md).
             if name.starts_with("loop")
                 || name.starts_with("ram")
                 || name.starts_with("dm-")
                 || name.starts_with("sr")
                 || name.starts_with("zram")
                 || name.starts_with("nbd")
-                || name.starts_with("md")
             {
                 continue;
             }
