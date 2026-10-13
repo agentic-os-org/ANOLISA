@@ -8,6 +8,7 @@ mod cli;
 mod compaction;
 mod compression;
 mod config;
+mod config_trust;
 mod context;
 mod core;
 mod extension;
