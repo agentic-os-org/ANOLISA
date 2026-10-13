@@ -73,15 +73,13 @@ Agent 框架和沙箱。ANOLISA CLI 提供统一的安装入口，各项能力�
     <tr>
       <td></td>
       <td></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/runtime/blaze/">Blaze</a></strong><br><sub>沙箱生命周期</sub></td>
-    </tr>
-    <tr>
-      <td></td>
-      <td></td>
       <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>统一的 Agent 策略配置</sub></td>
     </tr>
   </tbody>
 </table>
+
+Blaze 已迁移至独立仓库
+[blaze-rs](https://github.com/agentic-os-org/blaze-rs)。
 
 ## 解决什么问题
 

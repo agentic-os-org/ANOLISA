@@ -237,22 +237,6 @@
       "status": "incubating"
     },
     {
-      "id": "blaze",
-      "display_name": "Blaze",
-      "aliases": [],
-      "issue_option": null,
-      "path_prefixes": [
-        "src/blaze/"
-      ],
-      "label": "component:blaze",
-      "commit_scope": "blaze",
-      "commit_scope_aliases": [],
-      "release_tag_prefix": null,
-      "ci_key": "blaze",
-      "issue_triagers": [],
-      "status": "incubating"
-    },
-    {
       "id": "aw",
       "display_name": "AW",
       "aliases": [],

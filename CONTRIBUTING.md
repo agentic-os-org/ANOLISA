@@ -36,8 +36,8 @@ available to claim. To implement a roadmap direction, follow the Issue process:
 
 ## Repository at a glance
 
-ANOLISA is a monorepo. The twelve components and their supported development
-platforms are listed below. Build names are accepted by `build-all.sh`; commit
+ANOLISA is a monorepo. The table below lists component development platforms
+and entry points. Build names are accepted by `build-all.sh`; commit
 scopes are used in commit subjects and PR titles.
 
 | Component | Path | Platform | Build name | Scope | Development entry and minimum local gate |
@@ -53,7 +53,6 @@ scopes are used in commit subjects and PR titles.
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
 | ktuner | `src/ktuner/` | Linux only | n/a | `ktuner` | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
-| blaze | `src/blaze/` | Linux only | n/a | `blaze` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` |
 
 `tokenless` can publish macOS artifacts, but its binaries are cross-compiled
 from Linux. Do not use a macOS checkout as the tokenless build environment.
@@ -121,8 +120,8 @@ boundaries, explain the contract and test impact in the PR.
 - Optional set: `cosh-ng` and `sight`. Add `--all` or name them with
   `--component`.
 
-It does not build `anolisa`, `skillfs`, `ktuner`, or `blaze`. Use their
-component gates in the matrix above for those four components.
+The script does not build `anolisa`, `skillfs`, or `ktuner`. Use their
+component gates in the matrix above.
 
 With no install-mode flag, component files install to the user profile under
 `$HOME/.local` without elevated installation privileges. Dependency bootstrap
@@ -240,7 +239,6 @@ warning and should be justified or replaced before review.
 | `anolisa` | `distribution/anolisa/` |
 | `skillfs` | `src/skillfs/` |
 | `ktuner` | `src/ktuner/` |
-| `blaze` | `src/blaze/` |
 | `deps` | Dependency changes, including lockfiles. |
 | `ci` | `.github/workflows/` and CI configuration. |
 | `docs` | Documentation-only changes. |

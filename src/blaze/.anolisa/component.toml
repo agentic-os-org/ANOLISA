@@ -1,6 +1,0 @@
-[component]
-name = "blaze"
-version = "0.3.0"
-type = "daemon"
-language = "rust"
-description = "Per-host sandbox orchestrator daemon"

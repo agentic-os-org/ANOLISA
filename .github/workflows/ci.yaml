@@ -47,11 +47,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_blaze:
-        description: 'Force run blaze tests (ignore change detection)'
-        required: false
-        type: boolean
-        default: false
       run_skillfs:
         description: 'Force run SkillFS tests (ignore change detection)'
         required: false
@@ -93,7 +88,6 @@ jobs:
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
-      blaze: ${{ steps.changes.outputs.blaze }}
       cache_environment: >-
         ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
             (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -128,7 +122,6 @@ jobs:
           SKILLFS=false
           COSH_NG=false
           KTUNER=false
-          BLAZE=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
@@ -160,9 +153,6 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
-          fi
-          if echo "$CHANGED" | grep -q "^src/blaze/"; then
-            BLAZE=true
           fi
 
           # Exercise cache consumers when the runner image or cache bootstrap changes.
@@ -202,9 +192,6 @@ jobs:
           if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
             KTUNER=true
           fi
-          if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
-            BLAZE=true
-          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -216,7 +203,6 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
-          echo "blaze=$BLAZE" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -231,7 +217,6 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
-          echo "| blaze | $BLAZE |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Validate component version metadata
@@ -1568,46 +1553,3 @@ jobs:
         run: |
           cd src/ktuner
           cargo test
-
-  # =========================================================================
-  # Step 13: Test blaze (per-host sandbox daemon)
-  # =========================================================================
-  test-blaze:
-    name: Test blaze
-    needs: detect-changes
-    if: needs.detect-changes.outputs.blaze == 'true'
-    runs-on: anolisa-k8s-general-ci-x64
-    environment: ${{ needs.detect-changes.outputs.cache_environment }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.88.0'
-          components: 'rustfmt, clippy'
-
-      - name: Configure trusted compiler cache writes
-        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
-        uses: ./.github/actions/setup-sccache
-        with:
-          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: src/blaze
-
-      - name: Check formatting
-        run: |
-          cd src/blaze
-          cargo fmt --all --check
-
-      - name: Lint
-        run: |
-          cd src/blaze
-          cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run tests
-        run: |
-          cd src/blaze
-          cargo test --workspace

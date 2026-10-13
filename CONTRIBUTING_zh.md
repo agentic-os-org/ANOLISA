@@ -25,7 +25,7 @@ Roadmap 中的专题是候选方向，不代表排期承诺，也不代表任务
 
 ## 仓库概览
 
-ANOLISA 是一个 monorepo。下表列出十二个组件及其支持的开发平台。构建名称供
+ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。构建名称供
 `build-all.sh` 使用，scope 用于 commit subject 和 PR title。
 
 | 组件 | 路径 | 平台 | 构建名称 | Scope | 开发入口和最低本地门禁 |
@@ -41,7 +41,6 @@ ANOLISA 是一个 monorepo。下表列出十二个组件及其支持的开发平
 | SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
 | ktuner | `src/ktuner/` | 仅 Linux | 不适用 | `ktuner` | `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` |
-| blaze | `src/blaze/` | 仅 Linux | 不适用 | `blaze` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` |
 
 `tokenless` 可以发布 macOS 产物，但其二进制需要从 Linux 交叉编译。不要把 macOS checkout 当作 tokenless 的构建环境。标为 Linux 的组件都必须在 Linux 上构建和测试。`cosh-ng` 和 `agentsight` 的 macOS 受限路径见上表。
 
@@ -96,7 +95,7 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 - 默认集合为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`。
 - 可选集合为 `cosh-ng` 和 `sight`。使用 `--all` 或通过 `--component` 指定它们。
 
-它不会构建 `anolisa`、`skillfs`、`ktuner` 或 `blaze`。这四个组件请使用上方矩阵中的组件门禁。
+脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
 不指定安装模式时，组件文件会安装到用户目录 `$HOME/.local`，这一步不需要提权。
 依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
@@ -191,7 +190,6 @@ scope 会产生警告，发起 review 前应说明理由或改用推荐值。
 | `anolisa` | `distribution/anolisa/` |
 | `skillfs` | `src/skillfs/` |
 | `ktuner` | `src/ktuner/` |
-| `blaze` | `src/blaze/` |
 | `deps` | 依赖变更，包括 lockfile。 |
 | `ci` | `.github/workflows/` 和 CI 配置。 |
 | `docs` | 纯文档变更。 |
