@@ -68,6 +68,10 @@ jobs:
           python3 scripts/check-sqlite-entrypoints.py --self-test
           python3 scripts/check-sqlite-entrypoints.py
 
+      - name: Run scripts test suites
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --with pytest --no-project -m pytest scripts -q
+
       - name: Lint
         working-directory: src/agentsight
         run: cargo clippy --workspace --all-targets -- -D warnings
