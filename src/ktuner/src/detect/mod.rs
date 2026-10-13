@@ -1100,8 +1100,15 @@ fn effective_cpu_cores(host_cores: usize, cgroup_cores: u64) -> usize {
 }
 
 fn read_disk_info() -> Result<Vec<DiskInfo>> {
+    read_disk_info_from(Path::new("/sys/block"))
+}
+
+/// Path-injectable form of [`read_disk_info`] (the `_at` idiom): `block_dir` is
+/// the sysfs block tree the entries and their `queue/` attributes are read
+/// from, so the entry filter and the per-disk reads are assertable against a
+/// synthetic tree.
+pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
     let mut disks = Vec::new();
-    let block_dir = "/sys/block";
 
     if let Ok(entries) = fs::read_dir(block_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -1118,14 +1125,15 @@ fn read_disk_info() -> Result<Vec<DiskInfo>> {
                 continue;
             }
 
-            let disk_type = detect_disk_type(&name);
-            let scheduler = read_current_scheduler(&name);
-            let available_schedulers = read_available_schedulers(&name);
-            let nr_requests = read_nr_requests(&name);
-            let read_ahead_kb = read_read_ahead_kb(&name);
-            let rq_affinity = read_rq_affinity(&name);
-            let hidden = read_disk_hidden(&format!("/sys/block/{name}/hidden"));
-            let holders = read_disk_holders(&format!("/sys/block/{name}/holders"));
+            let dir = entry.path();
+            let disk_type = detect_disk_type(&dir, &name);
+            let scheduler = read_current_scheduler(&dir);
+            let available_schedulers = read_available_schedulers(&dir);
+            let nr_requests = read_nr_requests(&dir);
+            let read_ahead_kb = read_read_ahead_kb(&dir);
+            let rq_affinity = read_rq_affinity(&dir);
+            let hidden = read_disk_hidden(&dir.join("hidden"));
+            let holders = read_disk_holders(&dir.join("holders"));
 
             disks.push(DiskInfo {
                 name,
@@ -1144,7 +1152,7 @@ fn read_disk_info() -> Result<Vec<DiskInfo>> {
     Ok(disks)
 }
 
-fn detect_disk_type(name: &str) -> DiskType {
+fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     if name.starts_with("nvme") {
         return DiskType::NVMe;
     }
@@ -1157,8 +1165,8 @@ fn detect_disk_type(name: &str) -> DiskType {
     // rare).
     let is_virtual = name.starts_with("vd") || name.starts_with("xvd");
 
-    let rotational_path = format!("/sys/block/{name}/queue/rotational");
-    if let Ok(val) = fs::read_to_string(&rotational_path) {
+    let rotational_path = dir.join("queue/rotational");
+    if let Ok(val) = fs::read_to_string(rotational_path) {
         match val.trim() {
             "0" => DiskType::SSD,
             "1" => {
@@ -1177,8 +1185,8 @@ fn detect_disk_type(name: &str) -> DiskType {
     }
 }
 
-fn read_current_scheduler(name: &str) -> String {
-    let path = format!("/sys/block/{name}/queue/scheduler");
+fn read_current_scheduler(dir: &Path) -> String {
+    let path = dir.join("queue/scheduler");
     // Current scheduler is enclosed in brackets: "none [mq-deadline] bfq"
     fs::read_to_string(&path).map_or_else(
         |_| "unknown".to_string(),
@@ -1199,8 +1207,8 @@ fn active_option(content: &str) -> Option<String> {
         .map(|t| t[1..t.len() - 1].to_string())
 }
 
-fn read_available_schedulers(name: &str) -> Vec<String> {
-    let path = format!("/sys/block/{name}/queue/scheduler");
+fn read_available_schedulers(dir: &Path) -> Vec<String> {
+    let path = dir.join("queue/scheduler");
     if let Ok(content) = fs::read_to_string(&path) {
         content
             .split_whitespace()
@@ -1211,16 +1219,16 @@ fn read_available_schedulers(name: &str) -> Vec<String> {
     }
 }
 
-fn read_nr_requests(name: &str) -> u64 {
-    let path = format!("/sys/block/{name}/queue/nr_requests");
+fn read_nr_requests(dir: &Path) -> u64 {
+    let path = dir.join("queue/nr_requests");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
 
-fn read_read_ahead_kb(name: &str) -> u64 {
-    let path = format!("/sys/block/{name}/queue/read_ahead_kb");
+fn read_read_ahead_kb(dir: &Path) -> u64 {
+    let path = dir.join("queue/read_ahead_kb");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -1238,7 +1246,7 @@ fn read_read_ahead_kb(name: &str) -> u64 {
 ///
 /// An unreadable attribute reads as "not hidden", which keeps the advice
 /// emitting rather than silently dropping it.
-fn read_disk_hidden(hidden_path: &str) -> bool {
+fn read_disk_hidden(hidden_path: &Path) -> bool {
     fs::read_to_string(hidden_path)
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -1252,7 +1260,7 @@ fn read_disk_hidden(hidden_path: &str) -> bool {
 /// its callers, so a non-empty directory means the disk belongs to a stacked
 /// device rather than to a filesystem. Sorted so the read is deterministic; an
 /// unreadable directory reads as no holder, the conservative side for advice.
-fn read_disk_holders(holders_dir: &str) -> Vec<String> {
+fn read_disk_holders(holders_dir: &Path) -> Vec<String> {
     let mut holders: Vec<String> = fs::read_dir(holders_dir)
         .map(|entries| {
             entries
@@ -1265,8 +1273,8 @@ fn read_disk_holders(holders_dir: &str) -> Vec<String> {
     holders
 }
 
-fn read_rq_affinity(name: &str) -> u64 {
-    let path = format!("/sys/block/{name}/queue/rq_affinity");
+fn read_rq_affinity(dir: &Path) -> u64 {
+    let path = dir.join("queue/rq_affinity");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -2646,7 +2654,10 @@ mod tests {
         // An unreadable file yields "unknown" from BOTH bracket-scan readers
         // — the shared fallback pins that the deduplication did not change
         // semantics.
-        assert_eq!(read_current_scheduler("ktuner_no_such_disk"), "unknown");
+        assert_eq!(
+            read_current_scheduler(Path::new("ktuner_no_such_disk")),
+            "unknown"
+        );
         // When the THP file exists (any Linux host), the reader must return
         // exactly the bracketed active option of its real content, proving
         // both readers route through the same active_option helper.
@@ -2695,8 +2706,9 @@ mod tests {
 
     #[test]
     fn test_detect_disk_type() {
-        assert_eq!(detect_disk_type("nvme0n1"), DiskType::NVMe);
-        assert_eq!(detect_disk_type("nvme1n1"), DiskType::NVMe);
+        let dir = Path::new("/sys/block/nvme0n1");
+        assert_eq!(detect_disk_type(dir, "nvme0n1"), DiskType::NVMe);
+        assert_eq!(detect_disk_type(dir, "nvme1n1"), DiskType::NVMe);
     }
 
     /// A synthetic `/sys/block/<disk>` directory built from `(name, content)`
@@ -2726,16 +2738,16 @@ mod tests {
         // reader needs.
         let held = device_tree(&[("holders/dm-0/", ""), ("holders/md0/", "")]);
         assert_eq!(
-            read_disk_holders(held.join("holders").to_str().unwrap()),
+            read_disk_holders(&held.join("holders")),
             vec!["dm-0".to_string(), "md0".to_string()]
         );
 
         // An empty holders directory is the normal case for a mount source.
         let bare = device_tree(&[("holders/", "")]);
-        assert!(read_disk_holders(bare.join("holders").to_str().unwrap()).is_empty());
+        assert!(read_disk_holders(&bare.join("holders")).is_empty());
         // A missing directory (or one that cannot be read) must not invent a
         // holder: a bare device stays a mount candidate.
-        assert!(read_disk_holders(bare.join("missing").to_str().unwrap()).is_empty());
+        assert!(read_disk_holders(&bare.join("missing")).is_empty());
     }
 
     #[test]
@@ -2749,14 +2761,14 @@ mod tests {
             ("garbage", false),
         ] {
             let disk = device_tree(&[("hidden", content)]);
-            let got = read_disk_hidden(disk.join("hidden").to_str().unwrap());
+            let got = read_disk_hidden(&disk.join("hidden"));
             assert_eq!(
                 got, expected,
                 "hidden file {content:?} must read as {expected}"
             );
         }
         // An unreadable attribute reads as not hidden, keeping the advice.
-        assert!(!read_disk_hidden("/nonexistent/ktuner/hidden"));
+        assert!(!read_disk_hidden(Path::new("/nonexistent/ktuner/hidden")));
     }
 
     #[test]
