@@ -316,6 +316,12 @@ impl RegistrationManager {
 
         // Try v1 migration
         if let Ok(v1) = serde_json::from_str::<RegisterRecordV1>(&content) {
+            if v1.version != 1 {
+                return Err(UnreadableRecordCause::LegacyVersion {
+                    path: path.clone(),
+                    found: v1.version,
+                });
+            }
             let migrated: RegisterRecord = v1.into();
             return Ok(Some(migrated));
         }
@@ -665,6 +671,8 @@ enum UnreadableRecordCause {
     Parse { path: PathBuf },
     /// A schema version from the future.
     FutureSchema { path: PathBuf, found: String },
+    /// Only numeric version 1 has known legacy migration semantics.
+    LegacyVersion { path: PathBuf, found: u32 },
 }
 
 impl UnreadableRecordCause {
@@ -685,6 +693,11 @@ impl UnreadableRecordCause {
                 path.display(),
                 found,
                 REGISTER_SCHEMA_VERSION
+            ),
+            Self::LegacyVersion { path, found } => format!(
+                "{} has legacy version {} (expected 1)",
+                path.display(),
+                found
             ),
         }
     }
@@ -1084,6 +1097,9 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+        m.do_link("link-abc").unwrap();
+        assert_eq!(m.read_state(), ConsentState::Registered);
+        assert_eq!(m.read_link_id().as_deref(), Some("link-abc"));
     }
 
     #[test]
@@ -1283,6 +1299,34 @@ mod tests {
         let result = m.do_link("link-abc");
         assert_unreadable_refusal(result, &m.register_path);
         assert_record_unchanged(&m, future, 0o644);
+    }
+
+    #[test]
+    fn unsupported_legacy_version_is_init_and_refuses_mutations() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        for version in [3, 2, 0, u32::MAX] {
+            for state in ["init", "registered", "unregistered"] {
+                let content = format!(r#"{{"version":{version},"state":"{state}"}}"#);
+                stage_unreadable(&m, &content, 0o644);
+                let (consent, record) = m.read_state_and_record();
+                assert_eq!(consent, ConsentState::InitFresh, "{content}");
+                assert!(record.is_none(), "{content}");
+
+                for result in [
+                    m.do_link("link-abc"),
+                    m.do_unlink(),
+                    m.do_register("admin", RegisterSource::Cli),
+                    m.do_unregister_with("admin", || false),
+                ] {
+                    if let Err(SubscriptionError::UnreadableRecord { reason, .. }) = &result {
+                        assert!(reason.contains(&format!("legacy version {version} (expected 1)")));
+                    }
+                    assert_unreadable_refusal(result, &m.register_path);
+                    assert_record_unchanged(&m, &content, 0o644);
+                }
+            }
+        }
     }
 
     #[test]
