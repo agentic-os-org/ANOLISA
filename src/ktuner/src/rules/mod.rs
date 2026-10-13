@@ -1793,7 +1793,17 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         || info.has_process("valkey-server")
         || info.has_process("memcached")
         || info.has_process("etcd")
-        || info.has_process("elasticsearch");
+        // ZooKeeper and Consul are the in-memory coordination-KV classmates of
+        // etcd `classify` groups with it (the runtime marker table resolves
+        // org.apache.zookeeper to the `zookeeper` service), and OpenSearch is
+        // the same Lucene-based search workload as the Elasticsearch entry
+        // below (classify's has_search covers both). The sibling gates that
+        // were swept for their equivalents (0b55cba16, c2d7f5eb5, d7e861c8d)
+        // advise those hosts; this list stayed silent for them.
+        || info.has_process("zookeeper")
+        || info.has_process("consul")
+        || info.has_process("elasticsearch")
+        || info.has_process("opensearch");
     if !is_db_or_cache {
         return 1;
     }
@@ -9426,8 +9436,10 @@ mod tests {
         // forgot mongod (in every sibling db list), mariadbd (added to the
         // sibling gates by 73bdd5835/51913a79b but missed here), and
         // valkey-server (the Redis 7.2.4 fork the sweep of 0b55cba16 added
-        // everywhere else). Every service the rule accepts must trigger the
-        // recommendation, and a build job must not.
+        // everywhere else). zookeeper/consul and opensearch are the
+        // classifier's own peers of etcd and elasticsearch, which the same
+        // sweep of the siblings never reached here. Every service the rule
+        // accepts must trigger the recommendation, and a build job must not.
         for name in [
             "postgres",
             "mysqld",
@@ -9438,7 +9450,10 @@ mod tests {
             "valkey-server",
             "memcached",
             "etcd",
+            "zookeeper",
+            "consul",
             "elasticsearch",
+            "opensearch",
         ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
