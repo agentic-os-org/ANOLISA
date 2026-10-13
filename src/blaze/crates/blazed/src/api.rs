@@ -32,7 +32,13 @@ use crate::sandbox::{
 use crate::state::ServerState;
 
 const MAX_EXEC_TIMEOUT_SECS: u32 = 20;
-const MAX_GUEST_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
+/// Upper bound for one buffered HTTP request body, applied to every route.
+///
+/// Guest file envelopes (`exec`/`read`/`write`) are the largest legitimate
+/// bodies, so they define the ceiling. JSON control bodies and bodies a route
+/// never reads are bounded by the same value so a streamed body cannot
+/// exhaust daemon memory before the route runs.
+const MAX_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
 
 /// Top-level request handler. Always returns `Ok(Response)`; internal
 /// errors are turned into JSON error bodies so hyper never sees a panic.
@@ -64,8 +70,11 @@ where
         drop(req);
         dispatch(&method, &path, &query, Vec::new(), &state).await
     } else {
-        let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
-        match collect_body(req, limit).await {
+        // Every other request buffers its body before dispatch. Bound that
+        // buffer for every route — not only guest file envelopes — so an
+        // oversized or indefinitely streamed body cannot exhaust daemon
+        // memory before the route runs.
+        match collect_body(req, MAX_HTTP_BODY_BYTES).await {
             Ok(body) => dispatch(&method, &path, &query, body, &state).await,
             Err(e) => Err(e),
         }
@@ -76,21 +85,6 @@ where
         Err(e) => error_response(&e),
     };
     Ok(resp)
-}
-
-fn guest_body_route(method: &Method, path: &str) -> bool {
-    if method != Method::POST {
-        return false;
-    }
-    let parts = path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    matches!(
-        parts.as_slice(),
-        ["v1", "sandboxes", _, "exec" | "read" | "write"]
-    )
 }
 
 fn ignored_body_route(method: &Method, path: &str) -> bool {
@@ -108,7 +102,7 @@ fn ignored_body_route(method: &Method, path: &str) -> bool {
     )
 }
 
-async fn collect_body<B>(req: Request<B>, limit: Option<usize>) -> Result<Vec<u8>>
+async fn collect_body<B>(req: Request<B>, limit: usize) -> Result<Vec<u8>>
 where
     B: Body<Data = Bytes> + Unpin,
     B::Error: std::fmt::Display,
@@ -121,14 +115,12 @@ where
         let Ok(data) = frame.into_data() else {
             continue;
         };
-        if let Some(limit) = limit
-            && collected.len().saturating_add(data.len()) > limit
-        {
-            return Err(crate::guest::GuestError::PayloadTooLarge {
-                actual: collected.len().saturating_add(data.len()),
+        let actual = collected.len().saturating_add(data.len());
+        if actual > limit {
+            return Err(BlazeDaemonError::PayloadTooLarge {
+                actual: u64::try_from(actual).unwrap_or(u64::MAX),
                 limit,
-            }
-            .into());
+            });
         }
         collected.extend_from_slice(&data);
     }
@@ -5479,7 +5471,7 @@ mod tests {
             "data_b64": BASE64.encode(&envelope_payload),
         }))
         .expect("write request above the guest HTTP limit");
-        assert!(envelope_body.len() > MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(envelope_body.len() > MAX_HTTP_BODY_BYTES);
         let (status, error) = handled_json(&state, Method::POST, &path, envelope_body).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error["status"], 413);
@@ -5490,7 +5482,7 @@ mod tests {
             "data_b64": BASE64.encode(&payload),
         }))
         .expect("write request");
-        assert!(body.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(body.len() <= MAX_HTTP_BODY_BYTES);
 
         let (status, written) = handled_json(&state, Method::POST, &path, body).await;
         assert_eq!(status, StatusCode::OK);
@@ -5509,10 +5501,54 @@ mod tests {
             "data_b64": BASE64.encode(&payload),
         }))
         .expect("oversized write request");
-        assert!(oversized.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(oversized.len() <= MAX_HTTP_BODY_BYTES);
         let (status, error) = handled_json(&state, Method::POST, &path, oversized).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error["status"], 413);
+    }
+
+    #[tokio::test]
+    async fn non_guest_routes_bound_their_buffered_bodies() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut config = test_config(&temp);
+        let policy_dir = temp.path().join("policies");
+        std::fs::create_dir_all(&policy_dir).expect("policy dir");
+        config.policy.dir = policy_dir;
+        let state = mock_state_from_config(config);
+
+        // A create body above the HTTP envelope limit is rejected while it is
+        // being buffered instead of being fully read and parsed as JSON.
+        let oversized_create = {
+            let mut body = serde_json::to_vec(&json!({
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:ownership-test"
+            }))
+            .expect("valid create request");
+            body.extend(std::iter::repeat_n(b' ', MAX_HTTP_BODY_BYTES));
+            body
+        };
+        assert!(oversized_create.len() > MAX_HTTP_BODY_BYTES);
+        let (status, error) =
+            handled_json(&state, Method::POST, "/v1/sandboxes", oversized_create).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error["status"], 413);
+
+        // A body the route never reads is bounded too: the reload route used
+        // to buffer the whole stream before discarding it.
+        let oversized_reload = vec![b' '; MAX_HTTP_BODY_BYTES + 1];
+        let (status, error) =
+            handled_json(&state, Method::POST, "/v1/admin/reload", oversized_reload).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error["status"], 413);
+
+        // Bodies within the limit keep flowing through both routes.
+        let (status, _created) =
+            handled_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, reloaded) =
+            handled_json(&state, Method::POST, "/v1/admin/reload", Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reloaded["reloaded"], true);
     }
 
     #[tokio::test]
