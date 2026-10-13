@@ -3538,6 +3538,50 @@ mod tests {
         );
     }
 
+    /// Write a stand-in `systemctl` that appends its arguments to `calls`, and
+    /// return its path once it can be executed.
+    ///
+    /// The production code spawns the program itself and folds a spawn error
+    /// into "did not run", so a stand-in that fails to exec only surfaces as a
+    /// missing `calls` file. A sibling test thread that forks while this file
+    /// is still open for writing hands the child that write handle until its
+    /// own exec, and an exec of the stand-in in that window fails with
+    /// `ETXTBSY`. Warm the stand-in up with `--probe`, which it answers
+    /// without recording anything, until it no longer fails that way — the
+    /// same bounded retry `spawn_fresh_executable` in the detect tests uses.
+    fn executable_systemctl_stand_in(
+        dir: &std::path::Path,
+        calls: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let program = dir.join("systemctl");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ),
+        )
+        .expect("write the stand-in program");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
+            .expect("make the stand-in executable");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match std::process::Command::new(&program).arg("--probe").status() {
+                Ok(status) => {
+                    assert!(status.success(), "the stand-in answers --probe");
+                    return program;
+                }
+                Err(err)
+                    if err.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(err) => panic!("run the stand-in: {err}"),
+            }
+        }
+    }
+
     /// A retire is the mirror of the write arm, so it must undo both artifacts
     /// the write created. Deleting the unit file alone left systemd's
     /// enablement pointing at a file that no longer exists: the unit was
@@ -3573,17 +3617,7 @@ mod tests {
         // The stand-in records its arguments: a run that reaches the host's
         // systemctl instead writes nothing here.
         let calls = dir.0.join("systemctl-calls");
-        let program = dir.0.join("systemctl");
-        fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
-                calls.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
-            .expect("make the stand-in executable");
+        let program = executable_systemctl_stand_in(&dir.0, &calls);
 
         let guard = lock_ledger_at(path).unwrap();
         persist_from_rollback_at(
@@ -4509,17 +4543,7 @@ mod tests {
         // The stand-in records its arguments: a run that reaches the host's
         // systemctl instead writes nothing here.
         let calls = dir.join("systemctl-calls");
-        let program = dir.join("systemctl");
-        fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
-                calls.display()
-            ),
-        )
-        .expect("write the stand-in program");
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
-            .expect("make the stand-in executable");
+        let program = executable_systemctl_stand_in(&dir, &calls);
 
         let cleanup_failed = finalize_rollback_at(
             ledger.to_str().unwrap(),
