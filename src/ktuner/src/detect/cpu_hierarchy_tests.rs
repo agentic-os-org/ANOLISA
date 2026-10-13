@@ -110,9 +110,12 @@ fn cpuset_mask_bounds_the_effective_cpu_count() {
     t.write("kubepods/pod123/cpu.max", "max 100000");
     assert_eq!(t.read("0::/kubepods/pod123"), 2);
 
-    // The mask is inherited: a cgroup that enables the controller without
-    // narrowing it carries an equal or wider mask, so the smallest count on
-    // the chain (here the pod's) is the one that binds.
+    // A cgroup that enables the controller without narrowing it has no mask of
+    // its own, so the answer comes from the ancestor walk's fallback: the
+    // service has no `cpuset.cpus.effective` file, the slice's 4-7 is what
+    // binds. (With a mask of its own the cgroup's value is authoritative - it
+    // is the kernel's own folding of the chain, see
+    // `a_child_partition_is_not_capped_by_its_parents_effective_mask`.)
     let t = Tree::new();
     t.write("system.slice/cpuset.cpus.effective", "4-7");
     t.write("system.slice/app.service/cpu.max", "max 100000");
