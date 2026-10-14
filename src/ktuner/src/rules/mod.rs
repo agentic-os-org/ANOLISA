@@ -9493,12 +9493,27 @@ fn hung_task_warnings_recommendation(current: i64, recs: &mut Vec<Recommendation
     });
 }
 
-fn eval_hung_task_warnings(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/hung_task_warnings";
-    if !std::path::Path::new(path).exists() {
-        return 1;
+fn eval_hung_task_warnings(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_hung_task_warnings_at(info, recs, "/proc/sys/kernel/hung_task_warnings")
+}
+
+/// Path-injectable form of [`eval_hung_task_warnings`] (the `eval_*_at` idiom)
+/// so the signed switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — warnings are disabled — and [`read_sysctl_i64`]
+/// maps an unreadable or unparseable file to that same 0 (the read is signed
+/// because -1 means "unlimited"). Only a zero the reader could produce is
+/// evidence of the disabled warnings, so a masked or garbled proc entry (a
+/// container's, typically) neither reports a `current_value` the host does not
+/// have nor asks for a write it may not need.
+fn eval_hung_task_warnings_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if let Some(current) = read_switch_i64(path) {
+        hung_task_warnings_recommendation(current, recs);
     }
-    hung_task_warnings_recommendation(read_sysctl_i64(path), recs);
     1
 }
 
@@ -14502,6 +14517,60 @@ mod tests {
             rec.is_none(),
             "Should not recommend stat_interval for small CPU count"
         );
+    }
+
+    #[test]
+    fn test_hung_task_warnings_unreadable_stays_quiet() {
+        // kernel.hung_task_warnings is read signed so that -1 ("unlimited")
+        // is not read as the disabled 0, but an unreadable or unparseable
+        // file still became that 0: a masked or garbled proc entry (a
+        // container's, typically) was reported as `current_value: "0"` and
+        // answered with a write of 10 on a host whose switch was never read.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_hung_task_warnings_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let malformed = write("malformed", b"warnings\n");
+        let empty = write("empty", b"");
+        // A directory is an IO error even for root.
+        let io_error = dir.join("io_error");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("missing");
+
+        let info = make_test_info();
+        for path in [&malformed, &empty, &io_error, &missing] {
+            let mut recs = Vec::new();
+            eval_hung_task_warnings_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        // A readable 0 still fires; a readable -1 ("unlimited") and a
+        // positive count stay quiet.
+        for (value, expects_rec) in [("0", true), ("-1", false), ("10", false)] {
+            let path = write(&format!("switch.{value}"), format!("{value}\n").as_bytes());
+            let mut recs = Vec::new();
+            eval_hung_task_warnings_at(&info, &mut recs, path.to_str().unwrap());
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 disables the warnings"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "10");
+            }
+        }
     }
 
     #[test]
