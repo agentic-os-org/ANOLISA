@@ -1,7 +1,7 @@
 use crate::question::choices::question_choice_count as shared_question_choice_count;
 use crate::ui::{ApprovalActionSet, ApprovalPanelAction};
 
-use super::{RawInputCapture, RawInputEvent};
+use super::{CardInputState, RawInputCapture, RawInputEvent};
 
 pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
     match capture {
@@ -155,5 +155,47 @@ pub(super) fn capture_initial_selection(capture: &RawInputCapture) -> usize {
             ..
         } => (*selected).min(option_count.saturating_sub(1)),
         _ => 0,
+    }
+}
+
+impl CardInputState {
+    /// Snapshot event after free-text input or a draft edit; lives with
+    /// the other card-event constructors (layout discipline).
+    pub(super) fn input_event(&self, capture: &RawInputCapture) -> Option<RawInputEvent> {
+        match capture {
+            RawInputCapture::Question {
+                id,
+                allow_free_text,
+                secret,
+                ..
+            } if *allow_free_text => {
+                if is_removed_question_answer_slash_fragment(&self.free_text) {
+                    return None;
+                }
+                if *secret {
+                    Some(RawInputEvent::CardSecretInput(
+                        id.clone(),
+                        self.free_text.clone(),
+                    ))
+                } else {
+                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
+                }
+            }
+            RawInputCapture::TextQuestion { id, secret, .. } => {
+                if is_removed_question_answer_slash_fragment(&self.free_text) {
+                    return None;
+                }
+                if *secret {
+                    Some(RawInputEvent::CardSecretInput(
+                        id.clone(),
+                        self.free_text.clone(),
+                    ))
+                } else {
+                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
+                }
+            }
+            RawInputCapture::PromptDraft { id, .. } => Some(self.draft_changed_event(id)),
+            _ => None,
+        }
     }
 }
