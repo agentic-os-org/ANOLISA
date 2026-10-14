@@ -5,7 +5,8 @@ use crate::{rejected, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    sync::{atomic::Ordering, mpsc, Arc, TryLockError},
+    collections::BTreeMap,
+    sync::{atomic::Ordering, mpsc, Arc, Mutex, MutexGuard, TryLockError},
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +17,37 @@ pub(super) struct Lease {
     digest: [u8; 32],
     handle: Option<Value>,
     completion_digest: Option<[u8; 32]>,
+    cancelled: bool,
+}
+
+fn correlation(event: &str, session: &str, call: &str) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!([event, session, call]))
+                .map_err(|_| rejected("event_encoding"))?
+        )
+    ))
+}
+
+fn lock_hooks(
+    hooks: &Mutex<BTreeMap<String, Lease>>,
+    deadline: Instant,
+) -> Result<MutexGuard<'_, BTreeMap<String, Lease>>> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(rejected("event_open_timeout"));
+        }
+        match hooks.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => return Err(rejected("state_poisoned")),
+            Err(TryLockError::WouldBlock) => thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(2)),
+            ),
+        }
+    }
 }
 
 fn hermes_completion(mut native: Value) -> Result<Value> {
@@ -35,6 +67,68 @@ fn hermes_completion(mut native: Value) -> Result<Value> {
 }
 
 impl Runtime {
+    pub(super) fn close_hook(
+        &self,
+        instance_id: &str,
+        event: &str,
+        session: &str,
+        call: &str,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if !matches!(event, "tool.before" | "tool.after") || session.is_empty() || call.is_empty() {
+            return Err(rejected("native_correlation_missing"));
+        }
+        let hooks = Arc::clone(
+            &self
+                .instances
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?
+                .get(instance_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| rejected("unknown_instance"))?
+                .hooks,
+        );
+        let key = correlation(event, session, call)?;
+        let handle = {
+            // Serialize with opens so a delayed callback cannot escape cleanup.
+            let mut hooks = lock_hooks(&hooks, deadline)?;
+            if !hooks.contains_key(&key) && hooks.len() >= MAX_HOOK_EVENTS {
+                return Err(rejected("native_event_limit"));
+            }
+            let lease = hooks.entry(key).or_insert(Lease {
+                digest: [0; 32],
+                handle: None,
+                completion_digest: None,
+                cancelled: true,
+            });
+            lease.cancelled = true;
+            lease.handle.clone()
+        };
+        if let Some(handle) = handle {
+            let key = handle["event_id"]
+                .as_str()
+                .ok_or_else(|| rejected("event_invalid"))?;
+            loop {
+                {
+                    let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                    let Some(entry) = events.get(key) else {
+                        break;
+                    };
+                    entry.cancelled.store(true, Ordering::Release);
+                }
+                if Instant::now() >= deadline {
+                    return Err(rejected("event_close_timeout"));
+                }
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(5)),
+                );
+            }
+        }
+        Ok(json!({"closed": true}))
+    }
+
     pub(super) fn release_instance(&self, instance_id: &str, deadline: Instant) -> Result<Value> {
         {
             let mut instances = self
@@ -205,13 +299,13 @@ impl Runtime {
         {
             return Err(rejected("event_size_limit"));
         }
-        let correlation = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([value["name"], session, call]))
-                    .map_err(|_| rejected("event_encoding"))?
-            )
-        );
+        let correlation = correlation(
+            value["name"]
+                .as_str()
+                .ok_or_else(|| rejected("event_invalid"))?,
+            &session,
+            &call,
+        )?;
         let mut digest = Sha256::new();
         digest.update((encoded.len() as u64).to_be_bytes());
         digest.update(encoded);
@@ -219,21 +313,11 @@ impl Runtime {
         let digest: [u8; 32] = digest.finalize().into();
         // Serialize only opens for this instance, including initial audit claim.
         // Event workers do not acquire this lock, so preparation cannot deadlock.
-        let mut hooks = loop {
-            if Instant::now() >= deadline {
-                return Err(rejected("event_open_timeout"));
-            }
-            match hooks.try_lock() {
-                Ok(guard) => break guard,
-                Err(TryLockError::Poisoned(_)) => return Err(rejected("state_poisoned")),
-                Err(TryLockError::WouldBlock) => thread::sleep(
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(2)),
-                ),
-            }
-        };
+        let mut hooks = lock_hooks(&hooks, deadline)?;
         if let Some(lease) = hooks.get_mut(&correlation) {
+            if lease.cancelled {
+                return Err(rejected("native_event_closed"));
+            }
             if lease.digest != digest {
                 return Err(rejected("native_correlation_mismatch"));
             }
@@ -286,6 +370,7 @@ impl Runtime {
                 digest,
                 handle: None,
                 completion_digest: None,
+                cancelled: false,
             },
         );
         let handle = self.open(instance_id, value, Some(native_input), deadline)?;
@@ -295,6 +380,7 @@ impl Runtime {
                 digest,
                 handle: Some(handle.clone()),
                 completion_digest: None,
+                cancelled: false,
             },
         );
         Ok(handle)

@@ -166,6 +166,7 @@ class GateTests(GateFixture):
             "contract-empty-qwenpaw",
             "contract-empty-pi",
             "contract-empty-claude_sdk",
+            "contract-empty-agentscope",
         ):
             with self.subTest(mode=mode), patch.dict(
                 os.environ,

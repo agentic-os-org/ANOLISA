@@ -168,6 +168,12 @@ impl Runtime {
                 event,
                 native_input,
             } => self.open_hook(instance_id, event, native_input, deadline),
+            Operation::CloseHookEvent {
+                instance_id,
+                event,
+                session_id,
+                call_id,
+            } => self.close_hook(&instance_id, &event, &session_id, &call_id, deadline),
             Operation::InvokeStep {
                 event_id,
                 instance_id,

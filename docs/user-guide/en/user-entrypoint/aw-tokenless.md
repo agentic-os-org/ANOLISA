@@ -5,7 +5,7 @@
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
 checks replacement bounds; it does not independently prove semantic losslessness.
-Qoder, OpenClaw, QwenPaw, Hermes, Pi and Claude SDK native Bash share one Provider configuration for PreTool retry suggestions and PostTool
+Qoder, OpenClaw, QwenPaw, Hermes, Pi, AgentScope SDK 2.0.6 and Claude SDK native Bash share one Provider configuration for PreTool retry suggestions and PostTool
 compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
@@ -35,6 +35,11 @@ installation prefix. Use the framework-specific profile and launch flags from th
 
 Pi uses the SDK application factory described in the [Pi launch guide](aw.md#start-a-pi-sdk-worker);
 the package configuration generator still targets Qoder/OpenClaw.
+
+For AgentScope SDK, wire every public factory through `AwBridge`; the
+[SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
+combines sec-core checks/observation with both Tokenless operations. Follow the
+[SDK launch contract](aw.md#start-agentscope-sdk) for Python and factory setup.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`; it calls
@@ -92,6 +97,7 @@ PreTool does not provide those capabilities or Schema compression.
 | Hermes | `transform_tool_result` final string callback |
 | Pi SDK | Core `afterToolCall` content override after the original callback |
 | Claude SDK | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` native Bash envelope |
+| AgentScope SDK 2.0.6 | Public factory Bridge returns the final `ToolResponse` |
 
 OpenClaw requires its middleware API and explicit plugin enablement; AW's generated
 native profile declares the middleware contract. An observational `after_tool_call`
@@ -115,7 +121,8 @@ limits are AW failures handled by `on_error: report`; the native result is retai
 AW's persistent journal remains metadata-only and does not store replacement text.
 
 Keep existing completion observers and custom Hooks before compression in the
-`tool.after.steps` list. Qoder, QwenPaw, Hermes and Pi run these steps in their declared order when result
+`tool.after.steps` list. Qoder, QwenPaw, Hermes, Pi and AgentScope SDK run these steps
+in their declared order when result
 replacement is enabled; all observers see the original result. Only the final structured
 step may request `replace_result`. A replacement followed by another enabled step
 or a second replacement is rejected during admission. Earlier observers retain
@@ -126,7 +133,7 @@ custom Hook failure does not suppress later steps while budget remains.
 Qoder keeps independent native callbacks and orders only AW's after invocations
 inside the service; it does not force the native `sequential` flag or change
 external Hook scheduling. An explicitly configured native `sequential` setting
-still follows Qoder's global matching-plan semantics. QwenPaw registers the chain
+still follows Qoder's global matching-plan semantics. QwenPaw and AgentScope SDK register the chain
 in reverse so native middleware unwinding preserves its order. Hermes retains
 completion observers before its final result transform.
 

@@ -37,7 +37,15 @@ fn starter_example_needs_no_policy_program_and_requests_only_tool_events() {
 #[test]
 fn one_configuration_covers_declared_adapters_and_sixteen_event_names() {
     let mut value = example();
-    for adapter in ["qwenpaw", "qoder", "openclaw", "hermes", "pi", "claude-sdk"] {
+    for adapter in [
+        "qwenpaw",
+        "qoder",
+        "openclaw",
+        "hermes",
+        "pi",
+        "claude-sdk",
+        "agentscope",
+    ] {
         value["spec"]["agents"][adapter] = json!({
             "adapter": adapter,
             "argv": ["/nonexistent/agent", "--argument", ""]
@@ -235,6 +243,7 @@ fn exact_native_selectors_cover_custom_tools_without_regex_semantics() {
         json!(["bash", "file_read", "file_write"]),
         json!([
             "native:qwenpaw:custom",
+            "native:agentscope:custom",
             "native:qoder:mcp__read",
             "native:hermes:tool",
             "native:openclaw:exec"
