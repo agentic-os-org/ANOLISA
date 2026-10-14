@@ -391,7 +391,7 @@ impl SslSniff {
             // other Bun-compiled executables). Fall back to content detection
             // on the main executable; the normal Static attach path (symbols →
             // offset table → byte patterns) takes over from here.
-            if let Some(entry) = probe_exe_static_ssl(pid, &self.traced_files) {
+            if let Some(entry) = probe_exe_static_ssl(pid, &mut self.traced_files) {
                 libs.push(entry);
             }
         }
@@ -904,10 +904,14 @@ fn ssl_exe_markers() -> Vec<Vec<u8>> {
 /// marker prefilter passes, so the normal attach flow — `(dev, inode)`
 /// dedup, symbol attach, offset table, byte-pattern scan — applies
 /// unchanged. Returns `None` when the exe is unreadable, already present in
-/// `traced` (including Untraceable-marked), or carries no SSL marker.
+/// `traced` (including Untraceable-marked), or carries no SSL marker; a
+/// marker miss is itself negatively cached in `traced`, because the marker
+/// set is an immutable property of the file — without this, a long-lived
+/// process that matches a domain rule but carries no BoringSSL would pay a
+/// full executable read on every DNS event.
 fn probe_exe_static_ssl(
     pid: i32,
-    traced: &HashSet<FileKey>,
+    traced: &mut HashSet<FileKey>,
 ) -> Option<(String, FileKey, SslLibKind, String)> {
     let exe = proc_pid_entry(pid, "exe");
     let meta = fs::metadata(&exe).ok()?;
@@ -925,6 +929,9 @@ fn probe_exe_static_ssl(
         log::debug!(
             "[attach_process] pid={pid}: no SSL markers in main executable, skipping content probe"
         );
+        // Negative cache (Untraceable semantics: in traced_files, never in
+        // attachments, therefore never re-scanned).
+        traced.insert(key);
         return None;
     }
     log::info!(
@@ -937,7 +944,6 @@ fn probe_exe_static_ssl(
     // uprobe. The resolved path survives the exit, and the probe is
     // inode-global anyway. Fall back to `<pid>/exe` when readlink fails or
     // the file was replaced underneath (inode no longer matches).
-    let exe_str = exe.to_string_lossy().into_owned();
     let attach_path = match fs::read_link(&exe) {
         Ok(target) => {
             let resolved = target.to_string_lossy().into_owned();
@@ -964,10 +970,11 @@ fn stat_dev_to_key(dev: u64) -> u64 {
 /// True when any marker from [`ssl_exe_markers`] occurs in the file at
 /// `path`.
 ///
-/// Streams in [`SCAN_CHUNK_BYTES`] windows and stops at the first hit, so a
-/// matching binary costs only the read up to its first marker. The window
-/// tail carries over by `max_marker_len - 1` bytes so a marker straddling a
-/// boundary is still seen.
+/// Streams the file in rounds of [`SCAN_CHUNK_BYTES`] fresh bytes (the
+/// buffer additionally holds the `max_marker_len - 1` bytes carried over
+/// from the previous round, so a marker straddling a round boundary is
+/// still seen) and stops at the first hit, so a matching binary costs only
+/// the read up to its first marker.
 fn file_has_ssl_markers(path: &str) -> bool {
     let markers = ssl_exe_markers();
     let overlap = markers.iter().map(|m| m.len()).max().unwrap_or(1) - 1;
