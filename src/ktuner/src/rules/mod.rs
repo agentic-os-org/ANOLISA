@@ -8419,27 +8419,43 @@ fn eval_shmall(
     1
 }
 
-fn eval_compact_memory(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/compact_memory";
+fn eval_compact_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_compact_memory_at(
+        info,
+        recs,
+        "/proc/sys/vm/compact_memory",
+        "/proc/sys/vm/compaction_proactiveness",
+    )
+}
+
+/// Path-injectable form of [`eval_compact_memory`] (the `eval_*_at` idiom) so
+/// the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — proactive compaction is off — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence of the unset switch, so a
+/// masked or garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not
+/// need. A missing switch reports nothing, as before.
+fn eval_compact_memory_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    proactive_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let proactive_path = "/proc/sys/vm/compaction_proactiveness";
-    if std::path::Path::new(proactive_path).exists() {
-        let current = read_sysctl_u64(proactive_path);
-        if current == 0 {
-            recs.push(Recommendation {
-                param: "vm.compaction_proactiveness".to_string(),
-                current_value: "0".to_string(),
-                recommended_value: "20".to_string(),
-                reason: "未启用主动内存压缩，长时间运行后内存碎片化可能导致高阶分配失败"
-                    .to_string(),
-                confidence: Confidence::Medium,
-                category: Category::Performance,
-                writable: true,
-            });
-        }
-        return 1;
+    if read_switch(proactive_path) == Some(0) {
+        recs.push(Recommendation {
+            param: "vm.compaction_proactiveness".to_string(),
+            current_value: "0".to_string(),
+            recommended_value: "20".to_string(),
+            reason: "未启用主动内存压缩，长时间运行后内存碎片化可能导致高阶分配失败".to_string(),
+            confidence: Confidence::Medium,
+            category: Category::Performance,
+            writable: true,
+        });
     }
     1
 }
@@ -15385,6 +15401,48 @@ mod tests {
         let mut small = make_test_info();
         small.memory_total_gb = 16;
         assert!(advice(&small, &off).is_empty());
+    }
+
+    #[test]
+    fn compaction_proactiveness_needs_a_readable_switch() {
+        let (off, on, others) = switch_fixture("compaction_proactiveness");
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_compact_memory_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let trigger = dir.join("compact_memory");
+        std::fs::write(&trigger, b"1\n").unwrap();
+        let missing_trigger = dir.join("compact_memory.missing");
+
+        let info = make_test_info();
+        let advice = |trigger: &std::path::Path, proactive: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_compact_memory_at(
+                &info,
+                &mut recs,
+                trigger.to_str().unwrap(),
+                proactive.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&trigger, &off);
+        assert_eq!(recs.len(), 1, "a readable 0 is proactive compaction off");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&trigger, &on).is_empty(), "a readable 1 is on");
+        for path in &others {
+            assert!(
+                advice(&trigger, path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&missing_trigger, &off).is_empty(),
+            "the trigger file's absence still silences the rule"
+        );
     }
 
     #[test]
