@@ -9613,13 +9613,24 @@ fn eval_tcp_workaround_signed_windows_at(
     1
 }
 
-fn eval_protected_regular(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/fs/protected_regular";
-    if !std::path::Path::new(path).exists() {
-        return 1;
-    }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+fn eval_protected_regular(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_protected_regular_at(info, recs, "/proc/sys/fs/protected_regular")
+}
+
+/// Path-injectable form of [`eval_protected_regular`] (the `eval_*_at` idiom)
+/// so the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the protection is off — and [`read_sysctl_u64`]
+/// maps an unreadable or unparseable file to that same 0. Only a zero the
+/// reader could produce is evidence that the protection is off, so a masked or
+/// garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not need.
+fn eval_protected_regular_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "fs.protected_regular".to_string(),
             current_value: "0".to_string(),
@@ -19882,13 +19893,13 @@ mod tests {
         let checked = eval_protected_regular(&info, &mut recs);
         if std::path::Path::new("/proc/sys/fs/protected_regular").exists() {
             assert_eq!(checked, 1);
-            let val = read_sysctl_u64("/proc/sys/fs/protected_regular");
             let triggered = recs.iter().any(|r| r.param == "fs.protected_regular");
-            if val == 0 {
-                assert!(triggered, "Should trigger when protected_regular=0");
-                assert_eq!(recs.last().unwrap().category, Category::Security);
-            } else {
-                assert!(!triggered);
+            match read_switch("/proc/sys/fs/protected_regular") {
+                Some(0) => {
+                    assert!(triggered, "Should trigger when protected_regular=0");
+                    assert_eq!(recs.last().unwrap().category, Category::Security);
+                }
+                Some(_) | None => assert!(!triggered),
             }
         }
     }
@@ -19978,6 +19989,53 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 0 leaves FIFOs unprotected");
         assert_eq!(recs[0].current_value, "0");
         assert!(advice(&on).is_empty(), "a readable 1 protects them");
+        for path in [&malformed, &empty, &io_error, &missing] {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn protected_regular_advice_needs_a_readable_switch() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_protected_regular_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let off = write("off", b"0\n");
+        let on = write("on", b"2\n");
+        let malformed = write("malformed", b"nonsense\n");
+        let empty = write("empty", b"");
+        // A directory is an IO error even for root.
+        let io_error = dir.join("io_error");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("missing");
+
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_protected_regular_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(
+            recs.len(),
+            1,
+            "a readable 0 leaves regular files unprotected"
+        );
+        assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].recommended_value, "2");
+        assert!(advice(&on).is_empty(), "a readable 2 protects them");
         for path in [&malformed, &empty, &io_error, &missing] {
             assert!(
                 advice(path).is_empty(),
