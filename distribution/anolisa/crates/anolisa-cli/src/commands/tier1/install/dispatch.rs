@@ -47,6 +47,7 @@ use crate::context::{CliContext, InstallMode};
 use crate::progress::{self, ProgressReporter};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
+    override_template_var_warning,
 };
 use crate::resolution::{
     BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolveOptions,
@@ -100,10 +101,20 @@ pub(crate) fn host_backends(
 /// Validated `--repo` base URL, when the caller supplied one. Normalization
 /// runs before identity resolution so a malformed override is refused as a
 /// bad argument rather than surfacing as an unavailable component index.
+/// The override is literal, so a `$name` from the substitution vocabulary
+/// is accepted verbatim and only warned about here — no heuristic can tell
+/// a pasted template from a path that legitimately contains that text.
 pub(crate) fn normalized_repo_override(args: &InstallArgs) -> Result<Option<String>, CliError> {
     args.repo
         .as_deref()
-        .map(|url| normalize_override_url(url).map_err(|err| repo_config_err(err, true)))
+        .map(|url| {
+            let normalized =
+                normalize_override_url(url).map_err(|err| repo_config_err(err, true))?;
+            if let Some(warning) = override_template_var_warning(url) {
+                progress::suspend_output(|| eprintln!("warning: {warning}"));
+            }
+            Ok(normalized)
+        })
         .transpose()
 }
 
