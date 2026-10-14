@@ -3311,12 +3311,27 @@ fn core_pattern_records_the_pid(pattern: &str) -> bool {
 }
 
 fn eval_yama_ptrace_scope(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/yama/ptrace_scope";
+    eval_yama_ptrace_scope_at(info, recs, "/proc/sys/kernel/yama/ptrace_scope")
+}
+
+/// Path-injectable form of [`eval_yama_ptrace_scope`] (the `eval_*_at` idiom)
+/// so the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — any process may trace any other — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence of the unrestricted
+/// setting, so a masked or garbled proc entry (a container's, typically)
+/// neither reports a `current_value` the host does not have nor asks for a
+/// write it may not need.
+fn eval_yama_ptrace_scope_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.yama.ptrace_scope".to_string(),
             current_value: "0".to_string(),
@@ -13480,6 +13495,66 @@ mod tests {
             .find(|r| r.param == "kernel.hung_task_timeout_secs")
         {
             assert_eq!(rec.recommended_value, "120");
+        }
+    }
+
+    /// Synthetic readable-0 / readable-non-zero / malformed / empty / directory
+    /// / missing switches for the "a failed read is not the value 0" gates.
+    /// The directory is an IO error even for root.
+    fn zero_switch_paths(
+        prefix: &str,
+        on: &[u8],
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        [std::path::PathBuf; 4],
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_{prefix}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let off = write("off", b"0\n");
+        let on = write("on", on);
+        let malformed = write("malformed", b"nonsense\n");
+        let empty = write("empty", b"");
+        let io_error = dir.join("io_error");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("missing");
+        (off, on, [malformed, empty, io_error, missing])
+    }
+
+    #[test]
+    fn yama_ptrace_scope_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — any process may trace any other —
+        // and read_sysctl_u64 maps an unreadable or unparseable file to that
+        // same 0, so a masked or garbled proc entry (a container's, typically)
+        // was reported as `current_value: "0"` and answered with a write of 1
+        // on a host whose switch was never read.
+        let (off, on, others) = zero_switch_paths("yama_ptrace_scope", b"1\n");
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_yama_ptrace_scope_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 is the unrestricted setting");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 is already restricted");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
         }
     }
 
