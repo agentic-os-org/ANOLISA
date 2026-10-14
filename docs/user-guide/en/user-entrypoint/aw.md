@@ -7,7 +7,7 @@ its normal interface. You describe the programs and events in `aw.yaml`; AW
 starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
-The current Linux source build supports Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
@@ -23,7 +23,7 @@ live in the [configuration reference](../../../developer-guide/en/aw/configurati
 | Capability | Status |
 | --- | --- |
 | Validate one configuration with all 16 event names | ✅ Recognizing an event does not install a Hook |
-| Start Qoder CLI 1.1.64 through AW | ✅ Interactive and print entrypoints |
+| Start Qoder CLI through AW | ✅ Interactive and print entrypoints |
 | Run structured Providers before tools | ✅ `observe` and `block` |
 | Run structured Providers after tools | ✅ `observe`; success, error and blocked-attempt coverage depends on the framework |
 | Run native scripts and commands before/after tools | ✅ Unchanged callback input; byte output and exit status forwarded |
@@ -66,7 +66,7 @@ native permissions. Test one target at a time initially.
 
 | Target | Native prerequisite | Launch detail |
 | --- | --- | --- |
-| Qoder | CLI 1.1.64, completed login | Interactive or print; optional `--native-settings` |
+| Qoder | CLI >=1.1.64 with native command Hooks, completed login | Interactive or print; optional `--native-settings` |
 | OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
 | QwenPaw | 2.2.2b4 / AgentScope 2.0.8, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
 | Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
@@ -190,7 +190,7 @@ Framework profiles remain separate. Package removal is covered by the
 
 AW is not yet available through `anolisa install` or an RPM. Developers can
 build it on Linux with rustup and the repository's pinned toolchain. Install
-Qoder CLI 1.1.64 separately and verify its version. From the repository root:
+Qoder CLI separately and verify its version. From the repository root:
 
 ```bash
 cd src/aw
@@ -201,10 +201,38 @@ target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qo
 ```
 
 The [Qoder example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qoder.yaml)
-uses `argv: [qodercli]`. If another version is on `PATH`, replace that entry with
-the absolute path of the supported executable. `--agent qoder` selects the named
+uses `argv: [qodercli]`. To select a particular installation, replace that entry
+with the absolute path of its executable. `--agent qoder` selects the named
 entry under `spec.agents`; the name is yours to choose, while `adapter: qoder`
 selects the framework.
+
+AW requires a semantic CLI version >=1.1.64, the previously tested baseline,
+instead of one exact release. After surrounding whitespace is trimmed, `--version`
+must return a bare SemVer such as `1.1.66`, within 1–128 UTF-8 bytes. A leading
+`v`, product names, trailing annotations and additional lines are not accepted.
+A format error states this expectation and shows the observed output. AW records
+the trimmed output without searching it for a version token. Older or invalid
+versions are rejected before binding; a prerelease of 1.1.64 is below the minimum,
+while build metadata is retained. No YAML version field or downgrade is needed
+for a CLI using the same native Hook contract: `--settings`, exec-form command
+Hooks with literal `args`, `PreToolUse`/`PostToolUse`, callback IDs/input and exit 2
+for blocking.
+Version text alone does not certify compatibility; Hook-disabling settings,
+unsupported launch modes and malformed callbacks still fail. Earlier AW builds
+that required 1.1.64 must be updated to use this behavior.
+
+For example, name the target `qodercli` and select your installed executable:
+
+```yaml
+agents:
+  qodercli:
+    adapter: qoder
+    argv: [/absolute/path/to/qodercli]
+```
+
+Merge that block under `spec` in your complete configuration, then run
+`aw run --config /absolute/aw.yaml --agent qodercli`. The target name is separate
+from the native executable name and version.
 
 This example consumes Hook input and returns `{}` before and after tools. It
 adds no restriction and is not a security policy. Ask Qoder to run a harmless
@@ -606,7 +634,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
-the implementation. This build implements Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+the implementation. This build implements Qoder CLI, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`. `aw install`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw and QwenPaw reject it.

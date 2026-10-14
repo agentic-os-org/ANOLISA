@@ -6,7 +6,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
 会话结束后继续保存执行记录。
 
-当前 Linux 源码版本支持 Qoder CLI 1.1.64、OpenClaw 2026.9.6、
+当前 Linux 源码版本支持 Qoder CLI >=1.1.64、OpenClaw 2026.9.6、
 QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
@@ -25,7 +25,7 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 | 能力 | 状态 |
 | --- | --- |
 | 校验一份包含全部 16 个事件名的配置 | ✅ 识别事件不代表安装 Hook |
-| 通过 AW 启动 Qoder CLI 1.1.64 | ✅ 交互和 print 入口 |
+| 通过 AW 启动 Qoder CLI | ✅ 交互和 print 入口 |
 | 工具前运行结构化 Provider | ✅ `observe`、`block` |
 | 工具后运行结构化 Provider | ✅ `observe`；成功、失败及阻断尝试的覆盖随框架而异 |
 | 工具前后执行原生脚本和命令 | ✅ 回调输入保持不变，转交字节输出与退出状态 |
@@ -57,7 +57,7 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 
 | 目标 | 原生前置条件 | 启动差异 |
 | --- | --- | --- |
-| Qoder | CLI 1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
+| Qoder | 支持原生命令 Hook 的 CLI >=1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
 | OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
 | QwenPaw | 2.2.2b4 / AgentScope 2.0.8，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
 | Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
@@ -169,7 +169,7 @@ QwenPaw 正常退出时删除自己的临时插件。Hermes 保留已安装插�
 ## 构建并启动 Qoder
 
 AW 尚未通过 `anolisa install` 或 RPM 发布。开发者可以在 Linux 上用 rustup 和
-仓库固定的工具链构建。另行安装 Qoder CLI 1.1.64 并核对版本。从仓库根目录执行：
+仓库固定的工具链构建。另行安装 Qoder CLI 并核对版本。从仓库根目录执行：
 
 ```bash
 cd src/aw
@@ -180,9 +180,33 @@ target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qo
 ```
 
 [Qoder 示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qoder.yaml)使用
-`argv: [qodercli]`。如果 `PATH` 中是其他版本，将该项改为受支持可执行文件的绝对
-路径。`--agent qoder` 选择 `spec.agents` 下的命名对象；名称可以自定，
+`argv: [qodercli]`。若需选择特定安装，将该项改为对应可执行文件的绝对路径。
+`--agent qoder` 选择 `spec.agents` 下的命名对象；名称可以自定，
 `adapter: qoder` 才是框架类型。
+
+AW 要求 CLI 的语义版本 >=1.1.64，以此前测试基线为下限，不再固定一个版本。
+`--version` 输出去掉首尾空白后，必须是 `1.1.66` 这样的裸 SemVer，长度为 1–128
+个 UTF-8 字节。不接受前导 `v`、产品名、尾部说明或额外行。格式错误会明确说明
+这个要求，并显示实际输出。AW 记录去掉首尾空白后的原文，不从中搜索版本号。
+旧版本或非法版本文本在绑定前拒绝；1.1.64 的预发布版低于下限，构建信息仍保留。
+使用相同原生 Hook 合同的 CLI 无需在 YAML 填版本，也无需降级。该合同包括
+`--settings`、通过字面 `args` 执行的命令 Hook、`PreToolUse`/`PostToolUse`、
+回调 ID/输入，以及退出码 2 阻断。
+版本文本本身不能证明兼容；关闭 Hook 的配置、不支持的启动模式及非法回调仍会
+失败。旧 AW 构建若要求 1.1.64，需更新 AW 才能使用这个行为。
+
+例如，将目标命名为 `qodercli`，并选择已安装的可执行文件：
+
+```yaml
+agents:
+  qodercli:
+    adapter: qoder
+    argv: [/absolute/path/to/qodercli]
+```
+
+将该段合入完整配置的 `spec` 下，再运行
+`aw run --config /absolute/aw.yaml --agent qodercli`。目标名与原生可执行文件名、
+版本号分别定义。
 
 示例在工具前后消费 Hook 输入并返回 `{}`，不增加限制，也不是安全策略。可以让
 Qoder 执行一个无副作用的只读工具，触发前后两个回调；没有工具调用的回答不会
@@ -515,7 +539,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI 1.1.64、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.8
+当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.8
 和 Hermes 官方提交 `952c941e` Adapter。`aw install` 校验配置后分派到对应 Adapter；
 Hermes 支持持久化插件安装，Qoder、OpenClaw 和 QwenPaw 拒绝此命令。该命令不安装 AW 包
 或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。

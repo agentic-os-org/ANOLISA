@@ -12,7 +12,7 @@ import time
 
 if sys.argv[1:] == ["--version"]:
     print(os.environ.get("FAKE_VERSION", "1.1.64"))
-    sys.exit(0)
+    sys.exit(int(os.environ.get("FAKE_VERSION_EXIT", "0")))
 
 root = Path(os.environ["FAKE_ROOT"])
 (root / "environment-bytes-agent.json").write_text(
@@ -44,7 +44,7 @@ def invoke(hook, payload):
                    "FAKE_SHARED_ENV": "callback", "QODER_SITE": "GLOBAL",
                    "QODER_HOOK_SOURCE": "qoderwork" if os.environ.get(
                        "QODER_WORK_INTEGRATION_MODE") == "1" else "cli",
-                   "QODER_HOOK_VERSION": os.environ.get("QODER_CLIENT_VERSION") or "1.1.64"}
+                   "QODER_HOOK_VERSION": os.environ.get("QODER_CLIENT_VERSION") or os.environ.get("FAKE_VERSION", "1.1.64")}
     completed = subprocess.run(command, input=payload, capture_output=True, timeout=10,
                                check=False, env=environment)
     arguments = hook.get("args", [])

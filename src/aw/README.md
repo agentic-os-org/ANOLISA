@@ -3,7 +3,7 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI, OpenClaw, QwenPaw and Hermes through supported native
+Linux, it starts Qoder CLI >=1.1.64, OpenClaw, QwenPaw and Hermes through supported native
 entrypoints, runs external Providers and retains execution metadata after Agent
 sessions end. Frameworks keep their native interfaces, model configuration,
 scheduling and permissions. The current release is a Preview.
@@ -28,9 +28,9 @@ includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 
 ## Supported native entrypoints
 
-| Framework | Verified version | Entrypoint |
+| Framework | Native prerequisite | Entrypoint |
 | --- | --- | --- |
-| Qoder CLI | 1.1.64 | Interactive or print |
+| Qoder CLI | Native command Hook contract; detected version recorded | Interactive or print |
 | OpenClaw | 2026.9.6 | A new Gateway |
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
@@ -47,7 +47,7 @@ See the user guide for each Adapter's profile requirements and coexistence.
 
 ## Basic use
 
-From the repository root on Linux with rustup and Qoder CLI 1.1.64 available:
+From the repository root on Linux with rustup and Qoder CLI available:
 
 ```bash
 cd src/aw

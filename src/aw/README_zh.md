@@ -3,7 +3,7 @@
 [English](README.md)
 
 AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过受支持的原生入口
-启动 Qoder CLI、OpenClaw、QwenPaw 和 Hermes，运行外部 Provider，并在 Agent
+启动 Qoder CLI >=1.1.64、OpenClaw、QwenPaw 和 Hermes，运行外部 Provider，并在 Agent
 会话结束后保留执行元数据。框架继续管理自己的界面、模型配置、调度与权限。
 当前交付为 Preview。
 
@@ -26,9 +26,9 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 
 ## 支持的原生入口
 
-| 框架 | 已验证版本 | 入口 |
+| 框架 | 原生前提 | 入口 |
 | --- | --- | --- |
-| Qoder CLI | 1.1.64 | 交互或 print |
+| Qoder CLI | 原生命令 Hook 合同，记录实际版本 | 交互或 print |
 | OpenClaw | 2026.9.6 | 新 Gateway |
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
@@ -41,7 +41,7 @@ Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南
 
 ## 基本使用
 
-在 Linux 上准备 rustup 和 Qoder CLI 1.1.64，从仓库根目录执行：
+在 Linux 上准备 rustup 和 Qoder CLI，从仓库根目录执行：
 
 ```bash
 cd src/aw

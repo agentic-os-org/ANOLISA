@@ -211,7 +211,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
-                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "semver", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
             (
                 "aw-provider-sec-core", self.root / "crates/aw-provider-sec-core",
@@ -250,7 +250,7 @@ class GateTests(GateFixture):
         metadata = {"packages": packages, "workspace_members": [p["id"] for p in packages]}
         gate.structure(metadata, self.root)
         for package, dependency in (
-            (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
+            (0, "aw-core"), (1, "tokio"), (1, "semver"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
             (6, "aw-contracts"), (6, "tokio"),

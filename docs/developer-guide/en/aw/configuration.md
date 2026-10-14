@@ -9,8 +9,10 @@ workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw.
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
 between fields. The local Host performs Provider discovery and admission; the
-selected Adapter verifies its supported native version before binding. For a
-working four-framework example, start with the [integration walkthrough](integration.md).
+selected Adapter performs its native preparation checks before binding. Qoder
+requires CLI >=1.1.64 and records the probed version instead of an exact-release gate; OpenClaw,
+QwenPaw and Hermes retain their adapter-specific version or revision restrictions.
+For a working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
 
@@ -87,7 +89,7 @@ approval flows are outside the accepted native combinations. Changed input is
 rejected and handled through the affected step's `on_error`.
 
 Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
-with `observe`, plus native steps at these points. Qoder CLI 1.1.64 maps them to
+with `observe`, plus native steps at these points. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, exact selectors, guards, replacement effects and
 stronger execution guarantees are not runtime support. Qoder, OpenClaw, QwenPaw

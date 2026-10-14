@@ -62,7 +62,8 @@ registration path and does not require a plugin startup receipt.
 
 ## Delivery boundary
 
-This shared change retains Qoder CLI 1.1.64 as the only implemented adapter.
+Qoder requires a semantic CLI version >=1.1.64 and records the probed value; its
+command-Hook configuration and callback contracts remain enforced.
 OpenClaw, Hermes and QwenPaw supply separate native implementations and acceptance
 evidence. The daemon still retains at most 1024 correlated events per instance;
 long-lived native hosts must expose that limit and their configured failure

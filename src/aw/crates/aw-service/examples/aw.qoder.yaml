@@ -1,4 +1,4 @@
-# Run with Qoder CLI 1.1.64. Set argv to its installed path if needed.
+# Run with Qoder CLI >=1.1.64 supporting native command Hooks; set argv to its installed path.
 # This neutral command demonstrates hook execution, not a security policy.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration

@@ -24,6 +24,8 @@ if args.protocol == "provider" and request["method"] == "describe" and os.enviro
     (args.root / "preparing.pid").write_text(str(os.getpid()))
     time.sleep(8)
 if args.protocol == "provider":
+    (args.root / f"qoder-version-{request['method']}.txt").write_text(
+        os.environ.get("QODER_HOOK_VERSION", ""))
     (args.root / f"provider-{request['request_id']}.json").write_text(json.dumps(request))
     reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
     if request["method"] == "describe":

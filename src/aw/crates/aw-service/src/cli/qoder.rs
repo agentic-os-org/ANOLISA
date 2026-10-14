@@ -1,4 +1,4 @@
-//! Qoder CLI 1.1.64 native command hooks; scheduling remains in the Agent.
+//! Qoder native command hooks; scheduling remains in the Agent.
 
 use super::{
     adapter::{
@@ -16,14 +16,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const VERSION: &str = "1.1.64";
-
 pub(super) struct Qoder;
 
 struct Prepared {
     input: LaunchInput,
     settings: Value,
     native: Vec<String>,
+    version: String,
 }
 
 impl Adapter for Qoder {
@@ -46,13 +45,24 @@ impl Adapter for Qoder {
         check_args(&native)?;
         let settings = settings(input.flags.get("--native-settings"))?;
         check_sources(&input.command.cwd, &settings)?;
-        if adapter::version_output(&input.command, &["--version".into()])? != VERSION {
-            return Err(format!("Qoder CLI {VERSION} is required by this adapter").into());
+        let version = adapter::version_output(&input.command, &["--version".into()])?;
+        if version.is_empty() || version.len() > 128 {
+            return Err("Qoder CLI version probe output must contain 1..128 bytes".into());
+        }
+        let detected = semver::Version::parse(&version).map_err(|error| {
+            format!("could not parse Qoder CLI --version output; expected a bare SemVer such as 1.1.64, got {version:?}: {error}")
+        })?;
+        let minimum = semver::Version::new(1, 1, 64);
+        if detected < minimum {
+            return Err(
+                format!("Qoder CLI {minimum} or newer is required (detected {version})").into(),
+            );
         }
         Ok(Box::new(Prepared {
             input,
             settings,
             native,
+            version,
         }))
     }
 
@@ -75,7 +85,7 @@ impl Adapter for Qoder {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        capabilities(&self.native)
+        capabilities(&self.native, &self.version)
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -128,7 +138,7 @@ impl PreparedLaunch for Prepared {
             .get(std::ffi::OsStr::new("QODER_CLIENT_VERSION"))
             .filter(|v| !v.is_empty())
             .cloned()
-            .unwrap_or_else(|| VERSION.into());
+            .unwrap_or_else(|| self.version.clone().into());
         environment.insert("QODER_HOOK_SOURCE".into(), source.into());
         environment.insert("QODER_HOOK_VERSION".into(), version);
         environment.insert("QODER_SITE".into(), "GLOBAL".into());
@@ -141,10 +151,10 @@ impl PreparedLaunch for Prepared {
     }
 }
 
-pub(super) fn capabilities(args: &[String]) -> Capabilities {
+fn capabilities(args: &[String], version: &str) -> Capabilities {
     Capabilities {
         adapter: "qoder".into(),
-        version: VERSION.into(),
+        version: version.into(),
         entrypoint: if args
             .iter()
             .take_while(|arg| arg.as_str() != "--")

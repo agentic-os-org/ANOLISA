@@ -23,7 +23,7 @@ pub struct Settings<'a> {
     pub state: &'a Path,
     /// Explicit policy selection; installed Providers are never enabled implicitly.
     pub policy: Policy<'a>,
-    /// Qoder CLI 1.1.64 executable.
+    /// Qoder CLI >=1.1.64 executable with compatible native command Hooks.
     pub qoder: Option<&'a Path>,
     /// Node executable used by the pinned OpenClaw installation.
     pub node: Option<&'a Path>,

@@ -35,7 +35,7 @@ The installer verifies hashes, modes, architecture, version and source commit, r
 
 ## Use core without a Provider
 
-Install only the Agent you need: Qoder CLI **1.1.64**, or OpenClaw **2026.9.6** with Node.js. For Qoder, generate a base configuration as your regular user:
+Install only the Agent you need: Qoder CLI >=1.1.64 retaining the [native command-Hook contract](aw.md#build-and-start-qoder), or OpenClaw **2026.9.6** with Node.js. For Qoder, generate a base configuration as your regular user:
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
@@ -229,7 +229,14 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
 
 ## 3. Create one AW configuration
 
-Install Qoder CLI **1.1.64**, OpenClaw **2026.9.6** and a compatible Node.js runtime separately; the launcher verifies the pinned Agent versions. Set the following absolute paths to your actual installations. Run the remaining steps as your regular user.
+Install Qoder CLI >=1.1.64, OpenClaw **2026.9.6** and a compatible Node.js runtime separately.
+Qoder must retain `--settings`, exec-form command Hooks with literal `args`,
+`PreToolUse`/`PostToolUse`, callback IDs/input and exit 2 for blocking, as described
+in the [Qoder support contract](aw.md#build-and-start-qoder). AW records its successfully
+probed, nonempty version (at most 128 UTF-8 bytes) with 1.1.64 as the minimum semantic version; the
+version probe does not certify native effect adoption. OpenClaw retains its version
+check. Set the following absolute paths to your actual installations. Run the
+remaining steps as your regular user.
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"

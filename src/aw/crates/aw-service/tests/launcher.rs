@@ -5,6 +5,8 @@
 mod command_policy;
 #[path = "launcher/hermes_trust.rs"]
 mod hermes_trust;
+#[path = "launcher/qoder_version.rs"]
+mod qoder_version;
 #[path = "launcher/support.rs"]
 mod support;
 
@@ -406,10 +408,18 @@ fn native_query_separator_keeps_generated_hooks_and_literal_query() {
 
 #[test]
 fn native_commands_use_verified_directory_and_callback_environment() {
-    for (after, work_mode, client_version, source, version) in [
-        (false, None, None, "cli", "1.1.64"),
-        (true, Some("1"), Some("custom"), "qoderwork", "custom"),
-        (false, Some("0"), Some(""), "cli", "1.1.64"),
+    for (after, cli_version, work_mode, client_version, source, version) in [
+        (false, "1.1.64", None, None, "cli", "1.1.64"),
+        (false, "1.1.66", None, None, "cli", "1.1.66"),
+        (
+            true,
+            "1.1.66",
+            Some("1"),
+            Some("custom"),
+            "qoderwork",
+            "custom",
+        ),
+        (false, "1.1.66", Some("0"), Some(""), "cli", "1.1.66"),
     ] {
         let fixture = Fixture::new();
         let mut document = fixture.document();
@@ -422,6 +432,7 @@ fn native_commands_use_verified_directory_and_callback_environment() {
         let service = Service::start(&fixture, &document);
         let mut command = fixture.launch(&["--run-id", "environment"], None);
         command
+            .env("FAKE_VERSION", cli_version)
             .env("QODER_PROJECT_DIR", "/stale/qoder")
             .env("CLAUDE_PROJECT_DIR", "/stale/claude")
             .env("QODER_HOOK_SOURCE", "stale-source")
@@ -535,7 +546,8 @@ fn unsafe_native_launch_options_and_disabled_hooks_are_rejected_before_binding()
     for (name, value) in [
         ("QODER_HEADLESS_FAST_HOOKS", "1"),
         ("QODER_CONFIG_DIR_NAME", "custom"),
-        ("FAKE_VERSION", "0.0.0"),
+        ("FAKE_VERSION", ""),
+        ("FAKE_VERSION_EXIT", "7"),
     ] {
         let mut command = fixture.launch(&[], None);
         command.env(name, value);

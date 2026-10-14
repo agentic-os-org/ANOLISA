@@ -7,8 +7,9 @@
 
 [随包 Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 定义公共字段结构，Rust 校验器另行检查引用及字段之间的关系。本地 Host 负责
-Provider 发现与准入，所选 Adapter 在绑定前核实受支持的原生版本。四框架可运行
-示例见[组件接入教程](integration.md)。
+Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查。Qoder 探测并记录
+CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw 和 Hermes 仍保留各自的版本或
+修订限制。四框架可运行示例见[组件接入教程](integration.md)。
 
 ## 配置字段
 
@@ -75,7 +76,7 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 输入变化会被拒绝，并按受影响步骤的 `on_error` 处理。
 
 当前运行时准入工具前 `observe`/`block`、工具后 `observe`，以及这两个点位的原生
-步骤。Qoder CLI 1.1.64 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
+步骤。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。其他已识别事件、精确选择器、guard、替换效果和更强执行保证均不
 代表已有运行支持。Qoder、OpenClaw、QwenPaw 和 Hermes 均有启动 Adapter；
 受支持版本、入口及 after 事件覆盖见[使用指南](../../../user-guide/zh/user-entrypoint/aw.md)。

@@ -39,7 +39,7 @@ aw policy < provider-request.json\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
 aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
 aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
-Qoder CLI 1.1.64: run accepts optional --native-settings.\n\
+Qoder CLI >=1.1.64: run accepts optional --native-settings; records the detected version.\n\
 OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\
 QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
 Hermes 952c941e: run and install require --native-profile; run requires the installed AW plugin.\n\

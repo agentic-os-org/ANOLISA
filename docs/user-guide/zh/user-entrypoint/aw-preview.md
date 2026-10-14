@@ -32,7 +32,7 @@ sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 
 ## 无 Provider 使用 core
 
-只需安装所选 Agent：Qoder CLI **1.1.64**，或 OpenClaw **2026.9.6** 与 Node.js。以普通用户生成 Qoder 的基础配置：
+只需安装所选 Agent：保留[原生命令 Hook 合同](aw.md#构建并启动-qoder)的 Qoder CLI >=1.1.64，或 OpenClaw **2026.9.6** 与 Node.js。以普通用户生成 Qoder 的基础配置：
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
@@ -203,7 +203,12 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
 
 ## 3. 生成一份 AW 配置
 
-另外准备 Qoder CLI **1.1.64**、OpenClaw **2026.9.6** 及兼容的 Node.js；启动器会核对 Agent 版本。将下方绝对路径替换为实际安装位置。后续步骤使用普通用户运行。
+另外准备 Qoder CLI >=1.1.64、OpenClaw **2026.9.6** 及兼容的 Node.js。Qoder 须保留
+`--settings`、以字面量 `args` 执行的命令 Hook、`PreToolUse`/`PostToolUse`、
+回调 ID/输入及以退出码 2 阻断工具的合同，详见 [Qoder 支持合同](aw.md#构建并启动-qoder)。
+AW 记录成功探测到的非空版本（最多 128 个 UTF-8 字节），以 1.1.64 为语义版本下限；版本探测
+不代表原生效果已被采用。OpenClaw 保留版本检查。将下面绝对路径替换为实际
+安装路径，其余步骤以普通用户执行。
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
