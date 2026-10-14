@@ -278,6 +278,24 @@ needs a retry, even if the active link matches. Retry enable or complete disable
 does not prove a running OpenCode process loaded it. `--dry-run` previews the
 operation without modifying plugin files or receipts.
 
+#### QwenWorkCN (macOS local mode)
+
+```bash
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
+anolisa adapter disable tokenless qwenwork
+```
+
+The driver sideloads receipt-owned files and never changes desktop activation.
+Restart QwenWorkCN after enable/disable and open a new local session. Status reports
+loading and activation as `unknown`; file presence alone is not proof of activation.
+Keep the same `TOKENLESS_QWENWORK_HOME` for subsequent operations;
+`TOKENLESS_QWENWORK_APP` overrides the detected application bundle. Existing
+script installations must be removed with their original uninstaller before CLI
+enable. Modified and unrelated files are preserved. See [QwenWork integration](../token-saving/tokenless/framework-integration.md#qwenwork-macos-local-mode)
+for dependencies, migration, and the validated 1.2.5 version scope.
+
 ### logs and bug reports
 
 Inspect component logs or generate a diagnostic bundle:

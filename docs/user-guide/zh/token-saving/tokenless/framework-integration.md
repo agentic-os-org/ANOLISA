@@ -93,38 +93,54 @@ PreToolUse **仅匹配 Bash**，使用 RTK 改写受支持的命令。PostToolUs
 文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
 不注册 Tool Ready 或 Schema Hook。
 
-先通过已有受支持的安装方式安装 Tokenless；本 Adapter 需要 Bash、Python 3.9+ 和
-Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK。确保桌面会话能够找到这些
-二进制，而不只是交互式终端能够找到。
+先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
+和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。
+确保桌面会话能够找到这些二进制，而不只是交互式终端能够找到。
 
-Adapter **不会自动启用**，ANOLISA 目前也没有内置 `qwenwork` driver，因此下文通用的
-`anolisa adapter enable` 命令不适用于此目标。安装包含该 Adapter 的软件包后，使用随包
-脚本，并按实际安装位置调整资源路径：
+安装或升级前退出千问办公，然后执行：
 
 ```bash
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+anolisa adapter scan
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
 ```
 
-安装或升级前退出千问办公，完成后重启并开启新的**本地**会话。在应用内检查插件启用状态：
-旁加载成功不代表已经加载或激活。安装器把自包含插件复制到
-`~/.qwenworkcn/plugins-custom/tokenless`，不修改 settings、权限、数据库或插件禁用／阻止
-列表；遇到外来安装或已修改的文件会拒绝覆盖。
+CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
+完成后重启千问办公、开启新的**本地**会话，并在应用内检查插件激活状态。
+`status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。已验证版本为 1.2.5，
+其他版本会显示兼容性未验证的警告。
 
-`TOKENLESS_QWENWORK_APP` 用于指定非默认的千问办公应用 Bundle；
-`TOKENLESS_QWENWORK_HOME` 用于指定其数据目录。默认在 `/Applications` 或
-`~/Applications` 查找应用，并使用 `~/.qwenworkcn` 存放数据。
-不要将本 Adapter 指向 Qoder CLI 或 Qwen Code 配置目录。
+`TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。
+默认在 `/Applications` 和 `~/Applications` 查找应用，数据目录为 `~/.qwenworkcn`。
+使用绝对路径（支持开头的 `~`）。status、disable 和重新 enable 时保持同一数据目录；
+需要迁移时，先使用原配置 disable。不要指向 Qoder CLI 或 Qwen Code 的配置目录。
 
-卸载只移除未被修改的受管理插件，完成后同样需要重启应用：
+CLI 不接管没有自身 receipt 的已有安装。若此前使用随包脚本或 `make qwenwork-install`，
+先用原脚本卸载，再通过 CLI 启用（按实际安装位置调整资源路径）：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+anolisa adapter enable tokenless qwenwork
 ```
 
-源码 Checkout 也提供 `make qwenwork-install` 和 `make qwenwork-uninstall`，操作已经安装的
-Adapter 资源。安装和卸载都不需要调用内嵌 Qoder CLI 或未公开的桌面 API。
+CLI 管理的副本使用以下命令卸载：
+
+```bash
+anolisa --dry-run adapter disable tokenless qwenwork
+anolisa adapter disable tokenless qwenwork
+```
+
+卸载不依赖应用、源 Bundle 或 Hook 运行依赖仍然存在。只移除未修改的 receipt 归属文件及
+空插件目录，无关文件保留。修改过的文件会被保留，同时保留清理失败的 receipt：
+恢复或移除报告的冲突后重试。重新 enable 拒绝覆盖用户修改；复制中断会保留 receipt，
+供重试或清理。卸载后同样需要重启应用。
+
+随包脚本及源码 Checkout 的 `make qwenwork-install` / `make qwenwork-uninstall`
+仍是独立的备选方式。CLI 副本不包含这些生命周期脚本及其归属标记。两种方式均不调用
+内嵌 Qoder CLI 或未公开的桌面 API。需要恢复独立脚本管理时，先 disable CLI 管理的
+Adapter，再使用独立安装器。
 
 ### DeepSeek Harness 原生处理路径
 

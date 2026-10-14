@@ -183,8 +183,9 @@ fn project_disable(result: DisableOutcome) -> AdapterApplicationOutcome {
     } else {
         CommandOutcomeStatus::Partial {
             reason: format!(
-                "adapter '{}' cleanup incomplete; receipt kept for retry",
-                result.component
+                "adapter '{}' cleanup incomplete; receipt kept for retry: {}",
+                result.component,
+                result.report.messages.join("; ")
             ),
         }
     };
@@ -379,8 +380,9 @@ mod tests {
         assert_eq!(
             outcome.status(),
             &CommandOutcomeStatus::Partial {
-                reason: "adapter 'tokenless' cleanup incomplete; receipt kept for retry"
-                    .to_string(),
+                reason:
+                    "adapter 'tokenless' cleanup incomplete; receipt kept for retry: driver report"
+                        .to_string(),
             }
         );
         assert_eq!(

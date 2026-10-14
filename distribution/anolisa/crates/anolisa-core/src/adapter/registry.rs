@@ -15,6 +15,7 @@ use super::opencode::OpenCodeDriver;
 use super::qoder::QoderDriver;
 use super::qwencode::QwenCodeDriver;
 use super::qwenpaw::QwenPawDriver;
+use super::qwenwork::QwenWorkDriver;
 
 /// Immutable collection of the built-in framework drivers.
 pub struct DriverRegistry {
@@ -36,6 +37,7 @@ impl DriverRegistry {
                 Box::new(QoderDriver::new()),
                 Box::new(QwenCodeDriver::new()),
                 Box::new(QwenPawDriver::new()),
+                Box::new(QwenWorkDriver::new()),
             ],
         }
     }
@@ -82,6 +84,7 @@ mod tests {
         assert!(reg.contains("qoder"));
         assert!(reg.contains("qwencode"));
         assert!(reg.contains("qwenpaw"));
+        assert!(reg.contains("qwenwork"));
         assert_eq!(
             reg.names(),
             vec![
@@ -94,7 +97,8 @@ mod tests {
                 "claude-code",
                 "qoder",
                 "qwencode",
-                "qwenpaw"
+                "qwenpaw",
+                "qwenwork"
             ]
         );
     }

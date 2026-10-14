@@ -103,43 +103,62 @@ while text slots can use TOON. File-content protection, unsupported-content
 passthrough, and RTK deduplication still apply. Statistics use the separate Agent
 ID `qwenwork`. Tool Ready and Schema hooks are not registered.
 
-Install Tokenless with an existing supported installation route first; this
-adapter needs Bash, Python 3.9+, and the Tokenless binary. RTK is required for
-command rewriting but not for response compression. Ensure these binaries are
-available to the desktop session, not only to an interactive terminal.
+Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
+Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but
+not for response compression; a missing RTK produces a warning. Ensure these
+binaries are available to the desktop session, not only an interactive terminal.
 
-The adapter is **not** automatically activated, and there is no ANOLISA built-in
-`qwenwork` driver yet. The generic `anolisa adapter enable` commands below do not
-apply to this target. Use its bundled scripts after installing a package that
-includes the adapter, adjusting the resource path for your installation:
+Quit QwenWorkCN before installation or upgrade, then run:
 
 ```bash
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/detect.sh
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh --dry-run
-bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/install.sh
+anolisa adapter scan
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
 ```
 
-Quit QwenWorkCN before installation or upgrade, then restart it and open a new
-**local** session. Check the plugin's enabled status in the application: successful
-sideloading alone does not prove loading or activation. The installer copies a
-self-contained plugin into `~/.qwenworkcn/plugins-custom/tokenless`, without
-changing settings, permissions, databases, or disabled/blocked plugin lists.
-It refuses foreign or modified installations rather than overwriting them.
+The CLI copies a self-contained plugin to `~/.qwenworkcn/plugins-custom/tokenless`
+and records file ownership. Restart QwenWorkCN and open a new **local** session;
+check plugin activation in the application. `status` verifies application presence
+and managed files, while loading and activation remain `unknown`. Sideloading
+never changes settings, permissions, databases, or disabled/blocked plugin lists.
+Versions other than the validated 1.2.5 produce a compatibility warning.
 
-`TOKENLESS_QWENWORK_APP` selects a non-default QwenWorkCN application bundle;
-`TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults look for the app
-under `/Applications` or `~/Applications` and use `~/.qwenworkcn` for data.
-Do not point this adapter at Qoder CLI or Qwen Code configuration directories.
+`TOKENLESS_QWENWORK_APP` selects a non-default application bundle;
+`TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults search `/Applications`
+and `~/Applications`, with data under `~/.qwenworkcn`. Use absolute paths (a leading
+`~` is supported). Keep the same data directory for status, disable, and re-enable;
+to move it, disable using the original setting first. Do not use Qoder CLI or
+Qwen Code configuration directories.
 
-To remove only the managed, unmodified plugin, then restart the application:
+Existing installations without a CLI receipt are not adopted. If you previously
+used the bundled scripts or `make qwenwork-install`, uninstall with the original
+script before enabling through the CLI (adjust the resource path as needed):
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+anolisa adapter enable tokenless qwenwork
 ```
 
-Source checkouts also expose `make qwenwork-install` and `make qwenwork-uninstall`
-for already-installed adapter resources. Neither installation nor removal needs
-to invoke the embedded Qoder CLI or an undocumented desktop API.
+Use the CLI to remove CLI-managed copies:
+
+```bash
+anolisa --dry-run adapter disable tokenless qwenwork
+anolisa adapter disable tokenless qwenwork
+```
+
+Removal does not require the application, source bundle, or hook dependencies.
+It removes only unchanged receipt-owned files and empty plugin directories;
+unrelated files remain. Modified files are preserved and keep a failed-cleanup
+receipt: restore or remove the reported conflict, then retry. Re-enable refuses
+to overwrite user changes. Interrupted copies retain a receipt for retry or cleanup.
+Restart the application after removal as well.
+
+The standalone bundled scripts and source-checkout `make qwenwork-install` /
+`make qwenwork-uninstall` remain separate alternatives. CLI copies exclude those
+lifecycle scripts and their ownership marker. Neither route uses the embedded
+Qoder CLI or undocumented desktop APIs. To return to standalone management,
+disable the CLI-managed adapter first, then use the standalone installer.
 
 ### DeepSeek Harness native processing
 

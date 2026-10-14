@@ -249,6 +249,21 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 `unknown`；链接存在不代表运行中的 OpenCode 已加载插件。`--dry-run` 仅预览操作，
 不修改插件文件或 receipt。
 
+#### 千问办公 QwenWorkCN（macOS 本地模式）
+
+```bash
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
+anolisa adapter disable tokenless qwenwork
+```
+
+driver 旁加载 receipt 归属文件，不修改桌面应用的激活状态。enable/disable 后重启千问办公，
+开启新的本地会话。status 将加载和激活状态报告为 `unknown`，文件存在不代表已激活。
+后续操作保持相同的 `TOKENLESS_QWENWORK_HOME`；`TOKENLESS_QWENWORK_APP` 可覆盖检测到的
+应用 Bundle。已有脚本安装需先用原卸载器移除，再通过 CLI 启用。修改过的文件和无关文件
+会保留。依赖、迁移及 1.2.5 验证范围详见[千问办公集成](../token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+
 ### logs 与 bug report
 
 查看组件日志或生成诊断包：

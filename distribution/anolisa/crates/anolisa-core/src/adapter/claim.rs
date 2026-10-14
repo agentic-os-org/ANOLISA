@@ -569,6 +569,9 @@ pub enum ClaimResourceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverPayload {
+    /// QwenWork macOS local-mode sideload.
+    #[serde(rename = "qwenwork")]
+    QwenWork(QwenWorkClaim),
     /// OpenCode local-plugin payload; the spelling is the persisted discriminator.
     #[serde(rename = "opencode")]
     OpenCode(OpenCodeClaim),
@@ -599,6 +602,18 @@ pub enum DriverPayload {
     /// DeepSeek Harness (`dsh`) native plugin payload.
     #[serde(rename = "dsh")]
     Dsh(DshClaim),
+}
+
+/// QwenWork copy ownership, including an interrupted upgrade's previous revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenWorkClaim {
+    /// Resource id of the plugin directory, never an unchecked absolute path.
+    pub plugin_resource: String,
+    /// Persisted before the first copy; false receipts never authorize existing files.
+    pub installation_started: bool,
+    /// Previous managed bytes retained until all replacement copies succeed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_files: Vec<MaterializedFile>,
 }
 
 /// OpenCode ownership refers to a validated symlink resource, never a second path.
@@ -866,6 +881,25 @@ pub enum ClaimValidationError {
 
 fn validate_integrity_entries(claim: &AdapterClaim) -> Result<(), ClaimValidationError> {
     let fail = |reason: String| Err(ClaimValidationError::IntegrityRecord { reason });
+    if let DriverPayload::QwenWork(payload) = &claim.driver_payload {
+        for file in &payload.previous_files {
+            if file.resource_id != payload.plugin_resource
+                || !claim.resources.iter().any(|resource| {
+                    resource.id == file.resource_id
+                        && matches!(resource.kind, ClaimResourceKind::ExternalPath { .. })
+                })
+                || file.kind != ManagedFileKind::File
+            {
+                return fail("invalid QwenWork previous file resource".into());
+            }
+            validate_integrity_file(
+                &file.relative_path,
+                file.kind,
+                file.sha256.as_deref(),
+                file.symlink_target.as_deref(),
+            )?;
+        }
+    }
     if let Some(revision) = &claim.source_revision {
         if !revision.source_root.is_absolute() {
             return fail("source root is not absolute".into());

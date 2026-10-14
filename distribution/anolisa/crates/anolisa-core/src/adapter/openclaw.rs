@@ -507,9 +507,9 @@ impl FrameworkDriver for OpenClawDriver {
                         "openclaw plugin enable requires prepared host capabilities",
                     ));
                 }
-                PreparedEnable::QoderNative { .. } => {
+                PreparedEnable::QoderNative { .. } | PreparedEnable::QwenWork { .. } => {
                     return Err(prepared_state_mismatch(
-                        "openclaw plugin enable received Qoder capabilities",
+                        "openclaw plugin enable received another framework's prepared state",
                     ));
                 }
             }

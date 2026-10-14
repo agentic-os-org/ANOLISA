@@ -151,6 +151,11 @@ pub struct DriverPlan {
 /// [`PreparedEnable::None`].
 #[derive(Debug, Clone, Default)]
 pub enum PreparedEnable {
+    /// QwenWork preflight warnings emitted after successful sideloading.
+    QwenWork {
+        /// Version compatibility and optional dependency diagnostics.
+        warnings: Vec<String>,
+    },
     /// The driver needs no prepared host state for apply.
     #[default]
     None,

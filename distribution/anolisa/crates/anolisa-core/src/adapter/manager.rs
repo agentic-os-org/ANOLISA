@@ -3771,7 +3771,7 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "opencode" => Some(&["plugin"]),
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
-        "qoder" => Some(&["plugin"]),
+        "qoder" | "qwenwork" => Some(&["plugin"]),
         // dsh bundles are native plugins registered per explicit profile.
         "dsh" => Some(&["plugin"]),
         // QwenPaw installs a directory-named plugin through its own CLI.
@@ -4133,6 +4133,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
     let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
+        DriverPayload::QwenWork(_) => {
+            messages.push("would remove unchanged receipt-owned QwenWork plugin files and empty plugin directories; preserve unrelated or modified files".to_string());
+            None
+        }
         DriverPayload::OpenCode(_) => {
             cleanup_ids.extend(claim.resources.iter().map(|resource| resource.id.as_str()));
             None
@@ -5621,6 +5625,8 @@ mod tests {
         assert!(ok("qwencode", Some("extension")));
         assert!(ok("qwenpaw", Some("plugin")));
         assert!(ok("qwenpaw", None), "qwenpaw defaults to plugin");
+        assert!(ok("qwenwork", Some("plugin")));
+        assert!(ok("qwenwork", None), "qwenwork defaults to plugin");
     }
 
     #[test]
@@ -5633,6 +5639,7 @@ mod tests {
             "claude-code",
             "qoder",
             "qwenpaw",
+            "qwenwork",
         ] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("extension"))
                 .expect_err(&format!("{fw} + extension must be rejected"));
@@ -5661,7 +5668,7 @@ mod tests {
 
     #[test]
     fn framework_type_matrix_rejects_skill_bundle_on_plugin_only_frameworks() {
-        for fw in ["codex", "claude-code", "opencode"] {
+        for fw in ["codex", "claude-code", "opencode", "qwenwork"] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("skill_bundle"))
                 .expect_err(&format!("{fw} + skill_bundle must be rejected"));
             assert!(matches!(err, AdapterError::InvalidAdapterInput { .. }));

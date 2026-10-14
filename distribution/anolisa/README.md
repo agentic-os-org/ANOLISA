@@ -70,6 +70,11 @@ ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it
 See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
 for custom configuration directories and existing-installation ownership.
 
+Enable Tokenless in QwenWorkCN macOS local mode with
+`anolisa adapter enable tokenless qwenwork`. Restart the desktop application and
+check activation there; CLI status verifies files but reports activation as
+`unknown`. Existing script installations must be uninstalled before CLI enable.
+
 ## Install Modes
 
 | Mode | Prefix | When |
