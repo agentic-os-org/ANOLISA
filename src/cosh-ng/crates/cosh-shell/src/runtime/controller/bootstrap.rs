@@ -237,6 +237,13 @@ pub(crate) fn run_raw(
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
+    let zsh = matches!(&shell_kind, RawShellKind::Zsh);
+    let enhanced = config.integration.uses_markers();
+    inline_state.shell_identity = Some(format!(
+        "{} ({})",
+        if zsh { "zsh" } else { "bash" },
+        if enhanced { "enhanced" } else { "native" },
+    ));
     // #2161: share the relay-side input-wait clock and productized timeout.
     inline_state.input_wait_status = config.input_wait_status.clone();
     inline_state.input_wait_timeout = (cosh_config.input_wait_timeout_secs > 0)

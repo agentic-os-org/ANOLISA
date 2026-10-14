@@ -52,6 +52,7 @@
 | `/help` | 查看已安装版本支持的命令。 |
 | `/agent` | 编辑一次性 cosh-core 请求，可选择 Skill 并引用工作空间路径。 |
 | `/health` | 运行本地健康检查。 |
+| `/bug <description>` | 构建可检查的预填 bug 报告 URL。 |
 | `/status`（`/about`） | 查看运行时、Provider和会话状态。 |
 | `/stats [model\|tools]` | 查看模型身份或工具活动。 |
 | `/auth` | 选择或更新Provider认证。 |
@@ -66,6 +67,12 @@
 | `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | 管理MCP服务器。 |
 
 `/details`、`/audit`和`/send-to-shell`等命令只有在当前卡片或任务提供所需上下文时才会出现。`/mcp login`需要按MCP指南说明在Shell中完成OAuth流程。
+
+`/bug` 会把白名单内的运行时信息加入 issue URL，输出 URL 供检查，并在图形化
+Linux 或 macOS 上尽力打开。它不会读取日志、写文件或提交 issue；打开或点击
+链接时，预填的标题和诊断信息会随表单加载发送到 GitHub，issue 只有在你提交
+表单后才会创建。如果 `~/.copilot-shell/logs/` 存在，面板会提醒你检查最新
+文件，并在自行粘贴相关片段前删除 token、密钥和内网地址。
 
 ## 编辑一次性 Agent 请求
 

@@ -285,7 +285,8 @@ fn ensure_private_log_dir(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn log_directory() -> Option<std::path::PathBuf> {
+/// Structured-logging directory, `~/.copilot-shell/logs`.
+pub(crate) fn log_directory() -> Option<std::path::PathBuf> {
     dirs_next_or_home().map(|h| h.join(".copilot-shell/logs"))
 }
 fn dirs_next_or_home() -> Option<std::path::PathBuf> {

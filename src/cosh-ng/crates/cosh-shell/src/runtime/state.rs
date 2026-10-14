@@ -120,6 +120,9 @@ pub(crate) struct InlineState {
     /// A command-completion marker cannot prove idleness while this is non-zero.
     pub(crate) pending_shell_submits: usize,
     pub(crate) shell_session_id: Option<String>,
+    /// Wrapped shell and integration mode, e.g. `bash (enhanced)`; reported by
+    /// `/bug` because marker and routing bugs are shell-specific.
+    pub(crate) shell_identity: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,

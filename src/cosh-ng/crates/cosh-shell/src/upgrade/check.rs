@@ -182,6 +182,14 @@ fn cached_notice(
     }
 }
 
+/// Returns `name-evr` of the RPM owning the running executable, or `None` when
+/// `rpm` is missing, the probe times out, or the binary is not RPM-owned.
+pub(crate) fn current_executable_rpm_package() -> Option<String> {
+    let executable = current_executable()?;
+    rpm_installation_for_executable(&ProbeProcesses::default(), &executable)
+        .map(|installation| format!("{}-{}", installation.package, installation.evr))
+}
+
 /// Returns false only for explicit opt-out values.
 pub(crate) fn startup_upgrade_check_enabled_for_env() -> bool {
     !env::var("COSH_SHELL_UPGRADE_CHECK")

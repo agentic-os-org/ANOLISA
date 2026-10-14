@@ -294,7 +294,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 14
+            MessageId::ALL.len() - 21
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
@@ -305,7 +305,11 @@ mod tests {
             MessageId::AuthEcsRefreshing as usize + 1
         );
         assert_eq!(
-            MessageId::StartupUpgradeNoticeTitle as usize + 1,
+            MessageId::HelpSummaryBug as usize,
+            MessageId::StartupUpgradeNoticeTitle as usize + 1
+        );
+        assert_eq!(
+            MessageId::SlashBugCopyLine as usize + 1,
             MessageId::ALL.len()
         );
     }

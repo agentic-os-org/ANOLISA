@@ -211,3 +211,21 @@ macro_rules! composer_control_submit_ids {
         $next!($remaining, $($ids,)* PromptDraftFooterControlSubmitted,);
     };
 }
+
+// `/bug` copy is a trailing segment so existing MessageId discriminants stay
+// stable.
+macro_rules! bug_report_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryBug,
+            SlashBugTitle,
+            SlashBugLinkLine,
+            SlashBugFormLine,
+            SlashBugLogsLine,
+            SlashBugOpenedLine,
+            SlashBugCopyLine,
+        );
+    };
+}

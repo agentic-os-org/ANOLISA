@@ -125,7 +125,9 @@ bash: hello: command not found
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。
 需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
-普通 Shell prompt 保留原生路径补全。
+普通 Shell prompt 保留原生路径补全。运行 `/bug <description>` 可输出经过预填、
+可检查的 GitHub issue URL。命令不会读取日志或提交 issue；本地日志目录存在时，
+只会提醒你自行检查、脱敏并粘贴相关内容。
 
 `cosh-core` 中的系统和用户配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
 项目配置中的 Hook 定义被忽略；`.cosh/hooks` 中的项目 Shell Hook 另由

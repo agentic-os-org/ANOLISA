@@ -57,6 +57,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/bug",
+            usage: "/bug <description>",
+            summary_id: MessageId::HelpSummaryBug,
+            group: Some("Health"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/status",
             usage: "/status",
             summary_id: MessageId::HelpSummaryStatus,
@@ -406,6 +414,7 @@ mod tests {
         assert!(visible.contains(&"/mode routing [assisted|shell-only]"));
         assert!(visible.contains(&"/hooks"));
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
+        assert!(visible.contains(&"/bug <description>"));
         assert!(visible.contains(&"/agent"));
         assert!(!visible.contains(&"/draft"));
         assert!(!slash_command_registry()
@@ -421,6 +430,13 @@ mod tests {
         assert!(!visible.iter().any(|usage| usage.starts_with("/select")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/copy")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/debug")));
+        let bug = slash_command_registry()
+            .iter()
+            .find(|spec| spec.name == "/bug")
+            .expect("bug command spec");
+        assert_eq!(bug.group, Some("Health"));
+        assert_eq!(bug.scope, "read-only");
+        assert_eq!(bug.state, SlashCommandState::Public);
     }
 
     #[test]

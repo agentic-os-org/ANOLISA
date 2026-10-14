@@ -140,7 +140,10 @@ Composer that accepts a leading `/skill:<name>` and validated workspace-local
 Up/Down to select, and press Enter to execute the selected command. Use Tab to
 complete a command before adding arguments; Enter submits drafts with arguments
 or multiple lines as written.
-Ordinary shell prompts keep native path completion.
+Ordinary shell prompts keep native path completion. Run `/bug <description>`
+to print a reviewable, pre-filled GitHub issue URL. It never reads logs or
+submits the issue; when the local log directory exists, it only reminds you to
+inspect and redact relevant entries before pasting them yourself.
 
 In `cosh-core`, system and user config Hooks run by default without `hooks.enabled = true`.
 Project config Hook definitions are ignored; project Shell Hooks in `.cosh/hooks` require
