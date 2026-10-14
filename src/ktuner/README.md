@@ -508,18 +508,24 @@ surface uses (the bracketed option
 of a sysfs list, the single-space form of a multi-value sysctl), and `drifted`, whether `live`
 still matches `applied` — compared the way a write is verified, so a value the kernel renders in
 its own shape (a bracketed option list, TAB-separated multi-value, a leading-token echo) is not
-drift:
+drift, and `cleared_by`:
 
 ```json
 {"count": 3, "pending": [
-  {"applied": "none", "category": null, "drifted": null, "live": null, "param": "block/sda/scheduler", "previous": "mq-deadline"},
-  {"applied": "0", "category": "performance", "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"},
-  {"applied": "1", "category": "performance", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+  {"applied": "none", "category": null, "cleared_by": null, "drifted": null, "live": null, "param": "block/sda/scheduler", "previous": "mq-deadline"},
+  {"applied": "0", "category": "performance", "cleared_by": null, "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "category": "performance", "cleared_by": null, "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
 ]}
 ```
 
 An entry the kernel zeroed as a side effect of its mutually exclusive twin records
-`applied = "0"` — the value the kernel put live — so it is drifted once it is no longer 0. The
+`applied = "0"` — the value the kernel put live — so it is drifted once it is no longer 0, and
+`cleared_by` names the parameter whose write put that 0 there, in the spelling the clearer's own
+row publishes as `param`, so the two rows reconcile without knowing the pair table. Without it
+the row reads as though ktuner had chosen to disable a knob nobody mentioned. It is `null` when
+the ledger records no clearer for the zero: a 0 the caller asked for, and a twin whose clearer
+this listing does not carry — the ledger above has no `vm.dirty_bytes`, so its `vm.dirty_ratio`
+names nobody. The key is present on every entry, like `live`, `drifted` and `category`. The
 `category` is never re-derived from the parameter name (a security finding can sit on a
 `net.*` knob), so a record written before the field existed, or imported, reports `null` rather
 than a guess, exactly as a path that cannot be read (a device that is gone, a module that is not
@@ -537,11 +543,14 @@ unfiltered listing, in the same param order — `rollback --list vm/swappiness v
 
 ```json
 {"count": 3, "pending": [
-  {"applied": "1073741824", "category": "performance", "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
-  {"applied": "0", "category": "performance", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
-  {"applied": "1", "category": "performance", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+  {"applied": "1073741824", "category": "performance", "cleared_by": null, "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
+  {"applied": "0", "category": "performance", "cleared_by": "vm.dirty_bytes", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "category": "performance", "cleared_by": null, "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
 ]}
 ```
+
+Both halves of the pair come along, so the zeroed half's `cleared_by` names a row this listing
+carries — naming either half previews the same pair, the one a rollback of it would restore.
 
 A name the ledger does not record is the same command error the restore reports (`2`, stderr
 JSON, nothing on stdout), so a preview never promises a rollback that would refuse; with no

@@ -439,17 +439,17 @@ THP 参数、但 `systemctl enable ktuner-nonsysctl.service` 未成功，该键�
 
 ### rollback --list 输出
 
-`sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）。每个条目保留原有的 `param`/`applied`/`previous`，附带记录该条目的规则给出的 `category`（与 `check` 的词条同一小写拼写；本字段出现之前写入的记录、或库导入的记录为 `null`，任何类别都不选中它们），并新增内核当前的实际状态：`live` 从该条目自己的路径读取，使用与其他所有界面相同的读取器（sysfs 选项列表取方括号中的活动项、多值 sysctl 折叠为单空格）；`drifted` 表示 `live` 是否仍与 `applied` 一致，比较方式与写入校验相同——内核按自身形态呈现的值（方括号选项列表、TAB 分隔的多值、领先 token 回显）不算漂移：
+`sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）。每个条目保留原有的 `param`/`applied`/`previous`，附带记录该条目的规则给出的 `category`（与 `check` 的词条同一小写拼写；本字段出现之前写入的记录、或库导入的记录为 `null`，任何类别都不选中它们），并新增内核当前的实际状态：`live` 从该条目自己的路径读取，使用与其他所有界面相同的读取器（sysfs 选项列表取方括号中的活动项、多值 sysctl 折叠为单空格）；`drifted` 表示 `live` 是否仍与 `applied` 一致，比较方式与写入校验相同——内核按自身形态呈现的值（方括号选项列表、TAB 分隔的多值、领先 token 回显）不算漂移；`cleared_by` 见下：
 
 ```json
 {"count": 3, "pending": [
-  {"applied": "none", "category": null, "drifted": null, "live": null, "param": "block/sda/scheduler", "previous": "mq-deadline"},
-  {"applied": "0", "category": "performance", "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"},
-  {"applied": "1", "category": "performance", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+  {"applied": "none", "category": null, "cleared_by": null, "drifted": null, "live": null, "param": "block/sda/scheduler", "previous": "mq-deadline"},
+  {"applied": "0", "category": "performance", "cleared_by": null, "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "category": "performance", "cleared_by": null, "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
 ]}
 ```
 
-被内核作为互斥孪生副作用清零的条目记录 `applied = "0"`（内核实际写入的值），因此当它不再为 0 时即为漂移。`category` 绝不按参数名重算（安全发现可以落在 `net.*` 旋钮上），因此本字段出现之前写入或由导入写入的记录报 `null` 而不是猜测——与路径无法读取（设备已消失、模块未加载、write-only 旋钮）时报 `live: null` 和 `drifted: null` 同一口径：读不到值不算错误，漂移也不会改变退出码。列表是快照——预览与回滚之间内核可能变化。普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
+被内核作为互斥孪生副作用清零的条目记录 `applied = "0"`（内核实际写入的值），因此当它不再为 0 时即为漂移；`cleared_by` 点名是哪个参数的写入把这个 0 放进去的，用的是该参数自己那一行 `param` 的拼写，两行不必知道配对表就能对上。没有它，这一行看起来就像 ktuner 主动关掉了一个没人提过的旋钮。当账本里没有记录清零点时它是 `null`：调用方要求的 0，以及清零点不在本次列表中的孪生（上面那份账本没有 `vm.dirty_bytes`，所以它的 `vm.dirty_ratio` 不点名任何参数）。该键与 `live`、`drifted`、`category` 一样在每个条目上恒出现。`category` 绝不按参数名重算（安全发现可以落在 `net.*` 旋钮上），因此本字段出现之前写入或由导入写入的记录报 `null` 而不是猜测——与路径无法读取（设备已消失、模块未加载、write-only 旋钮）时报 `live: null` 和 `drifted: null` 同一口径：读不到值不算错误，漂移也不会改变退出码。列表是快照——预览与回滚之间内核可能变化。普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
 
 `sudo ktuner rollback --list <param> [<param>…]` 把预览收窄到 `rollback <param> [<param>…]`
 将恢复的内容。名字的解析与回滚完全相同（同样的拼写、同一套查找），所以列出的是每个点名的条目，
@@ -459,11 +459,14 @@ THP 参数、但 `systemctl enable ktuner-nonsysctl.service` 未成功，该键�
 
 ```json
 {"count": 3, "pending": [
-  {"applied": "1073741824", "category": "performance", "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
-  {"applied": "0", "category": "performance", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
-  {"applied": "1", "category": "performance", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+  {"applied": "1073741824", "category": "performance", "cleared_by": null, "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
+  {"applied": "0", "category": "performance", "cleared_by": "vm.dirty_bytes", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "category": "performance", "cleared_by": null, "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
 ]}
 ```
+
+配对的两半会一起列出，所以被清零那一半的 `cleared_by` 指向的正是本次列表中另一行——点任一半
+预览到的都是同一对，也就是回滚它时会恢复的那一对。
 
 账本里没有的名字是与回滚相同的命令错误（`2`，stderr JSON，stdout 为空），预览因此不会承诺
 一次会被拒绝的回滚；没有账本时所有名字都算未记录。两种情况都不写入任何东西。此前 `--list`
