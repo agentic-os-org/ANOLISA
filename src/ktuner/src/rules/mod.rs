@@ -515,6 +515,13 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // this gate (eval_swappiness, eval_dirty_ratio) take the classification
     // itself, so those hosts were advised to lower swappiness and dirty_ratio
     // while this list - the only place THP's stalls are gated - stayed silent.
+    //
+    // Elasticsearch and OpenSearch are the search half of the same
+    // MemoryIntensive class: `classify`'s has_search covers both, the
+    // swappiness rule advises them through that classification, and the
+    // vfs_cache_pressure list names them (opensearch was swept in with
+    // zookeeper/consul); their heaps see the same khugepaged collapse/split
+    // stalls as the caches and databases above.
     let is_latency_sensitive = info.has_process("redis-server")
         // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
         // `valkey-server` binary with the same event-loop, memory-resident
@@ -536,7 +543,11 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         // ZooKeeper and Consul are the coordination-KV classmates of etcd
         // `classify` groups with it.
         || info.has_process("zookeeper")
-        || info.has_process("consul");
+        || info.has_process("consul")
+        // The classifier's search workloads (has_search): the same
+        // memory-resident shape as the caches and databases above.
+        || info.has_process("elasticsearch")
+        || info.has_process("opensearch");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
         recs.push(Recommendation {
@@ -10111,6 +10122,34 @@ mod tests {
             recs.iter().all(|r| !r.param.contains("hugepage")),
             "a streaming workload is not latency-sensitive"
         );
+    }
+
+    #[test]
+    fn test_thp_covers_the_search_workloads() {
+        // The same "the gate and classify are two definitions of one thing"
+        // agreement the sibling sweep established: classify's `has_search`
+        // puts Elasticsearch and OpenSearch in the MemoryIntensive class, so
+        // the gates that name their class advise them — swappiness through the
+        // classification, and the vfs_cache_pressure list through the names it
+        // swept in with zookeeper/consul — while eval_thp, the only place THP
+        // is gated, stayed silent for them.
+        for name in ["elasticsearch", "opensearch"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            assert_eq!(
+                crate::profile::classify(&info),
+                crate::profile::WorkloadType::MemoryIntensive,
+                "{name} is the classifier's search workload"
+            );
+            let recs = evaluate(&info).unwrap().recommendations;
+            let rec = recs
+                .iter()
+                .find(|r| r.param.contains("hugepage"))
+                .unwrap_or_else(|| panic!("{name} must get the THP recommendation"));
+            assert_eq!(rec.recommended_value, "madvise");
+        }
     }
 
     #[test]
