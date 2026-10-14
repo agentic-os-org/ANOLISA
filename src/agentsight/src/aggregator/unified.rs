@@ -3,12 +3,14 @@
 //! This module provides a unified interface for aggregating parsed messages.
 //! It combines HTTP Connection Aggregator and Process Event Aggregator.
 
-use super::http::{ConnectionId, ConnectionMetrics, ConnectionState, HttpConnectionAggregator};
+use super::RemovedConnection;
+use super::http::{ConnectionId, ConnectionMetrics, HttpConnectionAggregator};
 use super::http2::Http2StreamAggregator;
 use super::proctrace::ProcessEventAggregator;
 use super::result::AggregatedResult;
 use crate::chrome_trace::export_trace_events;
 use crate::config::{DEFAULT_CONNECTION_CAPACITY, RuntimeLimits};
+use crate::parser::http::ParsedRequest;
 use crate::parser::{ParseResult, ParsedMessage};
 use crate::runtime_metrics::StageTimer;
 use std::time::{Duration, Instant};
@@ -25,6 +27,7 @@ pub struct Aggregator {
     last_eviction: Instant,
     /// Eviction period for idle/overweight HTTP connections.
     eviction_period: Duration,
+    bytes_budget: usize,
 }
 
 impl Default for Aggregator {
@@ -42,23 +45,26 @@ impl Aggregator {
     /// Create new unified aggregator with explicit memory/time limits.
     pub fn with_limits(connection_capacity: usize, limits: &RuntimeLimits) -> Self {
         let idle_timeout = Duration::from_secs(limits.connection_idle_timeout_secs);
+        let mut http = HttpConnectionAggregator::with_limits(
+            connection_capacity,
+            limits.max_connection_body_bytes,
+            idle_timeout,
+        );
+        http.configure_retention(limits);
+        http.set_compact_sse(!limits.retain_raw_sse);
+        let mut http2 = Http2StreamAggregator::with_limits(
+            connection_capacity.saturating_mul(4),
+            limits.max_connection_body_bytes,
+            Duration::from_secs(limits.connection_hard_timeout_secs),
+        );
+        http2.configure_retention(limits);
         Aggregator {
-            http: HttpConnectionAggregator::with_limits(
-                connection_capacity,
-                limits.max_connection_body_bytes,
-                idle_timeout,
-            ),
-            // HTTP/2 multiplexes many streams per connection; keep the stream
-            // LRU proportional to the connection capacity, like the default
-            // constructor, but enforce the configured byte and idle limits.
-            http2: Http2StreamAggregator::with_limits(
-                connection_capacity.saturating_mul(4),
-                limits.max_connection_body_bytes,
-                idle_timeout,
-            ),
+            http,
+            http2,
             process: ProcessEventAggregator::new(),
             last_eviction: Instant::now(),
             eviction_period: idle_timeout.min(Duration::from_secs(10)),
+            bytes_budget: limits.connection_max_bytes,
         }
     }
 
@@ -154,20 +160,67 @@ impl Aggregator {
                 ParsedMessage::ProcEvent(_) => None,
             })
             .max_by_key(|event| event.buf_size());
-        if let Some(event) = response_event.filter(|event| self.http.accepts_response_bytes(event))
-        {
-            let results: Vec<_> = self.http.process_raw_body_data(event).into_iter().collect();
+        let captured_sse = result
+            .messages
+            .iter()
+            .any(|message| matches!(message, ParsedMessage::SseEvent(_)));
+        let handled = response_event.and_then(|event| {
+            if self.http.accepts_response_bytes(event) || self.http.accepts_compact_sse_bytes(event)
+            {
+                Some(self.http.process_raw_body_data(event))
+            } else if captured_sse && self.http.accepts_unmatched_sse(event) {
+                // A chunk terminator arriving after semantic completion has
+                // no response payload and must not start another connection.
+                Some(if result.messages.iter().any(|message| {
+                    matches!(message, ParsedMessage::SseEvent(event) if !event.is_synthetic_done())
+                }) {
+                    self.http.start_unmatched_sse(event)
+                } else {
+                    None
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(completed) = handled {
+            let mut results = self.http.take_ready();
+            results.extend(completed);
+            self.enforce_bytes_budget();
+            results.extend(self.http.take_ready());
+            results.extend(self.http2.take_ready());
             for result in &results {
                 export_trace_events(result);
             }
             return results;
         }
 
-        let results: Vec<AggregatedResult> = result
-            .messages
-            .into_iter()
-            .flat_map(|msg| self.process_message(msg))
-            .collect();
+        let mut results = self.http.take_ready();
+        results.extend(self.http2.take_ready());
+        for message in result.messages {
+            let completed = self.process_message(message);
+            for result in &completed {
+                let id = match result {
+                    AggregatedResult::HttpComplete(pair) | AggregatedResult::SseComplete(pair) => {
+                        Some(pair.connection_id)
+                    }
+                    AggregatedResult::RequestOnly { connection_id, .. }
+                    | AggregatedResult::ResponseOnly { connection_id, .. } => Some(*connection_id),
+                    _ => None,
+                };
+                if let Some(id) = id {
+                    self.http.cleanup_completed(&id);
+                }
+            }
+            results.extend(self.http.take_ready());
+            results.extend(completed);
+            self.enforce_bytes_budget();
+            results.extend(self.http.take_ready());
+            results.extend(self.http2.take_ready());
+        }
+
+        self.enforce_bytes_budget();
+        results.extend(self.http.take_ready());
+        results.extend(self.http2.take_ready());
 
         // Export chrome trace if enabled
         for r in &results {
@@ -176,6 +229,30 @@ impl Aggregator {
 
         timer.record_outputs(results.len());
         results
+    }
+
+    pub(crate) fn set_compact_sse(&mut self, enabled: bool) {
+        self.http.set_compact_sse(enabled);
+        self.http2.set_compact_sse(enabled);
+    }
+
+    /// Bypass message-list construction for an already-framed semantic-only SSE read.
+    pub(crate) fn process_sse_capture(
+        &mut self,
+        event: &crate::probes::sslsniff::SslEvent,
+    ) -> Option<Vec<AggregatedResult>> {
+        if !self.http.accepts_compact_sse_bytes(event) {
+            return None;
+        }
+        let complete = self.http.process_raw_body_data(event);
+        self.enforce_bytes_budget();
+        let mut results = self.http.take_ready();
+        results.extend(self.http2.take_ready());
+        results.extend(complete);
+        for result in &results {
+            export_trace_events(result);
+        }
+        Some(results)
     }
 
     /// Get reference to HTTP aggregator
@@ -220,17 +297,16 @@ impl Aggregator {
     ///
     /// Used by crash detection on `ProcMon::Exit` to immediately extract
     /// in-flight connections before the periodic drain check runs.
-    pub(crate) fn drain_connections_for_pid(
-        &mut self,
-        pid: u32,
-    ) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<RemovedConnection> {
+        self.http2.drain_for_pid(pid);
         self.http.drain_connections_for_pid(pid)
     }
 
     /// Drain connections whose PID is no longer alive.
     ///
     /// Delegates to the HTTP aggregator's dead-PID drain.
-    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<RemovedConnection> {
+        self.http2.drain_dead_pids();
         self.http.drain_dead_pid_connections()
     }
 
@@ -238,8 +314,63 @@ impl Aggregator {
     ///
     /// Used to persist evidence for manually interrupted streams where the
     /// agent process remains alive, so dead-PID draining would never run.
-    pub(crate) fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
-        self.http.snapshot_idle_connections()
+    pub(crate) fn snapshot_idle_connections<T>(
+        &mut self,
+        make: impl FnMut(&ConnectionId, &ParsedRequest) -> Option<T>,
+    ) -> Vec<T> {
+        self.http.snapshot_idle_connections(make)
+    }
+
+    pub(crate) fn queue_removed(&mut self, removed: Vec<RemovedConnection>) {
+        self.http.queue_removed(removed);
+    }
+
+    pub(crate) fn drain_pending(&mut self) -> Vec<AggregatedResult> {
+        self.drain_pending_with_reason(super::RemoveReason::Shutdown)
+    }
+
+    pub(crate) fn drain_pending_with_reason(
+        &mut self,
+        reason: super::RemoveReason,
+    ) -> Vec<AggregatedResult> {
+        self.http.drain_pending(reason);
+        self.http2.abandon_pending(reason);
+        self.enforce_bytes_budget();
+        let mut results = self.http.take_ready();
+        results.extend(self.http2.take_ready());
+        results
+    }
+
+    /// Run correlation maintenance without requiring captured traffic.
+    pub(crate) fn tick(&mut self, now: Instant) -> Vec<AggregatedResult> {
+        self.http.tick(now);
+        self.http2.tick(now);
+        self.enforce_bytes_budget();
+        let mut results = self.http.take_ready();
+        results.extend(self.http2.take_ready());
+        results
+    }
+
+    fn enforce_bytes_budget(&mut self) {
+        while self.bytes_budget != 0
+            && self.connection_metrics().connection_cache_bytes > self.bytes_budget
+        {
+            let h1 = self.http.oldest_activity();
+            let h2 = self.http2.oldest_activity();
+            let removed = match (h1, h2) {
+                (Some(a), Some(b)) if a <= b => self.http.abandon_oldest(),
+                (Some(_), None) => self.http.abandon_oldest(),
+                (_, Some(_)) => self.http2.abandon_oldest(),
+                _ => self.http2.abandon_oldest(),
+            };
+            if !removed {
+                break;
+            }
+        }
+        let metrics = self.connection_metrics();
+        metrics::gauge!("agentsight_http_conn_active").set(metrics.pending_connection_count as f64);
+        metrics::gauge!("agentsight_http_conn_retained_bytes")
+            .set(metrics.connection_cache_bytes as f64);
     }
 }
 
@@ -378,11 +509,13 @@ mod tests {
         }
     }
 
-    fn feed_http2(aggregator: &mut Aggregator, frames: Vec<ParsedHttp2Frame>) {
-        let results = aggregator.process_result(ParseResult {
+    fn feed_http2(
+        aggregator: &mut Aggregator,
+        frames: Vec<ParsedHttp2Frame>,
+    ) -> Vec<AggregatedResult> {
+        aggregator.process_result(ParseResult {
             messages: vec![ParsedMessage::Http2Frames(frames)],
-        });
-        assert!(results.is_empty(), "no stream ended in this test");
+        })
     }
 
     #[test]
@@ -414,7 +547,14 @@ mod tests {
                 test_event(7, 0xABC, 1, 2000 + i),
             ));
         }
-        feed_http2(&mut aggregator, frames);
+        let results = feed_http2(&mut aggregator, frames);
+        assert!(results.iter().any(|result| matches!(
+            result,
+            AggregatedResult::Abandoned {
+                reason: super::super::RemoveReason::OverBudget,
+                ..
+            }
+        )));
 
         let metrics = aggregator.connection_metrics();
         assert!(
@@ -426,11 +566,11 @@ mod tests {
     }
 
     #[test]
-    fn http2_idle_stream_is_swept_by_periodic_eviction() {
+    fn http2_hard_timeout_emits_partial_stream_without_traffic() {
         // Regression: there was no idle sweep for HTTP/2, so a stream that
         // stopped making progress stayed in memory for the process lifetime.
         let limits = RuntimeLimits {
-            connection_idle_timeout_secs: 0,
+            connection_hard_timeout_secs: 1,
             ..Default::default()
         };
         let mut aggregator = Aggregator::with_limits(4, &limits);
@@ -447,17 +587,441 @@ mod tests {
         );
         assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
 
-        std::thread::sleep(Duration::from_millis(20));
-        // The next parse result runs the periodic eviction tick (period 0 here).
-        let results = aggregator.process_result(ParseResult {
-            messages: Vec::new(),
-        });
-        assert!(results.is_empty());
+        let results = aggregator.tick(Instant::now() + Duration::from_secs(2));
+        assert!(matches!(
+            results.as_slice(),
+            [AggregatedResult::Abandoned {
+                reason: super::super::RemoveReason::HardTimeout,
+                ..
+            }]
+        ));
 
         assert_eq!(
             aggregator.connection_metrics().pending_connection_count,
             0,
             "an idle http/2 stream must be dropped by the periodic sweep"
         );
+    }
+
+    #[test]
+    fn hard_timeout_resumption_is_response_only_and_preserves_the_new_stream() {
+        let limits = RuntimeLimits {
+            connection_hard_timeout_secs: 1,
+            ..Default::default()
+        };
+        let mut aggregator = Aggregator::with_limits(4, &limits);
+        let parser = Parser::new();
+        for (rw, bytes) in [
+            (
+                1,
+                b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            ),
+            (
+                0,
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".as_slice(),
+            ),
+        ] {
+            assert!(
+                aggregator
+                    .process_result(
+                        parser.parse_event(crate::event::Event::Ssl(ssl_event(1, 1, bytes, rw)))
+                    )
+                    .is_empty()
+            );
+        }
+        let expired = aggregator.tick(Instant::now() + Duration::from_secs(2));
+        assert!(matches!(
+            expired.as_slice(),
+            [AggregatedResult::Abandoned {
+                reason: super::super::RemoveReason::HardTimeout,
+                ..
+            }]
+        ));
+        let resumed =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n";
+        let results = aggregator.process_result(
+            parser.parse_event(crate::event::Event::Ssl(ssl_event(1, 1, resumed, 0))),
+        );
+        let [AggregatedResult::ResponseOnly { response, .. }] = results.as_slice() else {
+            panic!("late response must survive");
+        };
+        assert_eq!(
+            response.json_body()[0]["choices"][0]["delta"]["content"],
+            "late"
+        );
+        assert!(!aggregator.has_pending());
+    }
+
+    #[test]
+    fn http1_and_http2_share_one_byte_budget() {
+        let limits = RuntimeLimits {
+            connection_max_bytes: 5000,
+            ..Default::default()
+        };
+        let mut aggregator = Aggregator::with_limits(8, &limits);
+        let parser = Parser::new();
+        let mut request =
+            b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 3000\r\n\r\n".to_vec();
+        request.extend_from_slice(&vec![b'x'; 3000]);
+        assert!(
+            aggregator
+                .process_result(
+                    parser.parse_event(crate::event::Event::Ssl(ssl_event(1, 1, &request, 1)))
+                )
+                .is_empty()
+        );
+        let results = feed_http2(
+            &mut aggregator,
+            vec![test_frame(
+                1,
+                0,
+                0,
+                vec![b'x'; 3000],
+                test_event(1, 2, 1, 1),
+            )],
+        );
+        assert!(matches!(
+            results.as_slice(),
+            [AggregatedResult::Abandoned {
+                reason: super::super::RemoveReason::OverBudget,
+                ..
+            }]
+        ));
+        assert!(
+            aggregator.connection_metrics().connection_cache_bytes <= limits.connection_max_bytes
+        );
+        assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
+        assert_eq!(aggregator.http().active_connections(), 0);
+    }
+
+    #[test]
+    fn http2_pid_exit_preserves_partial_evidence_in_every_pending_phase() {
+        for phase in 0..3 {
+            let mut aggregator = Aggregator::with_limits(8, &RuntimeLimits::default());
+            let mut encoder = hpack::Encoder::new();
+            let headers = encoder.encode([
+                (b":method".as_slice(), b"POST".as_slice()),
+                (b":path".as_slice(), b"/v1/chat".as_slice()),
+            ]);
+            let mut frames = vec![
+                test_frame(1, 1, 4, headers.clone(), test_event(41, 1, 1, 100)),
+                test_frame(
+                    1,
+                    0,
+                    u8::from(phase != 0),
+                    b"request".to_vec(),
+                    test_event(41, 1, 1, 200),
+                ),
+                test_frame(1, 1, 5, headers, test_event(42, 2, 1, 100)),
+            ];
+            if phase == 2 {
+                let response = hpack::Encoder::new().encode([
+                    (b":status".as_slice(), b"200".as_slice()),
+                    (b"content-type".as_slice(), b"application/json".as_slice()),
+                ]);
+                frames.push(test_frame(1, 1, 4, response, test_event(41, 1, 0, 300)));
+                frames.push(test_frame(
+                    1,
+                    0,
+                    0,
+                    b"partial response".to_vec(),
+                    test_event(41, 1, 0, 400),
+                ));
+            }
+            assert!(feed_http2(&mut aggregator, frames).is_empty());
+            assert!(aggregator.drain_connections_for_pid(41).is_empty());
+            let results = feed_http2(&mut aggregator, Vec::new());
+            let [AggregatedResult::Abandoned { reason, partial }] = results.as_slice() else {
+                panic!("PID exit must emit one partial stream in phase {phase}");
+            };
+            assert_eq!(*reason, super::super::RemoveReason::PidExited);
+            let AggregatedResult::Http2StreamComplete(stream) = partial.as_ref() else {
+                panic!("PID exit must preserve HTTP/2 evidence");
+            };
+            assert_eq!(stream.stream_id.connection_id.pid, 41);
+            assert_eq!(stream.request_body(), b"request");
+            assert_eq!(stream.request_complete, phase != 0);
+            assert!(!stream.response_complete);
+            assert_eq!(stream.start_timestamp_ns, 100);
+            assert_eq!(stream.end_timestamp_ns, if phase == 2 { 400 } else { 200 });
+            assert_eq!(
+                stream.response_body(),
+                if phase == 2 {
+                    b"partial response".as_slice()
+                } else {
+                    b""
+                },
+            );
+            assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
+            aggregator.drain_connections_for_pid(41);
+            assert!(feed_http2(&mut aggregator, Vec::new()).is_empty());
+            aggregator.drain_connections_for_pid(42);
+            assert_eq!(feed_http2(&mut aggregator, Vec::new()).len(), 1);
+            assert!(!aggregator.has_pending());
+            assert_eq!(aggregator.connection_metrics().connection_cache_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn http2_dead_pid_releases_hpack_after_a_completed_stream() {
+        let mut aggregator = Aggregator::new();
+        let pid = u32::MAX;
+        assert!(!crate::utils::procfs::proc_pid(pid).exists());
+        let request = hpack::Encoder::new().encode([
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":path".as_slice(), b"/fixture".as_slice()),
+        ]);
+        let response = hpack::Encoder::new().encode([
+            (b":status".as_slice(), b"200".as_slice()),
+            (b"x-fixture".as_slice(), b"retained header".as_slice()),
+        ]);
+        let results = feed_http2(
+            &mut aggregator,
+            vec![
+                test_frame(1, 1, 5, request, test_event(pid, 1, 1, 100)),
+                test_frame(1, 1, 5, response, test_event(pid, 1, 0, 200)),
+            ],
+        );
+        assert!(matches!(
+            results.as_slice(),
+            [AggregatedResult::Http2StreamComplete(_)]
+        ));
+        assert!(!aggregator.has_pending());
+        assert!(aggregator.connection_metrics().connection_cache_bytes > 0);
+        assert!(aggregator.drain_dead_pid_connections().is_empty());
+        assert_eq!(aggregator.connection_metrics().connection_cache_bytes, 0);
+        assert!(feed_http2(&mut aggregator, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn http2_early_sse_completion_decodes_fragmented_trailers_for_the_next_stream() {
+        let mut aggregator = Aggregator::new();
+        let mut requests = hpack::Encoder::new();
+        let mut responses = hpack::Encoder::new();
+        let request = requests.encode([
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":path".as_slice(), b"/fixture".as_slice()),
+        ]);
+        let response = responses.encode([
+            (b":status".as_slice(), b"200".as_slice()),
+            (b"content-type".as_slice(), b"text/event-stream".as_slice()),
+        ]);
+        let completed = feed_http2(
+            &mut aggregator,
+            vec![
+                test_frame(1, 1, 5, request, test_event(41, 1, 1, 100)),
+                test_frame(1, 1, 4, response, test_event(41, 1, 0, 200)),
+                test_frame(
+                    1,
+                    0,
+                    0,
+                    b"data: [DONE]\n\n".to_vec(),
+                    test_event(41, 1, 0, 300),
+                ),
+            ],
+        );
+        assert!(matches!(
+            completed.as_slice(),
+            [AggregatedResult::Http2StreamComplete(_)]
+        ));
+        let trailers = responses.encode([(b"x-fixture".as_slice(), b"trailer value".as_slice())]);
+        assert!(
+            feed_http2(
+                &mut aggregator,
+                vec![
+                    test_frame(1, 1, 1, trailers[..1].to_vec(), test_event(41, 1, 0, 400)),
+                    test_frame(1, 9, 4, trailers[1..].to_vec(), test_event(41, 1, 0, 500)),
+                ]
+            )
+            .is_empty()
+        );
+        let request = requests.encode([
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":path".as_slice(), b"/fixture".as_slice()),
+        ]);
+        let response = responses.encode([
+            (b":status".as_slice(), b"200".as_slice()),
+            (b"x-fixture".as_slice(), b"trailer value".as_slice()),
+        ]);
+        let completed = feed_http2(
+            &mut aggregator,
+            vec![
+                test_frame(3, 1, 5, request, test_event(41, 1, 1, 600)),
+                test_frame(3, 1, 5, response, test_event(41, 1, 0, 700)),
+            ],
+        );
+        let [AggregatedResult::Http2StreamComplete(stream)] = completed.as_slice() else {
+            panic!("the next stream must complete without replaying the previous SSE");
+        };
+        assert_eq!(stream.stream_id.stream_id, 3);
+        assert!(
+            stream
+                .decoded_response_headers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|(key, value)| key == "x-fixture" && value == "trailer value")
+        );
+        assert!(!aggregator.has_pending());
+    }
+
+    #[test]
+    fn orphan_chunk_terminator_does_not_reopen_a_completed_sse_connection() {
+        for retain_raw_sse in [false, true] {
+            let mut aggregator = Aggregator::with_limits(
+                4,
+                &RuntimeLimits {
+                    retain_raw_sse,
+                    ..Default::default()
+                },
+            );
+            let parser = Parser::new();
+            let mut feed = |rw, bytes: &[u8]| {
+                aggregator.process_result(
+                    parser.parse_event(crate::event::Event::Ssl(ssl_event(7, 1, bytes, rw))),
+                )
+            };
+            let request = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}";
+            assert!(feed(1, request).is_empty());
+            assert!(feed(0, b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").is_empty());
+            let body =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+            let chunk = format!("{:x}\r\n{body}\r\n", body.len());
+            assert_eq!(feed(0, chunk.as_bytes()).len(), 1);
+            assert!(feed(0, b"0\r\n\r\n").is_empty());
+            assert!(feed(1, request).is_empty());
+            assert!(matches!(
+                feed(0, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").as_slice(),
+                [AggregatedResult::HttpComplete(_)]
+            ));
+            assert!(!aggregator.has_pending());
+            assert!(
+                aggregator
+                    .tick(Instant::now() + Duration::from_secs(1000))
+                    .is_empty()
+            );
+        }
+    }
+
+    fn start_http2_sse(aggregator: &mut Aggregator, stream: u32) {
+        let request = hpack::Encoder::new().encode([
+            (b":method".as_slice(), b"POST".as_slice()),
+            (b":path".as_slice(), b"/v1/chat/completions".as_slice()),
+        ]);
+        let response = hpack::Encoder::new().encode([
+            (b":status".as_slice(), b"200".as_slice()),
+            (b"content-type".as_slice(), b"text/event-stream".as_slice()),
+        ]);
+        assert!(
+            feed_http2(
+                aggregator,
+                vec![
+                    test_frame(stream, 1, 5, request, test_event(7, 1, 1, 100)),
+                    test_frame(stream, 1, 4, response, test_event(7, 1, 0, 200)),
+                ]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn byte_pressure_evicts_idle_http2_sse_before_a_stream_still_producing_data() {
+        let mut aggregator = Aggregator::new();
+        let delta = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n";
+        for stream in [1, 3] {
+            start_http2_sse(&mut aggregator, stream);
+            assert!(
+                feed_http2(
+                    &mut aggregator,
+                    vec![test_frame(
+                        stream,
+                        0,
+                        0,
+                        delta.to_vec(),
+                        test_event(7, 1, 0, 300),
+                    )]
+                )
+                .is_empty()
+            );
+        }
+        let budget = aggregator.connection_metrics().connection_cache_bytes;
+        aggregator.bytes_budget = budget;
+        aggregator.http2.configure_retention(&RuntimeLimits {
+            connection_max_bytes: budget,
+            ..Default::default()
+        });
+        let results = feed_http2(
+            &mut aggregator,
+            vec![test_frame(
+                1,
+                0,
+                0,
+                format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n",
+                    "x".repeat(32)
+                )
+                .into_bytes(),
+                test_event(7, 1, 0, 400),
+            )],
+        );
+        let [AggregatedResult::Abandoned { reason, partial }] = results.as_slice() else {
+            panic!("byte pressure must report the idle stream")
+        };
+        assert_eq!(*reason, super::super::RemoveReason::OverBudget);
+        let AggregatedResult::Http2StreamComplete(stream) = partial.as_ref() else {
+            panic!("expected HTTP/2 evidence")
+        };
+        assert_eq!(stream.stream_id.stream_id, 3);
+        assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
+        assert!(aggregator.connection_metrics().connection_cache_bytes <= budget);
+    }
+
+    #[test]
+    fn http2_multiline_sse_survives_both_completion_and_abandonment() {
+        for complete in [false, true] {
+            let mut aggregator = Aggregator::new();
+            start_http2_sse(&mut aggregator, 1);
+            let mut body = b"data: {\"id\":\"multiline\",\"model\":\"fixture\",\ndata: \"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}],\ndata: \"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}".to_vec();
+            if complete {
+                body.extend_from_slice(b"\n\ndata: [DONE]\n\n");
+            }
+            let mut results = feed_http2(
+                &mut aggregator,
+                vec![test_frame(1, 0, 0, body, test_event(7, 1, 0, 900))],
+            );
+            if !complete {
+                assert!(results.is_empty());
+                results = aggregator.drain_pending();
+            }
+            assert_eq!(results.len(), 1);
+            let result = match &results[0] {
+                AggregatedResult::Abandoned { reason, partial } => {
+                    assert!(!complete);
+                    assert_eq!(*reason, super::super::RemoveReason::Shutdown);
+                    partial.as_ref()
+                }
+                result => {
+                    assert!(complete);
+                    result
+                }
+            };
+            let AggregatedResult::Http2StreamComplete(stream) = result else {
+                panic!("expected captured multiline SSE")
+            };
+            let json = stream.response_sse_json_array().unwrap();
+            assert_eq!(json[0]["choices"][0]["delta"]["content"], "hello");
+            assert_eq!(json[0]["usage"]["total_tokens"], 15);
+            assert_eq!(stream.response_complete, complete);
+            let analysis = crate::analyzer::Analyzer::new().analyze_aggregated(&results[0]);
+            let token = analysis
+                .iter()
+                .find_map(|result| match result {
+                    crate::analyzer::AnalysisResult::Token(token) => Some(token),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(token.output_tokens, 3);
+            assert!(!aggregator.has_pending());
+        }
     }
 }

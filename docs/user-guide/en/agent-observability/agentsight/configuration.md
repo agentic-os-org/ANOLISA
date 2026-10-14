@@ -18,7 +18,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200,
@@ -60,11 +60,17 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
     "event_channel_policy": "backpressure",
     "event_channel_max_bytes_mb": 64,
     "pending_genai_max_count": 1000,
-    "pending_genai_max_bytes_mb": 64,
+    "pending_genai_max_bytes_mb": 16,
     "pid_cache_size": 1024,
+    "connection_capacity": 32,
+    "connection_max_bytes_mb": 64,
+    "ffi_channel_max_bytes_mb": 64,
     "max_connection_body_mb": 8,
+    "max_sse_retained_mb": 2,
+    "retain_raw_sse": false,
     "connection_idle_timeout_secs": 60,
-    "ring_buffer_mb": 32
+    "connection_hard_timeout_secs": 300,
+    "ring_buffer_mb": 64
   },
   "https": [
     { "rule": ["dashscope.aliyuncs.com"] },
@@ -92,7 +98,7 @@ Set it to `0` to disable the combined limit; any enabled value must be at least 
 re-reads valid edits before each maintenance pass and retains the last valid value while the file is
 missing, incomplete, or invalid.
 
-In schema v4, every per-store policy uses the same keys: `retention_days`, `max_db_size_mb`, and
+In schema v5, every per-store policy uses the same keys: `retention_days`, `max_db_size_mb`, and
 `check_interval_secs`. A zero value disables the corresponding age-retention, capacity, or
 scheduled-maintenance rule. If `check_interval_secs` is `0`, no automatic pass is scheduled even
 when the other two values are non-zero.
@@ -115,7 +121,7 @@ the pass deletes the oldest eligible records until logical usage is at most 90% 
 does not run `VACUUM`, so freed pages remain on the SQLite freelist for later writes.
 
 `check_interval_inserts` is no longer supported. The configuration format is replaced as a unit when
-`schema_version` changes: a missing or pre-v4 version is backed up and replaced with schema v4
+`schema_version` changes: a missing or pre-v5 version is backed up and replaced with schema v5
 instead of merging old settings. Start custom files from the shipped `agentsight.json` and do not
 copy the old key into the replacement.
 
@@ -152,20 +158,49 @@ Tuning knobs that come with a feature:
 
 ## Runtime limits
 
-These bound every in-memory buffer in the pipeline. Raise them for very busy hosts; lower them for
-memory-constrained ones. `MemoryMax=350M` in the packaged systemd unit assumes roughly the defaults.
+These limits bound retained payloads in the pipeline. Include the process baseline, eBPF ring buffer,
+decoder working memory and allocator overhead when choosing a process memory limit.
+The packaged systemd unit still uses `MemoryMax=350M`.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `event_channel_capacity` | `10000` | Bounded probe → pipeline channel |
-| `event_channel_policy` | `backpressure` | Behaviour when the channel is full: `backpressure`, `drop_newest`, `sample` |
-| `event_channel_max_bytes_mb` | `64` | Byte budget for events queued in that channel; `0` disables it. Enforced alongside the slot count, because one captured SSL record can be up to 4 MiB — 10 000 slots alone do not bound memory. Events arriving over budget are dropped and counted in the log |
+| `event_channel_policy` | `backpressure` | Wait for a queue slot after byte admission; `drop_newest` rejects a full queue. `sample`, `sample:N` and `sample=N` retain every Nth event (default N=10) |
+| `event_channel_max_bytes_mb` | `64` | Byte cap for queued probe payloads; `0` disables it. Byte-limit rejection drops the event and increments the channel drop counter, independently of the slot policy |
 | `pending_genai_max_count` | `1000` | Events waiting for a session ID |
-| `pending_genai_max_bytes_mb` | `64` | Byte cap for the same queue |
+| `pending_genai_max_bytes_mb` | `16` | Byte cap for the same queue |
 | `pid_cache_size` | `1024` | PID → Agent name LRU entries |
-| `max_connection_body_mb` | `8` | Body buffer per HTTP connection |
-| `connection_idle_timeout_secs` | `60` | Idle timeout before a connection buffer is dropped |
-| `ring_buffer_mb` | `32` | eBPF ring buffer size; must be a power of two |
+| `connection_capacity` | `32` | HTTP connection cache entries; must be greater than zero. Set at least as high as the expected concurrent connections |
+| `connection_max_bytes_mb` | `64` | Shared HTTP/1 + HTTP/2 retained-byte budget, including buffer capacity and decoder state; `0` disables it |
+| `ffi_channel_max_bytes_mb` | `64` | FFI event payload budget through callback completion; `0` disables it. Admission also observes the existing 10000-event queue limit |
+| `max_connection_body_mb` | `8` | Per-connection body limit, checked as fragments arrive |
+| `max_sse_retained_mb` | `2` | Retained SSE payload per stream, including unfinished events; minimum effective limit is 1 KiB |
+| `retain_raw_sse` | `false` | Preserve the original SSE sequence instead of reducing provider deltas; still subject to the byte limits |
+| `connection_idle_timeout_secs` | `60` | Soft inactivity timeout: snapshot a pending SQLite row once, while keeping the stream available to resume |
+| `connection_hard_timeout_secs` | `300` | Finalize and release inactive HTTP/1 connections and HTTP/2 streams as incomplete; `0` disables this timeout |
+| `ring_buffer_mb` | `64` | eBPF ring buffer size; must be a power of two |
+
+The default `connection_capacity=32` accommodates 32 concurrent HTTP/1 connections.
+Choose a capacity covering the actual connections used by all Agents; one Agent can open multiple
+connections. HTTP/2 allows four times that many stream entries and shares the same byte budget.
+Restart capture after changing runtime limits.
+
+When capacity, replacement, a byte limit, hard inactivity, process exit or shutdown ends a call,
+AgentSight emits the captured request or partial response with `finish_reason="incomplete"`.
+The semantic event metadata includes `abandon_reason` and `incomplete=true`; byte-limit removals
+also include `truncated=true`. These records use the normal FFI delivery path even without SQLite.
+Active traffic refreshes the inactivity timer. Soft snapshots require SQLite and keep the call in memory;
+hard maintenance also runs in FFI mode when no capture events arrive.
+
+Semantic-only delivery reduces SSE deltas and releases raw TLS buffers during the stream.
+Enable `retain_raw_sse` when an exporter needs the original event sequence. FFI raw HTTPS fallback
+also selects the original sequence. Both modes keep the configured resource limits.
+
+Runtime metrics exported through `AGENTSIGHT_METRICS_FILE` include
+`agentsight_http_conn_removed_total{reason,state}`, `agentsight_http_abandoned_emitted_total{reason}`,
+`agentsight_http_conn_active`, `agentsight_http_conn_retained_bytes`, `agentsight_ffi_inflight_bytes`,
+and `agentsight_ffi_dropped_total{reason}`. FFI queue overload drops the newest event and increments
+the `count` or `bytes` reason. These counters help distinguish an incomplete capture from a slow consumer.
 
 ## Agent discovery rules
 
@@ -267,12 +302,16 @@ this table. If a new Codex release is not captured, regenerate the entry with
 
 ## schema_version and upgrades
 
-`schema_version` (currently `4`) marks the config format. On start, AgentSight compares it with the
+`schema_version` (currently `5`) marks the config format. On start, AgentSight compares it with the
 built-in version:
 
 - equal or newer → your file is left untouched;
 - missing or older → AgentSight copies your file to `config.json.bak.<unix-seconds>` and replaces it
   with the current default file.
+
+Schema v5 introduces the bounded HTTP and FFI retention defaults described above and lowers the
+probe and deferred GenAI byte budgets. Files with an older version are backed up and replaced as
+a whole; reapply custom discovery rules and settings from the backup.
 
 Schema v4 replaces insert-count storage checks with `check_interval_secs` for every policy and adds
 `reuse`, `causal`, and `enforcement`. Custom settings from an older schema are not merged. Reapply

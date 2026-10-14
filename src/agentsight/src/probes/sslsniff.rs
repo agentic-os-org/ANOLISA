@@ -120,6 +120,24 @@ pub struct SslEvent {
 }
 
 impl SslEvent {
+    /// Preserve provenance without retaining or copying captured payload bytes.
+    pub(crate) fn metadata_only(&self) -> Self {
+        Self {
+            source: self.source,
+            timestamp_ns: self.timestamp_ns,
+            delta_ns: self.delta_ns,
+            pid: self.pid,
+            tid: self.tid,
+            uid: self.uid,
+            len: 0,
+            rw: self.rw,
+            comm: self.comm.clone(),
+            buf: Vec::new(),
+            is_handshake: self.is_handshake,
+            ssl_ptr: self.ssl_ptr,
+        }
+    }
+
     /// Create SslEvent from a raw ring-buffer sample of VARIABLE length.
     ///
     /// SSL records are tiered: the BPF side reserves only
@@ -1770,6 +1788,49 @@ mod tests {
         let ev = SslEvent::from_bytes(&rec).expect("header-only handshake must decode");
         assert!(ev.is_handshake, "is_handshake decodes true");
         assert!(ev.buf.is_empty(), "no payload");
+    }
+
+    #[test]
+    fn from_bytes_preserves_intermediate_tier_payloads() {
+        let header = std::mem::offset_of!(bpf::probe_SSL_data_t, buf);
+        assert_eq!(
+            header,
+            std::mem::offset_of!(bpf::probe_SSL_data_xlarge, buf)
+        );
+        assert_eq!(
+            header,
+            std::mem::offset_of!(bpf::probe_SSL_data_xxlarge, buf)
+        );
+
+        let cases = [
+            (1024 * 1024 + 9, bpf::SSL_TIER_XLARGE as usize),
+            (bpf::SSL_TIER_XLARGE as usize, bpf::SSL_TIER_XLARGE as usize),
+            (
+                bpf::SSL_TIER_XLARGE as usize + 1,
+                bpf::SSL_TIER_XXLARGE as usize,
+            ),
+            (
+                bpf::SSL_TIER_XXLARGE as usize,
+                bpf::SSL_TIER_XXLARGE as usize,
+            ),
+        ];
+        for (length, capacity) in cases {
+            let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+            let record = make_record(
+                &payload,
+                length as u32,
+                length as u32,
+                0,
+                capacity - length,
+                0,
+            );
+            let event = SslEvent::from_bytes(&record).expect("intermediate tier must decode");
+            assert_eq!(event.buf, payload);
+            assert_eq!(event.len as usize, length);
+            assert_eq!(event.ssl_ptr, 0xABCD);
+            assert_eq!(event.pid, 1234);
+            assert_eq!(event.comm, "node");
+        }
     }
 
     #[test]

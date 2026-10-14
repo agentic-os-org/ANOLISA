@@ -39,6 +39,14 @@ itself always writes to the default directory.
 > These files contain full prompts and model responses. Treat them as sensitive: keep the directory
 > permissions as installed, and be careful when copying them off the host.
 
+When SQLite is the only active output, completed calls are saved immediately. A registered default
+Logtail output whose deployment file is missing or telemetry is disabled does not add a session wait.
+If the Agent's session becomes known later, the stored session ID and full-event JSON are updated
+together. FFI callbacks and
+active external exporters keep the existing session-resolution wait before delivering a call.
+Output gates are checked for each call, so enabling or resuming Logtail restores that wait for
+subsequent calls.
+
 ## Retention and size limits
 
 Schema v4 gives every AgentSight-owned database a `retention_days`, `max_db_size_mb`, and

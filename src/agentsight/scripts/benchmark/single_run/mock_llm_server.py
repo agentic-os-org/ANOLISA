@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import socket
 import ssl
 import threading
 import time
+from collections.abc import Iterator
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +24,9 @@ from typing import Any, TextIO
 INPUT_TOKENS = 12
 OUTPUT_TOKENS = 8
 TOTAL_TOKENS = INPUT_TOKENS + OUTPUT_TOKENS
+PREFLIGHT_OUTPUT_TOKENS = 1
+PREFLIGHT_TOTAL_TOKENS = INPUT_TOKENS + PREFLIGHT_OUTPUT_TOKENS
+TOKEN_TEXT = " x"  # One cl100k_base token, including when repeated.
 ENDPOINTS = {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -37,9 +42,7 @@ class RequestRecorder:
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
 
-    def record(
-        self, run_id: str | None, request_id: str, http_status: int | None
-    ) -> None:
+    def record(self, run_id: str | None, request_id: str, http_status: int | None) -> None:
         """Record one accepted request without retaining its ID in memory."""
         if self.directory is None or not run_id or not RUN_ID_PATTERN.fullmatch(run_id):
             return
@@ -70,9 +73,7 @@ class RequestRecorder:
 def header_value(headers: dict[str, str], name: str) -> str | None:
     """Return an HTTP header using case-insensitive matching."""
     lowered = name.lower()
-    return next(
-        (value for key, value in headers.items() if key.lower() == lowered), None
-    )
+    return next((value for key, value in headers.items() if key.lower() == lowered), None)
 
 
 def request_id_from(body: bytes, headers: dict[str, str]) -> str:
@@ -98,9 +99,7 @@ def response_events(
 ) -> list[dict[str, Any]]:
     """Build provider-shaped SSE events with stable token usage."""
     text = ("benchmark response " * ((chunks * chunk_bytes // 20) + 2)).strip()
-    pieces = [text[i : i + chunk_bytes] for i in range(0, len(text), chunk_bytes)][
-        :chunks
-    ]
+    pieces = [text[i : i + chunk_bytes] for i in range(0, len(text), chunk_bytes)][:chunks]
     if len(pieces) < chunks:
         pieces.extend(["x" * chunk_bytes] * (chunks - len(pieces)))
     events: list[dict[str, Any]] = []
@@ -171,6 +170,27 @@ def response_events(
     return events
 
 
+def token_response_events(request_id: str, output_tokens: int) -> Iterator[dict[str, Any]]:
+    """Emit one verified token per delta without buffering a complete response."""
+    base = {
+        "id": request_id,
+        "request_id": request_id,
+        "object": "chat.completion.chunk",
+        "model": "benchmark-model",
+    }
+    for _ in range(output_tokens):
+        yield {**base, "choices": [{"index": 0, "delta": {"content": TOKEN_TEXT}}]}
+    yield {
+        **base,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": INPUT_TOKENS,
+            "completion_tokens": output_tokens,
+            "total_tokens": INPUT_TOKENS + output_tokens,
+        },
+    }
+
+
 class BenchmarkHandler(BaseHTTPRequestHandler):
     """Serve one benchmark request using server settings attached to the HTTP server."""
 
@@ -194,24 +214,35 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         headers = {k: v for k, v in self.headers.items()}
         request_id = request_id_from(body, headers)
         run_id = header_value(headers, "X-Benchmark-Run-ID")
+        preflight = header_value(headers, "X-Benchmark-Preflight") == "1"
         settings = self.server.settings  # type: ignore[attr-defined]
+        token_rate = getattr(settings, "tokens_per_second", None)
+        if token_rate is not None and self.path != "/v1/chat/completions":
+            self.send_error(HTTPStatus.BAD_REQUEST, "token pacing requires chat completions")
+            return
         # Persist the correlation ID before replying. Once k6 observes the
         # response, the validator is guaranteed to see the corresponding row.
         record_request(settings, run_id, request_id, HTTPStatus.OK)
-        events = response_events(
-            self.path, request_id, settings.chunks, settings.chunk_bytes
+        events = (
+            token_response_events(request_id, settings.output_tokens)
+            if token_rate is not None
+            else response_events(self.path, request_id, settings.chunks, settings.chunk_bytes)
         )
-        if settings.sse:
+        if settings.sse and not preflight:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            for event in events:
-                self.chunked_write(
-                    f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode()
-                )
-                if settings.chunk_delay:
+            if token_rate is not None:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            started = time.monotonic()
+            for index, event in enumerate(events):
+                if token_rate is not None and index < settings.output_tokens:
+                    # Absolute deadlines avoid accumulating serialization/write latency.
+                    time.sleep(max(0, started + (index + 1) / token_rate - time.monotonic()))
+                self.chunked_write(f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode())
+                if token_rate is None and settings.chunk_delay:
                     time.sleep(settings.chunk_delay)
             self.chunked_write(b"data: [DONE]\n\n")
             self.chunked_write(b"")
@@ -222,15 +253,17 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 "request_id": request_id,
                 "object": "chat.completion",
                 "usage": {
-                    "input_tokens": INPUT_TOKENS,
-                    "output_tokens": OUTPUT_TOKENS,
-                    "total_tokens": TOTAL_TOKENS,
+                    "prompt_tokens" if preflight else "input_tokens": INPUT_TOKENS,
+                    "completion_tokens" if preflight else "output_tokens": (
+                        PREFLIGHT_OUTPUT_TOKENS if preflight else OUTPUT_TOKENS
+                    ),
+                    "total_tokens": PREFLIGHT_TOTAL_TOKENS if preflight else TOTAL_TOKENS,
                 },
                 "choices": [
                     {
                         "message": {
                             "role": "assistant",
-                            "content": "benchmark response",
+                            "content": TOKEN_TEXT if preflight else "benchmark response",
                         },
                         "finish_reason": "stop",
                     }
@@ -262,6 +295,7 @@ class BenchmarkHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
         """Route ALPN-negotiated HTTP/2 connections to the h2 event loop."""
@@ -282,9 +316,7 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
     from h2.connection import H2Connection
     from h2.events import DataReceived, RequestReceived, StreamEnded
 
-    connection = H2Connection(
-        config=H2Configuration(client_side=False, header_encoding="utf-8")
-    )
+    connection = H2Connection(config=H2Configuration(client_side=False, header_encoding="utf-8"))
     connection.initiate_connection()
     sock.sendall(connection.data_to_send())
     bodies: dict[int, bytearray] = {}
@@ -323,15 +355,11 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
             if isinstance(event, RequestReceived):
                 headers = dict(event.headers)
                 paths[event.stream_id] = headers.get(":path", "")
-                run_ids[event.stream_id] = header_value(
-                    headers, "X-Benchmark-Run-ID"
-                )
+                run_ids[event.stream_id] = header_value(headers, "X-Benchmark-Run-ID")
                 bodies[event.stream_id] = bytearray()
             elif isinstance(event, DataReceived):
                 bodies.setdefault(event.stream_id, bytearray()).extend(event.data)
-                connection.acknowledge_received_data(
-                    event.flow_controlled_length, event.stream_id
-                )
+                connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
             elif isinstance(event, StreamEnded):
                 path = paths.pop(event.stream_id, "")
                 run_id = run_ids.pop(event.stream_id, None)
@@ -341,9 +369,7 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
                 elif path in ENDPOINTS:
                     rid = request_id_from(body, {})
                     record_request(settings, run_id, rid, HTTPStatus.OK)
-                    response = response_events(
-                        path, rid, settings.chunks, settings.chunk_bytes
-                    )
+                    response = response_events(path, rid, settings.chunks, settings.chunk_bytes)
                     if settings.sse:
                         connection.send_headers(
                             event.stream_id,
@@ -363,9 +389,7 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
                             send_stream_data(event.stream_id, frame)
                             if settings.chunk_delay:
                                 time.sleep(settings.chunk_delay)
-                        send_stream_data(
-                            event.stream_id, b"data: [DONE]\n\n", end_stream=True
-                        )
+                        send_stream_data(event.stream_id, b"data: [DONE]\n\n", end_stream=True)
                     else:
                         payload = json.dumps(
                             {
@@ -378,13 +402,9 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
                             },
                             separators=(",", ":"),
                         ).encode()
-                        send_h2_body(
-                            connection, event.stream_id, payload, "application/json"
-                        )
+                        send_h2_body(connection, event.stream_id, payload, "application/json")
                 else:
-                    connection.send_headers(
-                        event.stream_id, [(":status", "404")], end_stream=True
-                    )
+                    connection.send_headers(event.stream_id, [(":status", "404")], end_stream=True)
 
     try:
         while True:
@@ -402,9 +422,7 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
         sock.close()
 
 
-def send_h2_body(
-    connection: Any, stream_id: int, body: bytes, content_type: str
-) -> None:
+def send_h2_body(connection: Any, stream_id: int, body: bytes, content_type: str) -> None:
     """Send a complete HTTP/2 response."""
     connection.send_headers(
         stream_id,
@@ -427,6 +445,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunks", type=int, default=10)
     parser.add_argument("--chunk-bytes", type=int, default=64)
     parser.add_argument("--chunk-delay-ms", type=float, default=0)
+    parser.add_argument("--tokens-per-second", type=float)
+    parser.add_argument("--output-tokens", type=int)
     parser.add_argument("--json", action="store_true", help="serve JSON instead of SSE")
     parser.add_argument(
         "--http2", action="store_true", help="advertise HTTP/2 when h2 is installed"
@@ -446,6 +466,17 @@ def main() -> int:
         raise SystemExit(
             "chunks, chunk-bytes, and chunk-delay-ms must be non-negative (chunks/bytes > 0)"
         )
+    if args.tokens_per_second is not None or args.output_tokens is not None:
+        if (
+            args.tokens_per_second is None
+            or not math.isfinite(args.tokens_per_second)
+            or args.tokens_per_second <= 0
+            or args.output_tokens is None
+            or args.output_tokens <= 0
+            or args.json
+            or args.http2
+        ):
+            parser.error("positive --tokens-per-second and --output-tokens require HTTP/1.1 SSE")
     recorder = RequestRecorder(args.request_log_dir)
     server = BenchmarkHTTPServer((args.host, args.port), BenchmarkHandler)
     server.settings = argparse.Namespace(  # type: ignore[attr-defined]
@@ -454,6 +485,8 @@ def main() -> int:
         chunk_delay=args.chunk_delay_ms / 1000,
         sse=not args.json,
         request_recorder=recorder,
+        tokens_per_second=args.tokens_per_second,
+        output_tokens=args.output_tokens,
     )
     server.verbose = args.verbose  # type: ignore[attr-defined]
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -20,6 +20,12 @@
 //! }
 //! ```
 
+#[path = "context.rs"]
+mod context;
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod context_tests;
+
 use crate::aggregator::AggregatedResult;
 use crate::analyzer::token::{merge_response_output_text, merge_response_tool_calls};
 use crate::parser::sse::{ParsedSseEvent, SSEParser};
@@ -432,6 +438,11 @@ impl Analyzer {
     /// `AnalysisResult::Token` for SSE streams containing token usage,
     /// or `AnalysisResult::Message` for parsed LLM API request/response bodies.
     pub fn analyze_aggregated(&self, result: &AggregatedResult) -> Vec<AnalysisResult> {
+        if let AggregatedResult::Abandoned { reason, partial } = result {
+            let mut results = self.analyze_aggregated(partial);
+            results.push(AnalysisResult::Abandoned(*reason));
+            return results;
+        }
         let timer = crate::runtime_metrics::StageTimer::start("analyzer");
         log::debug!("Analyzing aggregated result({})", result.result_type());
         let mut results = Vec::new();
@@ -633,6 +644,7 @@ impl Analyzer {
                 let resp_body = stream.response_json_body();
                 self.analyze_message(&path, req_body.as_ref(), resp_body.as_ref())
             }
+            AggregatedResult::Abandoned { partial, .. } => self.extract_message_from_http(partial),
             AggregatedResult::ResponseOnly { .. }
             | AggregatedResult::ProcessComplete(_)
             | AggregatedResult::Http2Frames { .. } => None,
@@ -650,6 +662,7 @@ impl Analyzer {
     /// `analyze_aggregated` and is unaffected by this filter.
     fn should_parse_message(result: &AggregatedResult) -> bool {
         match result {
+            AggregatedResult::Abandoned { partial, .. } => Self::should_parse_message(partial),
             AggregatedResult::HttpComplete(pair) | AggregatedResult::SseComplete(pair) => {
                 MessageParser::is_llm_api_path(&pair.request.path)
             }
@@ -815,7 +828,7 @@ impl Analyzer {
     /// If the analyzer was created without a tokenizer (the `tokenizer`
     /// feature is disabled), the fallback is skipped to avoid triggering
     /// downloads/loads of large tokenizer models.
-    fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
+    pub(super) fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
         self.tokenizer.as_ref()?;
 
         // Extract context from the aggregated result.
@@ -857,6 +870,19 @@ impl Analyzer {
         // Get request JSON
         let request_json_ref = request_json.as_ref()?;
 
+        self.compute_tokens_from_json(pid, &comm, &path, request_json_ref, &sse_chunks)
+    }
+
+    pub(super) fn compute_tokens_from_json(
+        &self,
+        pid: u32,
+        comm: &str,
+        path: &str,
+        request_json_ref: &serde_json::Value,
+        sse_chunks: &[serde_json::Value],
+    ) -> Option<TokenRecord> {
+        self.tokenizer.as_ref()?;
+
         // Extract model name
         let model = request_json_ref
             .get("model")
@@ -873,7 +899,7 @@ impl Analyzer {
         };
 
         // Extract provider from path
-        let provider = manual_provider_from_path(&path);
+        let provider = manual_provider_from_path(path);
 
         // Count input tokens from request messages using chat template. The
         // same parser as `count_request_tokens`: OpenAI chat completions,
@@ -940,7 +966,7 @@ impl Analyzer {
         // fallback, so a complete capture is not counted two or three times.
         let output_tokens = {
             let (all_content, all_reasoning, all_tool_calls) =
-                merge_response_output_text(&sse_chunks);
+                merge_response_output_text(sse_chunks);
 
             let mut total = 0u64;
 

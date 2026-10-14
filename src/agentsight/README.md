@@ -250,6 +250,17 @@ npm run dev          # starts webpack-dev-server on http://localhost:3004
 
 When finished, run `make build-frontend && cargo build --release` to embed the updated UI.
 
+### Memory Benchmarking (Linux)
+
+[`scripts/benchmark/single_run/memory_run.sh`](scripts/benchmark/single_run/memory_run.sh)
+measures AgentSight RSS with configurable Agent count and output tok/s, defaulting
+to 32 Agents, 100 tok/s each, and 60 seconds. It prints average/peak RSS, host RAM
+shares and load/capture checks, and supports Git A/B comparisons with
+`--ab --baseline REF --candidate REF`. `--ring-buffer-mb N` sets the ring buffer
+size; reported probe drops invalidate the comparison. Tracing requires root or eBPF capabilities;
+the script requests sudo by default. See the [benchmark usage guide](scripts/docs/BENCHMARK_USAGE.md)
+for one-command examples, working-tree snapshots and reports.
+
 ## Quick Start
 
 ### Prerequisites
@@ -414,7 +425,7 @@ AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/co
 
 ### SQLite Storage (`storage`)
 
-`agentsight.json` schema v4 gives every AgentSight-owned SQLite store the same three policy keys:
+`agentsight.json` schema v5 gives every AgentSight-owned SQLite store the same three policy keys:
 `retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero value disables the
 corresponding age, capacity, or scheduled-maintenance rule. Primary and GenAI maintenance default
 to 60 seconds; reuse, causal, and enforcement stores also have explicit policies. One lightweight
@@ -449,14 +460,31 @@ Configure buffer caps to prevent unbounded memory growth:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `event_channel_capacity` | 10,000 | Bounded channel capacity for probe events |
-| `event_channel_policy` | `"backpressure"` | Full-channel policy: `backpressure` / `drop_newest` / `sample` |
+| `event_channel_policy` | `"backpressure"` | Wait for a queue slot after byte admission; `drop_newest` and `sample:N` remain available |
 | `event_channel_max_bytes_mb` | 64 | Byte budget for queued probe events (one SSL record reaches 4 MiB, so the slot count alone cannot bound memory) |
 | `pending_genai_max_count` | 1,000 | Max pending events awaiting session_id |
-| `pending_genai_max_bytes_mb` | 64 | Max bytes for pending events |
+| `pending_genai_max_bytes_mb` | 16 | Max bytes for pending events |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU cache size |
+| `connection_capacity` | 32 | HTTP connection cache entries; use at least the expected concurrency and restart tracing |
 | `max_connection_body_mb` | 8 | Per-connection HTTP body buffer cap |
-| `connection_idle_timeout_secs` | 60 | HTTP connection idle timeout (seconds) |
-| `ring_buffer_mb` | 32 | eBPF Ring Buffer size (must be power of 2) |
+| `connection_idle_timeout_secs` | 60 | Soft inactivity timeout for pending SQLite snapshots |
+| `connection_hard_timeout_secs` | 300 | Finalize inactive calls as incomplete and release them; 0 disables the timeout |
+| `connection_max_bytes_mb` | 64 | Shared HTTP/1 + HTTP/2 retained payload budget |
+| `ffi_channel_max_bytes_mb` | 64 | FFI payload budget, including active callbacks |
+| `max_sse_retained_mb` | 2 | Per-stream SSE payload limit |
+| `retain_raw_sse` | `false` | Preserve original SSE sequences for raw export or debugging |
+| `ring_buffer_mb` | 64 | eBPF Ring Buffer size (must be power of 2) |
+
+Semantic-only delivery reduces SSE deltas and releases raw TLS buffers during the stream.
+Forced connection removal reports an incomplete call with an abandonment reason.
+Probe and FFI queues enforce byte limits alongside their slot limits and count rejected events.
+These budgets cover retained payloads; process RSS also includes the ring buffer, decoder working
+memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits)
+for timeout, raw capture and overload behavior.
+
+Configuration schema v5 ships these defaults. Startup upgrades back up and replace older config
+files; reapply custom rules and settings from the backup. The implementation is described in
+[HTTP payload ownership and memory limits](docs/design/payload-memory.md).
 
 ### Runtime Metrics Export
 

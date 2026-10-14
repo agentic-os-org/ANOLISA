@@ -16,6 +16,105 @@ use agentsight::parser::Parser;
 use agentsight::response_map::ResponseSessionMapper;
 
 #[test]
+fn configured_connection_capacity_preserves_concurrent_sse() {
+    for concurrency in [32, 64] {
+        let mut config = agentsight::config::AgentsightConfig::new();
+        config
+            .load_from_json(&format!(
+                r#"{{"runtime_limits":{{"connection_capacity":{concurrency}}}}}"#
+            ))
+            .unwrap();
+        let parser = Parser::new();
+        let mut aggregator =
+            Aggregator::with_limits(config.connection_capacity, &config.runtime_limits);
+        let analyzer = Analyzer::new();
+        let builder = GenAIBuilder::new();
+        let mapper = ResponseSessionMapper::new();
+        let cache = HashMap::new();
+        let mut events = Vec::new();
+        let mut feed = |index: usize, rw: i32, bytes: Vec<u8>| {
+            let ssl = common::make_ssl_event(
+                30_000 + index as u32,
+                0x90_0000 + index as u64,
+                rw,
+                bytes,
+                "python3",
+            );
+            for result in aggregator.process_result(parser.parse_event(Event::Ssl(ssl))) {
+                let analyzed = analyzer.analyze_aggregated(&result);
+                events.extend(
+                    builder
+                        .build_with_pending(&analyzed, &mapper, &cache)
+                        .0
+                        .events,
+                );
+            }
+        };
+        for index in 0..concurrency {
+            feed(
+                index,
+                1,
+                common::make_openai_request_bytes("capacity-fixture", "benchmark", true),
+            );
+            feed(index, 0, common::make_openai_sse_response_headers());
+        }
+        let chunks: Vec<_> = (0..concurrency)
+            .map(|index| {
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({
+                        "id": format!("bench-capacity-{index}"),
+                        "model": "capacity-fixture",
+                        "choices": [{"index": 0, "delta": {"content": " x"}, "finish_reason": null}]
+                    })
+                )
+                .into_bytes()
+            })
+            .collect();
+        // Keep every response in flight until all 1,000 interleaved tokens arrive.
+        for _ in 0..1_000 {
+            for (index, chunk) in chunks.iter().enumerate() {
+                feed(index, 0, chunk.clone());
+            }
+        }
+        for index in 0..concurrency {
+            feed(
+                index,
+                0,
+                common::make_openai_sse_chunk(
+                    &format!("bench-capacity-{index}"),
+                    "capacity-fixture",
+                    "",
+                    12,
+                    1_000,
+                ),
+            );
+            feed(index, 0, common::make_sse_done());
+        }
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), concurrency);
+        let pids: std::collections::HashSet<_> = calls.iter().map(|call| call.pid).collect();
+        assert_eq!(pids.len(), concurrency);
+        for call in calls {
+            assert!(call.response.streamed);
+            assert_eq!(assistant_text(call), " x".repeat(1_000));
+            let usage = call
+                .token_usage
+                .as_ref()
+                .expect("every response includes usage");
+            assert_eq!(usage.input_tokens, 12);
+            assert_eq!(usage.output_tokens, 1_000);
+        }
+    }
+}
+
+#[test]
 fn native_event_clock_reaches_semantic_output() {
     use agentsight::probes::sslsniff::{SslEvent, bpf::probe_SSL_data_t as Raw};
     use std::mem::offset_of;

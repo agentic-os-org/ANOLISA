@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // ==================== Default Constants ====================
 
 /// Default LRU cache capacity for HTTP connections
-pub const DEFAULT_CONNECTION_CAPACITY: usize = 24;
+pub const DEFAULT_CONNECTION_CAPACITY: usize = 32;
 
 /// Default poll timeout for ring buffer polling (milliseconds)
 pub const DEFAULT_POLL_TIMEOUT_MS: u64 = 100;
@@ -69,8 +69,17 @@ pub const DEFAULT_EVENT_CHANNEL_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Default maximum number of pending GenAI events waiting for session_id resolution.
 pub const DEFAULT_PENDING_GENAI_MAX_COUNT: usize = 1_000;
 
-/// Default maximum bytes for pending GenAI events waiting for session_id resolution (64 MB).
-pub const DEFAULT_PENDING_GENAI_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Default maximum bytes for pending GenAI events waiting for session_id resolution (16 MiB).
+pub const DEFAULT_PENDING_GENAI_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Combined HTTP/1 connection and HTTP/2 stream payload budget.
+pub const DEFAULT_CONNECTION_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Payload budget retained until FFI callbacks return.
+pub const DEFAULT_FFI_CHANNEL_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum inactivity before in-flight state is finalized as incomplete.
+pub const DEFAULT_CONNECTION_HARD_TIMEOUT_SECS: u64 = 300;
+/// Per-stream retained SSE payload limit.
+pub const DEFAULT_MAX_SSE_RETAINED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default PID → agent_name cache size.
 pub const DEFAULT_PID_CACHE_SIZE: usize = 1024;
@@ -88,7 +97,7 @@ pub const DEFAULT_MAX_CONNECTION_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Default eBPF ring buffer size in MiB.
-pub const DEFAULT_RING_BUFFER_MB: usize = 32;
+pub const DEFAULT_RING_BUFFER_MB: usize = 64;
 
 pub const HF_ENDPOINT: &str = "https://hf-mirror.com";
 
@@ -222,7 +231,7 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 /// At startup the on-disk config's `schema_version` is compared against this
 /// value. If the on-disk version is missing or older, the config file is
 /// backed up (`.bak`) and overwritten with the embedded default.
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 // ==================== TCP Target Configuration ====================
 
@@ -682,6 +691,8 @@ pub struct JsonTrajectoryCollectionFeature {
 #[derive(serde::Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct JsonRuntimeLimits {
+    /// HTTP connection LRU entries; configure at least the expected concurrent connections.
+    pub connection_capacity: Option<usize>,
     pub event_channel_capacity: Option<usize>,
     #[serde(default)]
     pub event_channel_policy: Option<String>,
@@ -693,6 +704,16 @@ pub struct JsonRuntimeLimits {
     pub pid_cache_size: Option<usize>,
     pub max_connection_body_mb: Option<usize>,
     pub connection_idle_timeout_secs: Option<u64>,
+    /// Combined HTTP/1 and HTTP/2 retained payload budget in MiB.
+    pub connection_max_bytes_mb: Option<usize>,
+    /// FFI queue and active callback payload budget in MiB.
+    pub ffi_channel_max_bytes_mb: Option<usize>,
+    /// Inactivity limit for finalizing unfinished calls.
+    pub connection_hard_timeout_secs: Option<u64>,
+    /// Retained SSE state limit per stream in MiB.
+    pub max_sse_retained_mb: Option<usize>,
+    /// Keep raw SSE event sequences instead of reducing deltas.
+    pub retain_raw_sse: Option<bool>,
     /// eBPF ring buffer size in MiB. Must be a power-of-two multiple of the page
     /// size (common valid values: 8, 16, 32, 64). Loaded from `agentsight.json`
     /// and applied at BPF load time via `bpf_map__set_max_entries`.
@@ -924,12 +945,12 @@ pub fn chrome_trace() -> bool {
 /// Policy applied when a bounded event channel is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPolicy {
-    /// Block the producer until space is available (backpressure).
+    /// Wait for an available channel slot after byte admission.
     #[default]
     Backpressure,
     /// Drop the newest event and log a warning.
     DropNewest,
-    /// Sample events: keep roughly 1 in N when overloaded.
+    /// Keep every Nth event when sampling is explicitly configured.
     Sample(usize),
 }
 
@@ -1054,8 +1075,18 @@ pub struct RuntimeLimits {
     pub pid_cache_size: usize,
     /// Max bytes buffered per HTTP connection.
     pub max_connection_body_bytes: usize,
-    /// Idle timeout before an HTTP connection state is dropped.
+    /// Soft inactivity timeout for pending snapshots and empty connections.
     pub connection_idle_timeout_secs: u64,
+    /// Combined HTTP/1 and HTTP/2 retained payload budget.
+    pub connection_max_bytes: usize,
+    /// FFI payload budget, including callbacks currently running.
+    pub ffi_channel_max_bytes: usize,
+    /// Inactivity limit before emitting an incomplete record.
+    pub connection_hard_timeout_secs: u64,
+    /// Per-stream retained SSE payload limit.
+    pub max_sse_retained_bytes: usize,
+    /// Preserve raw SSE event sequences for debugging or raw export.
+    pub retain_raw_sse: bool,
     /// eBPF ring buffer size in MiB.
     pub ring_buffer_mb: usize,
 }
@@ -1071,6 +1102,11 @@ impl Default for RuntimeLimits {
             pid_cache_size: DEFAULT_PID_CACHE_SIZE,
             max_connection_body_bytes: DEFAULT_MAX_CONNECTION_BODY_BYTES,
             connection_idle_timeout_secs: DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS,
+            connection_max_bytes: DEFAULT_CONNECTION_MAX_BYTES,
+            ffi_channel_max_bytes: DEFAULT_FFI_CHANNEL_MAX_BYTES,
+            connection_hard_timeout_secs: DEFAULT_CONNECTION_HARD_TIMEOUT_SECS,
+            max_sse_retained_bytes: DEFAULT_MAX_SSE_RETAINED_BYTES,
+            retain_raw_sse: false,
             ring_buffer_mb: DEFAULT_RING_BUFFER_MB,
         }
     }
@@ -1536,6 +1572,14 @@ impl AgentsightConfig {
 
         // Parse runtime limits
         if let Some(limits) = parsed.runtime_limits.take() {
+            if let Some(capacity) = limits.connection_capacity {
+                if capacity == 0 {
+                    return Err(
+                        "runtime_limits.connection_capacity must be greater than zero".into(),
+                    );
+                }
+                self.connection_capacity = capacity;
+            }
             // A MiB budget becomes a byte budget with `* 1024 * 1024`. Do it
             // checked: with overflow checks off (the workspace disables dev
             // debug assertions) the multiply wraps silently in the shipped
@@ -1581,6 +1625,25 @@ impl AgentsightConfig {
                 connection_idle_timeout_secs: limits
                     .connection_idle_timeout_secs
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
+                connection_max_bytes: bytes_from_mb(
+                    "connection_max_bytes_mb",
+                    limits.connection_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_CONNECTION_MAX_BYTES),
+                ffi_channel_max_bytes: bytes_from_mb(
+                    "ffi_channel_max_bytes_mb",
+                    limits.ffi_channel_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_FFI_CHANNEL_MAX_BYTES),
+                connection_hard_timeout_secs: limits
+                    .connection_hard_timeout_secs
+                    .unwrap_or(DEFAULT_CONNECTION_HARD_TIMEOUT_SECS),
+                max_sse_retained_bytes: bytes_from_mb(
+                    "max_sse_retained_mb",
+                    limits.max_sse_retained_mb,
+                )?
+                .unwrap_or(DEFAULT_MAX_SSE_RETAINED_BYTES),
+                retain_raw_sse: limits.retain_raw_sse.unwrap_or(false),
                 ring_buffer_mb: limits.ring_buffer_mb.unwrap_or(DEFAULT_RING_BUFFER_MB),
             };
         }
@@ -1703,6 +1766,9 @@ pub use event_clock::{ClockConversionError, ktime_to_unix_ns};
 #[cfg(target_os = "linux")]
 pub(crate) use event_clock::{initialize_event_clock, report_clock_error};
 #[cfg(test)]
+mod connection_capacity_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1771,7 +1837,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 24);
+        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 32);
         assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
         assert_eq!(DEFAULT_MAX_HEADERS, 64);
@@ -1802,7 +1868,7 @@ mod tests {
             config.storage.primary_path(),
             default_base_path().join(PRIMARY_DB_NAME)
         );
-        assert_eq!(config.connection_capacity, 24);
+        assert_eq!(config.connection_capacity, 32);
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
         assert_eq!(config.max_headers, 64);
@@ -2358,6 +2424,17 @@ mod tests {
             DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS
         );
         assert_eq!(limits.ring_buffer_mb, DEFAULT_RING_BUFFER_MB);
+        assert_eq!(limits.connection_max_bytes, DEFAULT_CONNECTION_MAX_BYTES);
+        assert_eq!(limits.ffi_channel_max_bytes, DEFAULT_FFI_CHANNEL_MAX_BYTES);
+        assert_eq!(
+            limits.connection_hard_timeout_secs,
+            DEFAULT_CONNECTION_HARD_TIMEOUT_SECS
+        );
+        assert_eq!(
+            limits.max_sse_retained_bytes,
+            DEFAULT_MAX_SSE_RETAINED_BYTES
+        );
+        assert!(!limits.retain_raw_sse);
     }
 
     #[test]
@@ -2373,6 +2450,59 @@ mod tests {
         assert!(!flags.audit_enabled);
         assert!(!flags.token_consumption_enabled);
         assert!(!flags.sls_logtail_enabled);
+    }
+
+    #[test]
+    fn http_and_ffi_retention_limits_load_from_json() {
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(r#"{"runtime_limits":{"connection_max_bytes_mb":48,"ffi_channel_max_bytes_mb":12,"max_sse_retained_mb":3,"connection_hard_timeout_secs":90,"retain_raw_sse":true}}"#).unwrap();
+        assert_eq!(config.runtime_limits.connection_max_bytes, 48 * 1024 * 1024);
+        assert_eq!(
+            config.runtime_limits.ffi_channel_max_bytes,
+            12 * 1024 * 1024
+        );
+        assert_eq!(
+            config.runtime_limits.max_sse_retained_bytes,
+            3 * 1024 * 1024
+        );
+        assert_eq!(config.runtime_limits.connection_hard_timeout_secs, 90);
+        assert!(config.runtime_limits.retain_raw_sse);
+    }
+
+    #[test]
+    fn shipped_json_uses_the_same_memory_defaults_as_the_library() {
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(include_str!("../agentsight.json"))
+            .unwrap();
+        let limits = RuntimeLimits::default();
+        assert_eq!(config.connection_capacity, DEFAULT_CONNECTION_CAPACITY);
+        assert_eq!(config.runtime_limits.ring_buffer_mb, limits.ring_buffer_mb);
+        assert_eq!(
+            config.runtime_limits.event_channel_max_bytes,
+            limits.event_channel_max_bytes
+        );
+        assert_eq!(
+            config.runtime_limits.pending_genai_max_bytes,
+            limits.pending_genai_max_bytes
+        );
+        assert_eq!(
+            config.runtime_limits.connection_max_bytes,
+            limits.connection_max_bytes
+        );
+        assert_eq!(
+            config.runtime_limits.ffi_channel_max_bytes,
+            limits.ffi_channel_max_bytes
+        );
+        assert_eq!(
+            config.runtime_limits.max_sse_retained_bytes,
+            limits.max_sse_retained_bytes
+        );
+        assert_eq!(
+            config.runtime_limits.connection_hard_timeout_secs,
+            limits.connection_hard_timeout_secs
+        );
+        assert!(!config.runtime_limits.retain_raw_sse);
     }
 
     #[test]
@@ -2427,6 +2557,9 @@ mod tests {
             "event_channel_max_bytes_mb",
             "pending_genai_max_bytes_mb",
             "max_connection_body_mb",
+            "connection_max_bytes_mb",
+            "ffi_channel_max_bytes_mb",
+            "max_sse_retained_mb",
         ] {
             for mb in [u64::MAX, 1u64 << 44] {
                 let json = format!(r#"{{"runtime_limits": {{"{field}": {mb}}}}}"#);

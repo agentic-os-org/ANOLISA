@@ -235,33 +235,15 @@ impl LogtailExporter {
         })
     }
 
-    /// 创建默认路径的 Logtail 导出器。
-    ///
-    /// 固定写入 [`DEFAULT_SLS_LOGTAIL_PATH`]，不受 `SLS_LOGTAIL_FILE`
-    /// 环境变量或动态配置影响。用于非 sysom 模式下的本地默认 SLS 输出。
+    /// Write to the default local path only while its deployment gates allow it.
     pub fn new_default(encryption_pem: Option<&str>, trace_enabled: bool) -> Self {
-        let path = PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
-        if encryptor.is_none() {
-            log::info!(
-                "Logtail exporter (default): encryption disabled (no public key configured)"
-            );
-        }
-        if !trace_enabled {
-            log::info!(
-                "Logtail exporter (default): traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded"
-            );
-        }
-        LogtailExporter {
-            path,
-            encryptor,
+        Self::new_with_path_dynamic(
+            DEFAULT_SLS_LOGTAIL_PATH,
+            encryption_pem,
             trace_enabled,
-            dynamic: false,
-            require_path_exists: true,
-        }
+            false,
+            true,
+        )
     }
 
     /// 从显式路径创建 Logtail 导出器（用于运行时动态激活）
@@ -273,7 +255,7 @@ impl LogtailExporter {
         encryption_pem: Option<&str>,
         trace_enabled: bool,
     ) -> Self {
-        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, true)
+        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, true, false)
     }
 
     /// 从显式路径创建固定路径的 Logtail 导出器。
@@ -285,21 +267,29 @@ impl LogtailExporter {
         encryption_pem: Option<&str>,
         trace_enabled: bool,
     ) -> Self {
-        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, false)
+        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, false, false)
     }
 
-    fn new_with_path_dynamic(
+    /// Construct a sink with the same path and deployment gates used at delivery.
+    pub(crate) fn new_with_path_dynamic(
         path_str: &str,
         encryption_pem: Option<&str>,
         trace_enabled: bool,
         dynamic: bool,
+        require_path_exists: bool,
     ) -> Self {
         let path = PathBuf::from(path_str);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
-        let label = if dynamic { "dynamic" } else { "fixed" };
+        let label = if require_path_exists {
+            "default"
+        } else if dynamic {
+            "dynamic"
+        } else {
+            "fixed"
+        };
         if encryptor.is_none() {
             log::info!(
                 "Logtail exporter ({label}): encryption disabled (no public key configured)"
@@ -315,7 +305,7 @@ impl LogtailExporter {
             encryptor,
             trace_enabled,
             dynamic,
-            require_path_exists: false,
+            require_path_exists,
         }
     }
 
@@ -324,22 +314,11 @@ impl LogtailExporter {
         &self.path
     }
 
-    /// 将扁平化记录批量写入文件（append 模式）
-    ///
-    /// `dynamic=true` 时每次重新调用 `logtail_path()` 取最新路径；
-    /// 若动态路径已被 `set_dynamic_logtail_path("")` 清空（暂停语义），
-    /// 直接丢弃本批次，不报错。
-    fn write_batch(&self, events: &[GenAISemanticEvent]) {
+    fn output_path(&self) -> Option<PathBuf> {
         let target_path: PathBuf = if self.dynamic {
             match logtail_path() {
-                Some(p) if !p.is_empty() => {
-                    let p = PathBuf::from(p);
-                    if let Some(parent) = p.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    p
-                }
-                _ => return, // 动态路径已清空 → 暂停状态，丢弃本批次
+                Some(p) if !p.is_empty() => PathBuf::from(p),
+                _ => return None,
             }
         } else {
             self.path.clone()
@@ -351,7 +330,7 @@ impl LogtailExporter {
         if target_path == std::path::Path::new(DEFAULT_SLS_LOGTAIL_PATH)
             && default_path_telemetry_disabled()
         {
-            return;
+            return None;
         }
 
         // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
@@ -363,7 +342,19 @@ impl LogtailExporter {
                     "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
                 );
             });
+            return None;
+        }
+        Some(target_path)
+    }
+
+    fn write_batch(&self, events: &[GenAISemanticEvent]) {
+        let Some(target_path) = self.output_path() else {
             return;
+        };
+        if self.dynamic {
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
         }
 
         let mut records =
@@ -410,6 +401,10 @@ impl LogtailExporter {
 }
 
 impl GenAIExporter for LogtailExporter {
+    fn is_active(&self) -> bool {
+        self.output_path().is_some()
+    }
+
     fn name(&self) -> &str {
         // Distinguish dynamic exporters so the runtime can replace an existing
         // dynamic exporter instead of accumulating duplicates when the SLS path
@@ -1229,6 +1224,7 @@ pub mod tests {
         };
 
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(!exporter.is_active());
         exporter.export(&[event]);
 
         assert!(!tmp.exists());
@@ -1255,11 +1251,14 @@ pub mod tests {
         };
 
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(exporter.is_active());
         exporter.export(&[event]);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.is_empty());
         assert!(content.contains("\"gen_ai.operation.name\""));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!exporter.is_active());
 
         std::fs::remove_dir_all(&tmp).ok();
         reset_logtail_state();
@@ -1288,9 +1287,19 @@ pub mod tests {
         // path (env var unset → the path came from runtime config).
         let exporter = LogtailExporter::new(None, true).expect("enabled dynamic path");
 
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(exporter.is_active());
+        set_dynamic_logtail_path("");
+        assert!(!exporter.is_active());
+        exporter.export(std::slice::from_ref(&event));
+        assert!(
+            !p1.exists(),
+            "paused delivery must not create the previous path"
+        );
+
         // The config path changes before the next batch is exported.
         set_dynamic_logtail_path(p2.to_str().unwrap());
-        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(exporter.is_active());
         exporter.export(&[event]);
 
         assert!(

@@ -27,6 +27,34 @@ pub struct BuildOutput {
     pub pending_response_id: Option<String>,
 }
 
+impl BuildOutput {
+    /// Transfer serialized bodies after HTTP persistence and semantic parsing.
+    pub(crate) fn take_raw_bodies(&mut self, results: &mut [AnalysisResult]) {
+        let Some(GenAISemanticEvent::LLMCall(call)) = self.events.first_mut() else {
+            return;
+        };
+        let Some(http) = results.iter_mut().find_map(|result| match result {
+            AnalysisResult::Http(http) => Some(http),
+            AnalysisResult::HttpContext(context) => Some(&mut context.http),
+            _ => None,
+        }) else {
+            return;
+        };
+        call.request.raw_body = take_serialized_body(&mut http.request_body);
+        call.response.raw_body = take_serialized_body(&mut http.response_body);
+    }
+}
+
+fn take_serialized_body(body: &mut Option<String>) -> Option<String> {
+    let mut body = body.take()?;
+    // Serializer growth can leave almost twice the payload capacity. Do not
+    // carry that spare allocation through session waiting and callbacks.
+    if body.capacity() > body.len().saturating_add(body.len() / 4) {
+        body.shrink_to_fit();
+    }
+    Some(body)
+}
+
 /// Builder that constructs GenAI semantic events from AnalysisResult
 pub struct GenAIBuilder {
     /// Session ID prefix (timestamp-based, unique per agentsight run)
@@ -82,6 +110,40 @@ impl GenAIBuilder {
         format!("pmk-{:x}", hasher.finalize())
     }
 
+    pub(super) fn pending_match_key_json(
+        pid: u32,
+        timestamp: u64,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> String {
+        struct HashWriter<'a>(&'a mut Sha256);
+        impl std::io::Write for HashWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"agentsight-pending-v1\0");
+        for value in [
+            pid.to_string(),
+            timestamp.to_string(),
+            method.to_owned(),
+            path.to_owned(),
+        ] {
+            hasher.update(value.as_bytes());
+            hasher.update(b"\0");
+        }
+        if let Err(error) = serde_json::to_writer(HashWriter(&mut hasher), body) {
+            log::warn!("Cannot hash parsed request body: {error}");
+        }
+        format!("pmk-{:x}", hasher.finalize())
+    }
+
     fn parsed_request_match_body(
         request: &ParsedRequest,
         body: Option<&serde_json::Value>,
@@ -115,21 +177,93 @@ impl GenAIBuilder {
         response_mapper: &ResponseSessionMapper,
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_for_delivery(results, response_mapper, pid_agent_name_cache, true)
+    }
+
+    /// Build semantic delivery without pending-row copies when no SQLite sink exists.
+    pub(crate) fn build_for_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_delivery(
+            results,
+            response_mapper,
+            pid_agent_name_cache,
+            need_pending,
+            true,
+        )
+    }
+
+    /// Build without body copies; move bodies with `BuildOutput::take_raw_bodies`
+    /// only after deciding whether the original HTTP record is needed for fallback.
+    pub(crate) fn build_for_owned_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_delivery(
+            results,
+            response_mapper,
+            pid_agent_name_cache,
+            need_pending,
+            false,
+        )
+    }
+
+    fn build_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+        copy_raw: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
         let timer = StageTimer::start("genai");
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        if let Some(llm_call) = self.build_llm_call(results, response_mapper, pid_agent_name_cache)
+        if let Some(mut llm_call) =
+            self.build_llm_call_with_raw(results, response_mapper, pid_agent_name_cache, copy_raw)
         {
+            if let Some(reason) = results.iter().find_map(|result| match result {
+                AnalysisResult::Abandoned(reason) => Some(*reason),
+                _ => None,
+            }) {
+                llm_call
+                    .metadata
+                    .insert("abandon_reason".into(), reason.as_str().into());
+                llm_call.metadata.insert("incomplete".into(), "true".into());
+                if reason == crate::aggregator::RemoveReason::OverBudget {
+                    llm_call.metadata.insert("truncated".into(), "true".into());
+                }
+                if llm_call.response.messages.is_empty() {
+                    llm_call.response.messages.push(OutputMessage {
+                        role: "assistant".into(),
+                        parts: Vec::new(),
+                        name: None,
+                        finish_reason: Some("incomplete".into()),
+                    });
+                } else {
+                    for message in &mut llm_call.response.messages {
+                        message.finish_reason = Some("incomplete".into());
+                    }
+                }
+            }
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
-                AnalysisResult::Http(h) => Some(h.clone()),
+                AnalysisResult::Http(h) => Some(h),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             });
 
             // Extract input messages for the pending record
-            let (input_messages_json, system_instructions_json) = {
+            let (input_messages_json, system_instructions_json) = if need_pending {
                 let sys: Vec<_> = llm_call
                     .request
                     .messages
@@ -150,6 +284,8 @@ impl GenAIBuilder {
                         serde_json::to_string(&sys).ok()
                     },
                 )
+            } else {
+                (None, None)
             };
 
             // Determine response_id from call metadata (may come from parsed_message
@@ -165,9 +301,25 @@ impl GenAIBuilder {
                     .get_session_by_pid(llm_call.pid as u32)
                     .is_some();
 
+            let request_session = results.iter().any(|result| match result {
+                AnalysisResult::Message(message) => message.request_metadata_session_id().is_some(),
+                AnalysisResult::HttpContext(context) => context
+                    .request
+                    .as_ref()
+                    .and_then(|request| request.get("metadata"))
+                    .and_then(crate::analyzer::message::types::session_id_from_metadata)
+                    .is_some(),
+                _ => false,
+            });
+
             // If response_id exists but mapper didn't resolve session_id, queue
             // for deferred resolution so the next FileWrite event can fix it.
-            if response_id.is_some() && !mapper_hit {
+            if response_id.is_some()
+                && response_mapper.is_enabled()
+                && !request_session
+                && !mapper_hit
+                && !llm_call.metadata.contains_key("abandon_reason")
+            {
                 pending_response_id = response_id;
                 log::debug!(
                     "GenAI response_id {} not yet in mapper, will defer session_id resolution",
@@ -175,7 +327,7 @@ impl GenAIBuilder {
                 );
             }
 
-            pending = Some(PendingCallInfo {
+            pending = need_pending.then(|| PendingCallInfo {
                 call_id: llm_call.call_id.clone(),
                 trace_id: llm_call.metadata.get("response_id").cloned(),
                 conversation_id: llm_call.metadata.get("conversation_id").cloned(),
@@ -679,6 +831,35 @@ mod tests {
     use crate::genai::semantic::MessagePart;
     use crate::probes::sslsniff::SslEvent;
     use std::rc::Rc;
+
+    #[test]
+    fn payload_memory_delivery_does_not_defer_explicit_openai_request_session() {
+        let request = make_request(
+            "/v1/chat/completions",
+            r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"metadata":{"session_id":"session-fixture"}}"#,
+        );
+        let result = crate::aggregator::AggregatedResult::RequestOnly {
+            connection_id: ConnectionId {
+                pid: 1234,
+                ssl_ptr: 1,
+            },
+            request,
+        };
+        let analysis = crate::analyzer::Analyzer::new().analyze_for_delivery(&result, false);
+        let (output, _) = GenAIBuilder::new().build_with_pending(
+            &analysis,
+            &ResponseSessionMapper::new(),
+            &std::collections::HashMap::new(),
+        );
+        assert!(output.pending_response_id.is_none());
+        let GenAISemanticEvent::LLMCall(call) = &output.events[0] else {
+            panic!("expected LLM call")
+        };
+        assert_eq!(
+            call.metadata.get("session_id").map(String::as_str),
+            Some("session-fixture")
+        );
+    }
 
     fn make_request(path: &str, body: &str) -> ParsedRequest {
         let buf = body.as_bytes().to_vec();

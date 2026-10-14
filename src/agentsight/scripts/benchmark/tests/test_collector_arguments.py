@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import sys
 from pathlib import Path
 
@@ -79,4 +80,35 @@ def test_valid_timing_collects_samples(
         ],
     )
     assert collect_metrics.main() == 0
-    assert len(collector_output.read_text(encoding="utf-8").splitlines()) == 2
+    assert len(collector_output.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_shutdown_sample_keeps_drop_counters_published_after_the_last_tick(
+    collector_output: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropped = 0
+
+    def sample(*args: object) -> tuple[dict[str, int], int, float]:
+        return {"timestamp": 1, "ring_buffer_dropped": dropped}, 0, 0.0
+
+    def stop_after_publish(_: float) -> None:
+        nonlocal dropped
+        dropped = 7
+        collect_metrics.stop(0, None)
+
+    monkeypatch.setattr(collect_metrics, "sample", sample)
+    monkeypatch.setattr(collect_metrics.time, "sleep", stop_after_publish)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "collect_metrics.py",
+            "--pid=123",
+            f"--output={collector_output}",
+            "--duration=0",
+        ],
+    )
+    assert collect_metrics.main() == 0
+    with collector_output.open() as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["ring_buffer_dropped"] for row in rows] == ["0", "7"]

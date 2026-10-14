@@ -250,6 +250,14 @@ npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
 
 完成后，运行 `make build-frontend && cargo build --release` 将更新后的 UI 嵌入二进制。
 
+### 内存 benchmark（Linux）
+
+[`scripts/benchmark/single_run/memory_run.sh`](scripts/benchmark/single_run/memory_run.sh)
+可指定 Agent 数量和输出 tok/s 来测量 AgentSight RSS，默认 32 个 Agent、每路 100 tok/s、60 秒。
+脚本会打印平均/峰值 RSS、整机内存占比和负载/采集校验，并通过
+`--ab --baseline REF --candidate REF` 支持 Git A/B 对比。`--ring-buffer-mb N` 可指定 Ring Buffer 大小；探针计数发现丢事件时，对比结果判为无效。采集需要 root 或 eBPF capabilities，
+脚本默认请求 sudo。一键命令、工作区快照和报告说明见 [benchmark 使用指南](scripts/docs/BENCHMARK_USAGE_zh.md)。
+
 
 ## 快速开始
 
@@ -409,7 +417,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 
 ### SQLite 存储（`storage`）
 
-`agentsight.json` schema v4 为每个 AgentSight 自有 SQLite 存储统一使用 `retention_days`、
+`agentsight.json` schema v5 为每个 AgentSight 自有 SQLite 存储统一使用 `retention_days`、
 `max_db_size_mb` 和 `check_interval_secs` 三个策略项；值为 `0` 时分别关闭按时间、按容量或定时维护。
 主库与 GenAI 库默认每 60 秒维护一次，复用、因果与拦截库也有独立策略。每个长期运行进程最多使用一个
 轻量维护线程顺序调度该进程负责的数据库，`trace` 与 `serve` 再通过逐库锁协调。清理先删除过期记录，
@@ -442,14 +450,29 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `event_channel_capacity` | 10,000 | Probe → 事件通道的有界容量 |
-| `event_channel_policy` | `"backpressure"` | 满载策略：`backpressure` / `drop_newest` / `sample` |
+| `event_channel_policy` | `"backpressure"` | 通过字节限额后等待队列槽位；也支持 `drop_newest` 与 `sample:N` |
 | `event_channel_max_bytes_mb` | 64 | 排队事件的字节预算（单条 SSL 记录可达 4 MiB，仅靠槽位数无法限定内存）|
 | `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
-| `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
+| `pending_genai_max_bytes_mb` | 16 | 等待 session_id 的最大字节数 |
 | `pid_cache_size` | 1,024 | PID → agent_name 的 LRU 缓存大小 |
+| `connection_capacity` | 32 | HTTP 连接缓存条目数；至少设为预计并发连接数，并重启采集 |
 | `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
-| `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时（秒） |
-| `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
+| `connection_idle_timeout_secs` | 60 | SQLite pending snapshot 的空闲软超时 |
+| `connection_hard_timeout_secs` | 300 | 空闲硬超时：输出不完整记录并释放状态；0 关闭该超时 |
+| `connection_max_bytes_mb` | 64 | HTTP/1 与 HTTP/2 共用的 payload 保留预算 |
+| `ffi_channel_max_bytes_mb` | 64 | FFI payload 预算，包含执行中的 callback |
+| `max_sse_retained_mb` | 2 | 单流 SSE payload 上限 |
+| `retain_raw_sse` | `false` | 为 raw 导出或调试保留原始 SSE 序列 |
+| `ring_buffer_mb` | 64 | eBPF Ring Buffer 大小（必须为 2 的幂） |
+
+仅投递语义事件时，SSE delta 会增量归约，原始 TLS buffer 在流结束前即可释放。
+强制移除连接时会输出带原因的不完整记录。Probe 与 FFI 队列同时执行条数和字节限额，
+并记录被拒绝的事件数。这些预算约束保留的 payload；评估进程 RSS 时，
+还应计入 ring buffer、解码器工作内存及 allocator 开销。超时、raw 捕获与过载语义见
+[配置参考](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#运行时上限)。
+
+配置 schema v5 随包提供上述默认值。启动升级时会备份并整体替换旧配置，自定义规则与设置需从备份恢复。
+实现说明见 [HTTP payload 所有权与内存限额](docs/design/payload-memory_zh.md)。
 
 ### 运行时指标导出
 

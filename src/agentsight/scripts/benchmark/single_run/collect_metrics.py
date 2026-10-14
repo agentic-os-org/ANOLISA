@@ -311,6 +311,9 @@ def main() -> int:
     )
     parser.add_argument("--input-qps", type=float, default=0)
     parser.add_argument(
+        "--start-file", type=Path, help="wait for an agent-load monotonic start barrier"
+    )
+    parser.add_argument(
         "--metrics-file",
         type=Path,
         help="optional Prometheus or legacy key=value internal metrics snapshot",
@@ -350,6 +353,17 @@ def main() -> int:
         raise SystemExit(f"process {args.pid} does not exist")
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    if args.start_file is not None:
+        deadline = time.monotonic() + 65
+        while not args.start_file.exists() and not STOP:
+            if time.monotonic() > deadline:
+                raise SystemExit("agent load did not publish its start barrier")
+            time.sleep(0.05)
+        if STOP:
+            return 0
+        start = json.loads(args.start_file.read_text(encoding="utf-8"))["start"]
+        while time.monotonic() < start and not STOP:
+            time.sleep(max(0, min(0.05, start - time.monotonic())))
     started = time.monotonic()
     previous_time = started
     previous_ticks = read_cpu_ticks(args.pid)
@@ -400,6 +414,13 @@ def main() -> int:
                         pass
                     return SAFETY_EXIT_CODE
             time.sleep(args.interval)
+        # Include counters published while validation drains the capture queue,
+        # including updates after the collector's last periodic sample.
+        row, _, _ = sample(
+            args.pid, previous_ticks, previous_time, args.input_qps, args.metrics_file
+        )
+        writer.writerow(row)
+        handle.flush()
     return 0
 
 

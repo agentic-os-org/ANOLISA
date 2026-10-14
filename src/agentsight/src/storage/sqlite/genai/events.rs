@@ -403,10 +403,20 @@ impl GenAISqliteStore {
         &self,
         event: &GenAISemanticEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let event_json = super::pending::completed_event_json(event)?;
+        self.store_serialized_event(event, &event_json)
+    }
+
+    /// Reuse completed JSON without another allocation on an insertion retry.
+    pub(super) fn store_serialized_event(
+        &self,
+        event: &GenAISemanticEvent,
+        event_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Attempt insert with retry on SQLITE_FULL
         let mut retries = 0;
         loop {
-            match self.try_insert_event(event) {
+            match self.try_insert_event(event, event_json) {
                 Ok(()) => {
                     return Ok(());
                 }
@@ -444,9 +454,18 @@ impl GenAISqliteStore {
     fn try_insert_event(
         &self,
         event: &GenAISemanticEvent,
+        event_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let event_json = serde_json::to_string(event)?;
+        let message_columns = match event {
+            GenAISemanticEvent::LLMCall(call) => {
+                Some(super::pending::message_columns(call, event_json))
+            }
+            _ => None,
+        };
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI insertion mutex poisoned: {error}"))?;
 
         match event {
             GenAISemanticEvent::LLMCall(call) => {
@@ -485,23 +504,7 @@ impl GenAISqliteStore {
                     }
                 };
 
-                // Extract input messages (incremental: latest round only)
-                let input_messages: Option<String> = {
-                    let latest =
-                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
-                    if latest.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&latest).ok()
-                    }
-                };
-
-                // Extract output messages
-                let output_messages: Option<String> = if call.response.messages.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&call.response.messages).ok()
-                };
+                let (input_messages, output_messages) = message_columns.unwrap_or_default();
 
                 // Extract finish reasons
                 let finish_reasons: Option<String> = if call.response.messages.is_empty() {
@@ -539,12 +542,12 @@ impl GenAISqliteStore {
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
                         is_sse, sse_event_count, event_json, tool_call_ids, call_kind,
-                        first_output_timestamp_ns, input_tokens_includes_cache
+                        first_output_timestamp_ns, pending_match_key, input_tokens_includes_cache
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44
                     )",
                     params![
                         "llm_call",
@@ -577,8 +580,8 @@ impl GenAISqliteStore {
                         cache_creation,
                         cache_read,
                         system_instructions,
-                        input_messages,
-                        output_messages,
+                        input_messages.as_deref(),
+                        output_messages.as_deref(),
                         call.metadata.get("user_query"),
                         call.metadata.get("method"),
                         call.metadata.get("path"),
@@ -591,6 +594,7 @@ impl GenAISqliteStore {
                         call.metadata
                             .get("first_output_timestamp_ns")
                             .and_then(|value| value.parse::<i64>().ok()),
+                        call.metadata.get("pending_match_key"),
                         1i64,
                     ],
                 )?;

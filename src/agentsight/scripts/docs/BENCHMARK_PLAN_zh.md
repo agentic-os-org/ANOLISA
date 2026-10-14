@@ -125,6 +125,26 @@ request ID 精确对账仍能提供端到端采集丢失率；缺失计数器不
 新增脚本。Fault injector 的 HTTP/2 非法帧先由 Rust fixture 回归测试覆盖，不能
 把普通 h2load 流量误写成异常 HTTP/2 测试。
 
+### 2.3 固定输出 Token 速率的独立 Agent 压测
+
+启动方式、常用参数、产物说明和资源采样方法见 [benchmark 使用说明](BENCHMARK_USAGE_zh.md)。
+
+`single_run/run.sh --agents N --tokens-per-second RATE` 启动 N 个独立 Python 客户端。每个客户端维持一路 HTTPS/SSE 请求，完成后立即开始下一轮。mock 按指定速率发送重复的 ` x`，启动前用 `tiktoken` 的 `cl100k_base` 校验其 Token 数；每个请求的输入 usage 仍是固定 12 Token 的模拟值。
+
+```bash
+cd src/agentsight
+bash scripts/benchmark/single_run/run.sh --agents 32 --tokens-per-second 100 \
+  --duration 15 --tokens-per-response 200
+```
+
+先在当前 Python 环境安装 `scripts/benchmark/requirements.txt`。`tiktoken` 首次下载编码数据后会缓存。此模式要求 HTTP/1.1 SSE，无需 k6。
+
+指定 `--agents` 或 `--tokens-per-second` 即启用 Agent 模式，另一项默认分别为 32 和 100。`--tokens-per-response` 默认 1000；`--payload-kb` 控制请求填充大小。`--startup-delay` 默认 5 秒，为探针发现预留时间。测量时长不包含启动阶段；退出前会收完最后一轮在途响应。每次使用新的输出目录。
+
+`agent-summary.json`、`agents.jsonl.gz` 和 `benchmark-report.md` 记录独立 PID、每路实际接收的输出速率和活跃流峰值/均值。每路速率必须位于目标的 `--rate-tolerance` 范围内（默认 0.05），并发流重叠也必须达标；失败返回非零。输入 usage 和测量窗口之后收完的 Token 不计入实测输出速率。
+
+测量 eBPF 采集时，先以 root/所需 capabilities 启动 AgentSight，在 `cmdline.allow` 中使用 `["*python*", "*agents.py", "--worker"]` 规则仅匹配客户端，保留其他生产配置并排除发现 mock 服务端的规则。通过 `--agentsight-pid` 传入其真实 PID，可选传入 `--metrics-file` 和 standalone SQLite `--db`；未指定时只验证负载。现有资源采样器测量的是进程 RSS，单位为 MiB，不能直接复现 LoongCollector/FFI 的 WSS，也不能据此证明 275 MB 内存目标已达成。
+
 ## 3. 哪些内容做 before/after
 
 | 测试 | 对比方式 | 原因 |

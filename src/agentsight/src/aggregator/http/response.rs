@@ -17,6 +17,8 @@ pub struct AggregatedResponse {
     pub completion_timestamp_ns: Option<u64>,
     /// SSE events collected during streaming (if is_sse is true)
     pub sse_events: Vec<ParsedSseEvent>,
+    /// Original event count before delta reduction.
+    pub captured_sse_event_count: Option<usize>,
     /// Raw bytes that arrived as RawData while in SseActive state. These are
     /// continuation chunks of an oversized SSE event (e.g. OpenAI Responses
     /// API's `response.completed` echoing the full system prompt + tools)
@@ -32,6 +34,7 @@ impl AggregatedResponse {
             parsed,
             completion_timestamp_ns: None,
             sse_events: Vec::new(),
+            captured_sse_event_count: None,
             sse_continuation_bytes: None,
         }
     }
@@ -77,10 +80,12 @@ impl AggregatedResponse {
     /// Get end timestamp (last packet) in nanoseconds
     /// Uses the final body fragment for non-SSE responses.
     pub fn end_timestamp_ns(&self) -> u64 {
-        self.sse_events
-            .last()
-            .map(|e| e.source_event().timestamp_ns)
-            .or(self.completion_timestamp_ns)
+        self.completion_timestamp_ns
+            .or_else(|| {
+                self.sse_events
+                    .last()
+                    .map(|e| e.source_event().timestamp_ns)
+            })
             .unwrap_or_else(|| self.start_timestamp_ns())
     }
 
@@ -130,7 +135,8 @@ impl AggregatedResponse {
 
     /// Get SSE event count
     pub fn sse_event_count(&self) -> usize {
-        self.sse_events.len()
+        self.captured_sse_event_count
+            .unwrap_or(self.sse_events.len())
     }
 
     /// Add SSE event
@@ -448,6 +454,7 @@ mod latency_tests {
                 source_event: ssl_event("", 10),
             },
             sse_events,
+            captured_sse_event_count: None,
             sse_continuation_bytes: None,
         }
     }

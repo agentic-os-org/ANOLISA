@@ -34,6 +34,11 @@ AgentSight 采集到的一切都以 SQLite 数据库形式留在本机。Dashboa
 
 > 这些文件包含完整的提示词与模型回答，请按敏感数据对待：保持安装时的目录权限，往外拷贝时务必谨慎。
 
+SQLite 为唯一活跃输出时会立即保存已经完成的调用。默认 Logtail 即使已注册，只要部署文件不存在
+或 telemetry 已关闭，就不会增加 session 等待。如果之后才识别出 Agent 的会话，会同时更新已存储
+的 session ID 与完整事件 JSON。FFI callback 和活跃的外部 exporter 仍在投递前等待 session 解析。
+每次调用都会检查输出门控，因此启用或恢复 Logtail 后，后续调用会恢复该等待。
+
 ## 保留与容量上限
 
 schema v4 为每个 AgentSight 自有数据库统一配置 `retention_days`、`max_db_size_mb` 和

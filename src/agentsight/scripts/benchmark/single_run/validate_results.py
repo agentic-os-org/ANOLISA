@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Iterable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +107,7 @@ def load_captured(
     """Find captured IDs, narrowing indexed queries to the current run."""
     captured: dict[str, list[tuple[str, int | None]]] = {}
     uri = f"file:{db_path}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=0.5) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
             for row in connection.execute(
@@ -203,7 +205,7 @@ def load_captured_incremental(
     next_token_rowid = token_after_rowid
     next_pending_ids = set(pending_genai_ids)
     uri = f"file:{db_path}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=0.5) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
             for row in connection.execute(
@@ -362,17 +364,29 @@ def make_report(
         token_correct = {
             request_id
             for request_id in matched
-            if any(total == expected_total_tokens for _, total in captured[request_id])
+            if any(
+                status == "complete" and total == expected_total_tokens
+                for status, total in captured[request_id]
+            )
         }
     for request_id in complete:
         total = next(
             (
                 total
                 for status, total in captured[request_id]
-                if status == "complete" and total is not None
+                if status == "complete" and total == expected_total_tokens
             ),
             None,
         )
+        if total is None:
+            total = next(
+                (
+                    total
+                    for status, total in captured[request_id]
+                    if status == "complete" and total is not None
+                ),
+                None,
+            )
         if total is not None:
             captured_token_totals.append(total)
     report = {
@@ -381,17 +395,11 @@ def make_report(
         "captured_calls": len(captured),
         "matched": len(matched),
         "complete": len(complete),
-        "token_correct": (
-            len(token_correct) if expected_total_tokens is not None else None
-        ),
+        "token_correct": (len(token_correct) if expected_total_tokens is not None else None),
         "expected_total_tokens": (
-            expected_total_tokens * len(successful)
-            if expected_total_tokens is not None
-            else None
+            expected_total_tokens * len(successful) if expected_total_tokens is not None else None
         ),
-        "captured_total_tokens": (
-            sum(captured_token_totals) if captured_token_totals else None
-        ),
+        "captured_total_tokens": (sum(captured_token_totals) if captured_token_totals else None),
         "missing_ids": sorted(expected - captured.keys()),
         "extra_ids": sorted(captured.keys() - expected),
     }
@@ -417,8 +425,17 @@ def wait_for_report(
 ) -> dict[str, Any]:
     """Poll read-only SQLite until capture settles or the deadline expires."""
     deadline = time.monotonic() + wait_seconds
+    captured: Captured = {}
     while True:
-        captured = load_captured(db_path, prefix, expected, since_ns)
+        try:
+            captured = load_captured(db_path, prefix, expected, since_ns)
+        except sqlite3.OperationalError as error:
+            if (getattr(error, "sqlite_errorcode", 0) & 0xFF) not in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+            logging.warning("Capture database busy; retrying within validation deadline: %s", error)
         report = make_report(expected, successful, captured, expected_total_tokens)
         if report["completeness_ratio"] >= min_completeness:
             return report
@@ -447,20 +464,26 @@ def wait_for_streaming_report(
     pending_genai_ids: set[int] = set()
     completion_deadline: float | None = None
     while True:
-        incremental, genai_after_id, token_after_rowid, pending_genai_ids = (
-            load_captured_incremental(
-                db_path,
-                prefix,
-                # The per-run prefix is the authoritative boundary. AgentSight
-                # timestamps can come from a different clock domain than the
-                # harness wall clock, so applying since_ns here can discard a
-                # correctly captured run before its request ID is inspected.
-                None,
-                genai_after_id,
-                token_after_rowid,
-                pending_genai_ids,
+        try:
+            incremental, genai_after_id, token_after_rowid, pending_genai_ids = (
+                load_captured_incremental(
+                    db_path,
+                    prefix,
+                    # Run IDs are authoritative across capture clock domains.
+                    None,
+                    genai_after_id,
+                    token_after_rowid,
+                    pending_genai_ids,
+                )
             )
-        )
+        except sqlite3.OperationalError as error:
+            if (getattr(error, "sqlite_errorcode", 0) & 0xFF) not in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+            logging.warning("Capture database busy; retrying within validation deadline: %s", error)
+            incremental = {}
         merge_captured(captured, incremental)
         if completion_marker.exists():
             expected, successful = (

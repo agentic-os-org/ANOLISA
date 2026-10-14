@@ -107,47 +107,36 @@ impl ParsedSseEvent {
     /// - DashScope/Bailian native protocol: a terminal `finish_reason` inside
     ///   the `output` **object**. It never sends `data: [DONE]`.
     pub fn is_done(&self) -> bool {
-        if self.is_synthetic_done {
+        self.is_done_with_json(self.json_body().as_ref())
+    }
+
+    /// Whether completion came from HTTP framing rather than SSE payload.
+    pub(crate) fn is_synthetic_done(&self) -> bool {
+        self.is_synthetic_done
+    }
+
+    /// Reuse the JSON parsed by an incremental consumer for terminator detection.
+    pub(crate) fn is_done_with_json(&self, json: Option<&serde_json::Value>) -> bool {
+        if self.is_synthetic_done || self.event.as_deref() == Some("message_stop") {
             return true;
         }
-        // Anthropic SSE: event field is "message_stop"
-        if self.event.as_deref() == Some("message_stop") {
-            return true;
-        }
-        // OpenAI Responses API: do NOT terminate based on event field alone.
-        // The `response.completed` data field routinely exceeds 16KB (echoes
-        // instructions + tools + output), so the first TLS chunk only has
-        // the event header + truncated data. The stream must stay open to
-        // receive remaining chunks; it will terminate via the HTTP chunked
-        // end marker `0\r\n\r\n` (synthetic done) or when the data-field
-        // JSON is fully parseable (check below).
         let data = self.data();
         let text = String::from_utf8_lossy(data);
-        let trimmed = text.trim();
-        // OpenAI style
-        if trimmed == "[DONE]" || trimmed == "[END]" {
+        if matches!(text.trim(), "[DONE]" | "[END]") {
             return true;
         }
-        // Anthropic style: data contains {"type":"message_stop"}
-        // Responses API style: data contains {"type":"response.completed",...}
-        if trimmed.starts_with('{') {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                let t = v.get("type").and_then(|t| t.as_str());
-                if t == Some("message_stop")
-                    || t == Some("response.completed")
-                    || t == Some("response.failed")
-                    || t == Some("response.incomplete")
-                {
-                    return true;
-                }
-                if Self::is_dashscope_native_done(&v) {
-                    return true;
-                }
-                // Gemini style: no sentinel frame — the terminal chunk is the
-                // one whose candidates carry a non-empty finishReason. Middle
-                // chunks omit the field or send an explicit null, both of
-                // which must keep the stream open.
-                if v.get("candidates")
+        json.is_some_and(|value| {
+            matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some(
+                    "message_stop"
+                        | "response.completed"
+                        | "response.failed"
+                        | "response.incomplete"
+                )
+            ) || Self::is_dashscope_native_done(value)
+                || value
+                    .get("candidates")
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|candidates| {
                         candidates.iter().any(|candidate| {
@@ -157,12 +146,7 @@ impl ParsedSseEvent {
                                 .is_some_and(|reason| !reason.is_empty())
                         })
                     })
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        })
     }
 
     /// DashScope/Bailian native protocol terminator detection.

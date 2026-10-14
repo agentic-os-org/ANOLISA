@@ -254,6 +254,7 @@ impl GenAISqliteStore {
         &self,
         max_db_size_mb: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let _timer = crate::runtime_metrics::StageTimer::start("genai_maintenance");
         let deleted_by_age = self.purge_expired()?;
         let limit_bytes = max_db_size_mb.saturating_mul(1024 * 1024);
         if (deleted_by_age > 0 || limit_bytes > 0)
@@ -341,7 +342,9 @@ impl GenAISqliteStore {
         }
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
         let (event_count, event_bytes): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(event_json, ''))), 0)
+            // Read stored byte lengths without loading and decoding every large
+            // JSON value while holding the connection needed by capture delivery.
+            "SELECT COUNT(*), COALESCE(SUM(octet_length(event_json)), 0)
              FROM genai_events WHERE status != 'pending'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -354,7 +357,7 @@ impl GenAISqliteStore {
         let (evaluation_count, evaluation_bytes): (i64, i64) =
             if table_exists(&conn, "evaluation_runs")? {
                 conn.query_row(
-                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(result_json, ''))), 0)
+                    "SELECT COUNT(*), COALESCE(SUM(octet_length(result_json)), 0)
                      FROM evaluation_runs",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?)),

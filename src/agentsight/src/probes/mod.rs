@@ -1,4 +1,5 @@
 #![allow(clippy::module_inception)]
+pub(crate) mod budget;
 pub mod filewatch;
 pub mod filewrite;
 pub mod pidns;

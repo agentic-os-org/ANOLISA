@@ -135,6 +135,26 @@ new script only when those responsibilities cannot reasonably contain the
 behavior. Malformed HTTP/2 frames remain Rust fixture regressions initially;
 ordinary h2load traffic must not be described as malformed HTTP/2 testing.
 
+### 2.3 Independent agents at a fixed output token rate
+
+See the [benchmark usage guide](BENCHMARK_USAGE.md) for setup, common options, output files, and resource collection.
+
+`single_run/run.sh --agents N --tokens-per-second RATE` starts N independent Python clients. Each keeps one HTTPS/SSE request active and immediately starts another after completion. The token-paced mock sends repeated ` x`, verified with `tiktoken`'s `cl100k_base` before launch; input usage remains a synthetic 12 tokens per request.
+
+```bash
+cd src/agentsight
+bash scripts/benchmark/single_run/run.sh --agents 32 --tokens-per-second 100 \
+  --duration 15 --tokens-per-response 200
+```
+
+Install `scripts/benchmark/requirements.txt` in the active Python environment first. `tiktoken` caches its encoding data after the first download. This mode requires HTTP/1.1 SSE and does not require k6.
+
+`--agents` and `--tokens-per-second` default to 32 and 100 when either selects agent mode. `--tokens-per-response` defaults to 1000; `--payload-kb` controls request padding. `--startup-delay` defaults to 5 seconds for probe discovery. The measurement duration excludes startup; final in-flight responses drain before exit. Use a fresh output directory per run.
+
+`agent-summary.json`, `agents.jsonl.gz`, and `benchmark-report.md` record distinct PIDs, per-agent received output rates, and peak/average concurrent streams. Each rate must be within `--rate-tolerance` (default 0.05) of its target; stream overlap must also pass. Failures return nonzero. Input usage and drained responses are excluded from measured output rates.
+
+For eBPF measurement, start AgentSight with root/capabilities beforehand and match only the clients using `cmdline.allow` rule `["*python*", "*agents.py", "--worker"]`; preserve the other production settings and exclude mock-server discovery rules. Pass its live PID via `--agentsight-pid`, optionally `--metrics-file` and standalone SQLite `--db`. Without these, the run verifies the workload only. The existing resource sampler measures process RSS in MiB; this does not reproduce LoongCollector/FFI WSS or establish the 275 MB memory target.
+
 ## 3. Before/after scope
 
 | Test | Comparison | Reason |

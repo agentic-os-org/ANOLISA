@@ -252,6 +252,11 @@ impl Storage {
         }
         log::debug!("Storing analysis result: {result:?}");
         let id = match result {
+            AnalysisResult::Abandoned(_) => Ok(0),
+            AnalysisResult::HttpContext(context) if context.retain_raw => {
+                self.http_store.insert(&context.http)
+            }
+            AnalysisResult::HttpContext(_) => Ok(0),
             AnalysisResult::Audit(record) => self.audit_store.insert(record),
             AnalysisResult::Token(record) => self.token_store.insert(record),
             AnalysisResult::Message(_msg) => {

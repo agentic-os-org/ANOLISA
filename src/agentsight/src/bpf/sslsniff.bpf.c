@@ -139,6 +139,10 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
             SSL_EMIT_ONE(probe_SSL_data_medium, SSL_TIER_MEDIUM, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_); \
         else if (_l <= SSL_TIER_LARGE)                                                     \
             SSL_EMIT_ONE(probe_SSL_data_large, SSL_TIER_LARGE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);   \
+        else if (_l <= SSL_TIER_XLARGE)                                                    \
+            SSL_EMIT_ONE(probe_SSL_data_xlarge, SSL_TIER_XLARGE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_); \
+        else if (_l <= SSL_TIER_XXLARGE)                                                   \
+            SSL_EMIT_ONE(probe_SSL_data_xxlarge, SSL_TIER_XXLARGE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_); \
         else                                                                              \
             SSL_EMIT_ONE(probe_SSL_data_t, MAX_BUF_SIZE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);         \
     } while (0)

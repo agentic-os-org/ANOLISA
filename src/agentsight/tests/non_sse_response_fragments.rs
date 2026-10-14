@@ -1,7 +1,7 @@
 //! Response framing regressions through Parser → Aggregator → Analyzer → GenAI → SQLite.
 mod common;
 
-use agentsight::aggregator::{AggregatedResult, Aggregator};
+use agentsight::aggregator::{AggregatedResult, Aggregator, RemoveReason};
 use agentsight::analyzer::Analyzer;
 use agentsight::config::RuntimeLimits;
 use agentsight::event::Event;
@@ -379,8 +379,9 @@ fn incomplete_responses_are_bounded_and_never_complete_on_timeout() {
     ] {
         let mut aggregator = Aggregator::with_limits(4, &limits);
         request(&mut aggregator);
-        assert!(feed(&mut aggregator, 0, &response(&[], framing), 100).is_empty());
-        assert!(feed(&mut aggregator, 0, &[b'x'; 1025], 200).is_empty());
+        let mut removed = feed(&mut aggregator, 0, &response(&[], framing), 100);
+        removed.extend(feed(&mut aggregator, 0, &[b'x'; 1025], 200));
+        assert_incomplete(&removed, RemoveReason::OverBudget);
         assert!(!aggregator.has_pending());
         request(&mut aggregator);
         assert_eq!(feed(&mut aggregator, 0, &full_response(), 300).len(), 1);
@@ -396,9 +397,29 @@ fn malformed_framing_does_not_emit_complete() {
     ] {
         let mut aggregator = Aggregator::new();
         request(&mut aggregator);
-        assert!(feed(&mut aggregator, 0, &response(body.as_bytes(), framing), 100).is_empty());
+        let removed = feed(&mut aggregator, 0, &response(body.as_bytes(), framing), 100);
+        assert_incomplete(&removed, RemoveReason::ProtocolError);
         assert!(!aggregator.has_pending());
     }
+}
+
+fn assert_incomplete(results: &[AggregatedResult], expected: RemoveReason) {
+    assert!(matches!(results, [AggregatedResult::Abandoned { reason, .. }] if *reason == expected));
+    let analyzed = Analyzer::new().analyze_aggregated(&results[0]);
+    let (output, _) = GenAIBuilder::new().build_with_pending(
+        &analyzed,
+        &ResponseSessionMapper::new(),
+        &HashMap::new(),
+    );
+    assert!(output.pending_response_id.is_none());
+    let [GenAISemanticEvent::LLMCall(call)] = output.events.as_slice() else {
+        panic!("partial request must remain visible");
+    };
+    assert_eq!(call.metadata["abandon_reason"], expected.as_str());
+    assert_eq!(
+        call.response.messages[0].finish_reason.as_deref(),
+        Some("incomplete")
+    );
 }
 
 #[test]

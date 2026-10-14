@@ -8,6 +8,292 @@ use crate::storage::sqlite::PendingOrigin;
 
 const PID: u32 = 3_999_989;
 
+#[test]
+fn local_sqlite_completion_releases_payload_and_repairs_session() {
+    let dir = super::tests::unique_tmp_dir("local-completion");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+    let log_path = dir.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> =
+        vec![Box::new(Arc::clone(&store)), Box::new(Arc::clone(&logtail))];
+    let local_delivery = super::delivery::can_complete_locally(false, true, &exporters);
+    assert!(
+        local_delivery,
+        "an undeployed default file sink must not retain payloads"
+    );
+    let mut aggregator = Aggregator::new();
+    let text = "x".repeat(1024 * 1024);
+    let body = serde_json::json!({"model":"fixture","messages":[{"role":"user","content":text}],"stream":true}).to_string();
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+        )
+        .is_empty()
+    );
+    let response = "data: {\"id\":\"local-fixture\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1000,\"total_tokens\":1012}}\n\ndata: [DONE]\n\n";
+    let captured = feed(&mut aggregator, 0, response.as_bytes());
+    assert_eq!(captured.len(), 1);
+    let mut analysis = Analyzer::new().analyze_for_delivery(&captured[0], true);
+    drop(captured);
+    let mut mapper = ResponseSessionMapper::new();
+    let (mut output, pending) = GenAIBuilder::new().build_for_owned_delivery(
+        &analysis,
+        &mapper,
+        &HashMap::new(),
+        !local_delivery,
+    );
+    assert!(
+        pending.is_none(),
+        "local completion needs no pending-row body copies"
+    );
+    assert_eq!(output.pending_response_id.as_deref(), Some("local-fixture"));
+    output.take_raw_bodies(&mut analysis);
+    drop(analysis);
+    let GenAISemanticEvent::LLMCall(call) = &output.events[0] else {
+        panic!("expected captured call")
+    };
+    let conversation = call.metadata["conversation_id"].clone();
+    let mut expected = serde_json::to_value(&output.events[0]).unwrap();
+    let pid = super::delivery::complete_local_genai(&output, &store, &exporters)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pid, PID);
+    assert!(
+        !log_path.exists(),
+        "inactive export must not create a deployment file"
+    );
+    {
+        let rows = store.get_events_by_conversation(&conversation).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status.as_deref(), Some("complete"));
+        assert_eq!(rows[0].total_tokens, 1012);
+        assert_eq!(rows[0].user_query.as_deref(), Some(text.as_str()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0].event_json.as_deref().unwrap())
+                .unwrap(),
+            expected
+        );
+    }
+    let mut fixups = lru::LruCache::new(std::num::NonZeroUsize::new(4).unwrap());
+    fixups.put(
+        pid,
+        retro_fixup_call_ids(pid, &output.events)
+            .into_iter()
+            .map(|id| (id, std::time::Instant::now(), None))
+            .collect(),
+    );
+    drop(output);
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid,
+        tid: pid,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"local-fixture"}"#.to_vec(),
+    });
+    apply_retro_session_fixup(&mut fixups, &mapper, &store, None, pid, None);
+    assert!(fixups.peek(&pid).is_none());
+    let rows = store.get_events_by_session(session).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "late mapping repairs the persisted session column"
+    );
+    expected["LLMCall"]["metadata"]["session_id"] = serde_json::json!(session);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0].event_json.as_deref().unwrap()).unwrap(),
+        expected
+    );
+    drop(rows);
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_sqlite_completion_preserves_exporter_activation_and_session_wait() {
+    let dir = super::tests::unique_tmp_dir("local-completion-activation");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+    let log_path = dir.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> =
+        vec![Box::new(Arc::clone(&store)), Box::new(Arc::clone(&logtail))];
+    let mut mapper = ResponseSessionMapper::new();
+    assert!(super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    let (first, pending) = delivery_fixture("activation-fixture", &mapper, false);
+    assert!(pending.is_none());
+
+    // A sink becoming active after route selection must still see this call.
+    std::fs::File::create(&log_path).unwrap();
+    super::delivery::complete_local_genai(&first, &store, &exporters).unwrap();
+    let first_record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log_path).unwrap().trim()).unwrap();
+    assert_eq!(first_record["gen_ai.response.id"], "activation-fixture");
+    drop(first);
+
+    // Subsequent calls use the existing queue until their session is mapped.
+    let local_delivery = super::delivery::can_complete_locally(false, true, &exporters);
+    assert!(!local_delivery);
+    let (output, pending) = delivery_fixture("active-fixture", &mapper, !local_delivery);
+    let pending = pending.unwrap();
+    let call_id = pending.call_id.clone();
+    store.insert_pending(&pending).unwrap();
+    drop(pending);
+    let mut queue = PendingGenAiQueue::default();
+    queue.push(PendingGenAI {
+        response_id: output.pending_response_id.unwrap(),
+        events: output.events.into(),
+        pid: PID,
+        created_at: std::time::Instant::now(),
+    });
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap().lines().count(),
+        1
+    );
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid: PID,
+        tid: PID,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"active-fixture"}"#.to_vec(),
+    });
+    for batch in queue.resolve(&mapper) {
+        let events = batch.events.into_events();
+        complete_deferred_genai(&events, Some(&store), &exporters, None);
+    }
+    assert_eq!(queue.len(), 0);
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["gen_ai.response.id"], "active-fixture");
+    assert_eq!(records[1]["gen_ai.session.id"], session);
+    let saved = store.get_events_by_session(session).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].call_id.as_deref(), Some(call_id.as_str()));
+    assert_eq!(saved[0].status.as_deref(), Some("complete"));
+
+    std::fs::remove_file(&log_path).unwrap();
+    assert!(super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    assert!(
+        !super::delivery::can_complete_locally(true, true, &exporters),
+        "FFI still needs deferred delivery"
+    );
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_sqlite_write_failure_still_delivers_to_the_active_sink() {
+    let dir = super::tests::unique_tmp_dir("local-completion-failure");
+    let path = dir.join("genai_events.db");
+    drop(
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap(),
+    );
+    let store = GenAISqliteStore::open_read_only_existing(&path).unwrap();
+    let log_path = dir.join("events.jsonl");
+    std::fs::File::create(&log_path).unwrap();
+    let exporter = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(exporter)];
+    assert!(!super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    assert!(!super::delivery::can_complete_locally(false, false, &[]));
+    let (output, pending) =
+        delivery_fixture("failed-local-fixture", &ResponseSessionMapper::new(), false);
+    assert!(pending.is_none());
+    let error = super::delivery::complete_local_genai(&output, &store, &exporters).unwrap_err();
+    assert!(error.to_string().contains("readonly"), "{error}");
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log_path).unwrap().trim()).unwrap();
+    assert_eq!(record["gen_ai.response.id"], "failed-local-fixture");
+    assert_eq!(record["gen_ai.usage.input_tokens"], "12");
+    assert_eq!(record["gen_ai.usage.output_tokens"], "1");
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn delivery_fixture(
+    response_id: &str,
+    mapper: &ResponseSessionMapper,
+    need_pending: bool,
+) -> (
+    crate::genai::builder::BuildOutput,
+    Option<crate::storage::sqlite::PendingCallInfo>,
+) {
+    let mut aggregator = fixture(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+    let response = serde_json::json!({"id":response_id,"model":"fixture","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}});
+    let bytes = format!("data: {response}\n\ndata: [DONE]\n\n");
+    let captured = feed(&mut aggregator, 0, bytes.as_bytes());
+    assert_eq!(captured.len(), 1);
+    let mut analysis = Analyzer::new().analyze_for_delivery(&captured[0], true);
+    drop(captured);
+    let (mut output, pending) = GenAIBuilder::new().build_for_owned_delivery(
+        &analysis,
+        mapper,
+        &HashMap::new(),
+        need_pending,
+    );
+    output.take_raw_bodies(&mut analysis);
+    (output, pending)
+}
+
 fn feed(aggregator: &mut Aggregator, rw: i32, bytes: &[u8]) -> Vec<AggregatedResult> {
     let event = SslEvent {
         source: 0,
@@ -67,7 +353,8 @@ fn response_pending_exit_and_dead_pid_preserve_crash_evidence() {
                     aggregator.drain_connections_for_pid(PID)
                 };
                 assert_eq!(drained.len(), 1);
-                let (id, state) = &drained[0];
+                let id = &drained[0].id;
+                let state = &drained[0].state;
                 assert!(matches!(state, ConnectionState::ResponsePending { .. }));
                 let pending = GenAIBuilder::new()
                     .build_pending_from_request(
@@ -136,18 +423,22 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
         for deferred in [false, true] {
             let mut aggregator = fixture(prefix);
             aggregator.http_mut().evict_idle_and_oversized();
-            let snapshots = aggregator.snapshot_idle_connections();
-            assert_eq!(snapshots.len(), 1);
-            assert!(aggregator.snapshot_idle_connections().is_empty());
-            let (id, state) = &snapshots[0];
-            let mut pending = GenAIBuilder::new()
-                .build_pending_from_request(
-                    state.pending_request().expect("retained request"),
+            let builder = GenAIBuilder::new();
+            let snapshots = aggregator.snapshot_idle_connections(|id, request| {
+                builder.build_pending_from_request(
+                    request,
                     id,
                     &ResponseSessionMapper::new(),
                     &HashMap::new(),
                 )
-                .unwrap();
+            });
+            assert_eq!(snapshots.len(), 1);
+            assert!(
+                aggregator
+                    .snapshot_idle_connections(|_, _| Some(()))
+                    .is_empty()
+            );
+            let mut pending = snapshots.into_iter().next().unwrap();
             pending.pending_origin = PendingOrigin::IdleDrain;
             let dir = super::tests::unique_tmp_dir("response-pending");
             let store = GenAISqliteStore::new_with_path(
@@ -368,7 +659,7 @@ fn drain_fallback_counts_every_request_shape() {
             1,
             "{path}: the dead-PID drain keeps the call"
         );
-        let (_, state) = drained.into_iter().next().unwrap();
+        let state = drained.into_iter().next().unwrap().state;
         let request_body = state.pending_request().and_then(|r| r.json_body());
         let sse_events = match state {
             ConnectionState::SseActive { sse_events, .. } => sse_events,
@@ -409,7 +700,7 @@ fn drain_fallback_counts_dashscope_native_parameter_tools() {
     assert!(!crate::utils::procfs::proc_pid(PID).exists());
     let drained = aggregator.drain_dead_pid_connections();
     assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
-    let (_, state) = drained.into_iter().next().unwrap();
+    let state = drained.into_iter().next().unwrap().state;
     let body = state
         .pending_request()
         .and_then(|r| r.json_body())

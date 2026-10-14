@@ -108,8 +108,8 @@ impl SseParser {
     /// lacks the terminating blank line is still emitted, preserving the
     /// existing zero-copy end-of-buffer behavior.
     ///
-    /// Note: Zero-copy events expose the first data line. Use the legacy parser
-    /// when concatenated multi-line data is required.
+    /// Single data lines borrow the capture buffer; multiline events own only
+    /// their newline-joined payload and source metadata.
     pub fn parse(&self, event: Rc<SslEvent>) -> Vec<ParsedSseEvent> {
         self.parse_from_offset(event, 0)
     }
@@ -153,25 +153,13 @@ impl SseParser {
                     || current_retry.is_some()
                     || !data_parts.is_empty()
                 {
-                    // For zero-copy design, we only record the first data line
-                    // Multi-line data concatenation is not supported in zero-copy mode
-                    // Users needing full multi-line data should use the legacy SSEParser
-                    let (data_offset, data_len) = if !data_parts.is_empty() {
-                        // Only use first data line for zero-copy access;
-                        // its raw byte length is exact because trailing \r
-                        // was already trimmed above.
-                        (data_start.unwrap_or(0), data_parts[0].len())
-                    } else {
-                        (0, 0)
-                    };
-
-                    events.push(ParsedSseEvent::new(
+                    events.push(Self::assemble(
                         current_id.clone(),
                         current_event.clone(),
                         current_retry,
-                        data_offset,
-                        data_len,
-                        Rc::clone(&event),
+                        &data_parts,
+                        data_start,
+                        &event,
                     ));
 
                     // Reset for next event
@@ -246,25 +234,49 @@ impl SseParser {
                 || current_retry.is_some()
                 || !data_parts.is_empty())
         {
-            let (data_offset, data_len) = if !data_parts.is_empty() {
-                // Only use first data line for zero-copy access
-                let first_line_len = data_parts[0].len();
-                (data_start.unwrap_or(0), first_line_len)
-            } else {
-                (0, 0)
-            };
-
-            events.push(ParsedSseEvent::new(
+            events.push(Self::assemble(
                 current_id,
                 current_event,
                 current_retry,
-                data_offset,
-                data_len,
-                Rc::clone(&event),
+                &data_parts,
+                data_start,
+                &event,
             ));
         }
 
         events
+    }
+
+    fn assemble(
+        id: Option<String>,
+        event: Option<String>,
+        retry: Option<u64>,
+        parts: &[&[u8]],
+        start: Option<usize>,
+        source: &Rc<SslEvent>,
+    ) -> ParsedSseEvent {
+        if parts.len() <= 1 {
+            return ParsedSseEvent::new(
+                id,
+                event,
+                retry,
+                start.unwrap_or(0),
+                parts.first().map_or(0, |part| part.len()),
+                Rc::clone(source),
+            );
+        }
+        let mut owned = source.metadata_only();
+        owned.buf = Vec::with_capacity(
+            parts.iter().map(|part| part.len()).sum::<usize>() + parts.len() - 1,
+        );
+        for (index, part) in parts.iter().enumerate() {
+            if index != 0 {
+                owned.buf.push(b'\n');
+            }
+            owned.buf.extend_from_slice(part);
+        }
+        owned.len = owned.buf.len() as u32;
+        ParsedSseEvent::new(id, event, retry, 0, owned.buf.len(), Rc::new(owned))
     }
 }
 
@@ -420,8 +432,7 @@ mod tests {
 
     #[test]
     fn test_parse_offsets_survive_invalid_utf8_inside_data() {
-        // Invalid bytes inside the first data line must not inflate the
-        // recorded data_len either.
+        // Joining data lines must preserve invalid bytes without lossy expansion.
         let parser = SseParser::new();
         let data = b"event: usage\ndata: {\"a\":1}\xff\ndata: second\n\n".to_vec();
         let event = create_test_event(data);
@@ -429,7 +440,8 @@ mod tests {
         let events = parser.parse(event);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event.as_deref(), Some("usage"));
-        assert_eq!(events[0].data(), b"{\"a\":1}\xff");
+        assert_eq!(events[0].data(), b"{\"a\":1}\xff\nsecond");
+        assert_eq!(events[0].data_len(), b"{\"a\":1}\xff\nsecond".len());
     }
 
     #[test]
@@ -455,11 +467,32 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         let evt = &events[0];
-        // Multi-line data: offset points to first line "line1"
-        // data_len is the length of first line only (5)
-        // Full multi-line concatenation is not implemented in zero-copy mode
-        assert_eq!(evt.data(), b"line1");
-        assert_eq!(evt.data_len(), 5);
+        assert_eq!(evt.data(), b"line1\nline2");
+        assert_eq!(evt.data_len(), 11);
+    }
+
+    #[test]
+    fn multiline_data_preserves_empty_lines_metadata_and_utf8() {
+        for ending in ["\n", "\r", "\r\n"] {
+            for blank in [false, true] {
+                let mut bytes = format!(
+                    "id: fixture{ending}event: custom{ending}retry: 500{ending}data: 汉字{ending}data:{ending}data: 🙂{ending}"
+                );
+                if blank {
+                    bytes.push_str(ending);
+                }
+                let source = create_test_event(bytes.into_bytes());
+                let events = SseParser::new().parse(Rc::clone(&source));
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].data(), "汉字\n\n🙂".as_bytes());
+                assert_eq!(events[0].id.as_deref(), Some("fixture"));
+                assert_eq!(events[0].event.as_deref(), Some("custom"));
+                assert_eq!(events[0].retry, Some(500));
+                assert_eq!(events[0].source_event().pid, source.pid);
+                assert_eq!(events[0].source_event().timestamp_ns, source.timestamp_ns);
+                assert!(!std::ptr::eq(events[0].source_event(), source.as_ref()));
+            }
+        }
     }
 
     #[test]

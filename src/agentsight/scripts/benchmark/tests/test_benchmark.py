@@ -192,6 +192,35 @@ def test_request_recorder_keeps_ids_on_disk_and_bounds_open_files(
     assert recorder.handle is None
 
 
+@pytest.mark.parametrize(
+    "observations",
+    [
+        [("complete", 19), ("pending", 20)],
+        [("interrupted", 20), ("complete", 19)],
+        [("complete", None), ("pending", 20)],
+    ],
+)
+def test_token_accuracy_requires_a_complete_record_with_the_expected_tokens(
+    observations: list[tuple[str, int | None]],
+) -> None:
+    report = validate_results.make_report({"bench-1"}, {"bench-1"}, {"bench-1": observations}, 20)
+    assert report["completeness_ratio"] == 1
+    assert report["token_accuracy"] == 0
+    assert report["token_correct"] == 0
+
+
+def test_report_token_total_uses_the_same_correct_complete_observation() -> None:
+    report = validate_results.make_report(
+        {"bench-1"},
+        {"bench-1"},
+        {"bench-1": [("complete", 19), ("pending", 21), ("complete", 20)]},
+        20,
+    )
+    assert report["token_accuracy"] == 1
+    assert report["completeness_ratio"] == 1
+    assert report["captured_total_tokens"] == 20
+
+
 def test_validate_results_matches_token_and_event_records(tmp_path: Path) -> None:
     load_path = tmp_path / "k6.jsonl"
     rows = []
@@ -414,6 +443,158 @@ def test_streaming_validation_waits_for_load_completion_marker(
     assert report["complete"] == 1
     assert report["validation_mode"] == "streaming_incremental"
     assert report["retention_safe"] is True
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("release_lock", [False, True])
+def test_validation_retries_busy_reads_without_extending_its_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streaming: bool,
+    release_lock: bool,
+) -> None:
+    db_path = tmp_path / "capture.db"
+    writer = sqlite3.connect(db_path)
+    writer.executescript(
+        "CREATE TABLE genai_events (id INTEGER PRIMARY KEY, call_id TEXT, "
+        "status TEXT, total_tokens INTEGER);"
+        "INSERT INTO genai_events VALUES (1, 'bench-busy', 'complete', 20);"
+    )
+    writer.execute("BEGIN EXCLUSIVE")
+    ledger = tmp_path / "requests.jsonl"
+    ledger.write_text('{"request_id":"bench-busy","http_status":200}\n')
+    marker = tmp_path / "complete"
+    marker.touch()
+
+    def unlock(_: float) -> None:
+        assert release_lock, "a zero-length deadline must not sleep or retry"
+        writer.commit()
+
+    monkeypatch.setattr(validate_results.time, "sleep", unlock)
+    wait = 2 if release_lock else 0
+    expected = {"bench-busy"}
+    try:
+        if streaming:
+            report = validate_results.wait_for_streaming_report(
+                db_path,
+                ledger,
+                marker,
+                "bench-",
+                20,
+                1.0,
+                wait,
+                0.001,
+                request_log=ledger,
+            )
+        else:
+            report = validate_results.wait_for_report(
+                db_path,
+                "bench-",
+                expected,
+                expected,
+                20,
+                1.0,
+                wait,
+                0.001,
+            )
+    finally:
+        writer.rollback()
+        writer.close()
+    assert report["complete"] == int(release_lock)
+    assert report["token_correct"] == int(release_lock)
+    assert report["missing_ids"] == ([] if release_lock else ["bench-busy"])
+    assert "Capture database busy" in caplog.text
+
+
+def test_streaming_validation_keeps_cursors_and_evidence_after_a_busy_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "capture.db"
+    writer = sqlite3.connect(db_path)
+    writer.executescript(
+        "CREATE TABLE genai_events (id INTEGER PRIMARY KEY, call_id TEXT, "
+        "status TEXT, total_tokens INTEGER);"
+        "INSERT INTO genai_events VALUES (1, 'bench-1', 'complete', 20);"
+        "INSERT INTO genai_events VALUES (2, 'bench-2', 'pending', NULL);"
+    )
+    ledger = tmp_path / "requests.jsonl"
+    ledger.write_text(
+        "".join(
+            json.dumps({"request_id": f"bench-{i}", "http_status": 200}) + "\n" for i in (1, 2, 3)
+        )
+    )
+    marker = tmp_path / "complete"
+    polls = 0
+
+    def advance_writer(_: float) -> None:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            writer.execute("BEGIN EXCLUSIVE")
+            writer.execute("DELETE FROM genai_events WHERE id = 1")
+            writer.execute(
+                "UPDATE genai_events SET status = 'complete', total_tokens = 20 WHERE id = 2"
+            )
+            writer.execute("INSERT INTO genai_events VALUES (3, 'bench-3', 'complete', 20)")
+        elif polls == 2:
+            writer.commit()
+            marker.touch()
+        else:
+            pytest.fail("capture did not resume from the pending row and saved cursor")
+
+    monkeypatch.setattr(validate_results.time, "sleep", advance_writer)
+    try:
+        report = validate_results.wait_for_streaming_report(
+            db_path,
+            ledger,
+            marker,
+            "bench-",
+            20,
+            1.0,
+            2,
+            0.001,
+            request_log=ledger,
+        )
+    finally:
+        writer.rollback()
+        writer.close()
+    assert polls == 2
+    assert report["complete"] == 3
+    assert report["token_correct"] == 3
+    assert report["missing_ids"] == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_validation_propagates_database_errors_other_than_lock_contention(
+    tmp_path: Path, streaming: bool
+) -> None:
+    db_path = tmp_path / "invalid-schema.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE token_records (request_id TEXT)")
+    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+        if streaming:
+            validate_results.wait_for_streaming_report(
+                db_path,
+                tmp_path / "load",
+                tmp_path / "marker",
+                "bench-",
+                20,
+                1.0,
+                0,
+                0.001,
+            )
+        else:
+            validate_results.wait_for_report(
+                db_path,
+                "bench-",
+                set(),
+                set(),
+                20,
+                1.0,
+                0,
+                0.001,
+            )
 
 
 def test_validate_results_handles_invalid_json_and_empty_expected(
@@ -2354,8 +2535,9 @@ def test_regression_diff_reports_invalid_git_ref(
         run_regression.write_benchmark_diff("missing", tmp_path / "benchmark.diff")
 
 
+@pytest.mark.parametrize("interval", ["0", "-1", "nan", "inf"])
 def test_collect_metrics_cli_and_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interval: str
 ) -> None:
     output = tmp_path / "metrics.csv"
     collect_metrics.STOP = False
@@ -2392,27 +2574,23 @@ def test_collect_metrics_cli_and_stop(
             "--output",
             str(output),
             "--interval",
-            "0",
+            interval,
         ],
     )
-    with pytest.raises(SystemExit, match="interval must be positive"):
+    with pytest.raises(SystemExit, match="interval must be finite and positive"):
         collect_metrics.main()
 
 
 def test_collect_metrics_reports_each_resource_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        collect_metrics, "allocated_size", lambda _: 29 * collect_metrics.GIB
-    )
+    monkeypatch.setattr(collect_metrics, "allocated_size", lambda _: 29 * collect_metrics.GIB)
     monkeypatch.setattr(
         collect_metrics.shutil,
         "disk_usage",
         lambda _: SimpleNamespace(free=40 * collect_metrics.GIB),
     )
-    monkeypatch.setattr(
-        collect_metrics, "available_memory_bytes", lambda: 8 * collect_metrics.GIB
-    )
+    monkeypatch.setattr(collect_metrics, "available_memory_bytes", lambda: 8 * collect_metrics.GIB)
     arguments = (tmp_path, 100.0, 30, 5, 2048, 1536)
     assert collect_metrics.safety_violation(*arguments)["reason"] == "results_budget"
 

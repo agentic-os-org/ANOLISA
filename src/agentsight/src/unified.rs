@@ -18,6 +18,11 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 
+#[path = "unified/delivery.rs"]
+mod delivery;
+#[path = "unified/maintenance.rs"]
+mod maintenance;
+
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -139,7 +144,7 @@ pub struct AgentSight {
 /// before export. Otherwise, the events are exported with the response_id-based
 /// fallback (`SHA256("session" + first_response_id)`).
 struct PendingGenAI {
-    events: Vec<GenAISemanticEvent>,
+    events: crate::genai::DeferredPayload,
     response_id: String,
     pid: u32,
     created_at: std::time::Instant,
@@ -148,7 +153,7 @@ struct PendingGenAI {
 impl PendingGenAI {
     /// Rough byte estimate for memory budget enforcement.
     fn estimated_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.response_id.len() + self.events.len() * 512 // conservative per-event estimate
+        std::mem::size_of::<Self>() + self.response_id.capacity() + self.events.retained_bytes()
     }
 }
 
@@ -168,7 +173,7 @@ struct PendingGenAiQueue {
 /// One drained batch plus the pid whose retroactive session fix-up the
 /// caller should register (timeout exports only).
 struct DrainedGenAi {
-    events: Vec<GenAISemanticEvent>,
+    events: crate::genai::DeferredPayload,
     fixup_pid: Option<u32>,
 }
 
@@ -206,12 +211,7 @@ impl PendingGenAiQueue {
                     pending.response_id,
                     session_id
                 );
-                for event in &mut pending.events {
-                    if let GenAISemanticEvent::LLMCall(call) = event {
-                        call.metadata
-                            .insert("session_id".to_string(), session_id.clone());
-                    }
-                }
+                pending.events.set_session_id(&session_id);
                 drained.push(DrainedGenAi {
                     events: pending.events,
                     fixup_pid: None,
@@ -260,7 +260,7 @@ impl PendingGenAiQueue {
 
     /// Drain everything (shutdown): no fix-ups — the process is exiting, so
     /// no further FileWrite can arrive to repair a fallback session_id.
-    fn flush_all(&mut self) -> Vec<Vec<GenAISemanticEvent>> {
+    fn flush_all(&mut self) -> Vec<crate::genai::DeferredPayload> {
         let pending_items: Vec<_> = std::mem::take(&mut self.entries);
         self.bytes = 0;
         pending_items
@@ -276,7 +276,7 @@ impl PendingGenAiQueue {
     }
 
     /// Drain only the given (exited) pid's entries; other pids keep waiting.
-    fn flush_for_pid(&mut self, pid: u32) -> Vec<Vec<GenAISemanticEvent>> {
+    fn flush_for_pid(&mut self, pid: u32) -> Vec<crate::genai::DeferredPayload> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -292,7 +292,7 @@ impl PendingGenAiQueue {
     fn enforce_limits(
         &mut self,
         limits: &crate::config::RuntimeLimits,
-    ) -> Vec<Vec<GenAISemanticEvent>> {
+    ) -> Vec<crate::genai::DeferredPayload> {
         let max_count = limits.pending_genai_max_count.max(1);
         let max_bytes = limits.pending_genai_max_bytes.max(1);
         let mut evicted = Vec::new();
@@ -1249,7 +1249,12 @@ impl AgentSight {
             return None;
         }
 
+        self.tick();
         let event = self.probes.try_recv()?;
+        self.process_event(event)
+    }
+
+    fn process_event(&mut self, event: Event) -> Option<u64> {
         self.event_count += 1;
         record_event_received(event.event_type());
 
@@ -1258,13 +1263,13 @@ impl AgentSight {
         // Handle ProcMon events for agent lifecycle tracking
         if let Event::ProcMon(ref procmon_event) = event {
             self.handle_procmon_event(procmon_event);
-            return None;
+            return Some(self.event_count);
         }
 
         // Handle FileWatch events via callback (not through the pipeline)
         if let Event::FileWatch(ref fw_event) = event {
             self.handle_filewatch_event(fw_event);
-            return None;
+            return Some(self.event_count);
         }
 
         // Handle FileWrite events via callback (not through the pipeline)
@@ -1286,7 +1291,7 @@ impl AgentSight {
             }
             // After mapper is updated, try to resolve any pending GenAI events
             self.resolve_pending_genai();
-            return None;
+            return Some(self.event_count);
         }
 
         // Handle UDP DNS events (domain-based attachment)
@@ -1350,164 +1355,22 @@ impl AgentSight {
                 }
             }
 
-            return None;
+            return Some(self.event_count);
         }
 
+        if let Event::Ssl(ref ssl) = event {
+            if let Some(results) = self.aggregator.process_sse_capture(ssl) {
+                self.process_aggregated_results(results);
+                return Some(self.event_count);
+            }
+        }
         // Parse the event
         let result = self.parser.parse_event(event);
 
         // Process messages through aggregator
         let aggregated_results = self.aggregator.process_result(result);
 
-        // Analyze and store results
-        for agg_result in &aggregated_results {
-            let mut analysis_results = self.analyzer.analyze_aggregated(agg_result);
-
-            // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(
-                &analysis_results,
-                &self.response_mapper,
-                &self.pid_agent_name_cache,
-            );
-
-            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
-            // to the *process* comm (`<procfs root>/<pid>/comm`) and only then
-            // the event's per-event thread comm (which may be e.g. "HTTP client").
-            for ar in &mut analysis_results {
-                if let crate::analyzer::AnalysisResult::Token(t) = ar {
-                    if t.agent.is_none() {
-                        t.agent = self
-                            .pid_agent_name_cache
-                            .get(&t.pid)
-                            .cloned()
-                            .or_else(|| crate::discovery::scanner::read_comm(t.pid))
-                            .or_else(|| Some(t.comm.clone()));
-                    }
-                }
-            }
-
-            // FFI fallback: when every built LLM event is semantically empty
-            // (the underlying body format could not be parsed into
-            // `AgentsightLLMData`), skip the useless LLM event and fall through
-            // to raw-HTTP (`AgentsightHttpsData`) reporting instead. Only in FFI
-            // mode; requires *all* events to be empty LLM calls so we never drop
-            // a meaningful event.
-            let ffi_https_fallback =
-                self.ffi_sender.is_some() && events_are_empty_llm(&output.events);
-
-            if !output.events.is_empty() && !ffi_https_fallback {
-                if let Some(response_id) = output.pending_response_id {
-                    // Session_id not yet resolved — queue for deferred resolution.
-                    // Write a pending row NOW so crash detection can see this call
-                    // during the deferral window (up to PENDING_SESSION_TIMEOUT).
-                    if let Some(ref info) = pending_info {
-                        if let Some(sqlite_store) = self.genai_sqlite_store.as_ref() {
-                            if let Err(e) = sqlite_store.insert_pending(info) {
-                                log::warn!(
-                                    "Failed to insert deferred pending call {}: {}",
-                                    info.call_id,
-                                    e
-                                );
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "Deferred GenAI call queued without pending_info (response_id={response_id}), crash detection blind spot remains"
-                        );
-                    }
-                    self.pending_genai.push(PendingGenAI {
-                        events: output.events,
-                        response_id,
-                        pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
-                        created_at: std::time::Instant::now(),
-                    });
-                    self.enforce_pending_genai_limits();
-                    log::debug!("GenAI events queued for deferred session_id resolution");
-                } else {
-                    // Session_id resolved (or no response_id) — export immediately.
-                    // For SQLite: write pending first, then complete_pending;
-                    // for other exporters: normal export.
-                    if let Some(ref info) = pending_info {
-                        if let Some(sqlite_store) = self.genai_sqlite_store.as_ref() {
-                            if let Err(e) = sqlite_store.insert_pending(info) {
-                                log::warn!("Failed to insert pending call {}: {}", info.call_id, e);
-                            }
-                            for event in &output.events {
-                                if let Err(e) = sqlite_store.complete_pending(event) {
-                                    log::warn!("Failed to complete pending call: {e}");
-                                }
-                            }
-                            // Export to non-SQLite exporters only (SQLite already written)
-                            for exporter in &self.genai_exporters {
-                                if exporter.name() != "sqlite" {
-                                    exporter.export(&output.events);
-                                    log::debug!(
-                                        "Exported {} GenAI events via '{}'",
-                                        output.events.len(),
-                                        exporter.name()
-                                    );
-                                }
-                            }
-                            if let Some(ref sender) = self.ffi_sender {
-                                for event in &output.events {
-                                    if let GenAISemanticEvent::LLMCall(call) = event {
-                                        sender.send_llm(call);
-                                    }
-                                }
-                            }
-                        } else {
-                            self.export_genai_events(&output.events);
-                        }
-                    } else {
-                        self.export_genai_events(&output.events);
-                    }
-
-                    // ── Online interruption detection ─────────────────────────────
-                    // Run after export so the call is already persisted.
-                    self.detect_and_store_interruptions(&output.events);
-                }
-            } else if let Some(ref sender) = self.ffi_sender {
-                // Either no LLM event was produced, or all LLM events were
-                // semantically empty (fallback). The FFI sender suppresses
-                // raw HTTPS before cloning or enqueueing when it is disabled.
-                for ar in &analysis_results {
-                    if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        // Resolved here rather than in the FFI layer because the cache
-                        // lives on `self` and outlives the process, so an exited agent
-                        // still resolves. Same ladder as the LLM path in
-                        // `GenAICallBuilder::build` so both report the same value.
-                        //
-                        // Passed as a closure so `send_https` can skip it entirely when
-                        // raw HTTPS is disabled — the default — instead of paying two
-                        // `/proc` reads per non-LLM exchange for a value it drops.
-                        sender.send_https(record, || {
-                            Some(
-                                GenAIBuilder::resolve_agent_name(
-                                    &record.comm,
-                                    record.pid,
-                                    &self.pid_agent_name_cache,
-                                )
-                                .unwrap_or_else(|| record.comm.clone()),
-                            )
-                        });
-                    }
-                }
-            }
-
-            // In FFI mode data is delivered via callbacks; skip local storage.
-            if self.ffi_sender.is_none() {
-                for analysis_result in &analysis_results {
-                    if !self.should_persist_analysis_result(analysis_result) {
-                        continue;
-                    }
-                    if let Err(e) = self.storage.store(analysis_result) {
-                        log::warn!("Failed to store analysis result: {e}");
-                    } else {
-                        log::debug!("Analysis result saved");
-                    }
-                }
-            }
-        }
+        self.process_aggregated_results(aggregated_results);
 
         Some(self.event_count)
     }
@@ -1543,7 +1406,13 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
+                } else {
+                    self.flush_deferred_genai_for_pid(*pid);
+                    let removed = self.aggregator.drain_connections_for_pid(*pid);
+                    self.aggregator.queue_removed(removed);
                 }
+                let results = self.aggregator.tick(std::time::Instant::now());
+                self.process_aggregated_results(results);
             }
         }
     }
@@ -1584,6 +1453,7 @@ impl AgentSight {
             // Rate-limited internally, and deliberately outside the idle branch:
             // a saturated byte budget keeps the queue non-empty, which is exactly
             // when the watermarks matter most.
+            self.tick();
             self.maybe_log_buffer_watermarks();
             self.maybe_export_runtime_metrics();
             if let Some(result) = self.try_process() {
@@ -1591,10 +1461,6 @@ impl AgentSight {
             } else {
                 // No event available — flush any timed-out pending GenAI events
                 self.flush_expired_pending_genai();
-                // Drain orphaned connections from dead PIDs and persist as pending
-                self.drain_and_persist_dead_connections();
-                // Snapshot idle in-flight streams whose owning process is still alive.
-                self.drain_and_persist_idle_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1602,6 +1468,8 @@ impl AgentSight {
         }
 
         // On shutdown, flush all remaining pending events with fallback session_id
+        let abandoned = self.aggregator.drain_pending();
+        self.process_aggregated_results(abandoned);
         self.flush_all_pending_genai();
         self.export_final_runtime_metrics();
 
@@ -1620,6 +1488,8 @@ impl AgentSight {
             log::warn!("Agent resource sampler panicked during shutdown");
         }
         // Flush all pending GenAI events before exit
+        let abandoned = self.aggregator.drain_pending();
+        self.process_aggregated_results(abandoned);
         self.flush_all_pending_genai();
         self.export_final_runtime_metrics();
         // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit
@@ -1660,27 +1530,26 @@ impl AgentSight {
     /// `pub(crate)` because `FfiEventSender` is a crate-internal type and the
     /// only caller lives in this crate's FFI layer.
     pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
+        self.aggregator
+            .set_compact_sse(!sender.raw_https_enabled() && !self.runtime_limits.retain_raw_sse);
         self.ffi_sender = Some(sender);
     }
 
     /// Export GenAI events to all registered exporters
     fn export_genai_events(&self, events: &[GenAISemanticEvent]) {
-        if let Some(ref sender) = self.ffi_sender {
-            // FFI mode: deliver LLMCall events via callback channel only.
+        if self.ffi_sender.is_none() {
+            for exporter in &self.genai_exporters {
+                exporter.export(events);
+            }
+        }
+    }
+
+    fn send_ffi_events(&self, events: Vec<GenAISemanticEvent>) {
+        if let Some(sender) = &self.ffi_sender {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
                     sender.send_llm(call);
                 }
-            }
-        } else {
-            // Normal mode: export to all registered exporters.
-            for exporter in &self.genai_exporters {
-                exporter.export(events);
-                log::debug!(
-                    "Exported {} GenAI events via '{}'",
-                    events.len(),
-                    exporter.name()
-                );
             }
         }
     }
@@ -1698,13 +1567,16 @@ impl AgentSight {
     /// The pending row was written by the deferred-queue entry point; this
     /// method updates it via `complete_pending` and avoids double-writing by
     /// skipping the SQLite exporter in the fan-out.
-    fn complete_and_export_deferred_genai(&self, events: &[GenAISemanticEvent]) {
+    fn complete_and_export_deferred_genai(&mut self, events: crate::genai::DeferredPayload) {
+        let events = events.into_events();
         complete_deferred_genai(
-            events,
+            &events,
             self.genai_sqlite_store.as_ref(),
             &self.genai_exporters,
             self.ffi_sender.as_ref(),
         );
+        self.detect_and_store_interruptions(&events);
+        self.send_ffi_events(events);
     }
 
     /// Online interruption detection: inspect exported events and persist any
@@ -1885,24 +1757,28 @@ impl AgentSight {
         let drained = self.aggregator.drain_connections_for_pid(pid);
 
         // 2. Persist drained connections as pending calls
-        for (conn_id, state) in &drained {
-            let Some(request) = state.pending_request() else {
-                continue;
-            };
+        if let Some(ref store) = self.genai_sqlite_store {
+            for removed in &drained {
+                let conn_id = &removed.id;
+                let state = &removed.state;
+                let Some(request) = state.pending_request() else {
+                    continue;
+                };
 
-            if let Some(pending) = self.genai_builder.build_pending_from_request(
-                request,
-                conn_id,
-                &self.response_mapper,
-                &self.pid_agent_name_cache,
-            ) {
-                if let Some(ref store) = self.genai_sqlite_store {
+                if let Some(pending) = self.genai_builder.build_pending_from_request(
+                    request,
+                    conn_id,
+                    &self.response_mapper,
+                    &self.pid_agent_name_cache,
+                ) {
                     if let Err(e) = store.insert_pending(&pending) {
                         log::warn!("[CrashDetect] Failed to persist pending call: {e}");
                     }
                 }
             }
         }
+
+        self.aggregator.queue_removed(drained);
 
         // 3. Query all pending calls for this PID (including any persisted earlier)
         let Some(pending_calls) =
@@ -1943,47 +1819,21 @@ impl AgentSight {
     /// This covers manual output interruption where the agent process stays
     /// alive, so dead-PID draining cannot discover the abandoned stream.
     fn drain_and_persist_idle_connections(&mut self) {
-        let snapshots = self.aggregator.snapshot_idle_connections();
-        if snapshots.is_empty() {
+        let Some(store) = self.genai_sqlite_store.as_ref() else {
             return;
-        }
-
-        use crate::storage::sqlite::PendingOrigin;
-
-        for (conn_id, state) in snapshots {
-            let Some(request) = state.pending_request() else {
-                continue;
-            };
-
-            if let Some(mut pending) = self.genai_builder.build_pending_from_request(
-                request,
-                &conn_id,
-                &self.response_mapper,
-                &self.pid_agent_name_cache,
-            ) {
-                pending.pending_origin = PendingOrigin::IdleDrain;
-                if let Some(ref store) = self.genai_sqlite_store {
-                    let call_id = pending.call_id.clone();
-                    if let Err(e) = store.insert_pending(&pending) {
-                        log::warn!("[IdleDrain] Failed to persist pending call: {e}");
-                        continue;
-                    }
-                    log::info!(
-                        "[IdleDrain] persisted idle in-flight call as pending: call_id={} pid={} path={}",
-                        call_id,
-                        conn_id.pid,
-                        request.path,
-                    );
-                }
-            } else {
-                log::debug!(
-                    "[IdleDrain] build_pending returned None: pid={} path={} body_len={}",
-                    conn_id.pid,
-                    request.path,
-                    request.body_len
-                );
+        };
+        let builder = &self.genai_builder;
+        let mapper = &self.response_mapper;
+        let cache = &self.pid_agent_name_cache;
+        self.aggregator.snapshot_idle_connections(|id, request| {
+            let mut pending = builder.build_pending_from_request(request, id, mapper, cache)?;
+            pending.pending_origin = crate::storage::sqlite::PendingOrigin::IdleDrain;
+            if let Err(error) = store.insert_pending(&pending) {
+                log::warn!("[IdleDrain] Failed to persist pending call: {error}");
+                return None;
             }
-        }
+            Some(())
+        });
     }
 
     /// Drain aggregator connections whose PID is no longer alive and persist
@@ -1999,6 +1849,10 @@ impl AgentSight {
         if drained.is_empty() {
             return;
         }
+        if self.genai_sqlite_store.is_none() {
+            self.aggregator.queue_removed(drained);
+            return;
+        }
 
         use crate::aggregator::ConnectionState;
         use crate::genai::GenAIBuilder;
@@ -2012,15 +1866,18 @@ impl AgentSight {
             Option<String>,
         )> = Vec::new();
 
-        for (conn_id, state) in drained {
-            let Some(request) = state.pending_request().cloned() else {
+        for removed in &drained {
+            let conn_id = &removed.id;
+            let state = &removed.state;
+            let Some(request) = state.pending_request() else {
                 continue;
             };
             // Preserve SSE enrichment while sharing request selection with other drains.
             // For compressed SSE streams that were still in progress when the
             // process died (sse_events empty, compressed_buffer non-empty),
             // decode the buffer here so token-usage data is not lost (#973).
-            let sse_events = match state {
+            let decoded_events;
+            let sse_events: &[crate::parser::sse::ParsedSseEvent] = match state {
                 ConnectionState::SseActive {
                     sse_events,
                     compressed_buffer: Some(buf),
@@ -2033,27 +1890,29 @@ impl AgentSight {
                     // so drain-path token extraction can proceed.
                     let is_chunked =
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
-                            &response_headers,
+                            response_headers,
                         );
                     // A dead connection retains no completing read, so the
                     // header event is the only provenance left for the
                     // synthetic events; these feed pending-row usage
                     // extraction only, not duration accounting.
-                    crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
-                        &buf,
-                        content_encoding.as_deref(),
-                        is_chunked,
-                        zstd_decoder.as_deref(),
-                        &response_headers.source_event,
-                    )
+                    decoded_events =
+                        crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
+                            buf,
+                            content_encoding.as_deref(),
+                            is_chunked,
+                            zstd_decoder.as_deref(),
+                            &response_headers.source_event,
+                        );
+                    &decoded_events
                 }
                 ConnectionState::SseActive { sse_events, .. } => sse_events,
-                _ => vec![],
+                _ => &[],
             };
 
             if let Some(pending) = self.genai_builder.build_pending_from_request(
-                &request,
-                &conn_id,
+                request,
+                conn_id,
                 &self.response_mapper,
                 &self.pid_agent_name_cache,
             ) {
@@ -2096,7 +1955,7 @@ impl AgentSight {
                     // Parse captured SSE events for model, trace_id, tokens, output content
                     if !sse_events.is_empty() {
                         if let Some(mut enrichment) =
-                            GenAIBuilder::extract_sse_enrichment(&sse_events)
+                            GenAIBuilder::extract_sse_enrichment(sse_events)
                         {
                             // If SSE didn't carry usage data (stream was interrupted before
                             // the final chunk), compute tokens via the real tokenizer.
@@ -2171,6 +2030,8 @@ impl AgentSight {
                 );
             }
         }
+
+        self.aggregator.queue_removed(drained);
 
         // ── OOM detection for dead PIDs ──────────────────────────────────────
         // After persisting pending calls for dead PIDs, check if any were OOM-killed.
@@ -2293,9 +2154,8 @@ impl AgentSight {
                 self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-        for batch in &drained {
-            self.complete_and_export_deferred_genai(&batch.events);
-            self.detect_and_store_interruptions(&batch.events);
+        for batch in drained {
+            self.complete_and_export_deferred_genai(batch.events);
         }
     }
 
@@ -2308,9 +2168,8 @@ impl AgentSight {
                 self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-        for batch in &drained {
-            self.complete_and_export_deferred_genai(&batch.events);
-            self.detect_and_store_interruptions(&batch.events);
+        for batch in drained {
+            self.complete_and_export_deferred_genai(batch.events);
         }
     }
 
@@ -2323,8 +2182,7 @@ impl AgentSight {
     /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
         for events in self.pending_genai.flush_all() {
-            self.complete_and_export_deferred_genai(&events);
-            self.detect_and_store_interruptions(&events);
+            self.complete_and_export_deferred_genai(events);
         }
     }
 
@@ -2343,8 +2201,7 @@ impl AgentSight {
         // No retro fix-up registration here: the pid is dead, so the FileWrite
         // that would reveal its session mapping can never arrive anymore.
         for events in self.pending_genai.flush_for_pid(pid) {
-            self.complete_and_export_deferred_genai(&events);
-            self.detect_and_store_interruptions(&events);
+            self.complete_and_export_deferred_genai(events);
         }
     }
 
@@ -2425,8 +2282,7 @@ impl AgentSight {
     /// entries with the fallback session_id to prevent unbounded memory growth.
     fn enforce_pending_genai_limits(&mut self) {
         for events in self.pending_genai.enforce_limits(&self.runtime_limits) {
-            self.complete_and_export_deferred_genai(&events);
-            self.detect_and_store_interruptions(&events);
+            self.complete_and_export_deferred_genai(events);
         }
     }
 
@@ -2546,7 +2402,9 @@ impl Drop for AgentSight {
 fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
     !events.is_empty()
         && events.iter().all(|e| match e {
-            GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
+            GenAISemanticEvent::LLMCall(call) => {
+                !call.metadata.contains_key("abandon_reason") && call.is_semantically_empty()
+            }
             _ => false,
         })
 }
@@ -2584,13 +2442,7 @@ fn complete_deferred_genai(
                 log::warn!("Failed to complete deferred pending call: {e}");
             }
         }
-        if let Some(sender) = ffi_sender {
-            for event in events {
-                if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send_llm(call);
-                }
-            }
-        } else {
+        if ffi_sender.is_none() {
             for exporter in exporters {
                 if exporter.name() != "sqlite" {
                     exporter.export(events);
@@ -2599,13 +2451,7 @@ fn complete_deferred_genai(
         }
     } else {
         // No SQLite store — export to all exporters (or FFI)
-        if let Some(sender) = ffi_sender {
-            for event in events {
-                if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send_llm(call);
-                }
-            }
-        } else {
+        if ffi_sender.is_none() {
             for exporter in exporters {
                 exporter.export(events);
                 log::debug!(
@@ -2628,9 +2474,9 @@ fn complete_deferred_genai(
 fn take_deferred_genai_for_pid(
     pending_items: Vec<PendingGenAI>,
     pid: u32,
-) -> (Vec<Vec<GenAISemanticEvent>>, Vec<PendingGenAI>) {
+) -> (Vec<crate::genai::DeferredPayload>, Vec<PendingGenAI>) {
     let mut still_pending = Vec::new();
-    let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
+    let mut to_export = Vec::new();
 
     for pending in pending_items {
         if pending.pid == pid {
@@ -3170,8 +3016,8 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
 ///
 /// Split out from the logging call site so the wording is covered by tests: this
 /// line is the only evidence left after an OOM kill, and it has to say which
-/// buffer holds the memory. Attention means the byte budget already rejected
-/// events, which is reported at INFO so diagnosing an OOM does not require
+/// buffer holds the memory. Attention means memory admission encountered
+/// pressure, which is reported at INFO so diagnosing an OOM does not require
 /// turning on debug logging; a quiet pipeline stays at DEBUG.
 fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, String) {
     let mut report = format!(
@@ -3181,7 +3027,7 @@ fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, St
     let needs_attention = marks.dropped_over_budget > 0;
     if needs_attention {
         report.push_str(&format!(
-            ", {} events dropped over budget",
+            ", {} events dropped over byte budget",
             marks.dropped_over_budget
         ));
     }
@@ -3228,7 +3074,7 @@ mod tests {
             17,
         );
         assert!(needs_attention);
-        assert!(report.contains("42 events dropped over budget"));
+        assert!(report.contains("42 events dropped over byte budget"));
         assert!(report.contains("67108864 / 67108864 bytes in flight"));
         assert!(report.contains("pending_genai 17 entries"));
     }
@@ -4208,9 +4054,101 @@ mod tests {
     }
 
     #[test]
+    fn payload_memory_pending_roundtrips_all_drain_paths() {
+        use crate::genai::{InputMessage, MessagePart};
+
+        for raw in [true, false] {
+            for route in ["limit", "timeout", "resolve", "exit", "shutdown"] {
+                let text = "x".repeat(1024 * 1024);
+                let escaped = "quoted \"text\"\n".repeat(150);
+                let mut call = make_test_llm_call("compact-pending");
+                call.request.messages.push(InputMessage {
+                    role: "user".into(),
+                    parts: vec![
+                        MessagePart::Text {
+                            content: text.clone(),
+                        },
+                        MessagePart::Text {
+                            content: escaped.clone(),
+                        },
+                        MessagePart::ToolCall {
+                            id: Some("tool-fixture".into()),
+                            name: "lookup".into(),
+                            arguments: Some(serde_json::json!({"city": "杭州"})),
+                        },
+                    ],
+                    name: None,
+                });
+                if raw {
+                    call.request.raw_body =
+                        Some(serde_json::json!({"text": text, "escaped": escaped}).to_string());
+                }
+                call.metadata.insert("user_query".into(), text);
+                let original = GenAISemanticEvent::LLMCall(call);
+                let before = original.retained_bytes();
+                let mut expected = serde_json::to_value(&original).unwrap();
+                let mut queue = PendingGenAiQueue::default();
+                queue.push(PendingGenAI {
+                    events: vec![original].into(),
+                    response_id: "response-fixture".into(),
+                    pid: 1234,
+                    created_at: std::time::Instant::now() - PENDING_SESSION_TIMEOUT,
+                });
+                assert!(
+                    queue.bytes < before * 3 / 4,
+                    "{route}: payload was not compacted"
+                );
+                let mut mapper = ResponseSessionMapper::new();
+                if route == "resolve" {
+                    let session = "00000000-0000-0000-0000-000000000001";
+                    mapper.process_filewrite(&FileWriteEvent {
+                        pid: 1234,
+                        tid: 1234,
+                        uid: 0,
+                        timestamp_ns: 0,
+                        write_size: 0,
+                        comm: "fixture".into(),
+                        cgroup_id: 0,
+                        filename: format!("/tmp/{session}.jsonl"),
+                        buf: Vec::new(),
+                    });
+                    expected["LLMCall"]["metadata"]["session_id"] = serde_json::json!(session);
+                }
+                let mut batches = match route {
+                    "limit" => queue.enforce_limits(&crate::config::RuntimeLimits {
+                        pending_genai_max_bytes: 1,
+                        ..Default::default()
+                    }),
+                    "timeout" => queue
+                        .flush_expired()
+                        .into_iter()
+                        .map(|batch| batch.events)
+                        .collect(),
+                    "resolve" => queue
+                        .resolve(&mapper)
+                        .into_iter()
+                        .map(|batch| batch.events)
+                        .collect(),
+                    "exit" => queue.flush_for_pid(1234),
+                    "shutdown" => queue.flush_all(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(queue.bytes, 0);
+                assert_eq!(batches.len(), 1);
+                let restored = batches.pop().unwrap().into_events();
+                assert_eq!(
+                    serde_json::to_value(&restored[0]).unwrap(),
+                    expected,
+                    "{route}: fields changed"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_pending_genai_estimated_bytes() {
         let pending = PendingGenAI {
-            events: vec![],
+            events: vec![].into(),
             response_id: "test-response-id".to_string(),
             pid: 1234,
             created_at: std::time::Instant::now(),
@@ -4229,7 +4167,7 @@ mod tests {
     fn test_pending_genai_estimated_bytes_with_events() {
         let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-x"));
         let pending = PendingGenAI {
-            events: vec![event],
+            events: vec![event].into(),
             response_id: "r".to_string(),
             pid: 1,
             created_at: std::time::Instant::now(),
@@ -4248,7 +4186,7 @@ mod tests {
         let expired_at =
             std::time::Instant::now() - PENDING_SESSION_TIMEOUT - std::time::Duration::from_secs(1);
         let pending = |id: &str, pid: u32, at: std::time::Instant| PendingGenAI {
-            events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(id))],
+            events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(id))].into(),
             response_id: id.to_string(),
             pid,
             created_at: at,
@@ -4299,7 +4237,8 @@ mod tests {
             queue.push(PendingGenAI {
                 events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(&format!(
                     "evict-{i}"
-                )))],
+                )))]
+                .into(),
                 response_id: format!("r{i}"),
                 pid: 1,
                 created_at: std::time::Instant::now(),
@@ -4359,7 +4298,7 @@ mod tests {
         });
         let entries = vec![
             PendingGenAI {
-                events: vec![GenAISemanticEvent::LLMCall(call)],
+                events: vec![GenAISemanticEvent::LLMCall(call)].into(),
                 response_id: "resp-exit".to_string(),
                 pid: 4242,
                 // Fresh entry: the exit flush must not wait for
@@ -4370,7 +4309,8 @@ mod tests {
             PendingGenAI {
                 events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(
                     "other-pid-call",
-                ))],
+                ))]
+                .into(),
                 response_id: "resp-other".to_string(),
                 pid: 5555,
                 created_at: std::time::Instant::now(),
@@ -4427,6 +4367,14 @@ mod tests {
         // A single semantically empty LLM call → fallback.
         let empty = GenAISemanticEvent::LLMCall(make_test_llm_call("c1"));
         assert!(events_are_empty_llm(std::slice::from_ref(&empty)));
+
+        let mut abandoned = make_test_llm_call("incomplete");
+        abandoned
+            .metadata
+            .insert("abandon_reason".into(), "over_budget".into());
+        assert!(!events_are_empty_llm(&[GenAISemanticEvent::LLMCall(
+            abandoned
+        )]));
 
         // A call with parsed request messages → no fallback.
         let mut call = make_test_llm_call("c2");

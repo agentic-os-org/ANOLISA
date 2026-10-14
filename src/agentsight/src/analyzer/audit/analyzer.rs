@@ -48,6 +48,23 @@ impl AuditAnalyzer {
         http_record: &HttpRecord,
         token_record: Option<&TokenRecord>,
     ) -> Option<AuditRecord> {
+        // Parse the request body once; it feeds model, provider and
+        // session_id extraction below.
+        let request_json = http_record
+            .request_body
+            .as_ref()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
+
+        self.analyze_http_with_json(http_record, token_record, request_json.as_ref())
+    }
+
+    /// Analyze metadata with the request JSON already parsed by the pipeline.
+    pub(crate) fn analyze_http_with_json(
+        &self,
+        http_record: &HttpRecord,
+        token_record: Option<&TokenRecord>,
+        request_json: Option<&serde_json::Value>,
+    ) -> Option<AuditRecord> {
         // Create llm_call audit records for LLM API calls identified by path,
         // and for streaming calls whose parsed events yielded provider/usage
         // evidence. `is_sse` alone must not decide: MCP's legacy HTTP+SSE
@@ -67,13 +84,6 @@ impl AuditAnalyzer {
         if !is_llm_path && !has_usage_evidence {
             return None;
         }
-
-        // Parse the request body once; it feeds model, provider and
-        // session_id extraction below.
-        let request_json = http_record
-            .request_body
-            .as_ref()
-            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
 
         // Extract model. The request body is the primary source (the name the
         // caller asked for), but not every protocol puts it there: Gemini

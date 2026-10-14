@@ -18,6 +18,8 @@
 #define SSL_TIER_SMALL  (16 * 1024)        // 16 KiB
 #define SSL_TIER_MEDIUM (128 * 1024)       // 128 KiB
 #define SSL_TIER_LARGE  (512 * 1024)       // 512 KiB
+#define SSL_TIER_XLARGE (1088 * 1024)      // 1 MiB payload plus JSON/header headroom
+#define SSL_TIER_XXLARGE (2 * 1024 * 1024) // 2 MiB
 #define MAX_BUF_SIZE    (4 * 1024 * 1024)  // 4 MiB top tier (application cap, not a kernel limit)
 #define TASK_COMM_LEN 16
 
@@ -63,6 +65,8 @@ typedef u64 __be64;
 struct probe_SSL_data_small  { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_SMALL]; };
 struct probe_SSL_data_medium { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_MEDIUM]; };
 struct probe_SSL_data_large  { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_LARGE]; };
+struct probe_SSL_data_xlarge { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_XLARGE]; };
+struct probe_SSL_data_xxlarge { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_XXLARGE]; };
 struct probe_SSL_data_t      { SSL_DATA_HEADER_FIELDS u8 buf[MAX_BUF_SIZE]; };
 
 #endif /* __SSLSNIFF_H */

@@ -42,11 +42,17 @@ impl GenAIBuilder {
     /// 从 HTTP request body 直接解析 LLMRequest（OpenAI/Anthropic 格式）
     pub(super) fn parse_request_body(body: &str) -> Option<LLMRequest> {
         let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        let mut request = Self::parse_request_value(&v)?;
+        request.raw_body = Some(body.to_owned());
+        Some(request)
+    }
+
+    pub(super) fn parse_request_value(v: &serde_json::Value) -> Option<LLMRequest> {
         let obj = v.as_object()?;
 
         // Normalized view: "messages" (chat completions) or "input" + "instructions"
         // (Responses API used by codex 0.137+ via dashscope /v1/responses).
-        let (raw_messages, instructions_text) = crate::parser::llm::extract_messages_view(&v)?;
+        let (raw_messages, instructions_text) = crate::parser::llm::extract_messages_view(v)?;
 
         let mut messages: Vec<InputMessage> = Vec::new();
 
@@ -276,7 +282,7 @@ impl GenAIBuilder {
             }),
             stream: obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
             tools,
-            raw_body: Some(body.to_string()),
+            raw_body: None,
         })
     }
 
@@ -287,7 +293,7 @@ impl GenAIBuilder {
     /// 2. SSE response body first chunk "id" field
     /// 3. None (caller should fall back to call_id)
     pub(super) fn extract_response_id(
-        parsed_message: &Option<ParsedApiMessage>,
+        parsed_message: &Option<&ParsedApiMessage>,
         http: &HttpRecord,
     ) -> Option<String> {
         // 1. Try parsed message response.id. `ParsedApiMessage::response_id`
@@ -1649,7 +1655,7 @@ mod tests {
         };
 
         assert_eq!(
-            GenAIBuilder::extract_response_id(&parsed, &http).as_deref(),
+            GenAIBuilder::extract_response_id(&parsed.as_ref(), &http).as_deref(),
             Some("chatcmpl-sysom-1")
         );
     }

@@ -20,6 +20,13 @@ use agentsight_enforcement_protocol::{
 };
 use uuid::Uuid;
 
+#[path = "ffi/queue.rs"]
+mod queue;
+use queue::{QueueBudget, QueuedEvent};
+#[path = "ffi/json_buffer.rs"]
+mod json_buffer;
+use json_buffer::JsonBuffer;
+
 // ===========================================================================
 // Internal FFI event types (shared with unified.rs via crate::ffi)
 // ===========================================================================
@@ -28,6 +35,7 @@ use uuid::Uuid;
 ///
 /// Mutually exclusive: an HTTP exchange either becomes `Llm` (if recognised
 /// as an LLM API call) or `Https` (otherwise).  See §5 in c-ffi-api.md.
+#[derive(Debug)]
 pub(crate) enum FfiEvent {
     /// Raw HTTP exchange, plus the agent name resolved by the pipeline. The name
     /// is passed in because it comes from `AgentSight`'s pid → agent_name cache,
@@ -44,7 +52,7 @@ enum ProbeCommand {
     RemoveCgroup(u64),
 }
 
-/// Wraps an `mpsc::SyncSender<FfiEvent>` together with the `eventfd` descriptor
+/// Wraps an `mpsc::SyncSender<QueuedEvent>` together with the `eventfd` descriptor
 /// so that a single `.send()` call both enqueues the event and wakes up the
 /// consumer's epoll/select loop.
 ///
@@ -52,9 +60,10 @@ enum ProbeCommand {
 /// consumer does not call `agentsight_read()` frequently enough.
 #[derive(Clone)]
 pub(crate) struct FfiEventSender {
-    tx: mpsc::SyncSender<FfiEvent>,
+    tx: mpsc::SyncSender<QueuedEvent>,
     eventfd: i32,
     enable_raw_https: bool,
+    budget: Arc<QueueBudget>,
     security_drops: Arc<SecurityDropState>,
 }
 
@@ -107,11 +116,25 @@ impl SecurityDropState {
 }
 
 impl FfiEventSender {
+    pub(crate) fn raw_https_enabled(&self) -> bool {
+        self.enable_raw_https
+    }
+
     pub fn send(&self, event: FfiEvent) {
         // Bounded channel: if the consumer cannot keep up, drop the newest event
         // rather than blocking the background pipeline or growing memory without
         // limit.  This matches the `DropNewest` policy used for probe events.
-        match self.tx.try_send(event) {
+        let queued = match self.budget.admit(event) {
+            Ok(event) => event,
+            Err(event) => {
+                if let FfiEvent::Security(event) = &*event {
+                    self.security_drops.record(event);
+                }
+                metrics::counter!("agentsight_ffi_dropped_total", "reason" => "bytes").increment(1);
+                return;
+            }
+        };
+        match self.tx.try_send(queued) {
             Ok(()) => {
                 // Write 1 to the eventfd counter to wake up the consumer.
                 let val: u64 = 1;
@@ -120,7 +143,8 @@ impl FfiEventSender {
                 }
             }
             Err(mpsc::TrySendError::Full(dropped)) => {
-                if let FfiEvent::Security(event) = &dropped {
+                metrics::counter!("agentsight_ffi_dropped_total", "reason" => "count").increment(1);
+                if let FfiEvent::Security(event) = &*dropped.event {
                     self.security_drops.record(event);
                 }
                 log::warn!(
@@ -142,23 +166,19 @@ impl FfiEventSender {
     /// default, so taking a resolved value here would burn that per event only to drop
     /// it one line later. Keeping the gate ahead of the closure also keeps it in one
     /// place instead of duplicating the condition at the call site.
-    pub fn send_https(&self, record: &HttpRecord, agent_name: impl FnOnce() -> Option<String>) {
+    pub fn send_https(&self, record: HttpRecord, agent_name: impl FnOnce() -> Option<String>) {
         if !self.enable_raw_https {
             return;
         }
-        self.send(FfiEvent::Https(record.clone(), agent_name()));
+        self.send(FfiEvent::Https(record, agent_name()));
     }
 
     /// Enqueue an LLM call, lowercasing `agent_name` on the way in.
     ///
-    /// The FFI already takes a clone here, so normalizing it costs nothing and keeps
-    /// the pipeline's own copy (dashboard, SQLite, `/api/agent-names`) at its original
-    /// config casing. Normalizing at this boundary rather than in each builder is what
-    /// makes the `agentsight_read_v2` envelope self-consistent: its `Llm` arm
-    /// serializes `LLMCall` verbatim, so a `Hermes` here would not group with the
-    /// `hermes` the raw-HTTPS arm reports for the very same process.
-    pub fn send_llm(&self, call: &LLMCall) {
-        let mut call = call.clone();
+    /// Exporters observe the original casing before ownership moves here.
+    /// Normalizing at delivery keeps the typed callback and v2 JSON envelope
+    /// consistent with raw HTTPS events from the same process.
+    pub fn send_llm(&self, mut call: LLMCall) {
         if let Some(name) = call.agent_name.as_mut() {
             *name = name.to_lowercase();
         }
@@ -198,7 +218,7 @@ fn ffi_boundary(name: &str, operation: impl FnOnce() -> c_int) -> c_int {
 
 /// Create a `CString` from a Rust `&str`, replacing interior NUL bytes.
 fn safe_cstring(s: &str) -> CString {
-    CString::new(s.replace('\0', "")).unwrap()
+    CString::new(s.replace('\0', "")).unwrap_or_default()
 }
 
 /// Copy a Rust string into a fixed-size `[c_char; N]` buffer (NUL-terminated).
@@ -335,10 +355,11 @@ pub type AgentsightConfigHandle = AgentsightConfig;
 /// Main runtime handle.
 /// cbindgen:no-export
 pub struct AgentsightHandle {
-    rx: mpsc::Receiver<FfiEvent>,
+    rx: mpsc::Receiver<QueuedEvent>,
+    budget: Arc<QueueBudget>,
     /// Sender kept alive so the background thread's sends don't fail
     /// after start; taken (moved) into the thread in `agentsight_start`.
-    tx: Option<mpsc::SyncSender<FfiEvent>>,
+    tx: Option<mpsc::SyncSender<QueuedEvent>>,
     eventfd: i32,
     running: Arc<AtomicBool>,
     security_drops: Arc<SecurityDropState>,
@@ -367,14 +388,11 @@ pub const AGENTSIGHT_READ_BLOCK: c_int = 1;
 // Temporary data holders (keep C strings and byte buffers alive during callbacks)
 // ===========================================================================
 
-struct HttpsDataHolder {
+struct HttpsDataHolder<'a> {
+    _record: &'a HttpRecord,
     c_data: AgentsightHttpsData,
     _method: CString,
     _path: CString,
-    _req_headers: Vec<u8>,
-    _req_body: Option<Vec<u8>>,
-    _resp_headers: Vec<u8>,
-    _resp_body: Option<Vec<u8>>,
     _agent_name: Option<CString>,
     _container_id: Option<CString>,
 }
@@ -390,10 +408,10 @@ struct LlmDataHolder {
     _provider: CString,
     _model: CString,
     _finish_reason: Option<CString>,
-    _req_messages: CString,
-    _resp_messages: CString,
-    _tools: CString,
-    _input_message_delta: CString,
+    _req_messages: JsonBuffer,
+    _resp_messages: JsonBuffer,
+    _tools: JsonBuffer,
+    _input_message_delta: JsonBuffer,
 }
 
 struct EventDataHolder {
@@ -487,13 +505,13 @@ fn build_event_data(event: &FfiEvent) -> Result<EventDataHolder, serde_json::Err
     })
 }
 
-fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataHolder {
+fn build_https_data<'a>(record: &'a HttpRecord, agent_name: Option<&str>) -> HttpsDataHolder<'a> {
     let method = safe_cstring(&record.method);
     let path = safe_cstring(&record.path);
-    let req_headers = record.request_headers.as_bytes().to_vec();
-    let req_body = record.request_body.as_ref().map(|b| b.as_bytes().to_vec());
-    let resp_headers = record.response_headers.as_bytes().to_vec();
-    let resp_body = record.response_body.as_ref().map(|b| b.as_bytes().to_vec());
+    let req_headers = record.request_headers.as_bytes();
+    let req_body = record.request_body.as_ref().map(|b| b.as_bytes());
+    let resp_headers = record.response_headers.as_bytes();
+    let resp_body = record.response_body.as_ref().map(|b| b.as_bytes());
 
     // Process metadata, resolved the same way as the LLM path (`build_llm_data`) so
     // both event kinds report identical values for the same pid, and shared with the
@@ -536,12 +554,9 @@ fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataH
 
     HttpsDataHolder {
         c_data,
+        _record: record,
         _method: method,
         _path: path,
-        _req_headers: req_headers,
-        _req_body: req_body,
-        _resp_headers: resp_headers,
-        _resp_body: resp_body,
         _agent_name: agent_name,
         _container_id: container_id,
     }
@@ -627,25 +642,16 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
             None => (false, 0, 0, 0, 0, 0),
         };
 
-    let req_messages_json = serde_json::to_string(&call.request.messages).unwrap_or_default();
-    let resp_messages_json = serde_json::to_string(&call.response.messages).unwrap_or_default();
-    let req_messages = safe_cstring(&req_messages_json);
-    let resp_messages = safe_cstring(&resp_messages_json);
+    let req_messages = JsonBuffer::new(&call.request.messages);
+    let resp_messages = JsonBuffer::new(&call.response.messages);
 
     // Incremental (latest-round) input messages: the same per-round increment
     // stored in SQLite (`genai_events.input_messages`). Drops system messages
     // and keeps everything from the last `user` message onward.
     let input_delta = crate::genai::semantic::latest_round_input_messages(&call.request.messages);
-    let input_message_delta_json = serde_json::to_string(&input_delta).unwrap_or_default();
-    let input_message_delta = safe_cstring(&input_message_delta_json);
+    let input_message_delta = JsonBuffer::new(&input_delta);
 
-    let tools_json = call
-        .request
-        .tools
-        .as_ref()
-        .map(|tools| serde_json::to_string(tools).unwrap_or_default())
-        .unwrap_or_else(|| "[]".to_string());
-    let tools = safe_cstring(&tools_json);
+    let tools = JsonBuffer::new(&call.request.tools.as_deref().unwrap_or(&[]));
 
     let c_data = AgentsightLLMData {
         response_id: response_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
@@ -671,13 +677,13 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         cache_creation_input_tokens: cache_creation,
         cache_read_input_tokens: cache_read,
         request_messages: req_messages.as_ptr(),
-        request_messages_len: req_messages_json.len() as u32,
+        request_messages_len: req_messages.len() as u32,
         response_messages: resp_messages.as_ptr(),
-        response_messages_len: resp_messages_json.len() as u32,
+        response_messages_len: resp_messages.len() as u32,
         tools: tools.as_ptr(),
-        tools_len: tools_json.len() as u32,
+        tools_len: tools.len() as u32,
         input_message_delta: input_message_delta.as_ptr(),
-        input_message_delta_len: input_message_delta_json.len() as u32,
+        input_message_delta_len: input_message_delta.len() as u32,
     };
 
     LlmDataHolder {
@@ -1052,11 +1058,13 @@ pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mu
     // consumer cannot cause unbounded memory growth.
     let ffi_channel_capacity = config.runtime_limits.event_channel_capacity.max(1);
     let (tx, rx) = mpsc::sync_channel(ffi_channel_capacity);
+    let budget = QueueBudget::new(config.runtime_limits.ffi_channel_max_bytes);
     let running = Arc::new(AtomicBool::new(false));
     let security_drops = Arc::new(SecurityDropState::default());
 
     Box::into_raw(Box::new(AgentsightHandle {
         rx,
+        budget,
         tx: Some(tx),
         eventfd: efd,
         running,
@@ -1107,6 +1115,7 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
         let security_running = running.clone();
         let socket_path = config.ffi_enforcer_socket.clone();
         let security_drops = Arc::clone(&handle.security_drops);
+        let budget = Arc::clone(&handle.budget);
         handle.security_thread = Some(std::thread::spawn(move || {
             ffi_security_background_thread(
                 socket_path,
@@ -1114,6 +1123,7 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
                 eventfd,
                 security_running,
                 security_drops,
+                budget,
             );
         }));
     }
@@ -1122,8 +1132,9 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
     let (probe_cmd_tx, probe_cmd_rx) = mpsc::channel::<ProbeCommand>();
     handle.probe_cmd_tx = Some(probe_cmd_tx);
 
+    let budget = Arc::clone(&handle.budget);
     handle.thread = Some(std::thread::spawn(move || {
-        ffi_background_thread(config, tx, eventfd, running, probe_cmd_rx);
+        ffi_background_thread(config, tx, eventfd, running, probe_cmd_rx, budget);
     }));
 
     0
@@ -1131,10 +1142,11 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
 
 fn ffi_security_background_thread(
     socket_path: std::path::PathBuf,
-    tx: mpsc::SyncSender<FfiEvent>,
+    tx: mpsc::SyncSender<QueuedEvent>,
     eventfd: i32,
     running: Arc<AtomicBool>,
     security_drops: Arc<SecurityDropState>,
+    budget: Arc<QueueBudget>,
 ) {
     const MIN_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
     const MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1142,6 +1154,7 @@ fn ffi_security_background_thread(
         tx,
         eventfd,
         enable_raw_https: false,
+        budget,
         security_drops,
     };
     let client = crate::enforcement::EnforcementClient::new(&socket_path);
@@ -1196,14 +1209,16 @@ fn sleep_while_running(running: &AtomicBool, duration: std::time::Duration) {
 /// constraints on eBPF objects.
 fn ffi_background_thread(
     config: AgentsightConfig,
-    tx: mpsc::SyncSender<FfiEvent>,
+    tx: mpsc::SyncSender<QueuedEvent>,
     eventfd: i32,
     running: Arc<AtomicBool>,
     probe_cmd_rx: mpsc::Receiver<ProbeCommand>,
+    budget: Arc<QueueBudget>,
 ) {
     let sender = FfiEventSender {
         tx,
         eventfd,
+        budget,
         enable_raw_https: config.ffi_enable_raw_https,
         security_drops: Arc::new(SecurityDropState::default()),
     };
@@ -1240,6 +1255,7 @@ fn ffi_background_thread(
                 }
             }
         }
+        sight.tick();
         if sight.try_process().is_none() {
             // No event available — flush any timed-out pending GenAI events
             sight.flush_expired_pending_genai();
@@ -1358,6 +1374,19 @@ pub unsafe extern "C" fn agentsight_read(
     llm_ud: *mut c_void,
     flags: c_int,
 ) -> c_int {
+    ffi_boundary("agentsight_read", || unsafe {
+        agentsight_read_inner(h, http_cb, http_ud, llm_cb, llm_ud, flags)
+    })
+}
+
+unsafe fn agentsight_read_inner(
+    h: *mut AgentsightHandle,
+    http_cb: HttpsCallbackFn,
+    http_ud: *mut c_void,
+    llm_cb: LlmCallbackFn,
+    llm_ud: *mut c_void,
+    flags: c_int,
+) -> c_int {
     if h.is_null() {
         return -1;
     }
@@ -1372,7 +1401,9 @@ pub unsafe extern "C" fn agentsight_read(
                 // racing after this read leaves eventfd readable, so its event
                 // cannot be stranded without a future wakeup.
                 drain_eventfd(handle.eventfd);
-                unsafe { dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud) };
+                event.dispatch(|event| unsafe {
+                    dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud)
+                });
                 count += 1;
             }
             Err(_) => return -1,
@@ -1383,7 +1414,7 @@ pub unsafe extern "C" fn agentsight_read(
 
     // Non-blocking drain of remaining (or all) events.
     while let Ok(event) = handle.rx.try_recv() {
-        unsafe { dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud) };
+        event.dispatch(|event| unsafe { dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud) });
         count += 1;
     }
 
@@ -1430,9 +1461,9 @@ unsafe fn agentsight_read_v2_inner(
         match handle.rx.recv() {
             Ok(event) => {
                 drain_eventfd(handle.eventfd);
-                unsafe {
+                event.dispatch(|event| unsafe {
                     dispatch_event_v2(event, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud)
-                };
+                });
                 count += 1;
             }
             Err(_) => return -1,
@@ -1441,7 +1472,9 @@ unsafe fn agentsight_read_v2_inner(
         drain_eventfd(handle.eventfd);
     }
     while let Ok(event) = handle.rx.try_recv() {
-        unsafe { dispatch_event_v2(event, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud) };
+        event.dispatch(|event| unsafe {
+            dispatch_event_v2(event, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud)
+        });
         count += 1;
     }
     if let Some(event) = handle.security_drops.take_event() {
@@ -1748,12 +1781,16 @@ mod tests {
         let sender = FfiEventSender {
             tx,
             eventfd: -1,
+            budget: QueueBudget::new(0),
             enable_raw_https: false,
             security_drops: Arc::new(SecurityDropState::default()),
         };
-        sender.send_https(&make_http_record(None, None), || None);
+        sender.send_https(make_http_record(None, None), || None);
         sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
-        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Llm(_))));
+        assert!(matches!(
+            rx.try_recv().map(|event| *event.event),
+            Ok(FfiEvent::Llm(_))
+        ));
     }
 
     #[test]
@@ -1766,11 +1803,12 @@ mod tests {
         let sender = FfiEventSender {
             tx,
             eventfd: -1,
+            budget: QueueBudget::new(0),
             enable_raw_https: false,
             security_drops: Arc::new(SecurityDropState::default()),
         };
         let resolved = std::cell::Cell::new(false);
-        sender.send_https(&make_http_record(None, None), || {
+        sender.send_https(make_http_record(None, None), || {
             resolved.set(true);
             None
         });
@@ -1786,12 +1824,13 @@ mod tests {
         let sender = FfiEventSender {
             tx,
             eventfd: -1,
+            budget: QueueBudget::new(0),
             enable_raw_https: true,
             security_drops: Arc::new(SecurityDropState::default()),
         };
-        sender.send_https(&make_http_record(None, None), || Some("hermes".to_string()));
+        sender.send_https(make_http_record(None, None), || Some("hermes".to_string()));
         assert!(matches!(
-            rx.try_recv(),
+            rx.try_recv().map(|event| *event.event),
             Ok(FfiEvent::Https(_, Some(name))) if name == "hermes"
         ));
     }
@@ -1828,7 +1867,8 @@ mod tests {
     #[test]
     fn test_build_https_data_lowercases_agent_name() {
         // Matches build_llm_data: C consumers see one casing regardless of config.
-        let holder = build_https_data(&make_http_record(None, None), Some("Claude Code"));
+        let record = make_http_record(None, None);
+        let holder = build_https_data(&record, Some("Claude Code"));
         assert!(!holder.c_data.agent_name.is_null());
         let name = unsafe { CStr::from_ptr(holder.c_data.agent_name) };
         assert_eq!(name.to_str().unwrap(), "claude code");
@@ -1836,11 +1876,12 @@ mod tests {
 
     #[test]
     fn test_build_https_data_agent_name_none_is_null() {
-        let holder = build_https_data(&make_http_record(None, None), None);
+        let record = make_http_record(None, None);
+        let holder = build_https_data(&record, None);
         assert!(holder.c_data.agent_name.is_null());
     }
 
-    fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {
+    pub(super) fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {
         use crate::genai::semantic::{LLMRequest, LLMResponse};
         LLMCall {
             call_id: "call-1".to_string(),
@@ -1975,14 +2016,15 @@ mod tests {
         let sender = FfiEventSender {
             tx,
             eventfd: -1,
+            budget: QueueBudget::new(0),
             enable_raw_https: true,
             security_drops: Arc::new(SecurityDropState::default()),
         };
-        sender.send_llm(&make_llm_call(Some("Hermes"), 1));
-        sender.send_https(&make_http_record(None, None), || Some("Hermes".to_string()));
+        sender.send_llm(make_llm_call(Some("Hermes"), 1));
+        sender.send_https(make_http_record(None, None), || Some("Hermes".to_string()));
 
-        let llm_event = rx.try_recv().expect("llm event should be queued");
-        let https_event = rx.try_recv().expect("https event should be queued");
+        let llm_event = rx.try_recv().expect("llm event should be queued").event;
+        let https_event = rx.try_recv().expect("https event should be queued").event;
         let llm_payload =
             envelope_payload(&build_event_data(&llm_event).expect("llm event should serialize"));
         let https_payload = envelope_payload(
@@ -2016,6 +2058,7 @@ mod tests {
         let sender = FfiEventSender {
             tx,
             eventfd: -1,
+            budget: QueueBudget::new(0),
             enable_raw_https: false,
             security_drops: Arc::clone(&security_drops),
         };
@@ -2173,6 +2216,7 @@ mod tests {
                 -1,
                 worker_running,
                 Arc::new(SecurityDropState::default()),
+                QueueBudget::new(0),
             );
         });
         std::thread::sleep(std::time::Duration::from_millis(20));

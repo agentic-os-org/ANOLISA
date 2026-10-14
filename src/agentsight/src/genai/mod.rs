@@ -13,6 +13,8 @@ pub mod id_resolver;
 pub mod instance_id;
 pub mod logtail;
 mod openai_parse;
+mod retained;
+pub(crate) use retained::DeferredPayload;
 pub mod semantic;
 pub mod storage;
 
@@ -32,6 +34,9 @@ use std::sync::Arc;
 impl<T: GenAIExporter + Sync> GenAIExporter for Arc<T> {
     fn name(&self) -> &str {
         (**self).name()
+    }
+    fn is_active(&self) -> bool {
+        (**self).is_active()
     }
     fn export(&self, events: &[GenAISemanticEvent]) {
         (**self).export(events);

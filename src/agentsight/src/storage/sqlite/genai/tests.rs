@@ -1916,6 +1916,106 @@ fn test_insert_pending_records_idle_origin_and_match_key() {
 }
 
 #[test]
+fn completion_memory_columns_preserve_full_and_incremental_messages() {
+    let path = unique_size_test_db("completion-columns");
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    for route in ["pending", "captured", "fallback"] {
+        for incremental in [false, true] {
+            let text = "雪\"\n\0".repeat(512);
+            let message = |role: &str, text: String| crate::genai::InputMessage {
+                role: role.into(),
+                parts: vec![MessagePart::Text { content: text }],
+                name: None,
+            };
+            let mut messages = vec![message("user", text.clone())];
+            if incremental {
+                messages.insert(0, message("system", "instructions".into()));
+                messages.insert(1, message("user", "earlier turn".into()));
+                messages.insert(2, message("assistant", "earlier reply".into()));
+            }
+            let request = LLMRequest {
+                messages,
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: true,
+                tools: None,
+                raw_body: Some(serde_json::json!({"content":text}).to_string()),
+            };
+            let mut call = LLMCall::new(
+                format!("columns-{route}-{incremental}"),
+                1000,
+                "openai".into(),
+                "fixture".into(),
+                request,
+                1,
+                "fixture".into(),
+            );
+            call.response.messages.push(OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::Text {
+                    content: "reply 雪\n\0".into(),
+                }],
+                name: None,
+                finish_reason: Some("stop".into()),
+            });
+            call.metadata.insert("user_query".into(), text);
+            let expected_match_key = format!("columns-match-{route}-{incremental}");
+            call.metadata
+                .insert("pending_match_key".into(), expected_match_key.clone());
+            let expected_input = serde_json::to_string(
+                &crate::genai::semantic::latest_round_input_messages(&call.request.messages),
+            )
+            .unwrap();
+            let expected_output = serde_json::to_string(&call.response.messages).unwrap();
+            let id = call.call_id.clone();
+            let event = GenAISemanticEvent::LLMCall(call);
+            let expected_event = serde_json::to_string(&event).unwrap();
+            if route == "pending" {
+                let conn = store.conn.lock().unwrap();
+                conn.execute("INSERT INTO genai_events (event_type,status,call_id,start_timestamp_ns,event_json,pending_match_key) VALUES ('llm_call','pending',?1,1000,'{}',?2)", [&id, &expected_match_key]).unwrap();
+            }
+            if route == "captured" {
+                store.complete_captured(&event).unwrap();
+            } else {
+                store.complete_pending(&event).unwrap();
+            }
+            let conn = store.conn.lock().unwrap();
+            let saved: (String, String, String, String) = conn.query_row(
+            "SELECT input_messages,output_messages,event_json,status FROM genai_events WHERE call_id = ?1", [&id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).unwrap();
+            assert_eq!(
+                saved,
+                (
+                    expected_input,
+                    expected_output,
+                    expected_event,
+                    "complete".into()
+                )
+            );
+            let (match_key, includes_cache): (String, i64) = conn
+                .query_row(
+                    "SELECT pending_match_key, input_tokens_includes_cache
+                     FROM genai_events WHERE call_id = ?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(match_key, expected_match_key);
+            assert_eq!(includes_cache, 1);
+        }
+    }
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
 fn test_complete_pending_promotion_keeps_captured_request_evidence() {
     // 710a01ec0 established the contract for the call-id UPDATE: the
     // completing call's `input_messages`/`system_instructions` are `None`
@@ -1987,7 +2087,7 @@ fn test_complete_pending_promotion_keeps_captured_request_evidence() {
         .insert("call_kind".to_string(), "main".to_string());
 
     store
-        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .complete_captured(&GenAISemanticEvent::LLMCall(call))
         .unwrap();
 
     let conn = store.conn.lock().unwrap();
@@ -2102,7 +2202,7 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     );
 
     store
-        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .complete_captured(&GenAISemanticEvent::LLMCall(call))
         .unwrap();
 
     let conn = store.conn.lock().unwrap();
@@ -2134,15 +2234,9 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     cleanup_db(&path);
 }
 
-/// Two idle snapshots can share one match key: `insert_pending` adopts a
-/// snapshot only when the candidate set is a single row ("Ambiguous idle
-/// snapshots … preserving snapshots"), so the completion then lands in
-/// `complete_pending`'s match-key branch instead of the call-id one. That
-/// branch wrote the evidence columns unconditionally, so a completion whose
-/// parsed request carried no messages erased the request view the drain had
-/// captured — the same loss the call-id branch already guards against.
+/// Ambiguous snapshot keys must preserve each original row and its evidence.
 #[test]
-fn test_complete_pending_keeps_captured_evidence_on_the_match_key_branch() {
+fn test_completion_preserves_ambiguous_idle_snapshots() {
     let path = std::env::temp_dir().join(format!(
         "test_genai_pending_evidence_match_key_{}.db",
         std::process::id()
@@ -2250,27 +2344,39 @@ fn test_complete_pending_keeps_captured_evidence_on_the_match_key_branch() {
         .insert("call_kind".to_string(), "main".to_string());
 
     store
-        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .complete_pending(&GenAISemanticEvent::LLMCall(call.clone()))
         .unwrap();
+    call.call_id = "captured-dup".into();
+    let event = GenAISemanticEvent::LLMCall(call);
+    store.complete_captured(&event).unwrap();
+    store.complete_captured(&event).unwrap();
 
     let conn = store.conn.lock().unwrap();
-    let (input, system): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT input_messages, system_instructions FROM genai_events
-             WHERE call_id = 'real-dup'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    for id in ["idle-dup-a", "idle-dup-b"] {
+        let (status, input, system): (String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT status, input_messages, system_instructions FROM genai_events WHERE call_id = ?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(input, info.input_messages);
+        assert_eq!(system, info.system_instructions);
+    }
+    for id in ["real-dup", "captured-dup"] {
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM genai_events WHERE call_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "complete");
+    }
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
         .unwrap();
-    assert!(
-        input
-            .as_deref()
-            .is_some_and(|v| v.contains("what changed in the parser?")),
-        "the match-key branch must keep the captured request view, got {input:?}"
-    );
-    assert!(
-        system.as_deref().is_some_and(|v| v.contains("be terse")),
-        "the captured system instructions must survive too, got {system:?}"
+    assert_eq!(
+        count, 4,
+        "replayed completion must not duplicate a row or consume a snapshot"
     );
     drop(conn);
     cleanup_db(&path);
@@ -2950,6 +3056,42 @@ fn test_maintain_applies_age_retention_below_size_threshold() {
     assert_eq!(count, 0);
     drop(conn);
     cleanup_db(&path);
+}
+
+#[test]
+fn payload_memory_pruning_compares_json_bytes_instead_of_unicode_characters() {
+    let path = unique_size_test_db("unicode-payload");
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE evaluation_runs (id INTEGER PRIMARY KEY, result_json TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json) VALUES ('llm_call', 1, ?1)",
+            ["文".repeat(1024)],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO evaluation_runs (id, result_json) VALUES (1, ?1)",
+            ["x".repeat(2048)],
+        )
+        .unwrap();
+    }
+    assert_eq!(store.prune_old_records().unwrap(), 1);
+    {
+        let conn = store.conn.lock().unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))
+            .unwrap();
+        let evaluations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM evaluation_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(events, 0, "the Unicode JSON owns more bytes");
+        assert_eq!(evaluations, 1);
+    }
+    drop(store);
+    cleanup_size_test_db(&path);
 }
 
 #[test]

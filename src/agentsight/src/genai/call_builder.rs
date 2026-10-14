@@ -2,8 +2,8 @@
 //!
 //! Builds `LLMCall` / `LLMRequest` / `LLMResponse` from `AnalysisResult`,
 //! including OpenAI-specific SSE aggregation and tool-call delta merging.
-//! Logic preserved verbatim from the original `builder.rs`; only visibility
-//! widened to `pub(super)` so `builder.rs` can call `build_llm_call`.
+//! Semantic parsing keeps raw bodies borrowed until the caller decides whether
+//! to copy them or transfer ownership after HTTP persistence.
 
 use super::GenAIBuilder;
 use super::helpers::PidAgentNameCache;
@@ -15,40 +15,56 @@ use crate::response_map::ResponseSessionMapper;
 use std::collections::HashMap;
 
 impl GenAIBuilder {
-    /// Build LLMCall from analysis results
-    ///
-    /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    pub(super) fn build_llm_call(
+    pub(super) fn build_llm_call_with_raw(
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
         pid_agent_name_cache: &impl PidAgentNameCache,
+        copy_raw: bool,
     ) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
-            AnalysisResult::Token(t) => Some(t.clone()),
+            AnalysisResult::Token(t) => Some(t),
             _ => None,
         });
 
         let http_record = results.iter().find_map(|r| match r {
-            AnalysisResult::Http(h) => Some(h.clone()),
+            AnalysisResult::Http(h) => Some(h),
+            AnalysisResult::HttpContext(context) => Some(&context.http),
             _ => None,
         });
 
         let parsed_message = results.iter().find_map(|r| match r {
-            AnalysisResult::Message(m) => Some(m.clone()),
+            AnalysisResult::Message(m) => Some(m),
             _ => None,
         });
 
         // Need at least HttpRecord to build LLMCall
         let http = http_record?;
-        let pending_match_key = Self::pending_match_key(
-            http.pid,
-            http.timestamp_ns,
-            &http.method,
-            &http.path,
-            http.request_body.as_deref(),
-        );
+        let context = results.iter().find_map(|result| match result {
+            AnalysisResult::HttpContext(context) => Some(context),
+            _ => None,
+        });
+        let pending_match_key = context
+            .and_then(|context| context.request.as_ref())
+            .map(|body| {
+                Self::pending_match_key_json(
+                    http.pid,
+                    http.timestamp_ns,
+                    &http.method,
+                    &http.path,
+                    body,
+                )
+            })
+            .unwrap_or_else(|| {
+                Self::pending_match_key(
+                    http.pid,
+                    http.timestamp_ns,
+                    &http.method,
+                    &http.path,
+                    http.request_body.as_deref(),
+                )
+            });
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
         let path_match = crate::parser::llm::is_llm_api_path(&http.path);
@@ -61,9 +77,96 @@ impl GenAIBuilder {
         let internal_id = self.generate_id();
 
         // Build request from parsed message or HTTP record
-        let request = self.build_request(&parsed_message, &http);
+        let cached_request = if parsed_message.is_none() {
+            context
+                .and_then(|context| context.request.as_ref())
+                .and_then(Self::parse_request_value)
+                .map(|mut request| {
+                    request.raw_body = copy_raw.then(|| http.request_body.clone()).flatten();
+                    request
+                })
+        } else {
+            None
+        };
+        let request =
+            cached_request.unwrap_or_else(|| self.build_request(&parsed_message, http, copy_raw));
         // Build response from parsed message or HTTP record
-        let mut response = self.build_response(&parsed_message, &http, &token_record);
+        let mut response = self.build_response(
+            &parsed_message,
+            http,
+            &token_record,
+            context.is_some(),
+            copy_raw,
+        );
+
+        if let Some(context) = context
+            .filter(|_| http.is_sse || crate::parser::llm::is_dashscope_native_path(&http.path))
+        {
+            if let Some(value) = &context.response {
+                let chunks = value
+                    .as_array()
+                    .map_or_else(|| std::slice::from_ref(value), Vec::as_slice);
+                let (parts, finish) = Self::merge_sse_chunks(chunks);
+                let merged = if parts.is_empty() {
+                    Self::extract_dashscope_native_parts(chunks)
+                } else {
+                    Some((parts, finish))
+                };
+                if let Some((parts, finish_reason)) = merged {
+                    if response.messages.is_empty() {
+                        response.messages = vec![OutputMessage {
+                            role: "assistant".into(),
+                            parts,
+                            name: None,
+                            finish_reason,
+                        }];
+                    } else if let Some(message) = response
+                        .messages
+                        .first_mut()
+                        .filter(|message| message.role == "assistant")
+                    {
+                        // Match raw delivery's enrichment without flattening multiple
+                        // choices or reordering Anthropic content blocks.
+                        if !message
+                            .parts
+                            .iter()
+                            .any(|part| matches!(part, MessagePart::Reasoning { .. }))
+                        {
+                            if let Some(reasoning) = parts
+                                .iter()
+                                .find(|part| matches!(part, MessagePart::Reasoning { .. }))
+                            {
+                                message.parts.insert(0, reasoning.clone());
+                            }
+                        }
+                        let missing_ids = message
+                            .parts
+                            .iter()
+                            .any(|part| matches!(part, MessagePart::ToolCall { id: None, .. }));
+                        if missing_ids
+                            || !message
+                                .parts
+                                .iter()
+                                .any(|part| matches!(part, MessagePart::ToolCall { .. }))
+                        {
+                            if missing_ids {
+                                message.parts.retain(|part| {
+                                    !matches!(part, MessagePart::ToolCall { id: None, .. })
+                                });
+                            }
+                            message.parts.extend(
+                                parts
+                                    .into_iter()
+                                    .filter(|part| matches!(part, MessagePart::ToolCall { .. })),
+                            );
+                        }
+                        if message.finish_reason.is_none() {
+                            message.finish_reason = finish_reason;
+                        }
+                    }
+                }
+            }
+        }
 
         // Recover empty tool_call names from request tools definitions.
         // DashScope/Qwen gateways sometimes omit function.name entirely from
@@ -104,6 +207,11 @@ impl GenAIBuilder {
                     .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned())
             })
             .or_else(|| Self::extract_model_from_body(&http.request_body, &http.response_body))
+            .or_else(|| {
+                context
+                    .and_then(|context| context.request.as_ref()?.get("model")?.as_str())
+                    .map(str::to_owned)
+            })
             // Gemini names the model in the URL path
             // (`/v1beta/models/{model}:generateContent`) while its body carries
             // only `contents`/`generationConfig`, so neither the body walk nor
@@ -127,7 +235,20 @@ impl GenAIBuilder {
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
         // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
-        let response_id = Self::extract_response_id(&parsed_message, &http);
+        let response_id = Self::extract_response_id(&parsed_message, http).or_else(|| {
+            context
+                .and_then(|context| context.response.as_ref())
+                .and_then(serde_json::Value::as_array)
+                .and_then(|events| {
+                    events.iter().find_map(|event| {
+                        event
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                    })
+                })
+        });
         let call_id = response_id.clone().unwrap_or_else(|| internal_id.clone());
         let response_id = response_id.unwrap_or_else(|| call_id.clone());
 
@@ -142,7 +263,12 @@ impl GenAIBuilder {
         // 仍未命中则 fallback 到 `SHA256("session" + 该 session 内最早 response_id)`。
         let metadata_session = parsed_message
             .as_ref()
-            .and_then(|m| m.request_metadata_session_id());
+            .and_then(|m| m.request_metadata_session_id())
+            .or_else(|| {
+                context
+                    .and_then(|context| context.request.as_ref()?.get("metadata"))
+                    .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            });
         let parsed_response_id = parsed_message
             .as_ref()
             .and_then(|m| m.response_id())
@@ -176,7 +302,11 @@ impl GenAIBuilder {
             .last()
             .and_then(|m| m.finish_reason.as_deref())
         {
-            if Self::is_turn_terminal_finish_reason(reason) {
+            if !results
+                .iter()
+                .any(|result| matches!(result, AnalysisResult::Abandoned(_)))
+                && Self::is_turn_terminal_finish_reason(reason)
+            {
                 // Some providers (e.g. DashScope with forced tool_choice) report
                 // finish_reason "stop" even when the response carries tool calls.
                 // A response that still asks for tool execution means the turn is
@@ -206,6 +336,8 @@ impl GenAIBuilder {
         }
 
         // Extract error message from response body when status_code >= 400
+        drop(first_user_raw);
+        drop(last_user_raw);
         let error = if http.status_code >= 400 {
             http.response_body.as_ref().and_then(|body| {
                 /// Strip HTTP chunked transfer encoding (e.g. "b6\r\n{json}\r\n0\r\n\r\n")
@@ -290,7 +422,7 @@ impl GenAIBuilder {
             agent_name: Some(agent_name.clone()),
             metadata: {
                 let mut meta = HashMap::new();
-                meta.insert("method".to_string(), http.method);
+                meta.insert("method".to_string(), http.method.clone());
                 meta.insert("path".to_string(), http.path.clone());
                 meta.insert("status_code".to_string(), http.status_code.to_string());
                 meta.insert("is_sse".to_string(), http.is_sse.to_string());
@@ -357,8 +489,8 @@ impl GenAIBuilder {
                 // response_id: LLM API 返回的响应 ID，用作 trace_id
                 meta.insert("response_id".to_string(), response_id);
                 // user_query: 用户实际输入的原文
-                if let Some(ref q) = user_query {
-                    meta.insert("user_query".to_string(), q.clone());
+                if let Some(q) = user_query {
+                    meta.insert("user_query".to_string(), q);
                 }
                 // session_id: 同一 agent 进程的完整会话标识
                 if let Some(ref sid) = session_id {
@@ -471,7 +603,13 @@ impl GenAIBuilder {
     }
 
     /// Build LLMRequest from parsed message or HTTP record
-    fn build_request(&self, message: &Option<ParsedApiMessage>, http: &HttpRecord) -> LLMRequest {
+    fn build_request(
+        &self,
+        message: &Option<&ParsedApiMessage>,
+        http: &HttpRecord,
+        copy_raw: bool,
+    ) -> LLMRequest {
+        let raw_body = || copy_raw.then(|| http.request_body.clone()).flatten();
         match message {
             Some(ParsedApiMessage::OpenAICompletion { request, .. }) => {
                 if let Some(req) = request.as_ref() {
@@ -488,7 +626,7 @@ impl GenAIBuilder {
                         stop_sequences: req.stop.clone(),
                         stream: req.stream.unwrap_or(false),
                         tools: req.tools.clone(),
-                        raw_body: http.request_body.clone(),
+                        raw_body: raw_body(),
                     };
                 }
             }
@@ -530,7 +668,7 @@ impl GenAIBuilder {
                         stop_sequences: req.stop_sequences.clone(),
                         stream: req.stream.unwrap_or(false),
                         tools: req.tools.clone(),
-                        raw_body: http.request_body.clone(),
+                        raw_body: raw_body(),
                     };
                 }
             }
@@ -590,7 +728,7 @@ impl GenAIBuilder {
                         stop_sequences: None,
                         stream: req.params.stream,
                         tools: req.params.tools.clone(),
-                        raw_body: http.request_body.clone(),
+                        raw_body: raw_body(),
                     };
                 }
             }
@@ -599,7 +737,14 @@ impl GenAIBuilder {
 
         // Fallback: no parsed message — parse request_body directly
         if let Some(ref body) = http.request_body {
-            if let Some(req) = Self::parse_request_body(body) {
+            let parsed = if copy_raw {
+                Self::parse_request_body(body)
+            } else {
+                serde_json::from_str::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|value| Self::parse_request_value(&value))
+            };
+            if let Some(req) = parsed {
                 return req;
             }
         }
@@ -615,7 +760,7 @@ impl GenAIBuilder {
             stop_sequences: None,
             stream: false,
             tools: None,
-            raw_body: http.request_body.clone(),
+            raw_body: raw_body(),
         }
     }
 
@@ -697,9 +842,11 @@ impl GenAIBuilder {
     /// Build LLMResponse from parsed message or HTTP record
     fn build_response(
         &self,
-        message: &Option<ParsedApiMessage>,
+        message: &Option<&ParsedApiMessage>,
         http: &HttpRecord,
-        _token_record: &Option<TokenRecord>,
+        _token_record: &Option<&TokenRecord>,
+        cached_json: bool,
+        copy_raw: bool,
     ) -> LLMResponse {
         // Try to extract from parsed message first
         let (messages, finish_reason): (Vec<OutputMessage>, Option<String>) = match message {
@@ -838,7 +985,9 @@ impl GenAIBuilder {
         };
 
         // For SSE responses, extract from response_body when no parsed message
-        let messages = if messages.is_empty() && http.is_sse {
+        let messages = if cached_json {
+            messages
+        } else if messages.is_empty() && http.is_sse {
             // No parsed response — reconstruct from SSE response body directly
             if let Some(ref body) = http.response_body {
                 Self::parse_sse_response_body(body, finish_reason.as_deref()).unwrap_or(messages)
@@ -911,7 +1060,7 @@ impl GenAIBuilder {
         LLMResponse {
             messages,
             streamed: http.is_sse,
-            raw_body: http.response_body.clone(),
+            raw_body: copy_raw.then(|| http.response_body.clone()).flatten(),
         }
     }
 }
@@ -984,7 +1133,7 @@ mod tests {
     fn build_call(builder: &GenAIBuilder, results: &[AnalysisResult]) -> Option<LLMCall> {
         let mapper = ResponseSessionMapper::new();
         let cache = HashMap::new();
-        builder.build_llm_call(results, &mapper, &cache)
+        builder.build_llm_call_with_raw(results, &mapper, &cache, true)
     }
 
     fn empty_chat_msg(role: MessageRole, content: Option<&str>) -> OpenAIChatMessage {

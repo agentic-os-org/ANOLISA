@@ -213,8 +213,7 @@ def summarize_drops(
     completed = counter_delta(values["completed"])
     total_dropped = ring_dropped + channel_dropped
     available = any(
-        len(values[name]) >= 2
-        for name in ("ring_buffer_dropped", "channel_dropped")
+        len(values[name]) >= 2 for name in ("ring_buffer_dropped", "channel_dropped")
     )
     denominator = completed + total_dropped or load_requests
     return {
@@ -225,9 +224,7 @@ def summarize_drops(
             channel_dropped if len(values["channel_dropped"]) >= 2 else None
         ),
         "completed": completed if len(values["completed"]) >= 2 else None,
-        "total_dropped": (
-            total_dropped if available else None
-        ),
+        "total_dropped": (total_dropped if available else None),
         "drop_rate": (
             total_dropped / denominator * 100 if available and denominator else None
         ),
@@ -254,8 +251,12 @@ def build_summary(
         drops["drop_rate"] / 100 if drops["drop_rate"] is not None else None
     )
     completeness = numeric(validation.get("completeness_ratio")) if validation else None
-    expected_tokens = numeric(validation.get("expected_total_tokens")) if validation else None
-    captured_tokens = numeric(validation.get("captured_total_tokens")) if validation else None
+    expected_tokens = (
+        numeric(validation.get("expected_total_tokens")) if validation else None
+    )
+    captured_tokens = (
+        numeric(validation.get("captured_total_tokens")) if validation else None
+    )
     capture_loss_rate = (
         max(0.0, 1.0 - completeness) if completeness is not None else None
     )
@@ -336,8 +337,12 @@ def render_markdown(
 ) -> str:
     """Build a human-readable report from benchmark summaries."""
     completeness = numeric(validation.get("completeness_ratio")) if validation else None
-    expected_tokens = numeric(validation.get("expected_total_tokens")) if validation else None
-    captured_tokens = numeric(validation.get("captured_total_tokens")) if validation else None
+    expected_tokens = (
+        numeric(validation.get("expected_total_tokens")) if validation else None
+    )
+    captured_tokens = (
+        numeric(validation.get("captured_total_tokens")) if validation else None
+    )
     capture_loss_percent = (
         max(0.0, 1.0 - completeness) * 100 if completeness is not None else None
     )
@@ -534,6 +539,7 @@ def main() -> int:
     parser.add_argument("--metrics", type=Path)
     parser.add_argument("--validation-report", type=Path)
     parser.add_argument("--summary-output", type=Path)
+    parser.add_argument("--agent-summary", type=Path)
     args = parser.parse_args()
     validation = None
     if args.validation_report and args.validation_report.exists():
@@ -553,22 +559,43 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     resources = summarize_resources(args.metrics)
     drops = summarize_drops(args.metrics, load["requests"])
-    args.output.write_text(
-        render_markdown(
-            protocol=args.protocol,
-            qps=args.qps,
-            duration=args.duration,
-            load=load,
-            resources=resources,
-            qps_resources=summarize_qps_resources(args.metrics),
-            drops=drops,
-            validation=validation,
-            load_artifact=args.load_results,
-            load_log_artifact=args.load_log,
-            metrics_artifact=args.metrics,
-        ),
-        encoding="utf-8",
+    report = render_markdown(
+        protocol=args.protocol,
+        qps=args.qps,
+        duration=args.duration,
+        load=load,
+        resources=resources,
+        qps_resources=summarize_qps_resources(args.metrics),
+        drops=drops,
+        validation=validation,
+        load_artifact=args.load_results,
+        load_log_artifact=args.load_log,
+        metrics_artifact=args.metrics,
     )
+    agent_load = None
+    if args.agent_summary:
+        agent_load = json.loads(args.agent_summary.read_text(encoding="utf-8"))
+        lines = [
+            "\n## Independent agent load\n",
+            f"Load verification: {'PASS' if agent_load['passed'] else 'FAIL'}\n",
+            f"Agents: {agent_load['distinct_agent_pids']} distinct client PIDs; "
+            f"target: {agent_load['requested_agents']}.",
+            f"Active streams: peak {agent_load['peak_active_streams']}, "
+            f"average {agent_load['average_active_streams']:.2f}.",
+            f"Received output: {agent_load['received_output_tokens_per_second']:.2f} tokens/s; "
+            f"target per agent: {agent_load['target_tokens_per_second_per_agent']:.2f} tokens/s.",
+            "Fixture: ` x` verified with `cl100k_base`. Output rates cover the measurement window; "
+            "token reconciliation above includes synthetic input usage and drained responses.",
+            "\n| Agent | PID | Measured output tok/s | Error |",
+            "| ---: | ---: | ---: | --- |",
+        ]
+        for agent in agent_load["agents"]:
+            error = str(agent.get("error", "")).replace("|", "\\|").replace("\n", " ")
+            lines.append(
+                f"| {agent['agent']} | {agent['pid']} | {agent['tokens_per_second']:.2f} | {error} |"
+            )
+        report += "\n".join(lines) + "\n"
+    args.output.write_text(report, encoding="utf-8")
     if args.summary_output:
         args.summary_output.parent.mkdir(parents=True, exist_ok=True)
         summary = build_summary(
@@ -580,6 +607,8 @@ def main() -> int:
             drops=drops,
             validation=validation,
         )
+        if agent_load is not None:
+            summary["agent_load"] = agent_load
         args.summary_output.write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

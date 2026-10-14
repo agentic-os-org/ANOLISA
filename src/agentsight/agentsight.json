@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200
@@ -51,11 +51,17 @@
     "event_channel_policy": "backpressure",
     "event_channel_max_bytes_mb": 64,
     "pending_genai_max_count": 1000,
-    "pending_genai_max_bytes_mb": 64,
+    "pending_genai_max_bytes_mb": 16,
     "pid_cache_size": 1024,
+    "connection_capacity": 32,
+    "connection_max_bytes_mb": 64,
+    "ffi_channel_max_bytes_mb": 64,
     "max_connection_body_mb": 8,
+    "max_sse_retained_mb": 2,
+    "retain_raw_sse": false,
     "connection_idle_timeout_secs": 60,
-    "ring_buffer_mb": 32
+    "connection_hard_timeout_secs": 300,
+    "ring_buffer_mb": 64
   },
   "https": [
     {

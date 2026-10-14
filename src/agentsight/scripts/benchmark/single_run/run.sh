@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON:-python3}"
 BENCHMARK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$BENCHMARK_DIR/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 HOST="127.0.0.1"
@@ -13,7 +14,14 @@ PAYLOAD_KB="4"
 CHUNKS="10"
 CHUNK_BYTES="64"
 CHUNK_DELAY_MS="0"
+AGENTS=""
+TOKENS_PER_SECOND=""
+TOKENS_PER_RESPONSE=1000
+STARTUP_DELAY=5
+RATE_TOLERANCE=0.05
+EXPECTED_TOTAL_TOKENS=20
 AGENTSIGHT_PID=""
+PREPARE_CAPTURE=0
 METRICS_FILE=""
 DB=""
 KEEP_ARTIFACTS=0
@@ -33,6 +41,7 @@ RUN_ID="${BENCHMARK_RUN_ID:-$(date -u +%Y%m%dT%H%M%S)-$$-$(date +%N)}"
 
 usage() {
     echo "usage: $0 [--userspace] [--external-server] [--protocol sse|json|h2] [--host HOST] [--port PORT] [--qps N] [--duration SEC] [--payload-kb N] [--chunks N] [--chunk-bytes N] [--chunk-delay-ms N] [--agentsight-pid PID] [--metrics-file PATH] [--db PATH] [--request-log-dir DIR] [--validation-wait-seconds SEC] [--fault-count N] [--fault-oversized-bytes N] [--output-dir DIR] [--results-root DIR] [--max-results-gb N] [--min-free-disk-gb N] [--min-available-memory-mb N] [--max-agentsight-rss-mb N] [--max-k6-vus N] [--keep-artifacts]"
+    echo "agent load: --agents N --tokens-per-second RATE [--tokens-per-response N] [--startup-delay SEC] [--rate-tolerance FRACTION]; defaults: 32 agents, 100 output tokens/s, 1000 tokens/response, 5s discovery delay, 5% rate tolerance"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -48,7 +57,13 @@ while [[ $# -gt 0 ]]; do
         --chunks) CHUNKS="$2"; shift 2 ;;
         --chunk-bytes) CHUNK_BYTES="$2"; shift 2 ;;
         --chunk-delay-ms) CHUNK_DELAY_MS="$2"; shift 2 ;;
+        --agents) AGENTS="$2"; shift 2 ;;
+        --tokens-per-second) TOKENS_PER_SECOND="$2"; shift 2 ;;
+        --tokens-per-response) TOKENS_PER_RESPONSE="$2"; shift 2 ;;
+        --startup-delay) STARTUP_DELAY="$2"; shift 2 ;;
+        --rate-tolerance) RATE_TOLERANCE="$2"; shift 2 ;;
         --agentsight-pid) AGENTSIGHT_PID="$2"; shift 2 ;;
+        --prepare-capture) PREPARE_CAPTURE=1; shift ;;
         --metrics-file) METRICS_FILE="$2"; shift 2 ;;
         --db) DB="$2"; shift 2 ;;
         --request-log-dir) REQUEST_LOG_DIR="$2"; shift 2 ;;
@@ -75,6 +90,21 @@ if [[ "$USERSPACE" -eq 1 ]]; then
 fi
 
 case "$PROTOCOL" in sse|json|h2) ;; *) echo "protocol must be sse, json, or h2" >&2; exit 2 ;; esac
+if [[ -n "$AGENTS" || -n "$TOKENS_PER_SECOND" ]]; then
+    [[ "$PROTOCOL" == "sse" ]] || { echo "agent load requires --protocol sse" >&2; exit 2; }
+    AGENTS="${AGENTS:-32}"
+    TOKENS_PER_SECOND="${TOKENS_PER_SECOND:-100}"
+    "$PYTHON_BIN" "$SCRIPT_DIR/load/agents.py" --check-only --agents "$AGENTS" \
+        --tokens-per-second "$TOKENS_PER_SECOND" --tokens-per-response "$TOKENS_PER_RESPONSE" \
+        --duration "$DURATION" --payload-kb "$PAYLOAD_KB" --startup-delay "$STARTUP_DELAY" \
+        --rate-tolerance "$RATE_TOLERANCE" --output-dir "$OUTPUT_DIR/agents" --run-id "$RUN_ID"
+    EXPECTED_TOTAL_TOKENS="$("$PYTHON_BIN" -c 'import sys; print(12 + int(sys.argv[1]))' "$TOKENS_PER_RESPONSE")"
+    QPS="$("$PYTHON_BIN" -c 'import sys; print(int(sys.argv[1]) * float(sys.argv[2]) / int(sys.argv[3]))' "$AGENTS" "$TOKENS_PER_SECOND" "$TOKENS_PER_RESPONSE")"
+fi
+if [[ "$PREPARE_CAPTURE" -eq 1 && ( -z "$AGENTS" || -z "$DB" || -n "$AGENTSIGHT_PID" ) ]]; then
+    echo "capture preparation requires Agent mode, --db, and a deferred collector PID" >&2
+    exit 2
+fi
 if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
     echo "BENCHMARK_RUN_ID may contain only letters, digits, underscores, and hyphens" >&2
     exit 2
@@ -86,6 +116,10 @@ for value in "$MAX_RESULTS_GB" "$MIN_FREE_DISK_GB" "$MIN_AVAILABLE_MEMORY_MB" \
         exit 2
     fi
 done
+if [[ -n "$AGENTS" && -e "$OUTPUT_DIR/agents" ]]; then
+    echo "agent output exists; choose a new --output-dir: $OUTPUT_DIR" >&2
+    exit 2
+fi
 mkdir -p "$OUTPUT_DIR"
 # The collector writes this marker only on a violation, so a leftover file from
 # a previous run would fail a healthy rerun; clear it before the load starts.
@@ -127,10 +161,11 @@ if [[ "$EXTERNAL_SERVER" -eq 0 ]]; then
         -subj "/CN=localhost" -keyout "$TMP_DIR/server.key" -out "$TMP_DIR/server.crt" \
         >/dev/null 2>&1
     SERVER_ARGS=(--host "$HOST" --port "$PORT" --cert "$TMP_DIR/server.crt" --key "$TMP_DIR/server.key" --chunks "$CHUNKS" --chunk-bytes "$CHUNK_BYTES" --chunk-delay-ms "$CHUNK_DELAY_MS")
+    [[ -n "$AGENTS" ]] && SERVER_ARGS+=(--tokens-per-second "$TOKENS_PER_SECOND" --output-tokens "$TOKENS_PER_RESPONSE")
     [[ "$PROTOCOL" == "json" ]] && SERVER_ARGS+=(--json)
     [[ "$PROTOCOL" == "h2" ]] && SERVER_ARGS+=(--http2)
     [[ -n "$REQUEST_LOG_DIR" ]] && SERVER_ARGS+=(--request-log-dir "$REQUEST_LOG_DIR")
-    python3 "$SCRIPT_DIR/mock_llm_server.py" "${SERVER_ARGS[@]}" >"$OUTPUT_DIR/mock-server.log" 2>&1 &
+    "$PYTHON_BIN" "$SCRIPT_DIR/mock_llm_server.py" "${SERVER_ARGS[@]}" >"$OUTPUT_DIR/mock-server.log" 2>&1 &
     SERVER_PID=$!
 fi
 for _ in $(seq 1 50); do
@@ -145,7 +180,7 @@ if [[ "$FAULT_COUNT" -gt 0 ]]; then
     [[ -n "$AGENTSIGHT_PID" ]] && FAULT_ARGS+=(--watch-pid "$AGENTSIGHT_PID")
     (
         sleep 1
-        exec python3 "$SCRIPT_DIR/fault_injector.py" "${FAULT_ARGS[@]}"
+        exec "$PYTHON_BIN" "$SCRIPT_DIR/fault_injector.py" "${FAULT_ARGS[@]}"
     ) &
     FAULT_PID=$!
 fi
@@ -160,19 +195,39 @@ LOAD_LOG=""
 if [[ "$PROTOCOL" != "h2" ]]; then
     LOAD_RESULTS="$OUTPUT_DIR/k6.jsonl.gz"
     LOAD_LOG="$OUTPUT_DIR/k6.log"
+    if [[ -n "$AGENTS" ]]; then
+        LOAD_RESULTS="$OUTPUT_DIR/agents.jsonl.gz"
+        LOAD_LOG="$OUTPUT_DIR/agents.log"
+    fi
 fi
-if [[ "$PROTOCOL" != "h2" && -n "$DB" ]]; then
-    python3 "$SCRIPT_DIR/validate_results.py" \
+start_validator() {
+    [[ "$PROTOCOL" != "h2" && -n "$DB" ]] || return 0
+    "$PYTHON_BIN" "$SCRIPT_DIR/validate_results.py" \
         --load-results "$LOAD_RESULTS" --db "$DB" \
         --prefix "bench-$RUN_ID-" --since-ns "$VALIDATION_SINCE_NS" \
-        --expected-total-tokens 20 --wait-seconds "$VALIDATION_WAIT_SECONDS" \
+        --expected-total-tokens "$EXPECTED_TOTAL_TOKENS" --wait-seconds "$VALIDATION_WAIT_SECONDS" \
         --completion-marker "$VALIDATION_MARKER" \
         --request-log "$REQUEST_LOG" \
         --output "$OUTPUT_DIR/report.json" \
         >"$OUTPUT_DIR/validation.log" 2>&1 &
     VALIDATOR_PID=$!
-fi
-if [[ "$PROTOCOL" == "h2" ]]; then
+}
+[[ "$PREPARE_CAPTURE" -eq 1 ]] || start_validator
+if [[ -n "$AGENTS" ]]; then
+    AGENT_CAPTURE_ARGS=()
+    if [[ -n "$DB" ]]; then
+        AGENT_CAPTURE_ARGS=(--capture-marker "$VALIDATION_MARKER" \
+            --capture-timeout "$VALIDATION_WAIT_SECONDS")
+    fi
+    [[ "$PREPARE_CAPTURE" -eq 1 ]] && AGENT_CAPTURE_ARGS+=(--prepare-capture)
+    "$PYTHON_BIN" "$SCRIPT_DIR/load/agents.py" --agents "$AGENTS" \
+        --tokens-per-second "$TOKENS_PER_SECOND" --tokens-per-response "$TOKENS_PER_RESPONSE" \
+        --duration "$DURATION" --payload-kb "$PAYLOAD_KB" --startup-delay "$STARTUP_DELAY" \
+        --rate-tolerance "$RATE_TOLERANCE" --base-url "https://$HOST:$PORT" \
+        --run-id "$RUN_ID" --output-dir "$OUTPUT_DIR/agents" \
+        "${AGENT_CAPTURE_ARGS[@]}" >"$LOAD_LOG" 2>&1 &
+    LOAD_PID=$!
+elif [[ "$PROTOCOL" == "h2" ]]; then
     printf '{"request_id":"bench-%s-h2","model":"test-model","stream":true,"messages":[{"role":"user","content":"benchmark"}]}' "$RUN_ID" >"$TMP_DIR/payload.json"
     LOAD_LOG="$OUTPUT_DIR/h2load.txt"
     BASE_URL="https://$HOST:$PORT" QPS="$QPS" DURATION="$DURATION" \
@@ -192,9 +247,21 @@ else
     LOAD_PID=$!
 fi
 
+if [[ "$PREPARE_CAPTURE" -eq 1 ]]; then
+    while [[ ! -f "$OUTPUT_DIR/capture-ready.json" ]]; do
+        if ! kill -0 "$LOAD_PID" 2>/dev/null; then
+            echo "clients failed during capture preparation; see $LOAD_LOG" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+    AGENTSIGHT_PID="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$OUTPUT_DIR/tracer-ready.json")"
+    start_validator
+fi
+
 if [[ -n "$AGENTSIGHT_PID" ]]; then
     COLLECTOR_ARGS=(--pid "$AGENTSIGHT_PID" --input-qps "$QPS" --interval 1 \
-        --duration "$DURATION" --output "$OUTPUT_DIR/metrics.csv" \
+        --duration 0 --output "$OUTPUT_DIR/metrics.csv" \
         --load-pid "$LOAD_PID" --results-root "$RESULTS_ROOT" \
         --safety-output "$OUTPUT_DIR/safety-stop.json" \
         --max-results-gb "$MAX_RESULTS_GB" \
@@ -202,14 +269,24 @@ if [[ -n "$AGENTSIGHT_PID" ]]; then
         --min-available-memory-mb "$MIN_AVAILABLE_MEMORY_MB" \
         --max-agentsight-rss-mb "$MAX_AGENTSIGHT_RSS_MB")
     [[ -n "$METRICS_FILE" ]] && COLLECTOR_ARGS+=(--metrics-file "$METRICS_FILE")
-    python3 "$SCRIPT_DIR/collect_metrics.py" "${COLLECTOR_ARGS[@]}" &
+    [[ -n "$AGENTS" ]] && COLLECTOR_ARGS+=(--duration 0 --start-file "$OUTPUT_DIR/agents/start.json")
+    "$PYTHON_BIN" "$SCRIPT_DIR/collect_metrics.py" "${COLLECTOR_ARGS[@]}" &
     COLLECTOR_PID=$!
 fi
+if [[ "$PREPARE_CAPTURE" -eq 1 ]]; then
+    : >"$OUTPUT_DIR/load-release.json"
+fi
 
-wait "$LOAD_PID" || LOAD_STATUS=$?
-LOAD_PID=""
-if [[ -n "${COLLECTOR_PID:-}" ]] && kill -0 "$COLLECTOR_PID" 2>/dev/null; then
-    kill -TERM "$COLLECTOR_PID" 2>/dev/null || true
+if [[ -n "$AGENTS" && -n "${VALIDATOR_PID:-}" ]]; then
+    # Workers remain alive after publishing their load results until the
+    # validator consumes queued TLS events, including the final usage/DONE.
+    while kill -0 "$LOAD_PID" 2>/dev/null && kill -0 "$VALIDATOR_PID" 2>/dev/null; do
+        [[ -f "$VALIDATION_MARKER" ]] && break
+        sleep 0.1
+    done
+else
+    wait "$LOAD_PID" || LOAD_STATUS=$?
+    LOAD_PID=""
 fi
 if [[ -n "${COMPRESSOR_PID:-}" ]]; then
     wait "$COMPRESSOR_PID" || COMPRESSION_STATUS=$?
@@ -219,10 +296,18 @@ if [[ -n "${VALIDATOR_PID:-}" ]]; then
     : >"$VALIDATION_MARKER"
     wait "$VALIDATOR_PID" || VALIDATION_STATUS=$?
     VALIDATOR_PID=""
+    : >"$VALIDATION_MARKER.release"
     cat "$OUTPUT_DIR/validation.log"
+fi
+if [[ -n "$LOAD_PID" ]]; then
+    wait "$LOAD_PID" || LOAD_STATUS=$?
+    LOAD_PID=""
 fi
 COLLECTOR_STATUS=0
 FAULT_STATUS=0
+if [[ -n "${COLLECTOR_PID:-}" ]] && kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+    kill -TERM "$COLLECTOR_PID" 2>/dev/null || true
+fi
 if [[ -n "${COLLECTOR_PID:-}" ]]; then
     wait "$COLLECTOR_PID" || COLLECTOR_STATUS=$?
     COLLECTOR_PID=""
@@ -241,7 +326,8 @@ REPORT_ARGS=(--output "$OUTPUT_DIR/benchmark-report.md" --summary-output "$OUTPU
 [[ -n "$LOAD_LOG" ]] && REPORT_ARGS+=(--load-log "$LOAD_LOG")
 [[ -f "$OUTPUT_DIR/metrics.csv" ]] && REPORT_ARGS+=(--metrics "$OUTPUT_DIR/metrics.csv")
 [[ -f "$OUTPUT_DIR/report.json" ]] && REPORT_ARGS+=(--validation-report "$OUTPUT_DIR/report.json")
-python3 "$SCRIPT_DIR/render_report.py" "${REPORT_ARGS[@]}"
+[[ -n "$AGENTS" && -f "$OUTPUT_DIR/agent-summary.json" ]] && REPORT_ARGS+=(--agent-summary "$OUTPUT_DIR/agent-summary.json")
+"$PYTHON_BIN" "$SCRIPT_DIR/render_report.py" "${REPORT_ARGS[@]}"
 echo "benchmark artifacts: $OUTPUT_DIR"
 [[ "$LOAD_STATUS" -eq 0 ]] || exit "$LOAD_STATUS"
 [[ "$COMPRESSION_STATUS" -eq 0 ]] || exit "$COMPRESSION_STATUS"

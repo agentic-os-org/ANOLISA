@@ -288,6 +288,18 @@ fn describe_metrics() {
         "HTTP connections or streams evicted from correlation caches"
     );
     metrics::describe_counter!(
+        "agentsight_http_conn_removed_total",
+        "HTTP connection removals by reason and retained state"
+    );
+    metrics::describe_counter!(
+        "agentsight_http_abandoned_emitted_total",
+        "Incomplete HTTP records emitted after connection removal"
+    );
+    metrics::describe_counter!(
+        "agentsight_ffi_dropped_total",
+        "FFI events rejected by count or byte limits"
+    );
+    metrics::describe_counter!(
         "agentsight_stage_calls_total",
         "Invocations of an AgentSight processing stage"
     );
@@ -314,6 +326,18 @@ fn describe_metrics() {
     metrics::describe_gauge!(
         "agentsight_connection_cache_bytes",
         "Logical payload bytes retained for connection correlation"
+    );
+    metrics::describe_gauge!(
+        "agentsight_http_conn_active",
+        "HTTP connections or streams with retained in-flight state"
+    );
+    metrics::describe_gauge!(
+        "agentsight_http_conn_retained_bytes",
+        "Estimated retained HTTP allocation capacity"
+    );
+    metrics::describe_gauge!(
+        "agentsight_ffi_inflight_bytes",
+        "Estimated FFI payload bytes retained through callback completion"
     );
     metrics::describe_gauge!(
         "agentsight_pending_genai_count",
@@ -666,6 +690,47 @@ mod tests {
         assert!(snapshot.contains("agentsight_stage_calls_total{stage=\"aggregator\"} 2"));
         assert!(snapshot.contains("agentsight_stage_calls_total{stage=\"analyzer\"} 1"));
         assert!(snapshot.contains("agentsight_stage_outputs_total{stage=\"analyzer\"}"));
+    }
+
+    #[test]
+    fn connection_removals_report_incomplete_evidence_and_release_gauges() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            describe_metrics();
+            let parser = Parser::new();
+            let mut aggregator = Aggregator::with_limits(1, &Default::default());
+            for id in 1..=2 {
+                let mut event = ssl_event(
+                    http_message("POST /v1/chat/completions HTTP/1.1", "{}"),
+                    1,
+                    1_000,
+                );
+                event.ssl_ptr = id;
+                let results = aggregator.process_result(parser.parse_event(Event::Ssl(event)));
+                if id == 2 {
+                    assert!(matches!(
+                        results.as_slice(),
+                        [crate::aggregator::AggregatedResult::Abandoned {
+                            reason: crate::aggregator::RemoveReason::LruEvicted,
+                            ..
+                        }]
+                    ));
+                }
+            }
+            assert_eq!(aggregator.drain_pending().len(), 1);
+            assert_eq!(aggregator.connection_metrics().connection_cache_bytes, 0);
+        });
+        let snapshot = handle.render();
+        assert!(snapshot.contains(
+            "agentsight_http_conn_removed_total{reason=\"lru_evicted\",state=\"request_pending\"} 1"
+        ));
+        assert!(
+            snapshot.contains("agentsight_http_abandoned_emitted_total{reason=\"lru_evicted\"} 1")
+        );
+        assert!(snapshot.contains("agentsight_http_conn_active 0"));
+        assert!(snapshot.contains("agentsight_http_conn_retained_bytes 0"));
+        assert!(snapshot.contains("# HELP agentsight_http_conn_removed_total HTTP connection removals by reason and retained state"));
     }
 
     #[test]

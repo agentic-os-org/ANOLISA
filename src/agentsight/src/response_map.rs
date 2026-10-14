@@ -105,6 +105,11 @@ impl ResponseSessionMapper {
         }
     }
 
+    /// Whether a later file write can resolve a waiting call's session.
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Process a FileWriteEvent:
     /// 1. Extract UUID from filename as session_id
     /// 2. Parse buf as UTF-8, split by '\n'

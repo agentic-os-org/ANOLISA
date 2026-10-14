@@ -263,6 +263,13 @@ impl ZstdStreamDecoder {
         }
     }
 
+    /// Account for visible decoded storage and decoder working-memory headroom.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.decoder
+            .as_ref()
+            .map_or(0, |decoder| decoder.get_ref().buf.capacity() + 256 * 1024)
+    }
+
     /// Return everything decoded so far (all fully received blocks).
     ///
     /// Non-consuming: finalization can run on a cloned snapshot (idle/dead

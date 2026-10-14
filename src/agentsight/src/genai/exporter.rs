@@ -15,6 +15,14 @@ pub trait GenAIExporter: Send {
     /// Human-readable name for this exporter (used in logs)
     fn name(&self) -> &str;
 
+    /// Whether this exporter currently accepts events.
+    ///
+    /// Inactive sinks remain registered and are checked for each delivery.
+    /// Exporters without an availability gate conservatively remain active.
+    fn is_active(&self) -> bool {
+        true
+    }
+
     /// Export a batch of GenAI semantic events.
     ///
     /// This method should not block the caller for long.

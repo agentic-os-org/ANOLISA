@@ -4,6 +4,11 @@
 //! by their stream_id and correlating request (client->server) with response (server->client)
 //! to form complete HTTP/2 request/response pairs.
 
+#[path = "http2/retention.rs"]
+mod retention;
+#[path = "http2/sse.rs"]
+mod sse;
+
 use crate::aggregator::http::{ConnectionId, ConnectionMetrics, event_has_meaningful_output};
 use crate::aggregator::result::AggregatedResult;
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us};
@@ -191,14 +196,14 @@ impl Http2StreamState {
     /// Estimate frame payload bytes retained for stream correlation.
     fn buffered_bytes(&self) -> usize {
         fn frame_bytes(frame: &ParsedHttp2Frame) -> usize {
-            frame.payload_len
+            std::mem::size_of::<crate::probes::sslsniff::SslEvent>()
+                + frame.source_event.buf.capacity()
+                + frame.source_event.comm.capacity()
         }
 
-        fn frames_bytes(frames: &[ParsedHttp2Frame]) -> usize {
-            frames
-                .iter()
-                .map(frame_bytes)
-                .fold(0usize, usize::saturating_add)
+        fn frames_bytes(frames: &Vec<ParsedHttp2Frame>) -> usize {
+            frames.capacity() * std::mem::size_of::<ParsedHttp2Frame>()
+                + frames.iter().map(frame_bytes).sum::<usize>()
         }
 
         fn stream_bytes(stream: &Http2Stream) -> usize {
@@ -301,6 +306,10 @@ pub struct Http2Stream {
     pub decoded_request_headers: Option<Vec<(String, String)>>,
     /// Decoded response headers from stateful HPACK (name, value) pairs
     pub decoded_response_headers: Option<Vec<(String, String)>>,
+    /// DATA payloads already decoded and reduced by the streaming pipeline.
+    pub response_body_decoded: bool,
+    /// Original SSE event count before reduction.
+    pub captured_sse_event_count: Option<usize>,
 }
 
 impl Http2Stream {
@@ -318,6 +327,8 @@ impl Http2Stream {
             end_timestamp_ns: timestamp_ns,
             decoded_request_headers: None,
             decoded_response_headers: None,
+            response_body_decoded: false,
+            captured_sse_event_count: None,
         }
     }
 
@@ -456,6 +467,9 @@ impl Http2Stream {
     /// Get response body as decompressed string (concatenates all data frames)
     pub fn response_body_str(&self) -> Option<String> {
         let body = self.response_body();
+        if self.response_body_decoded {
+            return (!body.is_empty()).then(|| String::from_utf8_lossy(&body).into_owned());
+        }
         if body.is_empty() {
             None
         } else {
@@ -563,6 +577,9 @@ impl Http2Stream {
     /// The count follows the HTTP/1 aggregator's event count semantics and
     /// includes non-JSON events such as the [DONE] marker.
     pub fn response_sse_event_count(&self) -> usize {
+        if let Some(count) = self.captured_sse_event_count {
+            return count;
+        }
         self.response_body_str()
             .map(|body| SSEParser::parse_stream(&body).events.len())
             .unwrap_or(0)
@@ -757,16 +774,18 @@ struct DecodedHeadersPair {
 
 impl DecodedHeadersPair {
     fn buffered_bytes(&self) -> usize {
-        fn headers_bytes(headers: &[(String, String)]) -> usize {
-            headers.iter().fold(0usize, |total, (name, value)| {
-                total.saturating_add(name.len()).saturating_add(value.len())
-            })
+        fn headers_bytes(headers: &Vec<(String, String)>) -> usize {
+            headers.capacity() * std::mem::size_of::<(String, String)>()
+                + headers
+                    .iter()
+                    .map(|(name, value)| name.capacity() + value.capacity())
+                    .sum::<usize>()
         }
 
         self.request
-            .as_deref()
+            .as_ref()
             .map_or(0, headers_bytes)
-            .saturating_add(self.response.as_deref().map_or(0, headers_bytes))
+            .saturating_add(self.response.as_ref().map_or(0, headers_bytes))
     }
 }
 
@@ -796,6 +815,12 @@ pub struct Http2StreamAggregator {
     idle_timeout: Duration,
     /// Cumulative active-stream evictions from the bounded LRU.
     eviction_count: u64,
+    ready: Vec<crate::aggregator::AggregatedResult>,
+    compact_sse: bool,
+    max_sse_bytes: usize,
+    bytes_budget: usize,
+    sse_streams: LruCache<StreamId, super::http::SseStream>,
+    closed_streams: LruCache<StreamId, bool>,
 }
 
 impl Default for Http2StreamAggregator {
@@ -844,6 +869,12 @@ impl Http2StreamAggregator {
             max_stream_bytes: max_stream_bytes.max(1024),
             idle_timeout,
             eviction_count: 0,
+            ready: Vec::new(),
+            compact_sse: false,
+            max_sse_bytes: crate::config::DEFAULT_MAX_SSE_RETAINED_BYTES,
+            bytes_budget: crate::config::DEFAULT_CONNECTION_MAX_BYTES,
+            sse_streams: LruCache::new(cap),
+            closed_streams: LruCache::new(cap),
         }
     }
 
@@ -855,7 +886,14 @@ impl Http2StreamAggregator {
     pub fn process_frames(&mut self, frames: Vec<ParsedHttp2Frame>) -> Vec<Http2Stream> {
         let mut completed = Vec::new();
 
-        for frame in frames {
+        for mut frame in frames {
+            self.enforce_bytes_budget();
+            // A small frame must not keep an entire multi-frame TLS read alive.
+            let mut source = frame.source_event.metadata_only();
+            source.buf = frame.payload().to_vec();
+            source.len = source.buf.len() as u32;
+            frame.payload_offset = 0;
+            frame.source_event = std::rc::Rc::new(source);
             let connection_id = ConnectionId::from_ssl_event(&frame.source_event);
             let direction = StreamDirection::from_rw(frame.source_event.rw);
 
@@ -868,6 +906,17 @@ impl Http2StreamAggregator {
             }
 
             let stream_id = StreamId::new(connection_id, frame.stream_id);
+            if self.closed_streams.contains(&stream_id) {
+                if direction == StreamDirection::Request && frame.is_headers() {
+                    self.closed_streams.pop(&stream_id);
+                    self.discard_side_state(stream_id);
+                    self.reset_hpack_decoder(connection_id, StreamDirection::Request);
+                    self.reset_hpack_decoder(connection_id, StreamDirection::Response);
+                } else {
+                    self.process_closed_frame(&frame, stream_id, direction);
+                    continue;
+                }
+            }
 
             // Handle CONTINUATION frames: buffer until END_HEADERS
             if frame.frame_type == Http2FrameType::Continuation {
@@ -922,11 +971,18 @@ impl Http2StreamAggregator {
 
                 match state {
                     Http2StreamState::Complete(stream) => {
-                        completed.push(self.finalize_stream(stream_id, stream));
+                        completed.push(self.finalize_completed(stream_id, stream));
                     }
                     _ => {
                         self.insert_stream_state(stream_id, state);
                     }
+                }
+                continue;
+            }
+
+            if let Some(result) = self.process_sse_frame(stream_id, &frame) {
+                if let Some(stream) = result {
+                    completed.push(stream);
                 }
                 continue;
             }
@@ -943,7 +999,7 @@ impl Http2StreamAggregator {
 
             match state {
                 Http2StreamState::Complete(stream) => {
-                    completed.push(self.finalize_stream(stream_id, stream));
+                    completed.push(self.finalize_completed(stream_id, stream));
                 }
                 _ => {
                     self.insert_stream_state(stream_id, state);
@@ -951,6 +1007,7 @@ impl Http2StreamAggregator {
             }
         }
 
+        self.enforce_bytes_budget();
         completed
     }
 
@@ -1155,22 +1212,25 @@ impl Http2StreamAggregator {
     /// so a stream that never reaches END_STREAM would otherwise grow until the
     /// process exits.
     fn insert_stream_state(&mut self, stream_id: StreamId, state: Http2StreamState) {
-        let retained = state.buffered_bytes();
-        if retained > self.max_stream_bytes {
-            log::warn!(
-                "http/2 stream {stream_id:?} retained {retained} bytes > max_stream_bytes={}, dropping",
-                self.max_stream_bytes
+        if state.buffered_bytes() > self.max_stream_bytes {
+            self.emit_abandoned(
+                stream_id,
+                state,
+                crate::aggregator::RemoveReason::OverBudget,
             );
-            self.eviction_count = self.eviction_count.saturating_add(1);
-            self.discard_side_state(stream_id);
             return;
         }
-
-        self.last_activity.push(stream_id, Instant::now());
-        if let Some((evicted_id, _)) = self.streams.push(stream_id, state) {
-            self.eviction_count = self.eviction_count.saturating_add(1);
-            self.discard_side_state(evicted_id);
+        if self.streams.contains(&stream_id) {
+            self.abandon_stream(stream_id, crate::aggregator::RemoveReason::Replaced);
         }
+        if self.streams.len() == self.streams.cap().get() {
+            if let Some((id, _)) = self.streams.peek_lru() {
+                let id = *id;
+                self.abandon_stream(id, crate::aggregator::RemoveReason::LruEvicted);
+            }
+        }
+        self.last_activity.put(stream_id, Instant::now());
+        self.streams.put(stream_id, state);
     }
 
     /// Release the side maps belonging to a stream that is no longer retained.
@@ -1186,6 +1246,7 @@ impl Http2StreamAggregator {
             self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
         }
         self.decoded_headers_store.remove(&stream_id);
+        self.sse_streams.pop(&stream_id);
         self.last_activity.pop(&stream_id);
     }
 
@@ -1226,7 +1287,24 @@ impl Http2StreamAggregator {
         if let Some(buffer) = self.continuation_buffers.remove(&stream_id) {
             self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
         }
+        self.finish_sse(stream_id, &mut stream);
         self.last_activity.pop(&stream_id);
+        stream
+    }
+
+    fn finalize_completed(&mut self, stream_id: StreamId, stream: Http2Stream) -> Http2Stream {
+        metrics::counter!("agentsight_http_conn_removed_total", "reason" => "completed", "state" => "http2_stream").increment(1);
+        let wire_ended = stream
+            .response_data_frames
+            .last()
+            .or(stream.response_headers.as_ref())
+            .is_some_and(ParsedHttp2Frame::has_end_stream);
+        let stream = self.finalize_stream(stream_id, stream);
+        if !wire_ended {
+            if let Some((old, _)) = self.closed_streams.push(stream_id, false) {
+                self.discard_side_state(old);
+            }
+        }
         stream
     }
 
@@ -1238,14 +1316,18 @@ impl Http2StreamAggregator {
     /// here, so this sweep only bounds partial aggregation state. The HTTP/1
     /// aggregator runs an equivalent sweep on the same periodic tick.
     pub fn evict_idle_and_oversized(&mut self) {
-        let now = Instant::now();
+        self.tick(Instant::now());
+    }
+
+    pub(crate) fn tick(&mut self, now: Instant) {
         let timeout = self.idle_timeout;
 
         let idle: Vec<StreamId> = self
             .last_activity
             .iter()
             .filter_map(|(stream_id, seen)| {
-                (now.duration_since(*seen) > timeout).then_some(*stream_id)
+                (!timeout.is_zero() && now.saturating_duration_since(*seen) >= timeout)
+                    .then_some(*stream_id)
             })
             .collect();
         let oversized: Vec<StreamId> = self
@@ -1255,23 +1337,11 @@ impl Http2StreamAggregator {
             .map(|(stream_id, _)| *stream_id)
             .collect();
 
-        let mut evicted = 0u64;
-        for stream_id in idle.into_iter().chain(oversized) {
-            let was_retained = self.streams.pop(&stream_id).is_some();
-            let was_tracked = self.last_activity.pop(&stream_id).is_some();
-            if was_retained || was_tracked {
-                self.discard_side_state(stream_id);
-                evicted += 1;
-            }
+        for id in idle {
+            self.abandon_stream(id, crate::aggregator::RemoveReason::HardTimeout);
         }
-
-        if evicted > 0 {
-            self.eviction_count = self.eviction_count.saturating_add(evicted);
-            log::info!(
-                "http/2 evicted {evicted} idle/oversized stream(s) (timeout={}s, max_stream_bytes={})",
-                timeout.as_secs(),
-                self.max_stream_bytes
-            );
+        for id in oversized {
+            self.abandon_stream(id, crate::aggregator::RemoveReason::OverBudget);
         }
     }
 
@@ -1520,7 +1590,7 @@ impl Http2StreamAggregator {
         let continuation_bytes = self
             .continuation_buffers
             .values()
-            .map(|buffer| buffer.data.len())
+            .map(|buffer| buffer.data.capacity())
             .fold(0usize, usize::saturating_add);
         let decoded_header_bytes = self
             .decoded_headers_store
@@ -1534,10 +1604,15 @@ impl Http2StreamAggregator {
             .fold(0usize, usize::saturating_add);
 
         ConnectionMetrics {
-            connection_cache_bytes: pending_connection_bytes
-                .saturating_add(continuation_bytes)
-                .saturating_add(decoded_header_bytes)
-                .saturating_add(hpack_table_bytes),
+            connection_cache_bytes: self
+                .sse_streams
+                .iter()
+                .map(|(_, stream)| stream.retained_bytes())
+                .sum::<usize>()
+                + pending_connection_bytes
+                    .saturating_add(continuation_bytes)
+                    .saturating_add(decoded_header_bytes)
+                    .saturating_add(hpack_table_bytes),
             pending_connection_count: self.streams.len(),
             pending_connection_bytes,
             eviction_count: self.eviction_count,
@@ -1548,6 +1623,9 @@ impl Http2StreamAggregator {
     pub fn clear(&mut self) {
         self.streams.clear();
         self.completed_streams.clear();
+        self.ready.clear();
+        self.sse_streams.clear();
+        self.closed_streams.clear();
         self.hpack_states.clear();
         self.continuation_buffers.clear();
         self.decoded_headers_store.clear();
@@ -2236,14 +2314,13 @@ mod tests {
         );
         aggregator.process_frames(vec![first]);
 
+        let first_metrics = aggregator.metrics();
+        assert_eq!(first_metrics.pending_connection_count, 1);
+        assert_eq!(first_metrics.eviction_count, 0);
+        assert!(first_metrics.pending_connection_bytes >= 3);
         assert_eq!(
-            aggregator.metrics(),
-            ConnectionMetrics {
-                connection_cache_bytes: 3,
-                pending_connection_count: 1,
-                pending_connection_bytes: 3,
-                eviction_count: 0,
-            }
+            first_metrics.connection_cache_bytes,
+            first_metrics.pending_connection_bytes
         );
 
         let second = create_test_frame(
@@ -2255,15 +2332,24 @@ mod tests {
         );
         aggregator.process_frames(vec![second]);
 
+        let second_metrics = aggregator.metrics();
+        assert_eq!(second_metrics.pending_connection_count, 1);
+        assert_eq!(second_metrics.eviction_count, 1);
         assert_eq!(
-            aggregator.metrics(),
-            ConnectionMetrics {
-                connection_cache_bytes: 6,
-                pending_connection_count: 1,
-                pending_connection_bytes: 6,
-                eviction_count: 1,
-            }
+            second_metrics.pending_connection_bytes,
+            first_metrics.pending_connection_bytes + 3
         );
+        assert_eq!(
+            second_metrics.connection_cache_bytes,
+            second_metrics.pending_connection_bytes
+        );
+        assert!(matches!(
+            aggregator.take_ready().as_slice(),
+            [crate::aggregator::AggregatedResult::Abandoned {
+                reason: crate::aggregator::RemoveReason::LruEvicted,
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -2279,8 +2365,11 @@ mod tests {
         aggregator.process_frames(vec![first]);
 
         let metrics = aggregator.metrics();
-        assert_eq!(metrics.pending_connection_bytes, 5);
-        assert_eq!(metrics.connection_cache_bytes, 10);
+        assert!(metrics.pending_connection_bytes >= 5);
+        assert_eq!(
+            metrics.connection_cache_bytes,
+            metrics.pending_connection_bytes + 5
+        );
 
         let second = create_test_frame(
             3,
@@ -2292,8 +2381,11 @@ mod tests {
         aggregator.process_frames(vec![second]);
 
         let metrics = aggregator.metrics();
-        assert_eq!(metrics.pending_connection_bytes, 4);
-        assert_eq!(metrics.connection_cache_bytes, 8);
+        assert!(metrics.pending_connection_bytes >= 4);
+        assert_eq!(
+            metrics.connection_cache_bytes,
+            metrics.pending_connection_bytes + 4
+        );
         assert_eq!(metrics.eviction_count, 1);
         assert!(
             !aggregator.continuation_buffers.contains_key(&StreamId::new(
@@ -2331,7 +2423,8 @@ mod tests {
                 request_data_frames: vec![request_data.clone()],
             },
         );
-        assert_eq!(aggregator.metrics().pending_connection_bytes, 6);
+        let request_bytes = aggregator.metrics().pending_connection_bytes;
+        assert!(request_bytes >= 6);
 
         aggregator.streams.put(
             stream_id,
@@ -2349,22 +2442,21 @@ mod tests {
                 response: Some(vec![("y".into(), "ok".into())]),
             },
         );
-        assert_eq!(
-            aggregator.metrics(),
-            ConnectionMetrics {
-                connection_cache_bytes: 24,
-                pending_connection_count: 1,
-                pending_connection_bytes: 17,
-                eviction_count: 0,
-            }
-        );
+        let metrics = aggregator.metrics();
+        assert_eq!(metrics.pending_connection_count, 1);
+        assert!(metrics.pending_connection_bytes >= request_bytes + 11);
+        assert!(metrics.connection_cache_bytes >= metrics.pending_connection_bytes + 7);
+        assert_eq!(metrics.eviction_count, 0);
 
         let mut complete = Http2Stream::new(stream_id, 1000);
         complete.request_headers = Some(request_headers);
-        complete.request_data_frames.push(request_data);
+        complete.request_data_frames = vec![request_data];
         complete.response_headers = Some(response_headers);
-        complete.response_data_frames.push(response_data);
-        assert_eq!(Http2StreamState::Complete(complete).buffered_bytes(), 17);
+        complete.response_data_frames = vec![response_data];
+        assert_eq!(
+            Http2StreamState::Complete(complete).buffered_bytes(),
+            metrics.pending_connection_bytes
+        );
     }
 
     // --- HPACK stateful decode tests ---

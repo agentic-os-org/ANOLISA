@@ -1,15 +1,15 @@
 //! GenAI Builder helper functions
 //!
 //! Pure helpers for LLM request classification, provider/model extraction,
-//! user-query parsing and agent-name resolution. Logic preserved verbatim
-//! from the original `builder.rs`; only visibility was widened to
-//! `pub(super)` so siblings (`builder` / `call_builder`) can call these.
+//! user-query parsing and agent-name resolution. Large text is borrowed when
+//! extraction needs only a view of one message part.
 
 use super::GenAIBuilder;
 use super::semantic::{LLMRequest, MessagePart};
 use crate::analyzer::ParsedApiMessage;
 use crate::config::default_cmdline_rules;
 use crate::discovery::matcher::{CmdlineGlobMatcher, ProcessContext};
+use std::borrow::Cow;
 
 /// LLM call classification: Main (normal), Recap (compaction/summary), WebSearch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,14 +46,18 @@ pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
     // `instructions` plus a system item) spreads its text over the message's
     // parts. The raw path reads the same content and its doc requires both
     // paths to extract the same text.
-    let system_text: String = request
+    let mut system_parts = request
         .messages
         .iter()
         .filter(|m| m.role == "system")
         .map(|m| GenAIBuilder::joined_text_parts(&m.parts))
         .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    let system_text = match system_parts.len() {
+        0 => Cow::Borrowed(""),
+        1 => system_parts.pop().unwrap_or_default(),
+        _ => Cow::Owned(system_parts.join("\n")),
+    };
 
     // ① Check system_instructions (Cosh patterns)
     if !system_text.is_empty() {
@@ -315,7 +319,7 @@ impl GenAIBuilder {
     /// Extract model from parsed message
     pub(super) fn extract_model_from_message(
         &self,
-        message: &Option<ParsedApiMessage>,
+        message: &Option<&ParsedApiMessage>,
     ) -> Option<String> {
         match message {
             Some(ParsedApiMessage::OpenAICompletion { request, .. }) => {
@@ -392,22 +396,35 @@ impl GenAIBuilder {
     /// Every reader that wants "the text of this message" must join them all;
     /// a `parts.first()` read loses the mixed shapes (and made the classifier
     /// disagree with the raw/pending path for them).
-    fn joined_text_parts(parts: &[MessagePart]) -> String {
-        parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { content } if !content.is_empty() => Some(content.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn joined_text_parts(parts: &[MessagePart]) -> Cow<'_, str> {
+        let mut text = parts.iter().filter_map(|p| match p {
+            MessagePart::Text { content } if !content.is_empty() => Some(content.as_str()),
+            _ => None,
+        });
+        let Some(first) = text.next() else {
+            return Cow::Borrowed("");
+        };
+        let Some(second) = text.next() else {
+            return Cow::Borrowed(first);
+        };
+        let capacity =
+            first.len() + second.len() + 1 + text.clone().map(|part| part.len() + 1).sum::<usize>();
+        let mut joined = String::with_capacity(capacity);
+        joined.push_str(first);
+        joined.push('\n');
+        joined.push_str(second);
+        for part in text {
+            joined.push('\n');
+            joined.push_str(part);
+        }
+        Cow::Owned(joined)
     }
 
     /// 提取第一条有实际文本内容的 user message 的原始文本
     ///
     /// 仅返回含非空 `Text` 片段的首条 user message，供 `IdResolver`
     /// 生成 session_key 使用。跳过只含 tool_result 等的 user message。
-    pub(super) fn extract_first_user_raw(request: &LLMRequest) -> Option<String> {
+    pub(super) fn extract_first_user_raw(request: &LLMRequest) -> Option<Cow<'_, str>> {
         request
             .messages
             .iter()
@@ -419,7 +436,7 @@ impl GenAIBuilder {
     /// 提取最后一条有实际文本内容的 user message 的原始文本
     ///
     /// 跳过 Anthropic 格式中只包含 tool_result 的 user message
-    pub(super) fn extract_last_user_raw(request: &LLMRequest) -> Option<String> {
+    pub(super) fn extract_last_user_raw(request: &LLMRequest) -> Option<Cow<'_, str>> {
         request
             .messages
             .iter()
@@ -486,6 +503,10 @@ impl GenAIBuilder {
     /// (`crate::preferences::detector`) reuses this stripper so evidence
     /// excerpts quote the user's actual words, not agent template noise.
     pub(crate) fn strip_user_query_prefix(text: &str) -> String {
+        Self::strip_user_query_prefix_view(text).into_owned()
+    }
+
+    fn strip_user_query_prefix_view(text: &str) -> Cow<'_, str> {
         // cosh-ng: find a line starting with "user_input:" (after trimming)
         // and extract its value. This line-by-line approach tolerates template
         // adjustments such as indentation changes, missing leading newlines,
@@ -495,7 +516,7 @@ impl GenAIBuilder {
             if let Some(value) = trimmed.strip_prefix("user_input:") {
                 let extracted = value.trim();
                 if !extracted.is_empty() {
-                    return extracted.to_string();
+                    return Cow::Borrowed(extracted);
                 }
             }
         }
@@ -512,7 +533,7 @@ impl GenAIBuilder {
         if let Some(m) = OPENCLAW_TS_RE.find(text) {
             let after = text[m.end()..].trim_start();
             if !after.is_empty() {
-                return after.to_string();
+                return Cow::Borrowed(after);
             }
         }
 
@@ -520,11 +541,11 @@ impl GenAIBuilder {
         if text.contains("<system-reminder>") {
             let stripped = Self::strip_system_reminder_tags(text);
             if !stripped.is_empty() {
-                return stripped;
+                return Cow::Owned(stripped);
             }
         }
 
-        text.to_string()
+        Cow::Borrowed(text)
     }
 
     /// Remove all `<system-reminder>...</system-reminder>` blocks from text.
@@ -626,6 +647,49 @@ mod tests {
     use super::super::semantic::InputMessage;
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn completion_memory_text_views_borrow_and_preserve_multi_part_queries() {
+        let text = "x".repeat(1024 * 1024);
+        let request = make_llm_request(vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::Text { content: text }],
+            name: None,
+        }]);
+        let MessagePart::Text { content } = &request.messages[0].parts[0] else {
+            unreachable!()
+        };
+        let first = GenAIBuilder::extract_first_user_raw(&request).unwrap();
+        let last = GenAIBuilder::extract_last_user_raw(&request).unwrap();
+        assert!(matches!(first, Cow::Borrowed(_)));
+        assert_eq!(first.as_ptr(), content.as_ptr());
+        assert_eq!(last.as_ptr(), content.as_ptr());
+        assert!(matches!(
+            GenAIBuilder::strip_user_query_prefix_view(content),
+            Cow::Borrowed(_)
+        ));
+        let mixed = make_llm_request(vec![InputMessage {
+            role: "user".into(),
+            parts: vec![
+                MessagePart::ToolCallResponse {
+                    id: Some("tool".into()),
+                    response: serde_json::json!({"ok":true}),
+                },
+                MessagePart::Text {
+                    content: "first".into(),
+                },
+                MessagePart::Text { content: "".into() },
+                MessagePart::Text {
+                    content: "second".into(),
+                },
+            ],
+            name: None,
+        }]);
+        assert_eq!(
+            GenAIBuilder::extract_last_user_query(&mixed).as_deref(),
+            Some("first\nsecond")
+        );
+    }
 
     fn make_llm_request(messages: Vec<InputMessage>) -> LLMRequest {
         LLMRequest {
@@ -1528,7 +1592,7 @@ mod tests {
             response: None,
         });
         assert_eq!(
-            builder.extract_model_from_message(&msg),
+            builder.extract_model_from_message(&msg.as_ref()),
             Some("gpt-4-turbo".to_string())
         );
         assert_eq!(builder.extract_model_from_message(&None), None);
