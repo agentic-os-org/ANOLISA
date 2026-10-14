@@ -4735,12 +4735,27 @@ fn eval_stat_interval(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_hung_task_timeout(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/hung_task_timeout_secs";
+    eval_hung_task_timeout_at(info, recs, "/proc/sys/kernel/hung_task_timeout_secs")
+}
+
+/// Path-injectable form of [`eval_hung_task_timeout`] (the `eval_*_at` idiom)
+/// so the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the detector is disabled, which its own reason
+/// states — and [`read_sysctl_u64`] maps an unreadable or unparseable file to
+/// that same 0. Only a zero the reader could produce is evidence of the
+/// disabled detector, so a masked or garbled proc entry (a container's,
+/// typically) neither reports a `current_value` the host does not have nor
+/// asks for a write it may not need.
+fn eval_hung_task_timeout_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.hung_task_timeout_secs".to_string(),
             current_value: "0".to_string(),
@@ -13549,6 +13564,31 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 0 is the unrestricted setting");
         assert_eq!(recs[0].current_value, "0");
         assert!(advice(&on).is_empty(), "a readable 1 is already restricted");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn hung_task_timeout_advice_needs_a_readable_switch() {
+        // Same shape: only a zero the reader could produce is evidence that
+        // the detector is disabled, which is what the reason claims.
+        let (off, on, others) = zero_switch_paths("hung_task_timeout", b"120\n");
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_hung_task_timeout_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 disables the detector");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 120 is enabled");
         for path in &others {
             assert!(
                 advice(path).is_empty(),
