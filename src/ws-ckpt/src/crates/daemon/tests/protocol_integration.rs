@@ -103,6 +103,10 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 fs_used_bytes: 500_000_000,
             },
         },
+        Request::WatcherHealth => Response::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-degraded".to_string()],
+            watcher_queue_overflows: 2,
+        },
         Request::Cleanup { .. } => Response::CleanupOk {
             removed: vec!["msg1-step0".to_string()],
         },
@@ -687,6 +691,49 @@ async fn full_status_request_response_over_socket() {
             assert_eq!(report.workspaces[0].ws_id, "ws-test");
         }
         _ => panic!("expected StatusOk, got {:?}", response),
+    }
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn full_watcher_health_request_response_over_socket() {
+    // Watcher health is a dedicated request/response pair, not a
+    // StatusReport field: the report crosses the IPC in bincode frames
+    // (positional), so a new field would break older clients and the
+    // cosh-ng mirror of the status layout (#7592 review).
+    let socket_path = temp_socket_path();
+
+    let listener = UnixListener::bind(&socket_path).expect("bind");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        mock_server_handle(stream).await;
+    });
+
+    tokio::task::yield_now().await;
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+
+    let request = Request::WatcherHealth;
+    let frame = encode_frame(&request).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    client.read_exact(&mut payload).await.unwrap();
+
+    let response: Response = decode_payload(&payload).unwrap();
+    match response {
+        Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            watcher_queue_overflows,
+        } => {
+            assert_eq!(workspaces_without_watcher, vec!["ws-degraded".to_string()]);
+            assert_eq!(watcher_queue_overflows, 2);
+        }
+        _ => panic!("expected WatcherHealthOk, got {:?}", response),
     }
 
     server.await.unwrap();
