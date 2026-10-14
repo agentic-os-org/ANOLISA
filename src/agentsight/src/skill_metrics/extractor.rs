@@ -314,8 +314,12 @@ fn scan_skills_dir_recursive(dir: &std::path::Path, depth: u32) -> Vec<String> {
         }
         // Check if this directory contains SKILL.md
         if path.join("SKILL.md").exists() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                names.push(name.to_string());
+            // The name is a label for the report, never a path to open: render
+            // it like every other display name in this component, so a skill
+            // whose directory name is not UTF-8 is still reported instead of
+            // dropped from the list as if it were not installed.
+            if let Some(name) = path.file_name() {
+                names.push(name.to_string_lossy().into_owned());
             }
         } else {
             // No SKILL.md here — it may be a category folder; recurse
@@ -764,6 +768,38 @@ the list is refreshed later in the prompt:
             "the skill under the non-UTF-8 category must be found: {names:?}"
         );
         assert!(names.contains(&"plain".to_string()), "{names:?}");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The reported name is a label for the report, not a path to open, and a
+    /// skill directory whose name is not UTF-8 used to be dropped from the
+    /// report entirely — its name could not be turned into the `String` this
+    /// function returns, so an installed skill was invisible.
+    #[test]
+    fn test_scan_skills_dir_recursive_reports_a_non_utf8_skill_name() {
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_scan_skills_raw_name_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let skill = tmp.join(std::ffi::OsStr::from_bytes(b"skill\xff"));
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: raw\n---").unwrap();
+
+        let names = scan_skills_dir_recursive(&tmp, 2);
+        assert_eq!(
+            names.len(),
+            1,
+            "the skill is installed and must be listed: {names:?}"
+        );
+        assert!(
+            names[0].contains('\u{fffd}'),
+            "the name is rendered for display, like every other name: {names:?}"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
