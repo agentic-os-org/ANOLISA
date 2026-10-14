@@ -828,15 +828,20 @@ fn eval_aslr(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 /// value with the same confidence, and `dedupe_recommendations` keeps the first
 /// registration on a tie, so a `current < 2` test here shadows the specific
 /// rule on every `== 1` host and its reason can never reach a user.
+///
+/// Only a zero the reader could actually produce is that case:
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to 0, so a
+/// masked or garbled proc entry (a container's, typically) would otherwise
+/// report a `current_value` the host does not have and ask for a write it may
+/// not need. The switch reader keeps the two apart.
 fn eval_aslr_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.randomize_va_space".to_string(),
-            current_value: current.to_string(),
+            current_value: "0".to_string(),
             recommended_value: "2".to_string(),
             reason: "ASLR 未完全启用，攻击者可预测内存地址布局实施代码注入".to_string(),
             confidence: Confidence::High,
@@ -10158,6 +10163,56 @@ mod tests {
 
         // Fully randomized: nothing to advise.
         assert!(advice(&full).is_empty());
+    }
+
+    #[test]
+    fn aslr_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — ASLR fully off — and `read_sysctl_u64`
+        // maps an unreadable or unparseable file to that same 0. A masked or
+        // garbled proc entry (a container's, typically) was therefore reported
+        // as `current_value: "0"` and answered with a write the host may not
+        // need; only a zero the reader could produce counts.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_aslr_switch_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let off = dir.join("randomize_va_space.0");
+        std::fs::write(&off, b"0\n").unwrap();
+        let on = dir.join("randomize_va_space.2");
+        std::fs::write(&on, b"2\n").unwrap();
+        let malformed = dir.join("randomize_va_space.malformed");
+        std::fs::write(&malformed, b"off\n").unwrap();
+        let empty = dir.join("randomize_va_space.empty");
+        std::fs::write(&empty, b"").unwrap();
+        // A directory is an IO error even for root, so it stands in for a
+        // proc entry the reader is not allowed to open.
+        let io_error = dir.join("randomize_va_space.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_aslr_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(
+            recs.len(),
+            1,
+            "a readable 0 is the case the rule exists for"
+        );
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 2 is fully randomized");
+        for path in [&malformed, &empty, &io_error] {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
     }
 
     /// Synthetic `/lib/modules/<release>/kernel/net/sched`-style directory
