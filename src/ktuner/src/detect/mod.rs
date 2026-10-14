@@ -1893,7 +1893,24 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     // it.
     ("org.apache.zookeeper.server", "zookeeper"),
     ("zookeeper", "zookeeper"),
-    ("org.apache.flink", "flink"),
+    // Flink maps the packages its daemons live in — bin/flink-daemon.sh runs
+    // org.apache.flink.runtime.taskexecutor.TaskManagerRunner,
+    // org.apache.flink.runtime.entrypoint.StandaloneSessionClusterEntrypoint,
+    // org.apache.flink.container.entrypoint
+    // .StandaloneApplicationClusterEntryPoint,
+    // org.apache.flink.runtime.webmonitor.history.HistoryServer and
+    // org.apache.flink.runtime.zookeeper.FlinkZooKeeperQuorumPeer, while the
+    // Kubernetes and YARN deployments add their own entry packages — and NOT
+    // the bare `org.apache.flink` root, for the reason the Kafka markers above
+    // spell out: `bin/flink` execs the JVM with
+    // org.apache.flink.client.cli.CliFrontend, the client's own class, so only
+    // the class is left to decide. The SQL gateway is the one daemon outside
+    // those packages.
+    ("org.apache.flink.runtime", "flink"),
+    ("org.apache.flink.container.entrypoint", "flink"),
+    ("org.apache.flink.kubernetes.entrypoint", "flink"),
+    ("org.apache.flink.yarn.entrypoint", "flink"),
+    ("org.apache.flink.table.gateway.SqlGateway", "flink"),
     ("flink", "flink"),
     // Spark maps its standalone daemons (sbin/start-master.sh,
     // start-worker.sh, start-history-server.sh) and its Connect server
@@ -4460,6 +4477,46 @@ mod tests {
             "org.apache.cassandra.service.CassandraDaemon\0-f",
         );
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("cassandra"));
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_the_flink_client() {
+        // `bin/flink` execs the JVM with the client's own main class
+        // (flink-dist flink-bin/bin/flink: org.apache.flink.client.cli.
+        // CliFrontend), so the CLI's argv[0] is gone by the time the process
+        // is sampled — only the class is left to decide, and the bare
+        // `org.apache.flink` root read it as the cluster. A host that only
+        // submits jobs to a cluster running elsewhere reported "Flink",
+        // classified as the streaming workload and earned the read-ahead
+        // advice.
+        let cmdline = concat!(
+            "java\0-cp\0/opt/flink/lib/*\0",
+            "org.apache.flink.client.cli.CliFrontend\0run\0-m\0yarn-cluster\0app.jar",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // The daemons keep deciding: bin/flink-daemon.sh maps its entrypoint
+        // names to these classes, and the Kubernetes and YARN deployments
+        // ship their own entry packages; the SQL gateway is the one daemon
+        // outside them.
+        for class in [
+            "org.apache.flink.runtime.taskexecutor.TaskManagerRunner",
+            "org.apache.flink.runtime.entrypoint.StandaloneSessionClusterEntrypoint",
+            "org.apache.flink.container.entrypoint.StandaloneApplicationClusterEntryPoint",
+            "org.apache.flink.runtime.webmonitor.history.HistoryServer",
+            "org.apache.flink.runtime.zookeeper.FlinkZooKeeperQuorumPeer",
+            "org.apache.flink.kubernetes.entrypoint.KubernetesSessionClusterEntrypoint",
+            "org.apache.flink.yarn.entrypoint.YarnSessionClusterEntrypoint",
+            "org.apache.flink.table.gateway.SqlGateway",
+        ] {
+            let cmdline =
+                format!("java\0-Xmx1g\0{class}\0--config\0/opt/flink/conf/flink-conf.yaml");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("flink"),
+                "{class}"
+            );
+        }
     }
 
     #[test]
