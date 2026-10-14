@@ -2815,8 +2815,10 @@ fn eval_panic_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) 
     }
     // panic is a plain int; -1 reboots immediately, so it must be read signed
     // or the unsigned fallback maps it to 0 (never reboot) and fires the rule.
-    let current = read_sysctl_i64(path);
-    if current == 0 {
+    // The same fallback turns an unreadable or unparseable file into that 0,
+    // so the switch reader decides: only a successfully read 0 is the
+    // never-reboot setting this rule is for.
+    if read_switch_i64(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.panic".to_string(),
             current_value: "0".to_string(),
@@ -9187,6 +9189,22 @@ fn read_sysctl_string(path: &str) -> String {
 /// when the read produced nothing: a missing or unreadable switch is not
 /// evidence that the switch is off.
 fn read_switch(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+}
+
+/// Signed sibling of [`read_switch`] for the switches whose legal range
+/// includes -1.
+///
+/// `kernel.panic`, `kernel.panic_on_oops`, `vm.oom_dump_tasks` and
+/// `vm.oom_kill_allocating_task` are plain ints that are on for any nonzero
+/// value, so -1 is as on as 1 — and [`read_sysctl_i64`] maps an unreadable or
+/// unparseable file to 0, which is the value their gates fire on. This reader
+/// answers `None` for a read that produced nothing, exactly as the unsigned
+/// one does, so the gate can tell "the switch is 0" from "the switch could not
+/// be read".
+fn read_switch_i64(path: &str) -> Option<i64> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| raw.trim().parse().ok())
@@ -17322,6 +17340,54 @@ mod tests {
                 recs.len(),
                 usize::from(expects_rec),
                 "value {value}: only 0 (never reboot) is unhardened"
+            );
+        }
+    }
+
+    #[test]
+    fn test_panic_unreadable_switch_stays_quiet() {
+        // The signed truthiness above is kept, and a file the reader cannot
+        // interpret no longer becomes the value 0 these gates fire on: a
+        // masked or garbled proc entry (a container's, typically) used to be
+        // reported as `current_value: "0"` and answered with a write the host
+        // may not need.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_panic_unreadable_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let malformed = dir.join("panic.malformed");
+        std::fs::write(&malformed, b"never\n").unwrap();
+        let empty = dir.join("panic.empty");
+        std::fs::write(&empty, b"").unwrap();
+        // A directory is an IO error even for root.
+        let io_error = dir.join("panic.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("panic.missing");
+
+        let info = make_test_info();
+        for path in [&malformed, &empty, &io_error, &missing] {
+            let mut recs = Vec::new();
+            eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        // A readable 0 is still the unhardened value, and a readable -1 still
+        // counts as enabled.
+        for (value, expects_rec) in [("0", true), ("-1", false), ("1", false)] {
+            let path = dir.join(format!("panic.{value}"));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "kernel.panic = {value}: only 0 is the unhardened value"
             );
         }
     }
