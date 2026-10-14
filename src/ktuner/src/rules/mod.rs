@@ -1939,12 +1939,24 @@ fn eval_tcp_mtu_probing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pa
 // ─── VM/Memory Rules ─────────────────────────────────────────────────────────
 
 fn eval_max_map_count(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/max_map_count";
+    eval_max_map_count_at(info, recs, "/proc/sys/vm/max_map_count")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the gate is unit-testable
+/// against a temp file instead of the live /proc.
+fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     let needs_high = info.has_process("java")
         || info.has_process("elasticsearch")
+        // OpenSearch is the Apache-licensed fork of Elasticsearch 7.10: the
+        // same Lucene mmap workload and the same documented
+        // vm.max_map_count=262144 requirement, and classify's has_search
+        // groups the two. The sibling gates count it since 71000e2c8; this
+        // list still named only Elasticsearch, so an OpenSearch-only host kept
+        // the default.
+        || info.has_process("opensearch")
         || info.has_process_exact("node"); // exact: avoid matching node_exporter
     if !needs_high {
         return 1;
@@ -10702,6 +10714,61 @@ mod tests {
             .find(|r| r.param.contains("hugepage"))
             .unwrap_or_else(|| panic!("oracle must get the THP recommendation"));
         assert_eq!(thp_rec.recommended_value, "madvise");
+    }
+
+    #[test]
+    fn max_map_count_counts_opensearch_like_its_elasticsearch_twin() {
+        // The search pair the sibling gates already count (71000e2c8 and the
+        // classifier's has_search): an OpenSearch-only host must get the same
+        // advice an Elasticsearch host gets. The path-injectable form keeps
+        // the assertion independent of the host's own /proc value.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        std::fs::write(&knob, "65530\n").unwrap();
+
+        for name in ["java", "elasticsearch", "opensearch"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_max_map_count_at(&info, &mut recs, knob.to_str().unwrap());
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "vm.max_map_count")
+                .unwrap_or_else(|| panic!("{name} must get the max_map_count advice"));
+            assert_eq!(rec.recommended_value, "262144");
+        }
+
+        // The collector is not the runtime this gate is for.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "node_exporter".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_max_map_count_at(&info, &mut recs, knob.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "vm.max_map_count"),
+            "node_exporter is not node"
+        );
+
+        // A host that already raised the knob is left alone.
+        std::fs::write(&knob, "262144\n").unwrap();
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "opensearch".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_max_map_count_at(&info, &mut recs, knob.to_str().unwrap());
+        assert!(recs.is_empty(), "262144 is already the target");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
