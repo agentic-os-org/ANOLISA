@@ -5,10 +5,25 @@ on:
     branches:
       - main
       - 'release/agent-sec-core/**'
+    # Later patterns win: skip docs, keep shipped SKILL.md and fixtures, then
+    # drop V1-only inputs. Keep the V1/V2 classification in sync with
+    # detect-changes in ci.yaml.
     paths:
       - 'src/agent-sec-core/**'
       - '.github/workflows/sec-core-raw-v2.yaml'
+      - '!src/agent-sec-core/**/*.md'
+      - 'src/agent-sec-core/**/SKILL.md'
+      - 'src/agent-sec-core/skills/**'
+      - 'src/agent-sec-core/**/fixtures/**'
+      - '!src/agent-sec-core/agent-sec-cli/**'
+      - '!src/agent-sec-core/tests/unit-test/**'
+      - '!src/agent-sec-core/tests/integration-test/**'
   workflow_dispatch:
+
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   raw-install-e2e:
