@@ -1817,7 +1817,22 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// and ran its cache rules. A companion is a separate program, not a role name
 /// of the daemon (`nginx: worker process` keeps matching), so the program name
 /// is what decides, the same way ClickHouse's client tools are listed.
-const SERVICE_COMPANION_TOOLS: &[&str] = &["consul-template", "consul-esm", "grafana-agent"];
+///
+/// `clickhouse-keeper` is the same shape one step further: ClickHouse ships
+/// its coordination service (the Raft replacement for ZooKeeper) as its own
+/// daemon, `clickhouse-keeper`, whose name keeps `clickhouse` as its first
+/// name run — so a Keeper-only host reported ClickHouse and was handed the
+/// whole database program (swappiness, the dirty limits, the read-ahead
+/// window, `kernel.shmmni`, `vm.nr_hugepages`), none of which a Raft
+/// coordination node runs. Keeper is a separate program with its own
+/// configuration, so the program name decides, exactly as it does for the
+/// client tools of the same package.
+const SERVICE_COMPANION_TOOLS: &[&str] = &[
+    "consul-template",
+    "consul-esm",
+    "grafana-agent",
+    "clickhouse-keeper",
+];
 
 /// Whether the program `program` is a *tool* of a service rather than the
 /// service itself.
@@ -4136,6 +4151,11 @@ mod tests {
         for (name, service, label) in [
             ("consul-template", "consul", "Consul"),
             ("grafana-agent", "grafana", "Grafana"),
+            // ClickHouse's coordination daemon: `has_process("clickhouse")` is
+            // satisfied by its first name run, and the whole database program
+            // (including `vm.nr_hugepages` and `kernel.shmmni`) then ran on a
+            // host whose only ClickHouse process is a Raft store.
+            ("clickhouse-keeper", "clickhouse", "ClickHouse"),
         ] {
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
@@ -4261,6 +4281,10 @@ mod tests {
             "clickhouse-local",
             "clickhouse-obfuscator",
             "/usr/bin/clickhouse-client",
+            // ClickHouse's coordination daemon, a separate program of the same
+            // package with `clickhouse` as its first name run.
+            "clickhouse-keeper",
+            "/usr/bin/clickhouse-keeper",
             // Scripts of a JVM-hosted service: the daemon itself is the JVM.
             "kafka-topics.sh",
             "kafka-server-start.sh",
