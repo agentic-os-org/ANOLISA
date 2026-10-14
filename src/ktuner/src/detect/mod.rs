@@ -1964,13 +1964,24 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     // whose own name or package run starts with `hbase`, and no HBase daemon
     // class does (the last component is `HMaster`, `HRegionServer`, ...). The
     // mislabel also fired the streaming read-ahead advice on a random-IO HBase
-    // host. The two core daemons are mapped here; the Hadoop root keeps the
-    // rest of the family.
+    // host. The daemons `bin/hbase` can start are mapped here, ahead of the
+    // root, which keeps the jobs and clients of the family.
     ("org.apache.hadoop.hbase.master.HMaster", "hbase"),
     (
         "org.apache.hadoop.hbase.regionserver.HRegionServer",
         "hbase",
     ),
+    // The rest of the servers HBase's own launcher starts run under the same
+    // package root for the same reason: `bin/hbase rest | thrift | zookeeper`
+    // execs org.apache.hadoop.hbase.rest.RESTServer,
+    // ...hbase.thrift.ThriftServer and ...hbase.zookeeper.HQuorumPeer (HBase's
+    // own ZooKeeper peer), so the Hadoop root claimed them exactly as it did
+    // the master and region server, and their hosts were reported as Hadoop.
+    // All three are long-lived servers of the deployment, which is what this
+    // table decides, not the jobs and clients the root is right about.
+    ("org.apache.hadoop.hbase.rest.RESTServer", "hbase"),
+    ("org.apache.hadoop.hbase.thrift.ThriftServer", "hbase"),
+    ("org.apache.hadoop.hbase.zookeeper.HQuorumPeer", "hbase"),
     ("org.apache.hadoop", "hadoop"),
     ("hadoop", "hadoop"),
     ("hbase", "hbase"),
@@ -4418,6 +4429,42 @@ mod tests {
             "org.apache.hadoop.mapreduce.v2.app.MRAppMaster",
         ] {
             let cmdline = format!("java\u{0}{class}");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("hadoop"),
+                "{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_service_reads_every_hbase_server() {
+        // The other servers HBase's own launcher starts — `bin/hbase rest`,
+        // `thrift` and `zookeeper` exec RESTServer, ThriftServer and
+        // HQuorumPeer — run under the same org.apache.hadoop.hbase packages,
+        // so the Hadoop root claimed them exactly as it did the master and the
+        // region server, and their hosts were reported as Hadoop. HQuorumPeer
+        // is HBase's own ZooKeeper peer: it serves the deployment's znodes.
+        for class in [
+            "org.apache.hadoop.hbase.rest.RESTServer",
+            "org.apache.hadoop.hbase.thrift.ThriftServer",
+            "org.apache.hadoop.hbase.zookeeper.HQuorumPeer",
+        ] {
+            let cmdline = format!("java\u{0}-Xmx4g\u{0}{class}");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("hbase"),
+                "{class}"
+            );
+        }
+
+        // Only those classes are mapped, so the jobs and clients of the family
+        // still read as Hadoop rather than as a server of the deployment.
+        for class in [
+            "org.apache.hadoop.hbase.mapreduce.Export",
+            "org.apache.hadoop.hbase.zookeeper.ZKMainServer",
+        ] {
+            let cmdline = format!("java\u{0}-cp\u{0}hbase-server.jar\u{0}{class}");
             assert_eq!(
                 runtime_service_from_cmdline(&cmdline),
                 Some("hadoop"),
