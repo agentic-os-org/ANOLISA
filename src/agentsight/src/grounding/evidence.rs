@@ -651,7 +651,8 @@ fn ground_one(claim: &Claim, pool: &[EvidenceEntry]) -> Grounding {
 // retain containment, and numbers retain their separate approximate comparison.
 fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
     // The delimiters include the structural separators the extractor splits a
-    // value out of, where they also bound one in real output. `|` is sqlite3's
+    // value out of, where they also bound one in real output. The CJK marks
+    // bound a value where prose puts no spaces around it. `|` is sqlite3's
     // default column separator, so `1|/tmp/report.txt` is the text-column shape
     // of the `complete|119` a count was once hidden in.
     let boundary = |c: char| {
@@ -669,6 +670,12 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
                     | '<'
                     | '>'
                     | '|'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '！'
+                    | '？'
                     | '。'
                     | '，'
                     | '、'

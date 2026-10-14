@@ -617,6 +617,33 @@ fn scenario_markdown_formatted_path_still_matches_the_user_request() {
     );
 }
 
+#[test]
+fn scenario_cjk_punctuation_still_delimits_a_supplied_path() {
+    // Chinese prose puts no spaces around punctuation, so a path the user
+    // supplies sits against fullwidth marks -- the separators the claim
+    // extractor already splits on. Read as anything else, the same
+    // "decoration must not hide the value" failure returns in CJK.
+    let doc = traj(vec![
+        user(1, "日志默认写在（/var/log/app.log）里，帮我确认一下"),
+        agent(2, "确认了，写入 /var/log/app.log。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(
+            grounding_for(&index, "/var/log/app.log"),
+            Grounding::Grounded { .. }
+        ),
+        "the user supplied this path; CJK punctuation must not hide it: {:?}",
+        index.claims
+    );
+    assert!(
+        !has_onset(&index),
+        "a path the user themselves named cannot be an ungrounded claim: {:?}",
+        index.findings
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Semantic review may clear a claim, never strengthen one
 // ---------------------------------------------------------------------------
