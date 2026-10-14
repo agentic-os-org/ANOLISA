@@ -1074,6 +1074,15 @@ fn eval_tcp_max_syn_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 /// The unsigned reader parsed "-1" to Err and fell back to 0 — the
 /// *disabled* value — so the backlog rule sized the knob on exactly the
 /// hosts where the kernel skips its only reader.
+///
+/// The syncookie value judged here is the one this run's *plan* leaves behind:
+/// the sibling `net.ipv4.tcp_syncookies` rule raises a readable 0 to 1 on every
+/// host that listens ([`eval_tcp_syncookies_at`]), and 0 is the only value that
+/// keeps this knob's single reader alive. Advising the backlog on a readable 0
+/// therefore sized a knob the plan's own first write disables, on exactly the
+/// hosts whose syncookies that plan turns on. A host that wants syncookies off
+/// has to exclude that sibling, and then the backlog advice is right — the
+/// default plan the report is built from is not that host.
 fn eval_tcp_max_syn_backlog_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -1083,11 +1092,13 @@ fn eval_tcp_max_syn_backlog_at(
     if !info.param_exists(path) {
         return 1;
     }
-    if let Some(rec) = syn_backlog_recommendation(
-        read_sysctl_u64(path),
-        read_sysctl_i64(syncookies_path),
-        info.has_listen_sockets(),
-    ) {
+    let syncookies = read_sysctl_i64(syncookies_path);
+    if syncookies == 0 && info.param_exists(syncookies_path) && info.has_listen_sockets() {
+        return 1;
+    }
+    if let Some(rec) =
+        syn_backlog_recommendation(read_sysctl_u64(path), syncookies, info.has_listen_sockets())
+    {
         recs.push(rec);
     }
     1
@@ -12466,12 +12477,18 @@ mod tests {
     }
 
     #[test]
-    fn syn_backlog_skips_when_syncookies_hold_minus_one() {
+    fn syn_backlog_skips_a_syncookies_file_the_plan_turns_on() {
         // The syn-backlog rule reads tcp_syncookies as its gate, and that
         // knob was a plain proc_dointvec int through v5.10, so "-1" is a
         // legal, enabled value. The unsigned reader turned it into the
         // fallback 0 — disabled — and the rule sized the backlog on exactly
         // the hosts where the kernel skips the knob's only reader.
+        //
+        // A readable 0 is not that state either: it is what the sibling
+        // net.ipv4.tcp_syncookies rule writes out of in the same run, so a
+        // plan carrying "syncookies = 1" cannot also size the backlog. Only an
+        // absent file — a kernel without CONFIG_SYN_COOKIES — leaves the
+        // knob's single reader live.
         let info = make_test_info();
         let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let dir = std::env::temp_dir().join(format!(
@@ -12484,7 +12501,7 @@ mod tests {
         let backlog = dir.join("tcp_max_syn_backlog");
         let syncookies = dir.join("tcp_syncookies");
         std::fs::write(&backlog, "1024\n").unwrap();
-        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+        for (value, expects_rec) in [(-1, false), (0, false), (1, false), (2, false)] {
             std::fs::write(&syncookies, format!("{value}\n")).unwrap();
             let mut recs = Vec::new();
             eval_tcp_max_syn_backlog_at(
@@ -12496,9 +12513,25 @@ mod tests {
             assert_eq!(
                 recs.len(),
                 usize::from(expects_rec),
-                "syncookies {value}: any nonzero value skips the knob's only reader"
+                "syncookies {value}: 0 is raised by this run's plan, nonzero already skips the reader"
             );
         }
+        std::fs::remove_file(&syncookies).unwrap();
+        let mut recs = Vec::new();
+        eval_tcp_max_syn_backlog_at(
+            &info,
+            &mut recs,
+            backlog.to_str().unwrap(),
+            syncookies.to_str().unwrap(),
+        );
+        assert_eq!(
+            recs.len(),
+            1,
+            "without CONFIG_SYN_COOKIES the file is absent and the knob is read"
+        );
+        assert_eq!(recs[0].param, "net.ipv4.tcp_max_syn_backlog");
+        assert_eq!(recs[0].current_value, "1024");
+        assert_eq!(recs[0].recommended_value, "65536");
         std::fs::remove_dir_all(&dir).ok();
     }
 
