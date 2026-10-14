@@ -1879,6 +1879,20 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     ("spark", "spark"),
     ("org.apache.cassandra", "cassandra"),
     ("cassandra", "cassandra"),
+    // HBase's daemons run their main classes under org.apache.hadoop.hbase,
+    // i.e. as a package run the ("org.apache.hadoop","hadoop") marker below
+    // owns from the root, so a table in that order reported every HBase
+    // cluster as Hadoop: the ("hbase","hbase") entry can only match a class
+    // whose own name or package run starts with `hbase`, and no HBase daemon
+    // class does (the last component is `HMaster`, `HRegionServer`, ...). The
+    // mislabel also fired the streaming read-ahead advice on a random-IO HBase
+    // host. The two core daemons are mapped here; the Hadoop root keeps the
+    // rest of the family.
+    ("org.apache.hadoop.hbase.master.HMaster", "hbase"),
+    (
+        "org.apache.hadoop.hbase.regionserver.HRegionServer",
+        "hbase",
+    ),
     ("org.apache.hadoop", "hadoop"),
     ("hadoop", "hadoop"),
     ("hbase", "hbase"),
@@ -4190,6 +4204,42 @@ mod tests {
         let cmdline =
             "java\u{0}-cp\u{0}/opt/kafka/libs/kafka_2.13-3.7.0.jar\u{0}com.example.kafka.ConsumerApp";
         assert_eq!(runtime_service_from_cmdline(cmdline), None);
+    }
+
+    #[test]
+    fn test_runtime_service_reads_the_hbase_daemons() {
+        // HBase's daemons run main classes under org.apache.hadoop.hbase, so
+        // the ("org.apache.hadoop","hadoop") marker matched them first and a
+        // real HBase cluster was reported as Hadoop: the table's own
+        // ("hbase","hbase") entry can only match a class whose own name or
+        // package run starts with hbase, which no HBase daemon class does.
+        // The mislabel also made the streaming read-ahead advice fire on a
+        // random-IO HBase host (eval_read_ahead_kb's is_streaming list).
+        for class in [
+            "org.apache.hadoop.hbase.master.HMaster",
+            "org.apache.hadoop.hbase.regionserver.HRegionServer",
+        ] {
+            let cmdline = format!("java\u{0}-Xmx4g\u{0}{class}");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("hbase"),
+                "{class}"
+            );
+        }
+
+        // The rest of the Hadoop family keeps the root mapping.
+        for class in [
+            "org.apache.hadoop.hdfs.server.namenode.NameNode",
+            "org.apache.hadoop.hdfs.server.datanode.DataNode",
+            "org.apache.hadoop.mapreduce.v2.app.MRAppMaster",
+        ] {
+            let cmdline = format!("java\u{0}{class}");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("hadoop"),
+                "{class}"
+            );
+        }
     }
 
     #[test]
