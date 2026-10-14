@@ -1789,6 +1789,19 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
     "clickhouse-obfuscator",
 ];
 
+/// Companion programs of the comm-named services the engine acts on.
+///
+/// A service identified by its own comm (`consul`, `grafana`) is not the only
+/// program carrying its name: `consul-template` renders templates from a
+/// Consul cluster running elsewhere and `grafana-agent` ships metrics to a
+/// Grafana stack, and both keep the service's name as their first name run —
+/// which is what `has_process` matches. Such a host reported the service,
+/// classified as its workload (Consul is in `profile::classify`'s cache class)
+/// and ran its cache rules. A companion is a separate program, not a role name
+/// of the daemon (`nginx: worker process` keeps matching), so the program name
+/// is what decides, the same way ClickHouse's client tools are listed.
+const SERVICE_COMPANION_TOOLS: &[&str] = &["consul-template", "consul-esm", "grafana-agent"];
+
 /// Whether the program `program` is a *tool* of a service rather than the
 /// service itself.
 ///
@@ -1800,10 +1813,11 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// same shape through its multi-call binary. Both share the service's name
 /// prefix with a `-` boundary, which is what `has_process` matches, so a host
 /// that only talks to a service running elsewhere used to get that service's
-/// rules and workload classification.
+/// rules and workload classification. The companions of a comm-named service
+/// are listed separately, in [`SERVICE_COMPANION_TOOLS`].
 fn program_names_service_tool(program: &str) -> bool {
     let basename = program.rsplit('/').next().unwrap_or(program);
-    if CLICKHOUSE_CLIENT_TOOLS.contains(&basename) {
+    if CLICKHOUSE_CLIENT_TOOLS.contains(&basename) || SERVICE_COMPANION_TOOLS.contains(&basename) {
         return true;
     }
     RUNTIME_SERVICE_MARKERS.iter().any(|(_, service)| {
@@ -3970,6 +3984,51 @@ mod tests {
         );
     }
 
+    /// A companion program that carries a comm-named service's name with a `-`
+    /// boundary is a different program, not the service: `consul-template`
+    /// renders templates from a Consul cluster running elsewhere and
+    /// `grafana-agent` ships metrics to a Grafana stack. `has_process` matches
+    /// the name's first run, so such a host reported the service, classified
+    /// as its workload (Consul is in `profile::classify`'s cache class) and
+    /// ran its rules.
+    #[test]
+    fn service_companion_is_not_the_service() {
+        let root = std::env::temp_dir().join(format!("ktuner_companion_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).expect("create temp dir");
+
+        for (name, service, label) in [
+            ("consul-template", "consul", "Consul"),
+            ("grafana-agent", "grafana", "Grafana"),
+        ] {
+            let path = root.join(name);
+            fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
+            let mut command = std::process::Command::new(&path);
+            command.arg("60").stdout(std::process::Stdio::null());
+            let mut child = spawn_fresh_executable(&mut command, "spawn a companion-named process");
+            let pid = child.id().to_string();
+            wait_for_cmdline(&pid, name.as_bytes());
+
+            let info = gather_system_info().expect("gather system info");
+            let listed = info.has_process(service);
+            let reported = crate::services::detect_services(&info).contains(&label);
+
+            child.kill().ok();
+            child.wait().ok();
+
+            assert!(
+                !listed,
+                "{name} is a companion of {service}, not the service"
+            );
+            assert!(
+                !reported,
+                "the report must not name {label} for a host running only {name}"
+            );
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// The same for a script: the kernel keeps the script's name in
     /// /proc/<pid>/comm (`kafka-topics.sh`) while argv[0] is the interpreter
     /// that runs it, so a tool script satisfied `has_process("kafka")` — and a
@@ -4092,6 +4151,9 @@ mod tests {
             "mysqld",
             "memcached",
             "nginx",
+            // The services whose companions SERVICE_COMPANION_TOOLS lists.
+            "consul",
+            "grafana",
         ] {
             assert!(
                 !program_names_service_tool(daemon),
