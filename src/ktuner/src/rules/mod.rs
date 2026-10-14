@@ -15282,8 +15282,7 @@ mod tests {
         let mut recs = Vec::new();
         eval_bpf_jit_harden_at(path, jit, unprivileged, &mut recs);
         assert!(recs.is_empty(), "unparseable content is not the value 0");
-        std::fs::remove_file(path).ok();
-        std::fs::remove_dir(&dir).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The two switches that decide whether the recommended write has a
