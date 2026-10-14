@@ -212,6 +212,16 @@ function containmentEligible(riskCase: SecurityRiskCase): boolean {
     && riskCase.status !== 'resolved';
 }
 
+// Every list on this page renders its pager only while `total > pageSize`, so
+// an offset a refresh or a narrower filter has left out of range hides its own
+// way back: the server answers the stale offset with an empty page while the
+// control that could return to the first page is gone with it. Clamp an offset
+// to the last page of the list it now points into.
+function clampToLastPage(offset: number, total: number, pageSize: number): number {
+  const lastPage = Math.max(0, Math.floor(Math.max(0, total - 1) / pageSize) * pageSize);
+  return Math.min(offset, lastPage);
+}
+
 const StatCard: React.FC<{
   labelKey: MessageKey;
   value: React.ReactNode;
@@ -482,6 +492,23 @@ export const SystemAuditPage: React.FC = () => {
   useEffect(() => {
     if (caseSortLocked && caseSort === 'risk') setCaseSort('time');
   }, [caseSortLocked, caseSort]);
+
+  // A list can shrink under the current offset (a refresh prunes the expired
+  // cases and their bindings, a filter narrows the rows), and each table above
+  // renders its pager only while its total exceeds one page. Pull the offset
+  // back into the list that is left instead of stranding the table on a page
+  // the user cannot leave.
+  useEffect(() => {
+    setCaseOffset((current) => clampToLastPage(current, caseTotal, CASE_PAGE_SIZE));
+  }, [caseTotal]);
+
+  useEffect(() => {
+    setSessionOffset((current) => clampToLastPage(current, sessionTotal, SESSION_PAGE_SIZE));
+  }, [sessionTotal]);
+
+  useEffect(() => {
+    setEventOffset((current) => clampToLastPage(current, eventTotal, EVENT_PAGE_SIZE));
+  }, [eventTotal]);
 
   const loadMoreEvents = async () => {
     if (eventNextOffset === null || loadingMore) return;

@@ -1275,3 +1275,234 @@ test('interruption panel: resolved events are neither counted nor offered Resolv
   );
   assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });
+
+// ─── SystemAuditPage: a list that shrinks under the current offset ───────────
+//
+// Every list on this page renders its pager only while `total > pageSize` (the
+// cases card skips the imported Pagination, the sessions and events tables skip
+// the local one). An offset left out of range by a refresh or a narrower filter
+// therefore hides its own way back: the server answers the stale offset with an
+// empty page and the control that could return to page 1 is gone with it.
+
+const auditCases = (count, first = 0) => Array.from({ length: count }, (_, i) => ({
+  case_id: `case-${first + i}`,
+  agent_id: 'claude',
+  session_id: `session-${first + i}`,
+  summary: `rule ${first + i}`,
+  severity: 'high',
+  risk_score: 50 + i,
+  status: 'open',
+  blocked: false,
+  updated_at_ns: (first + i + 1) * 1_000_000_000,
+}));
+
+const auditSessions = (count, first = 0) => Array.from({ length: count }, (_, i) => ({
+  session_id: `session-${first + i}`,
+  security_event_count: 1,
+  first_seen_ns: 1_000_000_000,
+  last_seen_ns: 2_000_000_000,
+}));
+
+const auditEvents = (count, first = 0) => Array.from({ length: count }, (_, i) => ({
+  event_id: `event-${first + i}`,
+  event_type: 'exec',
+  session_id: `session-${first + i}`,
+  pid: 100 + i,
+  result: 'ok',
+}));
+
+function auditPageHarness() {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchAuditSummary',
+    'fetchSecurityCases',
+    'fetchAuditSessions',
+    'fetchAuditEvents',
+    'fetchEnforcementBindings',
+  ]);
+  // A stable `t` identity matters: it is one of the load callback's
+  // dependencies, and a fresh function per render would re-issue every load.
+  const t = (key) => key;
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    'react-router-dom': {
+      useNavigate: () => () => {},
+      useSearchParams: () => [new URLSearchParams(), () => {}],
+    },
+    '../i18n': { useI18n: () => ({ t, locale: 'en-US' }), useLocaleTag: () => 'en-US' },
+    '../components/ContainmentDialog': componentStub('ContainmentDialog'),
+    '../components/ContainmentLifecycleCard': componentStub('ContainmentLifecycleCard'),
+    '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
+    '../utils/enforcementMode': {
+      effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+    },
+    '../utils/ruleReason': { translateRuleReason: (summary) => summary },
+    '../utils/apiClient': {
+      ...stubs,
+      fetchSecurityCase: async () => ({ data: null }),
+      reviewSecurityCase: async () => ({}),
+    },
+  };
+  const page = loadPageModule('src/pages/SystemAuditPage.tsx', moduleStubs, driver).SystemAuditPage;
+  assert.equal(typeof page, 'function', 'SystemAuditPage must be a component');
+
+  const mounted = [];
+  const render = () => {
+    const rendered = driver.render(page);
+    rendered.effects.forEach((fn, index) => {
+      const deps = fn.__deps;
+      const prev = mounted[index];
+      if (prev && sameDeps(prev.deps, deps)) return;
+      if (prev && typeof prev.cleanup === 'function') prev.cleanup();
+      mounted[index] = { deps, cleanup: fn() };
+    });
+    return rendered;
+  };
+
+  // load() awaits its five callers in one allSettled, so every reload is
+  // answered as a batch.
+  const answer = async (payload = {}) => {
+    calls.fetchAuditSummary.at(-1).resolve({ data: payload.summary ?? {} });
+    calls.fetchSecurityCases.at(-1).resolve({
+      data: { items: payload.cases ?? [], total: payload.caseTotal ?? 0 },
+    });
+    calls.fetchAuditSessions.at(-1).resolve({
+      data: { items: payload.sessions ?? [], total: payload.sessionTotal ?? 0 },
+    });
+    calls.fetchAuditEvents.at(-1).resolve({
+      data: { items: payload.events ?? [], total: payload.eventTotal ?? 0, next_offset: null },
+    });
+    calls.fetchEnforcementBindings.at(-1).resolve({ bindings: [] });
+    await settle();
+    await settle();
+  };
+  const lastOffset = (name) => calls[name].at(-1).args[0].offset;
+  const text = (rendered) => elementText(rendered.element).join('|');
+
+  // Run a control the page built itself, the way the browser would.
+  const clickByText = (rendered, label) => {
+    const node = findElement(rendered.element, (el) => el.type === 'button'
+      && el.props && typeof el.props.onClick === 'function'
+      && elementText(el).join('') === label);
+    assert.ok(node, `sanity: the page must render a ${label} control`);
+    assert.notEqual(node.props.disabled, true, `sanity: ${label} must be enabled`);
+    node.props.onClick();
+  };
+
+  // The next-page control of the pager showing `pageSize` rows a page: the
+  // imported pager renders without hooks and the local one only reads the i18n
+  // stub, so both can be invoked directly to reach the buttons they build.
+  const clickPagerNext = (rendered, pageSize) => {
+    const pager = findElement(rendered.element, (el) => el.props
+      && (el.props.pageSize === pageSize || el.props.limit === pageSize)
+      && typeof (el.props.onChange || el.props.onPageChange) === 'function');
+    assert.ok(pager, `sanity: ${pageSize} rows a page must render a pager`);
+    const buttons = collectElements(pager.type(pager.props)).filter(
+      (el) => el.type === 'button' && el.props && el.props.disabled !== true,
+    );
+    assert.ok(buttons.length, 'sanity: the pager must offer an enabled control');
+    buttons[buttons.length - 1].props.onClick();
+  };
+
+  return { calls, render, answer, lastOffset, text, clickByText, clickPagerNext };
+}
+
+test('system audit: a case list pruned below the current page must reopen on real cases', async () => {
+  const h = auditPageHarness();
+
+  let rendered = h.render();
+  await h.answer({ cases: auditCases(60), caseTotal: 60 });
+  rendered = h.render();
+  assert.equal(h.calls.fetchSecurityCases.length, 1, 'sanity: an answered load must not re-issue itself');
+
+  h.clickPagerNext(rendered, 20);
+  rendered = h.render();
+  assert.equal(h.calls.fetchSecurityCases.length, 2, 'sanity: the next page must reload the list');
+  assert.equal(h.lastOffset('fetchSecurityCases'), 20, 'sanity: page 2 is offset 20');
+  await h.answer({ cases: auditCases(20, 20), caseTotal: 60 });
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('rule 20'), 'sanity: page 2 shows its own cases');
+
+  // The user refreshes, and the case list has been pruned to five since: the
+  // server answers the still-requested offset 20 with no rows at all.
+  h.clickByText(rendered, 'common.refresh');
+  rendered = h.render();
+  assert.equal(h.lastOffset('fetchSecurityCases'), 20, 'sanity: Refresh re-uses the current offset');
+  await h.answer({ cases: [], caseTotal: 5 });
+  rendered = h.render();
+  rendered = h.render();
+
+  assert.equal(
+    h.lastOffset('fetchSecurityCases'),
+    0,
+    'a case list that shrank below the current offset must be re-fetched from the first page',
+  );
+  await h.answer({ cases: auditCases(5), caseTotal: 5 });
+  rendered = h.render();
+  const text = h.text(rendered);
+  assert.ok(!text.includes('audit.cases.empty'), 'the pruned list must not stay on an empty page');
+  assert.ok(text.includes('rule 0'), 'the reopened page must show the remaining cases');
+});
+
+test('system audit: a session list pruned below the current page must reopen on real sessions', async () => {
+  const h = auditPageHarness();
+
+  let rendered = h.render();
+  await h.answer({ sessions: auditSessions(60), sessionTotal: 60 });
+  h.clickByText(rendered, 'audit.tab.sessions');
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-0'), 'sanity: the sessions tab lists sessions');
+
+  h.clickPagerNext(rendered, 20);
+  rendered = h.render();
+  assert.equal(h.lastOffset('fetchAuditSessions'), 20, 'sanity: page 2 is offset 20');
+  await h.answer({ sessions: auditSessions(20, 20), sessionTotal: 60 });
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-20'), 'sanity: page 2 shows its own sessions');
+
+  h.clickByText(rendered, 'common.refresh');
+  rendered = h.render();
+  await h.answer({ sessions: [], sessionTotal: 5 });
+  rendered = h.render();
+  rendered = h.render();
+
+  assert.equal(
+    h.lastOffset('fetchAuditSessions'),
+    0,
+    'a session list that shrank below the current offset must be re-fetched from the first page',
+  );
+  await h.answer({ sessions: auditSessions(5), sessionTotal: 5 });
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-0'), 'the pruned sessions must stay reachable');
+});
+
+test('system audit: an event list pruned below the current page must reopen on real events', async () => {
+  const h = auditPageHarness();
+
+  let rendered = h.render();
+  await h.answer({ events: auditEvents(60), eventTotal: 60 });
+  h.clickByText(rendered, 'audit.tab.events');
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-0'), 'sanity: the events tab lists its rows');
+
+  h.clickPagerNext(rendered, 50);
+  rendered = h.render();
+  assert.equal(h.lastOffset('fetchAuditEvents'), 50, 'sanity: page 2 is offset 50');
+  await h.answer({ events: auditEvents(10, 50), eventTotal: 60 });
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-50'), 'sanity: page 2 shows its own events');
+
+  h.clickByText(rendered, 'common.refresh');
+  rendered = h.render();
+  await h.answer({ events: [], eventTotal: 5 });
+  rendered = h.render();
+  rendered = h.render();
+
+  assert.equal(
+    h.lastOffset('fetchAuditEvents'),
+    0,
+    'an event list that shrank below the current offset must be re-fetched from the first page',
+  );
+  await h.answer({ events: auditEvents(5), eventTotal: 5 });
+  rendered = h.render();
+  assert.ok(h.text(rendered).includes('session-0'), 'the pruned events must stay reachable');
+});
