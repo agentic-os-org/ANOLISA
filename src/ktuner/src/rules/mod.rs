@@ -8601,9 +8601,9 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
 /// v6.6 :753, master :1120), so an explicit 0 means no soft-lockup report can
 /// be produced — including the case where the user left `soft_watchdog` on but
 /// `kernel.watchdog` off. A missing file keeps the recommendation, because the
-/// kernel's default is the soft detector *on*: the same "a failed read leaves
-/// the kernel default, which does use the knob" rule the core_uses_pid gate
-/// follows.
+/// kernel's default is the soft detector *on*, and so does one the reader
+/// cannot interpret: the same "a failed read leaves the kernel default, which
+/// does use the knob" rule the core_uses_pid gate follows.
 fn eval_softlockup_all_cpu_backtrace_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -8640,9 +8640,13 @@ fn eval_softlockup_all_cpu_backtrace_at(
 /// reports the *effective* switch, so any non-zero reading keeps the rule. A
 /// missing file also keeps it: the kernel default is the soft detector *on*,
 /// and the two files share one `CONFIG_SOFTLOCKUP_DETECTOR` table, so only a
-/// synthetic path can end up absent.
+/// synthetic path can end up absent. A switch that exists but cannot be read
+/// or parsed keeps it too — `read_sysctl_u64` maps a failed read to 0, which
+/// would read as "the detector is off" on a masked or garbled proc entry (a
+/// container's, typically) and silence the advice, the same rule the
+/// watchdog_thresh gate follows.
 fn soft_lockup_detector_is_live(soft_watchdog_path: &str) -> bool {
-    !std::path::Path::new(soft_watchdog_path).exists() || read_sysctl_u64(soft_watchdog_path) != 0
+    read_switch(soft_watchdog_path) != Some(0)
 }
 
 fn eval_compact_unevictable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -16163,6 +16167,18 @@ mod tests {
         let detector_on = dir.join("soft_watchdog.on");
         std::fs::write(&detector_on, b"1\n").unwrap();
         let detector_missing = dir.join("soft_watchdog.missing");
+        // A switch that exists but cannot be read or parsed is not evidence
+        // that the soft detector is off: `read_sysctl_u64` maps those to 0,
+        // so the gate has to parse the file itself and keep the advice for
+        // anything the reader cannot interpret, exactly as the watchdog_thresh
+        // gate does. Malformed content, an empty file and a directory (an IO
+        // error even for root) all keep the rule.
+        let detector_malformed = dir.join("soft_watchdog.malformed");
+        std::fs::write(&detector_malformed, b"off\n").unwrap();
+        let detector_empty = dir.join("soft_watchdog.empty");
+        std::fs::write(&detector_empty, b"").unwrap();
+        let detector_dir = dir.join("soft_watchdog.dir");
+        std::fs::create_dir_all(&detector_dir).unwrap();
 
         let mut info = make_test_info();
         info.cpu_cores = 96;
@@ -16179,7 +16195,13 @@ mod tests {
             "the soft detector is off: no soft-lockup report can use the backtrace"
         );
 
-        for detector in [&detector_on, &detector_missing] {
+        for detector in [
+            &detector_on,
+            &detector_missing,
+            &detector_malformed,
+            &detector_empty,
+            &detector_dir,
+        ] {
             let mut recs = Vec::new();
             eval_softlockup_all_cpu_backtrace_at(
                 &info,
