@@ -1658,9 +1658,17 @@ fn process_name_matches(name: &str, pattern: &str) -> bool {
 /// (`postgres_exporter`, `node-exporter`, `postgres_exporter_v2`), so a service
 /// match reports PostgreSQL, MySQL, Redis or Node as running on a host that only
 /// scrapes metrics, and the database rules then fire.
+///
+/// The `prometheus` PREFIX clause covers the collectors that carry the
+/// server's name (`prometheus-node-exporter`, `prometheus-agent`); the server
+/// itself is the monitoring host's workload and is the entry
+/// `services::detect_services` lists as `Prometheus`, so the bare name must
+/// not be dropped as a helper of itself. The clause swallowed it and made
+/// that entry unreachable — the same way the runtime marker table made the
+/// RabbitMQ entry unreachable.
 pub(crate) fn is_monitoring_helper_name(name: &str) -> bool {
     let name = name.to_lowercase();
-    name.starts_with("prometheus")
+    (name.starts_with("prometheus") && name != "prometheus")
         || name
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|token| token == "exporter")
@@ -4130,8 +4138,9 @@ mod tests {
             "node-exporter",
             "postgres_exporter_v2",
             "exporter",
-            "prometheus",
+            // The collectors that carry the server's name.
             "prometheus-node-exporter",
+            "prometheus-agent",
             "/usr/local/bin/postgres_exporter",
         ] {
             assert!(is_monitoring_helper_name(helper), "{helper} is a collector");
@@ -4145,6 +4154,12 @@ mod tests {
             "etcd",
             "mongod",
             "httpd",
+            // The Prometheus server is the workload of a monitoring host — the
+            // services table lists it as `Prometheus` — not a collector of
+            // itself. The prefix clause used to drop it and made that entry
+            // unreachable.
+            "prometheus",
+            "/usr/local/bin/prometheus",
             "/usr/lib/postgresql/16/bin/postgres",
             "/usr/sbin/nginx",
         ] {

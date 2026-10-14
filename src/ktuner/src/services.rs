@@ -126,6 +126,28 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_services_reports_the_prometheus_server() {
+        // The collector filter exists for the exporters named after their
+        // target and for the collectors that carry the server's own name
+        // (`prometheus-node-exporter`, `prometheus-agent`). The server itself
+        // is the workload of a monitoring host — this table lists it as
+        // `Prometheus` — and the over-broad prefix clause dropped it, so the
+        // entry could never match a live host.
+        let info = info_with(&["prometheus"]);
+        assert_eq!(detect_services(&info), vec!["Prometheus"]);
+        assert!(info.has_process("prometheus"));
+
+        // The collectors that share its name are still not the service.
+        let info = info_with(&["prometheus-agent", "prometheus-node-exporter"]);
+        assert!(
+            detect_services(&info).is_empty(),
+            "collectors are not the service: {:?}",
+            detect_services(&info)
+        );
+        assert!(!info.has_process("prometheus"));
+    }
+
+    #[test]
     fn test_detect_services_keeps_real_services() {
         let info = info_with(&[
             "postgres",
