@@ -2485,6 +2485,17 @@ fn restore_entries_with(
     let mut data = data.clone();
     heal_alias_duplicates(&mut data);
     let mut verified: Vec<&String> = Vec::new();
+    // A write the kernel REFUSES does not prove the knob is unrestored. The
+    // kernel enforces a minimum on both dirty `*_bytes` knobs (v6.6
+    // mm/page-writeback.c registers `dirty_bytes` with `dirty_bytes_min`
+    // = 2 * PAGE_SIZE and `dirty_background_bytes` with `SYSCTL_ONE`, and
+    // proc_doulongvec_minmax rejects anything below them with EINVAL), so the
+    // pristine 0 a ratio-mode host records cannot be written back through its
+    // own file at all. The zero comes back through the twin's restore instead:
+    // `dirty_ratio_handler` clears `vm.dirty_bytes` on every changed write.
+    // Verdicts therefore wait for the post-loop read below, exactly like the
+    // divergence check for accepted writes.
+    let mut refused: Vec<&String> = Vec::new();
     let mut failed = 0;
     let mut skipped = 0;
     // A disabled twin is restored AFTER its clearer: the clearer's write
@@ -2557,7 +2568,7 @@ fn restore_entries_with(
                     if !quiet {
                         progress!("  {} {} : {}", "✗".red(), param, e);
                     }
-                    failed += 1;
+                    refused.push(param);
                 }
             }
         } else {
@@ -2595,6 +2606,38 @@ fn restore_entries_with(
                 );
             }
             restored -= 1;
+            failed += 1;
+        }
+    }
+
+    // Judge the refused writes by the same final read. A refused write whose
+    // recorded original IS live at the end was achieved by another entry —
+    // the twin's restore is the only writer of the un-writable zero above — so
+    // it is a restore, not a failure. Counting it as a failure kept rollback
+    // at "Partial" with exit 1 for good, retained the ledger and left the boot
+    // replay in place on a host whose pair state was already fully restored.
+    // An unreadable path proves nothing (write-only tunables have no
+    // read-back), so only a readable, matching value counts.
+    for param in &refused {
+        let entry = &data.entries[*param];
+        let live = fs::read_to_string(&entry.path).ok();
+        let restored_by_twin = live.is_some_and(|live| {
+            matches!(
+                classify_readback_for_path(&entry.path, &entry.previous, live.trim()),
+                ReadbackVerdict::Verified { .. }
+            )
+        });
+        if restored_by_twin {
+            if !quiet {
+                progress!(
+                    "  {} {} → {} (写入被拒绝，孪生的写入已恢复)",
+                    "✓".green(),
+                    param,
+                    entry.previous
+                );
+            }
+            restored += 1;
+        } else {
             failed += 1;
         }
     }
@@ -5672,6 +5715,128 @@ mod tests {
         assert!(
             !rollback_should_finalize(outcome.failed, outcome.skipped),
             "a cleared sibling must keep the ledger for inspection"
+        );
+    }
+
+    #[test]
+    fn a_refused_write_the_twin_restored_counts_as_restored() {
+        // The kernel rejects the pristine 0 of a ratio-mode host on both dirty
+        // `*_bytes` knobs (v6.6 mm/page-writeback.c: `dirty_bytes` is
+        // registered with `dirty_bytes_min` = 2 * PAGE_SIZE and
+        // `dirty_background_bytes` with `SYSCTL_ONE`, and
+        // proc_doulongvec_minmax returns EINVAL below them — `echo 0 >
+        // /proc/sys/vm/dirty_bytes` fails on a stock host). The zero comes back
+        // through the TWIN's restore instead: `dirty_ratio_handler` clears
+        // `vm.dirty_bytes` on every changed write, and the ledger's cleared-twin
+        // record restores that ratio after the refused bytes write. Judging the
+        // refused write by its own error reported Partial forever (exit 1,
+        // ledger kept, boot replay left in place) on a host whose pair state the
+        // twin's write had already brought back.
+        let dir = AtomicTestDir::new("restore_refused_write");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("dirty_ratio");
+        let bytes_path = bytes.to_str().unwrap().to_string();
+        let ratio_path = ratio.to_str().unwrap().to_string();
+        // Live state at rollback time: the bytes knob holds the tuned value,
+        // the ratio the write cleared.
+        fs::write(&bytes, "268435456").unwrap();
+        fs::write(&ratio, "0").unwrap();
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "268435456".into(),
+                    path: bytes_path.clone(),
+                    category: None,
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "0".into(),
+                    path: ratio_path.clone(),
+                    category: None,
+                },
+            ),
+        ]);
+        // The kernel write, simulated on plain files: the bytes file refuses
+        // the below-minimum zero, and a changed ratio write zeroes it.
+        let mut kernel = |path: &str, value: &str| -> std::io::Result<()> {
+            if path == bytes_path && value.parse::<u64>().unwrap() < 2 * 4096 {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            fs::write(path, value)?;
+            if path == ratio_path {
+                fs::write(&bytes, "0")
+            } else {
+                Ok(())
+            }
+        };
+        let outcome = restore_entries_with(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+            &mut kernel,
+        );
+        assert_eq!(
+            fs::read_to_string(&bytes).unwrap(),
+            "0",
+            "the twin's restore puts the recorded original back"
+        );
+        assert_eq!(fs::read_to_string(&ratio).unwrap(), "20");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (2, 0, 0),
+            "both halves of the pair are restored"
+        );
+        assert!(
+            rollback_should_finalize(outcome.failed, outcome.skipped),
+            "a fully restored pair must finalize: the ledger is deleted and the boot replay removed"
+        );
+    }
+
+    #[test]
+    fn a_refused_write_nothing_restores_still_fails() {
+        // Same refusal WITHOUT the twin's record: nothing can put the recorded
+        // zero live, so the bytes knob keeps the tuned value and the rollback
+        // must report a failure (keep the ledger for a retry) — the deferred
+        // verdict must not turn any refusal into a success.
+        let dir = AtomicTestDir::new("restore_refused_write_unrestored");
+        let bytes = dir.0.join("dirty_bytes");
+        let bytes_path = bytes.to_str().unwrap().to_string();
+        fs::write(&bytes, "268435456").unwrap();
+        let entries = BTreeMap::from([(
+            "vm.dirty_bytes".to_string(),
+            RollbackEntry {
+                previous: "0".into(),
+                applied: "268435456".into(),
+                path: bytes_path.clone(),
+                category: None,
+            },
+        )]);
+        let mut kernel = |path: &str, value: &str| -> std::io::Result<()> {
+            if path == bytes_path && value.parse::<u64>().unwrap() < 2 * 4096 {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            fs::write(path, value)
+        };
+        let outcome = restore_entries_with(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+            &mut kernel,
+        );
+        assert_eq!(fs::read_to_string(&bytes).unwrap(), "268435456");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (0, 1, 0),
+            "a refusal nothing else repaired stays a failure"
         );
     }
 
