@@ -8666,7 +8666,7 @@ fn eval_bpf_jit_harden_at(
     if current != 0 {
         return 1;
     }
-    if read_switch(jit_enable_path) == Some(0) {
+    if !jit_in_force(read_switch(jit_enable_path), info.has_listen_sockets()) {
         return 1;
     }
     if level_one_blinding_has_no_loader(read_switch(unprivileged_path), &info.kernel_version) {
@@ -8682,6 +8682,29 @@ fn eval_bpf_jit_harden_at(
         writable: true,
     });
     1
+}
+
+/// Whether the JIT this run's plan leaves enabled, i.e. whether a program can
+/// still ask for JITed code and the hardening level this rule asks for has
+/// something to blind.
+///
+/// The switch on disk is not the plan: the sibling [`eval_bpf_jit_enable`] rule
+/// raises a readable 0 to 1 whenever the host listens on TCP, so on a listening
+/// host the plan turns the JIT on and refusing the hardening entry because of
+/// the pre-plan 0 withheld the advice on exactly the hosts the JIT write
+/// reaches (it is the same plan-value judgement
+/// [`level_one_blinding_has_no_loader`] makes for the other switch). Only a
+/// readable 0 with nothing that would enable it — no listener — leaves every
+/// program's `jit_requested` false: v6.6 `kernel/bpf/core.c:117` sets it from
+/// `ebpf_jit_enabled()`, which requires `bpf_jit_enable` (include/linux/
+/// filter.h:1082). An unreadable switch is not evidence that the JIT is off and
+/// fails open, like this rule's other gates.
+fn jit_in_force(jit_enable: Option<u64>, has_listen_sockets: bool) -> bool {
+    match jit_enable {
+        Some(0) => has_listen_sockets,
+        Some(_) => true,
+        None => true,
+    }
 }
 
 /// Whether every loader that can still load a program will be `bpf_capable()`
@@ -16530,19 +16553,23 @@ mod tests {
     /// fails open (it is not evidence that the switch is off).
     ///
     /// `bpf_jit_enable == 0` leaves every program's `jit_requested` false, so
-    /// nothing can be blinded; a non-zero `unprivileged_bpf_disabled` leaves
-    /// only `bpf_capable()` loaders, and hardening level 1 does not blind
-    /// those — and so does a 0 on 5.13+, where the rule's sibling writes 2 in
-    /// the same plan. Either switch voids the advice, which is why the live
-    /// assertion below has to model them.
-    fn bpf_jit_harden_is_voided_by_a_switch(kernel_version: &str) -> bool {
+    /// nothing can be blinded — unless the host listens, because the sibling
+    /// rule raises a readable 0 to 1 in the same run; a non-zero
+    /// `unprivileged_bpf_disabled` leaves only `bpf_capable()` loaders, and
+    /// hardening level 1 does not blind those — and so does a 0 on 5.13+,
+    /// where the rule's sibling writes 2 in the same plan. Either switch voids
+    /// the advice, which is why the live assertion below has to model them.
+    fn bpf_jit_harden_is_voided_by_a_switch(
+        kernel_version: &str,
+        has_listen_sockets: bool,
+    ) -> bool {
         let switch = |path: &str| {
             std::fs::read_to_string(path)
                 .ok()
                 .map(|raw| raw.trim().to_string())
         };
         let unprivileged = switch("/proc/sys/kernel/unprivileged_bpf_disabled");
-        switch("/proc/sys/net/core/bpf_jit_enable").as_deref() == Some("0")
+        (switch("/proc/sys/net/core/bpf_jit_enable").as_deref() == Some("0") && !has_listen_sockets)
             || unprivileged.as_deref().is_some_and(|value| value != "0")
             || (unprivileged.as_deref() == Some("0") && kernel_at_least(kernel_version, 5, 13))
     }
@@ -16565,7 +16592,8 @@ mod tests {
         // design (#6829), so the expectation has to follow. Without them this
         // assertion fails on every stock Ubuntu 24.04 host, where
         // `kernel.unprivileged_bpf_disabled` defaults to 2.
-        let voided = bpf_jit_harden_is_voided_by_a_switch(&info.kernel_version);
+        let voided =
+            bpf_jit_harden_is_voided_by_a_switch(&info.kernel_version, info.has_listen_sockets());
         match std::fs::read_to_string("/proc/sys/net/core/bpf_jit_harden") {
             Ok(raw) => {
                 assert_eq!(
@@ -16657,11 +16685,40 @@ mod tests {
         eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
         assert_eq!(recs.len(), 1, "a consumer exists: the gap is a finding");
 
-        // JIT off: no program asks for JITed code, so nothing is blinded.
+        // JIT off on disk: not the state this run's plan leaves behind. The
+        // sibling net.core.bpf_jit_enable rule raises a readable 0 to 1 on any
+        // host that listens, so only a listener-less host keeps every program's
+        // jit_requested false. The gate is a pure function of the two inputs,
+        // so assert both shapes on it and let the `_at` form show the wiring
+        // for whichever state the test host is in.
+        assert!(
+            !jit_in_force(Some(0), false),
+            "no listener: the plan leaves the JIT off, nothing to blind"
+        );
+        assert!(
+            jit_in_force(Some(0), true),
+            "a listener gets the sibling rule's JIT enable in the same plan"
+        );
+        assert!(jit_in_force(Some(1), false), "a live JIT keeps the advice");
+        assert!(
+            jit_in_force(None, false),
+            "an unreadable switch is not evidence that the JIT is off"
+        );
         std::fs::write(jit, "0\n").expect("write fixture");
         let mut recs = Vec::new();
         eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
-        assert!(recs.is_empty(), "the JIT is off: nothing to blind");
+        if info.has_listen_sockets() {
+            assert_eq!(
+                recs.len(),
+                1,
+                "the plan enables the JIT where the host listens: {recs:?}"
+            );
+        } else {
+            assert!(
+                recs.is_empty(),
+                "no listener: the plan leaves the JIT off: {recs:?}"
+            );
+        }
 
         // Unprivileged BPF denied: every loader that can still load a program
         // is bpf_capable(), and level 1 does not blind those; level 2 denies
