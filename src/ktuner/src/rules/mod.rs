@@ -853,12 +853,23 @@ fn eval_aslr_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -
 }
 
 fn eval_dmesg_restrict(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/dmesg_restrict";
+    eval_dmesg_restrict_at(info, recs, "/proc/sys/kernel/dmesg_restrict")
+}
+
+/// Path-injectable form of [`eval_dmesg_restrict`] (the `eval_*_at` idiom) so
+/// the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the kernel log has no read restriction — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence of an open log, so a
+/// masked or garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not
+/// need.
+fn eval_dmesg_restrict_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.dmesg_restrict".to_string(),
             current_value: "0".to_string(),
@@ -10206,6 +10217,49 @@ mod tests {
         );
         assert_eq!(recs[0].current_value, "0");
         assert!(advice(&on).is_empty(), "a readable 2 is fully randomized");
+        for path in [&malformed, &empty, &io_error] {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn dmesg_restrict_advice_needs_a_readable_switch() {
+        // Same shape as the ASLR gate: the rule fires on 0, and
+        // `read_sysctl_u64` maps an unreadable or unparseable file to that
+        // same 0, so a masked or garbled proc entry was answered with a write
+        // of 1 next to a `current_value` the host never reported.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_dmesg_restrict_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let off = dir.join("dmesg_restrict.0");
+        std::fs::write(&off, b"0\n").unwrap();
+        let on = dir.join("dmesg_restrict.1");
+        std::fs::write(&on, b"1\n").unwrap();
+        let malformed = dir.join("dmesg_restrict.malformed");
+        std::fs::write(&malformed, b"restricted\n").unwrap();
+        let empty = dir.join("dmesg_restrict.empty");
+        std::fs::write(&empty, b"").unwrap();
+        let io_error = dir.join("dmesg_restrict.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_dmesg_restrict_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 leaves the kernel log open");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 is restricted");
         for path in [&malformed, &empty, &io_error] {
             assert!(
                 advice(path).is_empty(),
