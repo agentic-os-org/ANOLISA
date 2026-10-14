@@ -911,6 +911,13 @@ fn eval_accept_redirects_at(
     1
 }
 
+/// The SysRq functions ktuner considers safe to leave enabled: sync (16),
+/// remount-read-only (32) and reboot/poweroff (128).
+/// `Documentation/admin-guide/sysrq.rst` lists the bit of every function; the
+/// others (2 log level, 4 keyboard/SAK, 8 dumps, 64 signalling, 256 RT nicing)
+/// are the ones the rule exists to take away.
+const SAFE_SYSRQ_MASK: i64 = 176;
+
 fn eval_sysrq(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     eval_sysrq_at(info, recs, "/proc/sys/kernel/sysrq")
 }
@@ -929,22 +936,43 @@ fn eval_sysrq_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) 
     }
     // sysrq is a mask; -1 enables every function, so it must be read signed
     // or the unsigned fallback maps it to 0 (disabled) and skips the rule.
-    let current = read_sysctl_i64(path);
-    // sysrq=1 means all functions enabled; high values also enable all
-    if current != 0 && current != 176 {
-        // 176 = safe subset (sync + remount-ro + reboot)
-        recs.push(Recommendation {
-            param: "kernel.sysrq".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "176".to_string(),
-            reason: "SysRq 功能过于开放，限制为安全子集（同步+只读重挂载+重启）防止滥用"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Security,
-            writable: true,
-        });
+    if let Some(rec) = sysrq_recommendation(read_sysctl_i64(path)) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the sysrq rule (the `*_recommendation` idiom), split
+/// from the file probe so the mask arithmetic is assertable against values.
+///
+/// `kernel.sysrq` is a SET of functions, and the recommendation REPLACES it, so
+/// "not `176`" is not the same as "too open": a mask built only from the safe
+/// subset's own bits — a host that kept `16` (sync) or `16|32` and withheld the
+/// rest — grants nothing outside it, and writing `176` would ADD the functions
+/// the operator withheld (remount-read-only, reboot/poweroff) while dropping
+/// none. A Security finding whose reason promises a restriction must not widen
+/// the capability it judges, so the mask is reduced only when it carries a bit
+/// outside the subset.
+fn sysrq_recommendation(current: i64) -> Option<Recommendation> {
+    // 0 disables every function; 176 IS the safe subset.
+    if current == 0 || current == SAFE_SYSRQ_MASK {
+        return None;
+    }
+    // `& !176` keeps exactly the bits outside the subset, and a two's-complement
+    // `-1` (every function enabled) keeps all of them, so this is also the
+    // "maximally open" case the signed read exists for.
+    if current & !SAFE_SYSRQ_MASK == 0 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sysrq".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "176".to_string(),
+        reason: "SysRq 功能过于开放，限制为安全子集（同步+只读重挂载+重启）防止滥用".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Security,
+        writable: true,
+    })
 }
 
 // ─── Network Performance Rules ───────────────────────────────────────────────
@@ -15828,14 +15856,27 @@ mod tests {
     fn test_sysrq_boundaries() {
         // 0 (sysrq fully disabled) and 176 (the safe subset itself:
         // sync + remount-ro + reboot) are already hardened and must NOT be
-        // flagged; every other value — including the signed -1 mask and the
-        // common 1/16/438 masks — must recommend 176.
+        // flagged. Neither must a mask built only from the subset's own bits
+        // (16 sync, 32 remount-ro, 128 reboot, and their combinations): it
+        // grants nothing outside the subset, so writing 176 would ADD the
+        // withheld functions instead of restricting anything. Every mask with
+        // a bit outside it — including the signed -1 mask and the common
+        // 1/8/438 values — must recommend 176.
         let info = make_test_info();
         for (value, expects_rec) in [
             (-1, true),
             (0, false),
             (1, true),
-            (16, true),
+            (2, true),
+            (8, true),
+            (64, true),
+            (256, true),
+            (16, false),
+            (32, false),
+            (128, false),
+            (48, false),
+            (144, false),
+            (160, false),
             (176, false),
             (438, true),
         ] {
@@ -15851,7 +15892,7 @@ mod tests {
             assert_eq!(
                 recs.len(),
                 usize::from(expects_rec),
-                "value {value}: only 0 (disabled) and 176 (safe subset) are hardened"
+                "value {value}: only a mask with a bit outside the safe subset is restricted"
             );
             if expects_rec {
                 assert_eq!(
