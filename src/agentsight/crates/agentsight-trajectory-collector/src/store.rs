@@ -1202,10 +1202,15 @@ pub fn extract_user_message_previews(atif_json: &str) -> (Option<String>, Option
         if step.get("source").and_then(|s| s.as_str()) != Some("user") {
             continue;
         }
-        let Some(msg) = step.get("message").and_then(|m| m.as_str()) else {
+        let Some(message) = step.get("message") else {
             continue;
         };
-        let cleaned = strip_system_context(msg);
+        // ATIF v1.6+ types `message` as `String | Array<ContentPart>`, the
+        // array form being a multimodal step's text and attachments. Reading
+        // it with `as_str()` dropped such a turn from the previews while the
+        // typed readers in this crate answered for the same document, so the
+        // projection flattens the union the way the converters do.
+        let cleaned = strip_system_context(&crate::atif::extract_text_from_content(message));
         if cleaned.is_empty() {
             continue;
         }
@@ -1650,6 +1655,32 @@ mod tests {
         // Unterminated tag swallows the rest of the block.
         let atif2 = r#"{"steps":[{"step_id":1,"source":"user","message":"<local-command-caveat>Caveat: truncated"}]}"#;
         assert_eq!(extract_user_message_previews(atif2), (None, None));
+    }
+
+    /// ATIF v1.6+ types `message` as `String | Array<ContentPart>`, the array
+    /// form being how a multimodal turn carries its text and attachments. The
+    /// projection read the message with `as_str()`, so such a turn produced no
+    /// preview at all — a session whose first user turn was an array showed an
+    /// empty preview in the list while the typed readers answered for the same
+    /// document. The union is flattened the way the converters flatten it, so
+    /// a text block still previews as the text and attachments stay out of it.
+    #[test]
+    fn test_extract_user_message_previews_reads_content_part_messages() {
+        let atif = r#"{"steps":[
+            {"step_id":1,"source":"user","message":[
+                {"type":"text","text":"What is in this image?"},
+                {"type":"image","source":{"path":"a.png"}}
+            ]},
+            {"step_id":2,"source":"agent","message":"looking"},
+            {"step_id":3,"source":"user"}
+        ]}"#;
+        let (first, last) = extract_user_message_previews(atif);
+        assert_eq!(first.as_deref(), Some("What is in this image?"));
+        assert_eq!(
+            last.as_deref(),
+            Some("What is in this image?"),
+            "the message-less step carries no preview"
+        );
     }
 
     #[test]

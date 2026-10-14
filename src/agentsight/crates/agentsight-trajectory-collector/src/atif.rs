@@ -440,7 +440,11 @@ fn extract_agent_info(
 /// it into a user step's message would leak tool output into the
 /// `first/last_user_message` previews, preference rules and LLM prompts that
 /// read the message as the human's own words.
-fn extract_text_from_content(content: &serde_json::Value) -> String {
+///
+/// The ATIF `message` union (`String | Array<ContentPart>`) is the same shape
+/// under another name, so the preview projection reuses this flattener and
+/// accepts the documents the schema's typed readers already accept.
+pub(crate) fn extract_text_from_content(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(blocks) => {
