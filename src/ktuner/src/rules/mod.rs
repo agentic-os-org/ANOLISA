@@ -2870,6 +2870,15 @@ const FORWARDING_DAEMONS: &[&str] = &[
     "pppd",
     "xl2tpd",
     "pluto",
+    // The daemons that hand the same forwarding off to a peer already in the
+    // list, so the idle state is the one this predicate sees: PPTP's `pptpd`
+    // spawns `pppd` only once a client connects (the same endpoint role as the
+    // `pppd`/`xl2tpd` pair above), and ZeroTier's `zerotier-one` is the mesh
+    // VPN daemon tailscaled's peer is (`tailscaled` above); a host running
+    // either routes traffic for peers while the process it forwards through
+    // is not running yet, and was judged "no forwarding in use".
+    "pptpd",
+    "zerotier-one",
 ];
 
 /// Whether one of the daemons that forward traffic for others is running.
@@ -12251,6 +12260,11 @@ mod tests {
             "pppd",
             "xl2tpd",
             "pluto",
+            // The daemons that spawn one of the above only while a peer is
+            // connected: an idle PPTP server runs pptpd, and a ZeroTier node
+            // runs zerotier-one while routing for its network.
+            "pptpd",
+            "zerotier-one",
         ] {
             let mut info = make_test_info();
             info.processes = vec![crate::detect::ProcessInfo {
