@@ -1,6 +1,12 @@
-use crate::detect::{read_sysctl_i64, read_sysctl_u64, DiskInfo, DiskType, SystemInfo};
+use crate::detect::{
+    detect_disk_type, read_sysctl_i64, read_sysctl_u64, DiskInfo, DiskType, SystemInfo,
+};
 use crate::profile::WorkloadType;
 use anyhow::Result;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Confidence {
@@ -4812,8 +4818,13 @@ fn swap_configured(path: &str) -> bool {
 /// partitions, and a mapper node stacked on another mapper node, are in no
 /// directory of this inventory.
 ///
-/// Anything else — a swap file, a zram node, a `/dev/mapper/<name>` alias —
-/// resolves to no disk and is left alone, so a medium this inventory cannot see
+/// A swap file prints a path instead of a device name, so it resolves through
+/// `stat()` — the device its filesystem sits on — and
+/// `/sys/dev/block/<major>:<minor>`, the block device that device number
+/// names; a partition directory resolves to the whole disk that carries the
+/// medium. Anything else — a zram node, a `/dev/mapper/<name>` alias, a file
+/// on a filesystem whose device number has no entry in the block-device tree —
+/// resolves to no device and is left alone, so a medium this host cannot see
 /// keeps today's advice instead of losing it.
 ///
 /// Read as bytes, like [`swap_configured`]: one area whose path is not UTF-8
@@ -4821,6 +4832,16 @@ fn swap_configured(path: &str) -> bool {
 /// would then hand the harmful advice back to every other area on the host —
 /// the HDD one this gate exists for included.
 fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
+    swap_on_a_rotational_disk_at(info, swaps_path, Path::new(SYS_DEV_BLOCK))
+}
+
+/// Root of the block-device tree a swap file's device number resolves through.
+const SYS_DEV_BLOCK: &str = "/sys/dev/block";
+
+/// Path-injectable form of [`swap_on_a_rotational_disk`]: `sys_dev_block` is
+/// the tree the device number is looked up in, so a swap file's medium is
+/// assertable against a synthetic device tree.
+fn swap_on_a_rotational_disk_at(info: &SystemInfo, swaps_path: &str, sys_dev_block: &Path) -> bool {
     let Ok(content) = std::fs::read(swaps_path) else {
         return false;
     };
@@ -4828,31 +4849,68 @@ fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
         let Some(area) = line.split(|byte: &u8| byte.is_ascii_whitespace()).next() else {
             return false;
         };
-        let Some(name) = area.strip_prefix(b"/dev/") else {
-            return false;
-        };
-        info.disks.iter().any(|disk| {
-            disk.disk_type == DiskType::HDD
-                && (disk
-                    .holders
-                    .iter()
-                    .any(|holder| holder.as_bytes() == name)
-                    // A whole device or one of its partitions: nothing after the
-                    // disk name (`/dev/sdb`), or a partition suffix (`2`, and
-                    // `p2` as nvme/mmcblk write it). A bare prefix match would
-                    // attribute `/dev/sdaa2` to a disk named `sda` and
-                    // `/dev/sdb2bak` to `sdb`, and quietly drop the advice for
-                    // the disk the area is really on.
-                    || name.strip_prefix(disk.name.as_bytes()).is_some_and(|rest| {
-                        rest.is_empty()
-                            || rest
-                                .strip_prefix(b"p")
-                                .unwrap_or(rest)
-                                .iter()
-                                .all(|byte| byte.is_ascii_digit())
-                    }))
-        })
+        match area.strip_prefix(b"/dev/") {
+            Some(name) => info
+                .disks
+                .iter()
+                .any(|disk| disk.disk_type == DiskType::HDD && disk_backs_the_device(disk, name)),
+            None => matches!(
+                swap_file_medium(Path::new(OsStr::from_bytes(area)), sys_dev_block),
+                Some(DiskType::HDD)
+            ),
+        }
     })
+}
+
+/// Whether `disk` backs the device `name` as `/proc/swaps` spells it: the disk
+/// itself, one of its partitions, or a mapper node recorded in its `holders`
+/// directory.
+///
+/// A whole device or one of its partitions: nothing after the disk name
+/// (`/dev/sdb`), or a partition suffix (`2`, and `p2` as nvme/mmcblk write
+/// it). A bare prefix match would attribute `/dev/sdaa2` to a disk named `sda`
+/// and `/dev/sdb2bak` to `sdb`, and quietly drop the advice for the disk the
+/// area is really on.
+fn disk_backs_the_device(disk: &DiskInfo, name: &[u8]) -> bool {
+    disk.holders.iter().any(|holder| holder.as_bytes() == name)
+        || name.strip_prefix(disk.name.as_bytes()).is_some_and(|rest| {
+            rest.is_empty()
+                || rest
+                    .strip_prefix(b"p")
+                    .unwrap_or(rest)
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// Medium of the block device the file at `area` lives on, if the host can
+/// name it: the file's `st_dev` is the device its filesystem sits on, and
+/// `/sys/dev/block/<major>:<minor>` is the block device that number belongs
+/// to (the partition directory of one device number resolves to the whole
+/// disk, which holds the medium).
+///
+/// `None` when anything in that chain is missing — a file that no longer
+/// exists, a filesystem on a device number the tree has no entry for (tmpfs,
+/// overlayfs), an unreadable attribute — so the caller keeps today's advice.
+/// The medium itself is read with the inventory's own detector, so a virtual
+/// disk that reports rotational=1 is not mislabeled here either.
+fn swap_file_medium(area: &Path, sys_dev_block: &Path) -> Option<DiskType> {
+    let dev = std::fs::metadata(area).ok()?.dev();
+    let dir = std::fs::canonicalize(sys_dev_block.join(format!(
+        "{}:{}",
+        libc::major(dev),
+        libc::minor(dev)
+    )))
+    .ok()?;
+    // A partition directory is the disk plus a suffix and carries no queue of
+    // its own: the medium is the whole disk's.
+    let disk_dir = if dir.join("partition").exists() {
+        dir.parent()?.to_path_buf()
+    } else {
+        dir
+    };
+    let name = disk_dir.file_name()?.to_string_lossy().to_string();
+    Some(detect_disk_type(&disk_dir, &name))
 }
 
 fn eval_rmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -13447,12 +13505,17 @@ mod tests {
             .concat(),
         )
         .unwrap();
+        // A file-backed area whose file no longer exists — an unlinked area is
+        // still listed by /proc/swaps — has no device to stat, so no medium is
+        // claimed for it. (The resolvable file case is asserted in
+        // page_cluster_resolves_a_swap_files_medium_through_its_device, against
+        // a synthetic device tree.)
         let on_a_file = dir.join("swaps-file");
         std::fs::write(
             &on_a_file,
             [
                 header.as_slice(),
-                b"/swapfile                                file\t\t16776188\t0\t\t-3\n",
+                b"/ktuner-nonexistent-swapfile               file\t\t16776188\t0\t\t-3\n",
             ]
             .concat(),
         )
@@ -13591,7 +13654,7 @@ mod tests {
             (
                 &on_a_file,
                 true,
-                "a swap file names no disk, so no medium is claimed",
+                "a file area whose backing device cannot be resolved is left alone",
             ),
             (
                 &on_a_longer_name,
@@ -13639,6 +13702,96 @@ mod tests {
             let fired = recs.iter().any(|r| r.param == "vm.page-cluster");
             assert_eq!(fired, expected, "{why}: {}", swaps.display());
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn page_cluster_resolves_a_swap_files_medium_through_its_device() {
+        // A file-backed area prints a path, not a device name, so the
+        // whole-disk inventory has nothing to match and its medium used to be
+        // unknown — the advice went out even when the file sat on a rotational
+        // disk. The medium is still knowable: stat() gives the device the
+        // file's filesystem sits on, and /sys/dev/block/<major>:<minor> is the
+        // block device that number belongs to; the device directory's
+        // queue/rotational is the same flag the inventory reads, reached
+        // through the partition directory when the number is a partition's.
+        //
+        // The synthetic tree plants the entry for this file's OWN device
+        // number, so the code walks its real stat() -> major:minor ->
+        // read_link path; the links are relative, as sysfs writes them.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_swap_file_medium_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("swapfile");
+        std::fs::write(&file, b"swap").unwrap();
+        let dev = std::fs::metadata(&file).unwrap().dev();
+        let number = format!("{}:{}", libc::major(dev), libc::minor(dev));
+        let swaps = dir.join("swaps");
+        std::fs::write(
+            &swaps,
+            [
+                b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n".as_slice(),
+                format!("{}\t\tfile\t\t1048572\t\t0\t\t-3\n", file.display()).as_bytes(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        // The file's device number names a whole rotational device.
+        let on_hdd = dir.join("sysdev-hdd");
+        let hdd_disk = dir.join("devices/block/sdb");
+        std::fs::create_dir_all(hdd_disk.join("queue")).unwrap();
+        std::fs::write(hdd_disk.join("queue/rotational"), b"1\n").unwrap();
+        std::fs::create_dir_all(&on_hdd).unwrap();
+        std::os::unix::fs::symlink("../devices/block/sdb", on_hdd.join(&number)).unwrap();
+
+        // The same number names a partition of a non-rotational disk.
+        let on_a_partition = dir.join("sysdev-partition");
+        let partition = dir.join("devices/block/nvme0n1/nvme0n1p2");
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("partition"), b"2\n").unwrap();
+        std::fs::create_dir_all(dir.join("devices/block/nvme0n1/queue")).unwrap();
+        std::fs::write(dir.join("devices/block/nvme0n1/queue/rotational"), b"0\n").unwrap();
+        std::fs::create_dir_all(&on_a_partition).unwrap();
+        std::os::unix::fs::symlink(
+            "../devices/block/nvme0n1/nvme0n1p2",
+            on_a_partition.join(&number),
+        )
+        .unwrap();
+
+        // A tree with no entry for the number (the shape of a filesystem on a
+        // device sysfs does not describe: tmpfs, overlayfs, a network mount).
+        let no_entry = dir.join("sysdev-no-entry");
+        std::fs::create_dir_all(&no_entry).unwrap();
+
+        let info = make_test_info();
+        let gate = |root: &std::path::Path| {
+            swap_on_a_rotational_disk_at(&info, swaps.to_str().unwrap(), root)
+        };
+        assert!(
+            gate(&on_hdd),
+            "a swap file on a rotational device must suppress the advice"
+        );
+        assert!(
+            !gate(&on_a_partition),
+            "a swap file on a partition of a non-rotational disk keeps the advice"
+        );
+        assert!(
+            !gate(&no_entry),
+            "a device number the tree has no entry for keeps today's advice"
+        );
+
+        // A file that no longer exists cannot be resolved either.
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            !gate(&on_hdd),
+            "an area whose file is gone keeps today's advice"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

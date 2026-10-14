@@ -1221,7 +1221,10 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
     Ok(disks)
 }
 
-fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
+/// Medium of the device in `dir`, named `name`: the one place the rotational
+/// flag is interpreted, so a rule that resolves another device directory (a
+/// swap file's backing device) reads the same answer as the inventory.
+pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     if name.starts_with("nvme") {
         return DiskType::NVMe;
     }
