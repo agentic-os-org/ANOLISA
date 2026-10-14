@@ -706,6 +706,21 @@ fn is_cleared_twin(
 /// The key comes back in the spelling the ledger holds it under, not the
 /// canonical one: that is the spelling every listing publishes as `param`, so
 /// a caller can address the clearer's own row by the name it is given here.
+///
+/// A pair recorded with BOTH halves at 0 is the one shape the ledger cannot
+/// attribute: every handler of a mutually exclusive pair clears its twin on the
+/// write (`if (ret == 0 && write)` for the background and overcommit pairs,
+/// inside the changed-value branch for the dirty foreground pair), so with both
+/// records at 0 each one looks like the other's side effect. Left there, each
+/// half is the other's cleared twin: `render_persistence` skips both lines (a
+/// ledger holding only the pair renders no sysctl file at all, which then
+/// *removes* the one on disk while the ledger still claims the entries), the
+/// listing reports each half as cleared by the other, and the restore writes
+/// each half after its "clearer". The ratio half is taken as the writer there —
+/// its own zero is a value a caller wrote, and the ratio line alone reproduces
+/// the live pair at boot, since its write zeroes the bytes half — so a zero
+/// bytes record stops being a clearer, while a bytes record that holds a real
+/// value keeps clearing the ratio half as before.
 fn cleared_twin_of<'a>(
     entries: &'a BTreeMap<String, RollbackEntry>,
     param: &str,
@@ -717,8 +732,19 @@ fn cleared_twin_of<'a>(
     let canonical = param.replace('/', ".");
     entries
         .keys()
-        .find(|k| cleared_sibling(k).is_some_and(|twin| twin == canonical))
+        .find(|k| {
+            cleared_sibling(k).is_some_and(|twin| twin == canonical)
+                && !(is_ratio_half(&canonical) && entries[*k].applied == "0")
+        })
         .map(String::as_str)
+}
+
+/// Whether `param` is the ratio half of its mutually exclusive pair. All three
+/// pairs are `<something>_ratio` against a byte-counted twin
+/// (`vm.dirty_ratio`/`vm.dirty_bytes`, `vm.dirty_background_ratio`/
+/// `vm.dirty_background_bytes`, `vm.overcommit_ratio`/`vm.overcommit_kbytes`).
+fn is_ratio_half(param: &str) -> bool {
+    param.ends_with("_ratio")
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -3762,6 +3788,59 @@ mod tests {
             !config.contains("overcommit_ratio"),
             "the disabled twin's record must not be re-applied at boot: {config}"
         );
+    }
+
+    /// Both halves of a pair recorded at 0: every handler of a mutually
+    /// exclusive pair clears its twin on the write, so the ledger cannot say
+    /// which write produced the state and each record looks like the other's
+    /// side effect. Without a tie-break both halves are skipped — the pair
+    /// vanishes from the boot config, and a ledger holding only the pair
+    /// renders no file at all, which removes the one on disk — and the listing
+    /// reports each half as cleared by the other. The ratio line is the one
+    /// that reproduces the pair: writing it zeroes the bytes half.
+    #[test]
+    fn render_persistence_keeps_one_line_of_an_all_zero_pair() {
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_background_bytes".to_string(),
+                RollbackEntry {
+                    previous: "268435456".into(),
+                    applied: "0".into(),
+                    path: "/proc/sys/vm/dirty_background_bytes".into(),
+                    category: Some(Category::Performance),
+                },
+            ),
+            (
+                "vm.dirty_background_ratio".to_string(),
+                RollbackEntry {
+                    previous: "10".into(),
+                    applied: "0".into(),
+                    path: "/proc/sys/vm/dirty_background_ratio".into(),
+                    category: Some(Category::Performance),
+                },
+            ),
+        ]);
+        let bytes = &entries["vm.dirty_background_bytes"];
+        assert_eq!(
+            cleared_twin_of(&entries, "vm.dirty_background_bytes", bytes),
+            Some("vm.dirty_background_ratio"),
+            "the bytes half is the side effect, so its line is skipped"
+        );
+        let ratio = &entries["vm.dirty_background_ratio"];
+        assert_eq!(
+            cleared_twin_of(&entries, "vm.dirty_background_ratio", ratio),
+            None,
+            "the ratio half is the writer: the pair must not skip itself"
+        );
+
+        let (config, script) = render_persistence(&entries);
+        let config = config.expect("one line of the pair is renderable");
+        assert!(config.contains("vm.dirty_background_ratio = 0"), "{config}");
+        assert!(
+            !config.contains("dirty_background_bytes"),
+            "the zeroed bytes line would zero the ratio again at boot: {config}"
+        );
+        assert!(script.is_none());
     }
 
     /// The twin lookup must answer for the separator spellings every other
