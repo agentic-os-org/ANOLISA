@@ -76,6 +76,12 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
     let has_streaming = info.has_process("kafka")
         || info.has_process("flink")
         || info.has_process("spark")
+        // HDFS stores and serves data in large sequential blocks, and the
+        // read-ahead rule already counts a Hadoop host among its streaming
+        // workloads (the list that resizes an HDD's read-ahead window for
+        // sequential readers): the classifier is the other list of the same
+        // class, so a Hadoop-only host belongs on io-throughput, not mixed.
+        || info.has_process("hadoop")
         // Pulsar is the same event-streaming class as Kafka; the runtime
         // detector already resolves org.apache.pulsar broker cmdlines to
         // the "pulsar" service.
@@ -328,6 +334,30 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["flink"])),
             WorkloadType::IoThroughput
+        );
+    }
+
+    #[test]
+    fn test_classify_hadoop() {
+        // HDFS stores and serves data in large sequential blocks, and the
+        // read-ahead rule already counts a Hadoop host among its streaming
+        // workloads (the list that resizes an HDD's read-ahead window for
+        // sequential readers). The classifier is the other list of the same
+        // class, so a Hadoop-only host must report io-throughput instead of
+        // mixed.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop"])),
+            WorkloadType::IoThroughput
+        );
+        // A database still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop", "postgres"])),
+            WorkloadType::IoLatency
+        );
+        // A metrics collector of that family is not the family's workload.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop_exporter"])),
+            WorkloadType::Mixed
         );
     }
 
