@@ -3979,9 +3979,11 @@ fn eval_oom_kill_allocating_task_at(
     if !info.param_exists(path) {
         return 1;
     }
-    // Any nonzero value is enabled, so -1 must not read as the value 0.
-    let current = read_sysctl_i64(path);
-    if current == 0 {
+    // Any nonzero value is enabled, so -1 must not read as the value 0 — and
+    // neither may a file the reader could not interpret, which the signed
+    // sysctl reader maps to 0 as well. Only a successfully read 0 is the
+    // disabled switch.
+    if read_switch_i64(path) == Some(0) {
         recs.push(Recommendation {
             param: "vm.oom_kill_allocating_task".to_string(),
             current_value: "0".to_string(),
@@ -17709,6 +17711,54 @@ mod tests {
                 assert_eq!(recs[0].current_value, "0");
                 assert_eq!(recs[0].recommended_value, "1");
             }
+        }
+    }
+
+    #[test]
+    fn test_oom_kill_unreadable_switch_stays_quiet() {
+        // The signed truthiness above is kept, and a file the reader cannot
+        // interpret no longer becomes the value 0 these gates fire on: a
+        // masked or garbled proc entry (a container's, typically) used to be
+        // reported as `current_value: "0"` and answered with a write the host
+        // may not need.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_oom_kill_unreadable_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let malformed = dir.join("oom_kill.malformed");
+        std::fs::write(&malformed, b"never\n").unwrap();
+        let empty = dir.join("oom_kill.empty");
+        std::fs::write(&empty, b"").unwrap();
+        // A directory is an IO error even for root.
+        let io_error = dir.join("oom_kill.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("oom_kill.missing");
+
+        let info = make_test_info();
+        for path in [&malformed, &empty, &io_error, &missing] {
+            let mut recs = Vec::new();
+            eval_oom_kill_allocating_task_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        // A readable 0 is still the unhardened value, and a readable -1 still
+        // counts as enabled.
+        for (value, expects_rec) in [("0", true), ("-1", false), ("1", false)] {
+            let path = dir.join(format!("oom_kill.{value}"));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_oom_kill_allocating_task_at(&info, &mut recs, path.to_str().unwrap());
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "vm.oom_kill_allocating_task = {value}: only 0 is the unhardened value"
+            );
         }
     }
 
