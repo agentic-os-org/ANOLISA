@@ -1901,7 +1901,14 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         // advice is gated - stayed silent and left them on the default
         // reclaim pressure.
         || info.has_process("tidb-server")
-        || info.has_process("tikv-server");
+        || info.has_process("tikv-server")
+        // oracle is the last OLTP database the sibling gates count that this
+        // list skipped: the THP, read-ahead and NUMA gates count it, and
+        // swappiness and the dirty ratios take the IoLatency verdict the
+        // classifier already gives an Oracle-only host. A buffer-cache
+        // pressure is the shape this rule is written for, so the host stayed
+        // on the default while every sibling database was advised.
+        || info.has_process("oracle");
     if !is_db_or_cache {
         return 1;
     }
@@ -3536,6 +3543,12 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
         // lists, and both names were still missing from it.
         || info.has_process("tidb-server")
         || info.has_process("tikv-server")
+        // oracle is the other OLTP database every sibling latency gate counts
+        // (the THP gate, swappiness and the dirty ratios through the
+        // classification, the read-ahead and NUMA gates), and its
+        // client-protocol round-trip is the same synchronous request-path
+        // shape this pair of rules exists for.
+        || info.has_process("oracle")
 }
 
 /// Path-injectable form of [`eval_busy_poll`] (the `eval_*_at` idiom) so the
@@ -3544,9 +3557,9 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
 /// The gate lists every workload whose network round-trips sit on the
 /// request path: the caches (redis, memcached), the proxies (nginx), the
 /// OLTP databases (postgres, mysqld — MariaDB 10.4+ runs as mariadbd, the
-/// same OLTP shape — and mongod), clickhouse, and TiDB with its TiKV region
-/// store, whose per-query round-trip is the distributed shape of the same
-/// class. The OLTP databases appear in every sibling latency gate —
+/// same OLTP shape — mongod, and oracle), clickhouse, and TiDB with its TiKV
+/// region store, whose per-query round-trip is the distributed shape of the
+/// same class. The OLTP databases appear in every sibling latency gate —
 /// eval_thp's `is_latency_sensitive`, the swappiness/dirty_ratio db lists,
 /// classify's IoLatency — but were missing here, so a database host never
 /// got the busy-polling advice its synchronous per-query round-trip profile
@@ -10169,9 +10182,10 @@ mod tests {
         // sweep of the siblings never reached here. TiDB and TiKV are the
         // classifier's OLTP database and its distributed KV store (has_db ->
         // IoLatency): the sweep of the latency classes reached them in the
-        // THP rule, but this list stayed silent for them. Every service the
-        // rule accepts must trigger the recommendation, and a build job must
-        // not.
+        // THP rule, but this list stayed silent for them. oracle is the last
+        // OLTP database the sibling gates count that this list skipped, the
+        // gap issue #7426 names. Every service the rule accepts must trigger
+        // the recommendation, and a build job must not.
         for name in [
             "postgres",
             "mysqld",
@@ -10188,6 +10202,7 @@ mod tests {
             "opensearch",
             "tidb-server",
             "tikv-server",
+            "oracle",
         ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
@@ -12640,7 +12655,9 @@ mod tests {
     /// busy_read gate copied it, and TiDB and TiKV (the classifier's OLTP
     /// database and its distributed KV store) are the remaining members of
     /// that database class - a TiDB host's per-query round-trip to its region
-    /// store is the request-path shape this pair of rules exists for.
+    /// store is the request-path shape this pair of rules exists for. oracle
+    /// is the last member of that class (#7426), so the pair must fire for it
+    /// as well.
     #[test]
     fn busy_read_counts_every_service_its_twin_counts() {
         let dir = std::env::temp_dir().join(format!(
@@ -12667,6 +12684,7 @@ mod tests {
             "clickhouse",
             "tidb-server",
             "tikv-server",
+            "oracle",
         ] {
             let mut info = make_test_info();
             info.network = vec![NetInfo {
@@ -17699,7 +17717,9 @@ mod tests {
         // includes (eval_thp's is_latency_sensitive, the swappiness /
         // dirty_ratio db lists, classify's IoLatency): a synchronous
         // per-query network round-trip is the classic busy-polling shape.
-        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld —
+        // and oracle, the last database of that class the gate skipped
+        // (#7426).
         let path = std::env::temp_dir().join(format!(
             "ktuner_busy_poll_{}_{:?}",
             std::process::id(),
@@ -17713,6 +17733,7 @@ mod tests {
             "mariadbd",
             "mongod",
             "clickhouse",
+            "oracle",
         ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
