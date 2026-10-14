@@ -1851,6 +1851,22 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     ("catalina", "tomcat"),
     ("tomcat", "tomcat"),
     ("jenkins", "jenkins"),
+    // RabbitMQ runs on the Erlang VM: its launcher execs `beam.smp`, so the
+    // process is named after the VM and the broker can only be identified
+    // from the command line. The launcher passes the node name as
+    // `-sname rabbit@<host>` (RABBITMQ_NODENAME's default prefix is
+    // `rabbit`, and the same name repeats in the
+    // `-boot .../mnesia/rabbit@<host>/rabbit` path), which is the one token
+    // of a real cmdline that names the service: the
+    // `-pa .../rabbitmq_server-<v>/ebin` directory is matched by its
+    // basename (`ebin`) by design. Without this marker `has_process`
+    // ("rabbitmq") can never be true for the packaged daemon, so the table's
+    // ("rabbitmq", "RabbitMQ") entry was unreachable and a RabbitMQ host
+    // reported no service at all. A cluster whose node name was deliberately
+    // renamed (`-sname orders@host`) is not recognised — the marker matches
+    // the default prefix, exactly as the jar and main-class markers match
+    // upstream's own names.
+    ("rabbit", "rabbitmq"),
 ];
 
 /// Decide the service a generic-runtime process (java/python/node/...) runs
@@ -4064,6 +4080,37 @@ mod tests {
         // Elasticsearch, including a versioned jar basename.
         let cmdline = "java\0-jar\0/usr/share/elasticsearch-8.12.0/lib/elasticsearch-8.12.0.jar";
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("elasticsearch"));
+    }
+
+    #[test]
+    fn test_runtime_service_reads_the_rabbitmq_erlang_node() {
+        // RabbitMQ's launcher execs the Erlang VM, so the process is
+        // `beam.smp` and the service is only visible in the command line.
+        // The node name gives it away (RABBITMQ_NODENAME defaults to
+        // `rabbit@<host>`), and the same token comes back from the launcher's
+        // own arguments: `-s rabbit boot` names RABBITMQ_BOOT_MODULE, whose
+        // default is `rabbit`, and the boot file lives under
+        // `.../mnesia/rabbit@<host>/rabbit`. The `-pa` directory names nothing
+        // (its basename is `ebin`), which is why the table's
+        // ("rabbitmq", "RabbitMQ") entry could never match before: the
+        // packaged daemon is never a process named `rabbitmq`.
+        let cmdline = concat!(
+            "/usr/lib/erlang/erts-13.2.6.5/bin/beam.smp\0-W\0w\0-MBas\0ageffcbf\0",
+            "-MHas\0ageffcbf\0-MBlmbcs\0512\0-MMmcs\030\0",
+            "-sname\0rabbit@node1\0-s\0rabbit\0boot\0",
+            "-boot\0/var/lib/rabbitmq/mnesia/rabbit@node1/rabbit\0",
+            "-pa\0/usr/lib/rabbitmq/lib/rabbitmq_server-3.13.7/ebin\0",
+            "-kernel\0prevent_overlapping_partitions\0false\0-noinput",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("rabbitmq"));
+
+        // An unrelated Erlang application keeps its VM name: only the default
+        // RabbitMQ node/boot prefix is claimed.
+        let cmdline = concat!(
+            "/usr/lib/erlang/erts-13.2.6.5/bin/beam.smp\0-sname\0myapp@node1\0",
+            "-boot\0/var/lib/myapp/mnesia/myapp@node1/start\0-pa\0/opt/myapp/ebin",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
     }
 
     #[test]
