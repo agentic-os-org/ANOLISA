@@ -253,7 +253,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
         <div className="px-5 pb-4">
           {/* Message */}
           {step.message ? (
-            <ExpandableText text={step.message} className="text-gray-700 bg-gray-50" />
+            <ExpandableText text={asText(step.message)} className="text-gray-700 bg-gray-50" />
           ) : (
             <span className="text-xs text-gray-400 italic">{t('atif.noMessageContent')}</span>
           )}
@@ -579,10 +579,22 @@ function optionalArray(value: unknown, accepts: (item: unknown) => boolean): boo
   return value == null || (Array.isArray(value) && value.every(accepts));
 }
 
+function isAtifMessage(value: unknown): boolean {
+  if (value == null || typeof value === 'string') return true;
+  return Array.isArray(value) && value.every(part => isRecord(part) && (
+    (part.type === 'text' && typeof part.text === 'string' && part.source == null)
+    || (part.type === 'image' && part.text == null && isRecord(part.source)
+      && typeof part.source.path === 'string'
+      && typeof part.source.media_type === 'string'
+      && ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(part.source.media_type))
+  ));
+}
+
 function isAtifStep(value: unknown): boolean {
   if (!isRecord(value) || !Number.isSafeInteger(value.step_id) || (value.step_id as number) < 0
     || typeof value.source !== 'string'
-    || !optionalStrings(value, ['message', 'timestamp', 'model_name', 'reasoning_content'])) return false;
+    || !isAtifMessage(value.message)
+    || !optionalStrings(value, ['timestamp', 'model_name', 'reasoning_content'])) return false;
   if (!optionalArray(value.tool_calls, call => isRecord(call)
     && typeof call.tool_call_id === 'string' && typeof call.function_name === 'string')) return false;
   if (value.metrics != null && (!isRecord(value.metrics)

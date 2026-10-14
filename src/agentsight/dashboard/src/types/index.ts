@@ -242,11 +242,15 @@ export interface AtifStepMetrics {
   extra?: any;
 }
 
+export type AtifContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { media_type: string; path: string } };
+
 export interface AtifStep {
   step_id: number;
   timestamp?: string;
   source: 'system' | 'user' | 'agent';
-  message?: string;
+  message?: string | AtifContentPart[];
   model_name?: string;
   reasoning_content?: string;
   tool_calls?: AtifToolCall[];

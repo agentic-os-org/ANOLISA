@@ -9,7 +9,7 @@ export function roundMatchesText(steps: AtifStep[], query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   return steps.some((step) => {
-    const text = [step.message, step.reasoning_content];
+    const text = [jsonText(step.message ?? ''), step.reasoning_content];
     for (const call of Array.isArray(step.tool_calls) ? step.tool_calls : []) {
       if (!call || typeof call !== 'object') continue;
       text.push(call.function_name, jsonText(call.arguments));
