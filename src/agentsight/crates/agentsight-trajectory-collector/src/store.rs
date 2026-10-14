@@ -641,6 +641,10 @@ impl TrajectoryStore {
 
     /// Returns distinct project / source / agent_name values for UI filters.
     ///
+    /// Agent labels are merged case-insensitively (see
+    /// [`distinct_agent_names`]); project paths and source identifiers stay
+    /// exact, matching the filters that consume them.
+    ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn list_filters(&self) -> Result<TrajectoryFilters> {
@@ -648,7 +652,7 @@ impl TrajectoryStore {
         Ok(TrajectoryFilters {
             projects: distinct_column(&conn, "project")?,
             sources: distinct_column(&conn, "source")?,
-            agent_names: distinct_column(&conn, "agent_name")?,
+            agent_names: distinct_agent_names(&conn)?,
         })
     }
 
@@ -1178,6 +1182,27 @@ fn distinct_column(conn: &Connection, column: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Distinct agent labels for the UI filters, merged case-insensitively.
+///
+/// The agent filter itself is `COLLATE NOCASE` (`list_summaries`,
+/// `scan_steps`) and `list_agent_activity_summaries` groups the same way, so
+/// an exact `DISTINCT` would offer one dropdown entry per spelling while every
+/// one of them selects all spellings' rows. The display name is the smallest
+/// spelling, the same `MIN` the activity summary reports.
+fn distinct_agent_names(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT MIN(agent_name) AS agent_name FROM collected_trajectories
+         GROUP BY agent_name COLLATE NOCASE
+         ORDER BY agent_name",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,6 +1660,27 @@ mod tests {
             vec!["qoder".to_string(), "qoderwork".to_string()]
         );
         assert_eq!(f.agent_names, vec!["qoder".to_string()]);
+    }
+
+    #[test]
+    fn test_list_filters_merges_agent_case_variants() {
+        // `list_summaries` / `scan_steps` filter agent_name case-insensitively
+        // and `list_agent_activity_summaries` groups the same way, so one agent
+        // spelled two ways is one selectable agent. An exact DISTINCT left the
+        // dropdown with one entry per spelling, each selecting every spelling.
+        let store = TrajectoryStore::new_with_path(&tmp_db("filters-case")).unwrap();
+        for (session_id, agent_name) in [("a", "Qoder"), ("b", "qoder"), ("c", "codex")] {
+            let mut rec = sample_record();
+            rec.session_id = session_id.into();
+            rec.agent_name = agent_name.into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let f = store.list_filters().unwrap();
+        assert_eq!(
+            f.agent_names,
+            vec!["Qoder".to_string(), "codex".to_string()]
+        );
     }
 
     #[test]
