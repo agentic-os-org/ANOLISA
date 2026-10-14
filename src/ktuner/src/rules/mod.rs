@@ -1893,7 +1893,15 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         || info.has_process("zookeeper")
         || info.has_process("consul")
         || info.has_process("elasticsearch")
-        || info.has_process("opensearch");
+        || info.has_process("opensearch")
+        // TiDB is the classifier's OLTP database and TiKV its distributed KV
+        // store (`classify`'s has_db -> IoLatency); the sibling rules that
+        // take that verdict (eval_swappiness, eval_dirty_ratio) already
+        // advise those hosts, while this list - the only place the VFS cache
+        // advice is gated - stayed silent and left them on the default
+        // reclaim pressure.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server");
     if !is_db_or_cache {
         return 1;
     }
@@ -10096,8 +10104,12 @@ mod tests {
         // valkey-server (the Redis 7.2.4 fork the sweep of 0b55cba16 added
         // everywhere else). zookeeper/consul and opensearch are the
         // classifier's own peers of etcd and elasticsearch, which the same
-        // sweep of the siblings never reached here. Every service the rule
-        // accepts must trigger the recommendation, and a build job must not.
+        // sweep of the siblings never reached here. TiDB and TiKV are the
+        // classifier's OLTP database and its distributed KV store (has_db ->
+        // IoLatency): the sweep of the latency classes reached them in the
+        // THP rule, but this list stayed silent for them. Every service the
+        // rule accepts must trigger the recommendation, and a build job must
+        // not.
         for name in [
             "postgres",
             "mysqld",
@@ -10112,6 +10124,8 @@ mod tests {
             "consul",
             "elasticsearch",
             "opensearch",
+            "tidb-server",
+            "tikv-server",
         ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
