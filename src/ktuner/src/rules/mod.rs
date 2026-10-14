@@ -3467,6 +3467,11 @@ fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// hand-rolled `postgres || mysqld` list: MariaDB 10.4+ runs as `mariadbd`
 /// (the daemon comm Debian and Ubuntu ship), so a MariaDB-only host missed
 /// the rule while the sibling SysV IPC sizing rules already counted it.
+///
+/// The count is also read as a switch here: the rule fires on a zero, and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0,
+/// so only a zero the reader could produce is evidence that no huge page is
+/// reserved.
 fn eval_nr_hugepages_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -3479,9 +3484,8 @@ fn eval_nr_hugepages_at(
     if !is_database_present(info) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
     let recommended = quarter_memory_hugepages(info.memory_total_gb, hugepage_kb);
-    if current == 0 && info.memory_total_gb >= 16 && recommended > 0 {
+    if read_switch(path) == Some(0) && info.memory_total_gb >= 16 && recommended > 0 {
         recs.push(Recommendation {
             param: "vm.nr_hugepages".to_string(),
             current_value: "0".to_string(),
@@ -13638,6 +13642,41 @@ mod tests {
         let mut small = make_test_info();
         small.cpu_cores = 8;
         assert!(advice(&small, &off).is_empty());
+    }
+
+    #[test]
+    fn nr_hugepages_advice_needs_a_readable_switch() {
+        // The count is a switch here too: the rule fires on a zero, and the
+        // database and memory preconditions stay exactly as they were.
+        let (off, on, others) = zero_switch_paths("nr_hugepages", b"4096\n");
+        let mut info = info_with_processes(&["mariadbd"]);
+        info.memory_total_gb = 32;
+        let advice = |info: &SystemInfo, path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_nr_hugepages_at(info, &mut recs, path.to_str().unwrap(), 2048);
+            recs
+        };
+
+        let recs = advice(&info, &off);
+        assert_eq!(recs.len(), 1, "a readable 0 reserves no huge page");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(
+            advice(&info, &on).is_empty(),
+            "a readable 4096 reserves some"
+        );
+        for path in &others {
+            assert!(
+                advice(&info, path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        let client = info_with_processes(&["mariadb-dump"]);
+        assert!(
+            advice(&client, &off).is_empty(),
+            "the database precondition is untouched"
+        );
     }
 
     #[test]
