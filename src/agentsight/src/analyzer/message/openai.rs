@@ -778,6 +778,76 @@ impl OpenAIParser {
         serde_json::from_value::<OpenAIResponse>(resp).ok()
     }
 
+    /// Text of a cumulative message frame's `content` field: a plain string,
+    /// or the concatenated text of an array of content parts.
+    fn snapshot_text(content: Option<&serde_json::Value>) -> String {
+        match content {
+            Some(serde_json::Value::String(text)) => text.clone(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        }
+    }
+
+    /// Apply the cumulative-snapshot rule to one text fragment list: a
+    /// snapshot that extends the text so far replaces it, anything else
+    /// appends — the rule the drain merger's `accumulate_text` applies, so
+    /// both paths fold a repeated whole-message frame to the same answer.
+    fn accumulate_snapshot(parts: &mut Vec<String>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if text.starts_with(parts.concat().as_str()) {
+            parts.clear();
+        }
+        parts.push(text.to_string());
+    }
+
+    /// Fold one wire tool call into the accumulator slot it names.
+    ///
+    /// `whole` marks a cumulative frame's call: its id, name and arguments
+    /// replace the slot's values instead of extending them, because the frame
+    /// repeats the complete call rather than a fragment of it.
+    fn merge_tool_call(
+        tool_call_map: &mut std::collections::HashMap<u32, (String, String, String)>,
+        idx: u32,
+        tc: &serde_json::Value,
+        whole: bool,
+    ) {
+        let entry = tool_call_map
+            .entry(idx)
+            .or_insert_with(|| (String::new(), String::new(), String::new()));
+        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                entry.0 = id.to_string();
+            }
+            // 空字符串不覆盖已有的 id
+        }
+        let Some(func) = tc.get("function") else {
+            return;
+        };
+        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                entry.1 = name.to_string();
+            }
+            // Empty string must not overwrite an existing name: some
+            // backends (e.g. deepseek models on DashScope) repeat
+            // name:"" on every continuation delta.
+        }
+        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+            if whole {
+                if !args.is_empty() {
+                    entry.2 = args.to_string();
+                }
+            } else {
+                entry.2.push_str(args);
+            }
+        }
+    }
+
     /// Aggregate SSE chunks into a single OpenAIResponse
     fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         use std::collections::HashMap;
@@ -805,6 +875,46 @@ impl OpenAIParser {
                 }
                 // Extract content delta for aggregation
                 for choice in &sse_chunk.choices {
+                    // A cumulative whole-message frame repeats the answer so
+                    // far instead of an increment (some OpenAI-compatible
+                    // gateways close with one). Every other consumer of the
+                    // stream reads that shape; dropping the frame because it
+                    // carries `message` instead of `delta` lost its text, its
+                    // whole tool calls and its terminal finish reason.
+                    if let Some(snapshot) = choice.message.as_ref() {
+                        Self::accumulate_snapshot(
+                            &mut content_parts,
+                            &Self::snapshot_text(snapshot.get("content")),
+                        );
+                        if let Some(reasoning) =
+                            snapshot.get("reasoning_content").and_then(|v| v.as_str())
+                        {
+                            Self::accumulate_snapshot(&mut reasoning_parts, reasoning);
+                        }
+                        if let Some(refusal) = snapshot.get("refusal").and_then(|v| v.as_str()) {
+                            Self::accumulate_snapshot(&mut refusal_parts, refusal);
+                        }
+                        let snapshot_calls = snapshot
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|calls| calls.as_slice())
+                            .unwrap_or_default();
+                        for (call_pos, tc) in snapshot_calls.iter().enumerate() {
+                            // The frame carries whole calls, so a missing
+                            // `index` names the call by its position.
+                            let idx = tc
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(call_pos as u64);
+                            if idx >= MAX_TOOL_CALL_SLOTS {
+                                log::debug!(
+                                    "[OpenAI] dropping snapshot tool_call with out-of-range index {idx}"
+                                );
+                                continue;
+                            }
+                            Self::merge_tool_call(&mut tool_call_map, idx as u32, tc, true);
+                        }
+                    }
                     if let Some(content) = &choice.delta.content {
                         if !content.is_empty() {
                             content_parts.push(content.clone());
@@ -864,28 +974,7 @@ impl OpenAIParser {
                             }
                             let idx = idx as u32;
                             current_slot.insert(choice.index, idx);
-                            let entry = tool_call_map
-                                .entry(idx)
-                                .or_insert_with(|| (String::new(), String::new(), String::new()));
-                            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                if !id.is_empty() {
-                                    entry.0 = id.to_string();
-                                }
-                                // 空字符串不覆盖已有的 id
-                            }
-                            if let Some(func) = tc.get("function") {
-                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                    if !name.is_empty() {
-                                        entry.1 = name.to_string();
-                                    }
-                                    // Empty string must not overwrite an existing name: some
-                                    // backends (e.g. deepseek models on DashScope) repeat
-                                    // name:"" on every continuation delta.
-                                }
-                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                                    entry.2.push_str(args);
-                                }
-                            }
+                            Self::merge_tool_call(&mut tool_call_map, idx, tc, false);
                         }
                     }
                     // Legacy function_call delta: the pre-`tool_calls`
@@ -2294,6 +2383,177 @@ mod tests {
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"x\":1}"
         );
+    }
+
+    /// A chat-completions choice can carry a cumulative `message` snapshot
+    /// instead of a `delta`: SysOM's Copilot stream sends nothing else, and
+    /// some OpenAI-compatible gateways close with a whole `message` as the
+    /// final frame. A chunk without `delta` failed typed deserialization and
+    /// was skipped whole, so the aggregation lost the snapshot's text, its
+    /// tool calls and its terminal `finish_reason` while every other consumer
+    /// of the same stream (the drain merger, the token fold) reads that shape.
+    #[test]
+    fn test_aggregate_sse_chunks_reads_cumulative_message_snapshots() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({"index": 0, "delta": {"content": "Do"}})),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {"role": "assistant", "content": "Done"},
+                "finish_reason": "stop"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        assert!(
+            matches!(
+                resp.choices[0].message.content.as_ref(),
+                Some(OpenAIContent::Text(text)) if text == "Done"
+            ),
+            "the closing snapshot completes the answer the deltas started"
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("stop".to_string()),
+            "the terminal reason rides the snapshot frame"
+        );
+    }
+
+    /// A snapshot frame's `content` can be an array of content parts, and the
+    /// frame repeats `reasoning_content` and `refusal` whole: each folds by
+    /// the same cumulative rule as the text, so a snapshot that extends the
+    /// deltas so far replaces them and an unrelated one appends.
+    #[test]
+    fn test_aggregate_sse_chunks_folds_snapshot_parts_reasoning_and_refusal() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({
+                "index": 0,
+                "delta": {"content": "Hel", "reasoning_content": "Think", "refusal": "Sorry"}
+            })),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Hel"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                        {"type": "text", "text": "lo"}
+                    ],
+                    "reasoning_content": "Thinking",
+                    "refusal": "No"
+                },
+                "finish_reason": "stop"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let message = &resp.choices[0].message;
+        assert!(
+            matches!(message.content.as_ref(), Some(OpenAIContent::Text(text)) if text == "Hello"),
+            "the parts' text joins and replaces the prefix the deltas streamed"
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Thinking"),
+            "a reasoning snapshot extending the deltas replaces them"
+        );
+        assert_eq!(
+            message.refusal.as_deref(),
+            Some("SorryNo"),
+            "an unrelated refusal snapshot appends"
+        );
+    }
+
+    /// A snapshot frame repeats whole tool calls: each replaces the slot it
+    /// names instead of extending the streamed fragments, an index-less call
+    /// takes its list position, an empty field keeps the slot's value, and a
+    /// call whose index is past the slot cap is dropped.
+    #[test]
+    fn test_aggregate_sse_chunks_replaces_tool_calls_from_snapshot() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_a",
+                    "function": {"name": "read_file", "arguments": "{\"path\":"}
+                }]}
+            })),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "",
+                            "function": {"name": "", "arguments": "{\"path\":\"/tmp/a.md\"}"}
+                        },
+                        {
+                            "id": "call_b",
+                            "function": {"name": "write_file", "arguments": ""}
+                        },
+                        {
+                            "index": 4096,
+                            "id": "call_far",
+                            "function": {"name": "dropped", "arguments": "{}"}
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+        assert_eq!(tc.len(), 2, "the out-of-range call is dropped: {tc:?}");
+        assert_eq!(tc[0]["id"], "call_a", "an empty id keeps the streamed one");
+        assert_eq!(tc[0]["function"]["name"], "read_file");
+        assert_eq!(
+            tc[0]["function"]["arguments"], "{\"path\":\"/tmp/a.md\"}",
+            "the whole call replaces the streamed fragment instead of extending it"
+        );
+        assert_eq!(
+            tc[1]["id"], "call_b",
+            "an index-less call takes its position"
+        );
+        assert_eq!(tc[1]["function"]["name"], "write_file");
+        assert_eq!(tc[1]["function"]["arguments"], "");
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
     }
 
     /// Compatible providers stream Chat tool calls without an `index`: a

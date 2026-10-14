@@ -594,7 +594,15 @@ pub struct OpenAiSseChoice {
     /// Index of the choice
     pub index: u32,
     /// Delta content (incremental update)
+    ///
+    /// A cumulative frame carries a whole `message` instead, so the delta
+    /// defaults rather than rejecting that frame.
+    #[serde(default)]
     pub delta: OpenAiSseDelta,
+    /// Cumulative whole-message frame: repeats the answer so far instead of
+    /// an increment. Kept untyped because its shape is the terminal message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<serde_json::Value>,
     /// Reason for finishing (stop, length, tool_calls, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -604,7 +612,7 @@ pub struct OpenAiSseChoice {
 }
 
 /// OpenAI SSE delta content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenAiSseDelta {
     /// Role (usually only in first chunk)
     #[serde(default, skip_serializing_if = "Option::is_none")]
