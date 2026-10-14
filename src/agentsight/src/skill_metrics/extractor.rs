@@ -289,11 +289,16 @@ fn extract_system_text(event: &TraceEventDetail) -> String {
 /// Sub-directories within those (i.e. category folders like `ai/`, `devops/`)
 /// are also scanned one level deep to match the os-skills layout.
 fn scan_system_skills_dir() -> Vec<String> {
-    scan_skills_dir_recursive(SYSTEM_SKILLS_DIR, 2)
+    scan_skills_dir_recursive(std::path::Path::new(SYSTEM_SKILLS_DIR), 2)
 }
 
 /// Recursively scan a skills directory up to `depth` levels.
-fn scan_skills_dir_recursive(dir: &str, depth: u32) -> Vec<String> {
+///
+/// The walk takes a `Path` and recurses with the path it already holds: a
+/// category folder can carry any bytes a directory name may hold, and
+/// rebuilding its path from the lossy display form made `read_dir` fail, so
+/// every skill under such a folder disappeared from the report.
+fn scan_skills_dir_recursive(dir: &std::path::Path, depth: u32) -> Vec<String> {
     if depth == 0 {
         return Vec::new();
     }
@@ -314,8 +319,7 @@ fn scan_skills_dir_recursive(dir: &str, depth: u32) -> Vec<String> {
             }
         } else {
             // No SKILL.md here — it may be a category folder; recurse
-            let sub = path.to_string_lossy().into_owned();
-            names.extend(scan_skills_dir_recursive(&sub, depth - 1));
+            names.extend(scan_skills_dir_recursive(&path, depth - 1));
         }
     }
     names
@@ -364,7 +368,7 @@ fn scan_qwen_user_skills_dirs_in(home_roots: &[&str]) -> Vec<String> {
             if !target.is_dir() {
                 continue;
             }
-            for found in scan_skills_dir_recursive(&target.to_string_lossy(), 2) {
+            for found in scan_skills_dir_recursive(&target, 2) {
                 if !names.contains(&found) {
                     names.push(found);
                 }
@@ -687,7 +691,10 @@ the list is refreshed later in the prompt:
     #[test]
     fn test_scan_system_skills_dir_missing_dir() {
         // scan_skills_dir_recursive should return empty vec when dir doesn't exist
-        let result = scan_skills_dir_recursive("/nonexistent/path/that/does/not/exist", 2);
+        let result = scan_skills_dir_recursive(
+            std::path::Path::new("/nonexistent/path/that/does/not/exist"),
+            2,
+        );
         assert!(result.is_empty());
     }
 
@@ -713,7 +720,7 @@ the list is refreshed later in the prompt:
         )
         .unwrap();
 
-        let names = scan_skills_dir_recursive(&tmp.to_string_lossy(), 2);
+        let names = scan_skills_dir_recursive(&tmp, 2);
         assert!(
             names.contains(&"install-copaw".to_string()),
             "expected install-copaw in {names:?}"
@@ -724,6 +731,40 @@ the list is refreshed later in the prompt:
         );
 
         // cleanup
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A category folder can carry any bytes a directory name may hold, so the
+    /// walk must recurse with the path it already holds. Rebuilding that path
+    /// from the lossy display form made `read_dir` fail, and every skill under
+    /// the folder disappeared from the report.
+    #[test]
+    fn test_scan_skills_dir_recursive_keeps_a_non_utf8_category_path() {
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_scan_skills_raw_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        // A category folder whose name carries a raw 0xFF byte, holding one
+        // skill, next to an ordinary skill at the top level.
+        let category = tmp.join(std::ffi::OsStr::from_bytes(b"cat\xff"));
+        let nested = category.join("nested-skill");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("SKILL.md"), "---\nname: nested-skill\n---").unwrap();
+        let plain = tmp.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        fs::write(plain.join("SKILL.md"), "---\nname: plain\n---").unwrap();
+
+        let names = scan_skills_dir_recursive(&tmp, 2);
+        assert!(
+            names.contains(&"nested-skill".to_string()),
+            "the skill under the non-UTF-8 category must be found: {names:?}"
+        );
+        assert!(names.contains(&"plain".to_string()), "{names:?}");
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
