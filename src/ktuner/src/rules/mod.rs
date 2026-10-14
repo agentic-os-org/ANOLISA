@@ -2308,7 +2308,14 @@ fn eval_numa_balancing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
         // Oracle 12.2+ disables automatic NUMA balancing itself at instance
         // startup (MOS 2060885.1) — the kernel's migration hinting faults on
         // SGA pages are exactly the stalls =0 heads off.
-        || info.has_process("oracle");
+        || info.has_process("oracle")
+        // TiDB is the classifier's OLTP database and TiKV its distributed KV
+        // store (`classify`'s has_db -> IoLatency); both were still missing
+        // from this hand-rolled list, so a TiDB or TiKV host kept the
+        // kernel's page-migration hinting on while the sibling gates that
+        // take the classification already sized its other knobs.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server");
     if !is_db {
         return 1;
     }
@@ -9457,6 +9464,46 @@ mod tests {
         assert!(
             recs.iter().any(|r| r.param == "vm.dirty_background_ratio"),
             "oracle must gate the dirty_background_ratio rule in"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// profile::classify calls a TiDB host io-latency — TiDB is an OLTP
+    /// database and TiKV its distributed KV store — but this hand-rolled db
+    /// list still skips both process names, so a TiDB or TiKV host on more
+    /// than one NUMA node kept automatic balancing on while every sibling
+    /// database is taken off it. The gate takes no workload verdict, so the
+    /// classifier's own databases are the only thing that can turn it on.
+    #[test]
+    fn tidb_and_tikv_gate_the_numa_balancing_rule() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_tidb_numa_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("numa_balancing");
+        std::fs::write(&path, "1\n").unwrap();
+
+        for name in ["tidb-server", "tikv-server"] {
+            let mut info = info_with_processes(&[name]);
+            info.numa_nodes = 2;
+            let mut recs = Vec::new();
+            eval_numa_balancing_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.numa_balancing"),
+                "{name} must gate the numa_balancing rule in"
+            );
+        }
+        // A workload outside the database class is left alone.
+        let mut info = info_with_processes(&["make"]);
+        info.numa_nodes = 2;
+        let mut recs = Vec::new();
+        eval_numa_balancing_at(&info, &mut recs, path.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "kernel.numa_balancing"),
+            "a build job is not a database"
         );
 
         std::fs::remove_dir_all(&dir).ok();
