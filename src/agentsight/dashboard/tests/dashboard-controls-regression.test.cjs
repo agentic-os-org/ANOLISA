@@ -129,6 +129,52 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+for (const [label, model, tools, idle, expected] of [
+  ['half-second model', 0.5, 0, 0, [['model', 0.5]]],
+  ['one-second model', 1, 0, 0, [['model', 1]]],
+  ['half-second tool', 0, 0.5, 0, [['tools', 0.5]]],
+  ['one-second tool', 0, 1, 0, [['tools', 1]]],
+  ['mixed durations', 0.5, 2, 0.2, [['model', 0.5], ['tools', 2]]],
+  ['long model and tool', 2, 3, 0, [['model', 2], ['tools', 3]]],
+  ['all zero', 0, 0, 0, []],
+  ['short idle', 0, 0, 0.5, []],
+  ['one-second idle', 0, 0, 1, []],
+  ['long idle', 0, 0, 1.1, [['idle', 1.1]]],
+]) {
+  test(`optimization: performance slices preserve ${label}`, () => {
+    const driver = createHooksDriver();
+    const recharts = Object.fromEntries(['Cell', 'Pie', 'PieChart', 'ResponsiveContainer', 'Tooltip']
+      .map((name) => [name, Object.assign(() => null, { displayName: name })]));
+    const duration = loadPageModule('src/utils/formatDuration.ts', {}, driver);
+    const { PerfSection } = loadPageModule('src/pages/OptimizationPage.tsx', {
+      recharts,
+      'react-router-dom': { useNavigate: () => () => {}, useParams: () => ({}) },
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': {},
+      '../components/CopyButton': {},
+      '../utils/formatDuration': duration,
+      '../utils/accuracyAttribution': {},
+      '../utils/richText': {},
+      '../components/TokenFlameChart': { default: () => null },
+    }, driver, '\nexports.PerfSection = PerfSection;');
+    const perf = Object.freeze({
+      wall_secs: model + tools + idle, model_secs: model, tool_secs: tools, idle_secs: idle,
+      tool_count: tools > 0 ? 1 : 0, tool_calls: [], top_slow: [], idle_gaps: [], frag_idle_secs: 0,
+    });
+    const { element } = driver.render(PerfSection, { perf, issues: null, issuesState: 'idle' });
+    const pie = collectElements(element, (node) => node.type === recharts.Pie)[0];
+    assert.ok(pie, 'the production performance chart exists');
+    const expectedSlices = expected.map(([kind, secs]) => [`opt.perf.slice.${kind}`, secs]);
+    assert.deepEqual(pie.props.data.map((slice) => [slice.name, slice.secs]), expectedSlices);
+    const legendLabels = collectElements(element, (node) => node.type === 'span'
+      && node.props?.className === 'text-gray-600').map((node) => node.children[0]);
+    assert.deepEqual(legendLabels, expectedSlices.map(([name]) => name));
+    const centre = collectElements(element, (node) => node.type === 'span'
+      && node.props?.className === 'text-sm font-semibold text-gray-900')[0];
+    assert.equal(centre.children[0], duration.formatDurationSecs(perf.wall_secs));
+  });
+}
+
 function collectElements(node, predicate, out = []) {
   if (node == null || typeof node !== 'object') return out;
   if (Array.isArray(node)) {

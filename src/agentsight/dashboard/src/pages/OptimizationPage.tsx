@@ -571,12 +571,12 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
   const modelPct = Math.round((perf.model_secs / wall) * 100);
   const toolPct = Math.round((perf.tool_secs / wall) * 100);
   const idlePct = Math.max(0, 100 - modelPct - toolPct);
-  // 环形图三分：仅保留有实际占用的分类，避免 0 值扇区
+  // Keep positive model/tool time; preserve the existing idle display threshold.
   const timeSlices = [
-    { name: t('opt.perf.slice.model'), secs: perf.model_secs, pct: modelPct, color: '#3b82f6' },
-    { name: t('opt.perf.slice.tools'), secs: perf.tool_secs, pct: toolPct, color: '#10b981' },
-    { name: t('opt.perf.slice.idle'), secs: perf.idle_secs, pct: idlePct, color: '#9ca3af' },
-  ].filter((s) => s.secs > 1);
+    { kind: 'model', name: t('opt.perf.slice.model'), secs: perf.model_secs, pct: modelPct, color: '#3b82f6' },
+    { kind: 'tool', name: t('opt.perf.slice.tools'), secs: perf.tool_secs, pct: toolPct, color: '#10b981' },
+    { kind: 'idle', name: t('opt.perf.slice.idle'), secs: perf.idle_secs, pct: idlePct, color: '#9ca3af' },
+  ].filter((s) => s.kind === 'idle' ? s.secs > 1 : s.secs > 0);
 
   return (
     <section className="mt-6">
