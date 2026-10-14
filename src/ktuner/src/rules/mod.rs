@@ -2495,20 +2495,38 @@ fn eval_send_redirects_at(
 /// redirect path reachable at all (see [`eval_send_redirects_at`]). An
 /// unreadable or missing tree reports `false`, so a rule that promises to stop
 /// redirects it cannot prove are possible stays quiet.
+///
+/// The path comes from the directory entry itself, never from its display form:
+/// `dev_valid_name` accepts any interface name without `/`, `:` or whitespace,
+/// so an entry name can carry non-UTF-8 bytes, and a `&str` round trip through
+/// `to_string_lossy` rewrites them to U+FFFD — the read then misses the file it
+/// was aimed at and the interface is counted as not forwarding.
 fn any_interface_forwards(conf_root: &std::path::Path) -> bool {
     let Ok(entries) = std::fs::read_dir(conf_root) else {
         return false;
     };
     for entry in entries.filter_map(|entry| entry.ok()) {
-        let forwarding = entry.path().join("forwarding");
         // The forwarding slot is the plain proc_dointvec int behind
         // ctl_forward_entry (no bounds), and IN_DEV_FORWARD is a truthiness
         // test — read it signed so a -1 interface counts as forwarding.
-        if read_sysctl_i64(&forwarding.to_string_lossy()) != 0 {
+        if read_sysctl_i64_path(&entry.path().join("forwarding")) != 0 {
             return true;
         }
     }
     false
+}
+
+/// Signed reader for a path the caller already holds, for the conf-tree walks
+/// whose directory entry names — interface names — can be non-UTF-8.
+///
+/// The `&str` readers beside it take a name that a caller has already turned
+/// into text; walking a tree with them can only go through `to_string_lossy`,
+/// which resolves to no file at all and reads as the value 0.
+fn read_sysctl_i64_path(path: &std::path::Path) -> i64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn eval_perf_event_paranoid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -13432,6 +13450,51 @@ mod tests {
                 }
             }
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The per-interface `forwarding` slot is read through the directory
+    /// entry's raw name, not its lossy display form. `dev_valid_name` accepts
+    /// any name without `/`, `:` or whitespace, so an interface can carry
+    /// non-UTF-8 bytes; rebuilding the path from `to_string_lossy` (U+FFFD)
+    /// missed the file, the gate concluded the host forwards nothing, and both
+    /// redirect rules stayed quiet on a router that can still send them.
+    #[test]
+    fn redirect_gates_see_a_non_utf8_forwarding_interface() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_redirect_non_utf8_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("all")).unwrap();
+        std::fs::create_dir_all(dir.join("default")).unwrap();
+        let all = dir.join("all/send_redirects");
+        let default = dir.join("default/send_redirects");
+        std::fs::write(&all, "1\n").unwrap();
+        std::fs::write(&default, "1\n").unwrap();
+        // Every ordinary entry forwards nothing.
+        for interface in ["all", "default", "lo"] {
+            let forwarding = dir.join(interface).join("forwarding");
+            std::fs::create_dir_all(forwarding.parent().unwrap()).unwrap();
+            std::fs::write(forwarding, "0\n").unwrap();
+        }
+        // The one forwarding interface carries a raw 0xFF byte in its name.
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"eth\xff0"));
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::write(raw.join("forwarding"), "1\n").unwrap();
+
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_send_redirects_at(&info, &mut recs, all.to_str().unwrap(), &dir);
+        eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+        assert_eq!(
+            recs.len(),
+            2,
+            "the forwarding interface is invisible only to the lossy path: {recs:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
