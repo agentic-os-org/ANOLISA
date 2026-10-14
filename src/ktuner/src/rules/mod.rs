@@ -2884,12 +2884,20 @@ fn runs_a_forwarding_daemon(info: &SystemInfo) -> bool {
 /// host silently breaks guest/pod/tunnel traffic, so we must be conservative
 /// and only suggest turning it off when we see no sign forwarding is in use.
 fn host_needs_ip_forward(info: &SystemInfo) -> bool {
+    host_needs_ip_forward_in(info, std::path::Path::new("/sys/class/net"))
+}
+
+/// Path-injectable form of [`host_needs_ip_forward`]: `net_dir` is the
+/// `/sys/class/net`-style tree the interface half scans, so the bridge and
+/// tunnel names are assertable against a synthetic directory — the same seam
+/// [`dir_has_bond`] gives the ARP-tuning family.
+fn host_needs_ip_forward_in(info: &SystemInfo, net_dir: &std::path::Path) -> bool {
     if runs_a_forwarding_daemon(info) {
         return true;
     }
     // Bridge / tunnel / virtual interfaces are a strong signal of VM, container
     // or VPN networking. (info.network filters these out, so scan directly.)
-    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+    if let Ok(entries) = std::fs::read_dir(net_dir) {
         for e in entries.filter_map(|e| e.ok()) {
             let n = e.file_name().to_string_lossy().to_string();
             if n.starts_with("virbr")
@@ -2902,6 +2910,17 @@ fn host_needs_ip_forward(info: &SystemInfo) -> bool {
                 || n.starts_with("tap")
                 || n.starts_with("wg")
                 || n.starts_with("vxlan")
+                // Proxmox VE names every bridge it creates `vmbr<N>` and its
+                // installer creates `vmbr0` for the guests ("Bridge names:
+                // Commonly vmbr[N] ... The installation program creates a
+                // single bridge named vmbr0", pve.proxmox.com wiki "Network
+                // Configuration"), and that bridge is what carries guest
+                // traffic out — the same role virbr0 and br0 already cover for
+                // libvirt and plain bridges. A hypervisor whose VMs are all
+                // stopped runs neither qemu nor libvirtd, so this name is the
+                // only sign left, and a zero written there cuts every guest off
+                // as soon as one starts.
+                || n.starts_with("vmbr")
                 || n == "br0"
                 || n == "br1"
             {
@@ -12249,6 +12268,43 @@ mod tests {
             name: "nginx".to_string(),
         }];
         assert!(!runs_a_forwarding_daemon(&info));
+    }
+
+    #[test]
+    fn host_needs_ip_forward_counts_a_hypervisor_bridge() {
+        // The interface half of the same predicate: a hypervisor whose guests
+        // are all stopped runs neither qemu nor libvirtd, so the bridge its
+        // guests route through is the only sign left. Proxmox VE names every
+        // bridge it creates `vmbr<N>` and its installer creates `vmbr0` for
+        // the guests ("Bridge names: Commonly vmbr[N], where 0 ≤ N ≤ 4094
+        // (vmbr0 - vmbr4094) ... The installation program creates a single
+        // bridge named vmbr0", pve.proxmox.com wiki "Network Configuration"),
+        // and the guest-network examples on that page are the ones that set
+        // net.ipv4.ip_forward=1 for them. Judging such a host "no forwarding
+        // in use" writes ip_forward=0 and cuts every guest off.
+        let info = make_test_info();
+        let proxmox = NetDir::new(&["lo/", "eno1/", "vmbr0/"]);
+        assert!(
+            host_needs_ip_forward_in(&info, &proxmox.0),
+            "a Proxmox guest bridge is a forwarding sign"
+        );
+
+        // The bridges, tunnels and container links the table has always
+        // carried still count.
+        for name in ["virbr0/", "docker0/", "br-1234abcd/", "cni0/", "wg0/"] {
+            let dir = NetDir::new(&["lo/", name]);
+            assert!(
+                host_needs_ip_forward_in(&info, &dir.0),
+                "{name} forwards for its peers"
+            );
+        }
+
+        // A host with ordinary NICs and no forwarding daemon stays advised.
+        let plain = NetDir::new(&["lo/", "eno1/", "eno2/"]);
+        assert!(
+            !host_needs_ip_forward_in(&info, &plain.0),
+            "plain interfaces are not a forwarding sign"
+        );
     }
 
     #[test]
