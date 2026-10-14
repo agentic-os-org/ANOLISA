@@ -44,8 +44,9 @@ fn rollback_list_cli_contract() {
         assert!(entry["previous"].is_string());
         // The live reading is a string or an explicit null; the comparison is
         // a bool or null; the recorded category is one of the two documented
-        // strings or an explicit null. All three keys are always present on
-        // every entry.
+        // strings or an explicit null; the clearer of a zeroed twin is a
+        // parameter name or an explicit null. All four keys are always present
+        // on every entry.
         assert!(entry["live"].is_string() || entry["live"].is_null());
         assert!(entry["drifted"].is_boolean() || entry["drifted"].is_null());
         assert!(
@@ -53,13 +54,14 @@ fn rollback_list_cli_contract() {
                 || entry["category"] == "security"
                 || entry["category"].is_null()
         );
-        assert_eq!(entry.as_object().unwrap().len(), 6, "entry keys: {entry}");
+        assert!(entry["cleared_by"].is_string() || entry["cleared_by"].is_null());
+        assert_eq!(entry.as_object().unwrap().len(), 7, "entry keys: {entry}");
     }
 }
 
 /// End-to-end contract on a private fixture: run the real binary in a mount
 /// namespace with a hand-built ledger, and assert that `--list` publishes
-/// exactly the six documented keys per entry, that an unreadable path is
+/// exactly the seven documented keys per entry, that an unreadable path is
 /// reported as null inside the JSON (never printed, never an error, stderr
 /// empty, exit code untouched), and that a changed value is flagged.
 ///
@@ -149,7 +151,15 @@ fn rollback_list_reports_live_drift_without_extra_output() {
             .collect();
         assert_eq!(
             keys,
-            ["applied", "category", "drifted", "live", "param", "previous"],
+            [
+                "applied",
+                "category",
+                "cleared_by",
+                "drifted",
+                "live",
+                "param",
+                "previous"
+            ],
             "entry keys, in the documented alphabetical order: {entry}"
         );
         // This fixture is a ledger written before the category was recorded:
@@ -274,9 +284,10 @@ fn rollback_list_reports_the_recorded_category() {
 /// End-to-end contract for `--list <param>...` on the same kind of private
 /// fixture: the named entries — any accepted spelling, plus the mutually
 /// exclusive twin the restore takes along — come back in the unfiltered
-/// listing's shape and order, and a name the ledger does not record is the
-/// restore's command error (exit 2, stderr JSON, nothing on stdout) with the
-/// ledger left byte for byte as it was.
+/// listing's shape and order, so a zeroed half's `cleared_by` still names an
+/// entry the filtered set carries, and a name the ledger does not record is
+/// the restore's command error (exit 2, stderr JSON, nothing on stdout) with
+/// the ledger left byte for byte as it was.
 #[test]
 #[ignore = "requires root and mount namespaces; writes only isolated fixture files"]
 fn rollback_list_narrows_to_the_named_entries() {
@@ -376,6 +387,21 @@ fn rollback_list_narrows_to_the_named_entries() {
     );
     assert_eq!(body["pending"][2]["live"], "1");
     assert_eq!(body["pending"][2]["drifted"], false);
+    // The pair in this fixture is one write: `vm.dirty_bytes` was written, so
+    // the kernel zeroed `vm.dirty_ratio` and the ledger records both. The row
+    // whose 0 the write caused names the entry that caused it — in the
+    // spelling the other row publishes as `param` — and the written half,
+    // which was asked for, names nobody.
+    assert_eq!(body["pending"][0]["param"], "vm.dirty_bytes");
+    assert!(
+        body["pending"][0]["cleared_by"].is_null(),
+        "the written half was asked for: {body}"
+    );
+    assert_eq!(body["pending"][1]["param"], "vm.dirty_ratio");
+    assert_eq!(
+        body["pending"][1]["cleared_by"], "vm.dirty_bytes",
+        "the zeroed twin names its clearer: {body}"
+    );
 
     let out = list(&["vm.swappiness", "vm.typo"]);
     assert_eq!(out.status.code(), Some(2));
@@ -501,4 +527,10 @@ fn rollback_list_drifted_keeps_only_known_drift() {
     assert_eq!(body["pending"][0]["drifted"], Value::Null);
     assert_eq!(body["pending"][1]["drifted"], true);
     assert_eq!(body["pending"][2]["drifted"], false);
+    // No clearer is recorded for this zero: the write that would have caused
+    // it is not in the ledger, so the row publishes null rather than guessing
+    // at the pair table.
+    assert_eq!(body["pending"][1]["cleared_by"], Value::Null);
+    assert_eq!(body["pending"][0]["cleared_by"], Value::Null);
+    assert_eq!(body["pending"][2]["cleared_by"], Value::Null);
 }

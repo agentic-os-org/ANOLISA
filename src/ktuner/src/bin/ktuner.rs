@@ -1160,7 +1160,10 @@ fn drifted_entries(entries: Vec<tuner::RollbackPreview>) -> Vec<tuner::RollbackP
 /// by param (BTreeMap order); `live` and `drifted` arrive as `Option`s so an
 /// unreadable path publishes JSON `null` instead of a guessed value, and
 /// `category` as one so a record that carries none publishes `null` the same
-/// way — the keys stay present on every entry.
+/// way — the keys stay present on every entry. `cleared_by` follows them: the
+/// ledger key of the entry whose write zeroed this one, `null` for every entry
+/// no twin cleared, and never absent, so a consumer reads the reason a row
+/// holds an `applied` of 0 without branching on key presence.
 fn rollback_list_output(entries: &[tuner::RollbackPreview]) -> serde_json::Value {
     json!({
         "count": entries.len(),
@@ -1174,6 +1177,7 @@ fn rollback_list_output(entries: &[tuner::RollbackPreview]) -> serde_json::Value
                     "category": entry.category,
                     "live": entry.live,
                     "drifted": entry.drifted,
+                    "cleared_by": entry.cleared_by,
                 })
             })
             .collect::<Vec<_>>(),
@@ -1650,7 +1654,7 @@ mod tests {
         assert_eq!(
             rollback_list_output(&kept),
             json!({ "count": 1, "pending": [
-                {"applied": "0", "category": null, "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"}
+                {"applied": "0", "category": null, "cleared_by": null, "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"}
             ]})
         );
         assert_eq!(
@@ -1800,6 +1804,7 @@ mod tests {
                     {
                         "applied": "1",
                         "category": "performance",
+                        "cleared_by": null,
                         "drifted": false,
                         "live": "1",
                         "param": "vm.swappiness",
@@ -1808,6 +1813,7 @@ mod tests {
                     {
                         "applied": "none",
                         "category": null,
+                        "cleared_by": null,
                         "drifted": null,
                         "live": null,
                         "param": "block/sda/scheduler",
@@ -1818,10 +1824,10 @@ mod tests {
         );
     }
 
-    /// The regression this feature owes: the three keys beyond the recorded
-    /// triple are the ONLY change to the published shape. Stripping them from
-    /// the output must reproduce, field for field, what `rollback --list`
-    /// emitted before they existed.
+    /// The regression this feature owes: the keys beyond the recorded triple
+    /// are the ONLY change to the published shape. Stripping them from the
+    /// output must reproduce, field for field, what `rollback --list` emitted
+    /// before they existed.
     #[test]
     fn rollback_list_output_adds_only_the_readings_and_category() {
         let entries = vec![
@@ -1848,6 +1854,7 @@ mod tests {
             object.remove("live");
             object.remove("drifted");
             object.remove("category");
+            object.remove("cleared_by");
         }
         assert_eq!(
             out,
@@ -1865,7 +1872,7 @@ mod tests {
     fn rollback_list_output_keys_are_alphabetical() {
         // The README's "Object keys are emitted in alphabetical order" is a
         // hard contract for consumers: the serialized entry must carry
-        // applied < category < drifted < live < param < previous.
+        // applied < category < cleared_by < drifted < live < param < previous.
         let entries = vec![preview_entry(
             "vm.swappiness",
             "1",
@@ -1876,7 +1883,7 @@ mod tests {
         )];
         assert_eq!(
             serde_json::to_string(&rollback_list_output(&entries)).unwrap(),
-            r#"{"count":1,"pending":[{"applied":"1","category":"security","drifted":false,"live":"1","param":"vm.swappiness","previous":"60"}]}"#
+            r#"{"count":1,"pending":[{"applied":"1","category":"security","cleared_by":null,"drifted":false,"live":"1","param":"vm.swappiness","previous":"60"}]}"#
         );
     }
 
@@ -1884,8 +1891,9 @@ mod tests {
     fn rollback_list_output_serializes_unknown_readings_as_null() {
         // A path that could not be read has no value to publish and no
         // comparison to report, and a record that carries no category has none
-        // to publish: the keys stay present with null and are never dropped,
-        // so a consumer never branches on key presence.
+        // to publish, and an entry no twin cleared has no clearer to name: the
+        // keys stay present with null and are never dropped, so a consumer
+        // never branches on key presence.
         let entries = vec![preview_entry("vm.swappiness", "1", "60", None, None, None)];
         let out = rollback_list_output(&entries);
         let entry = &out["pending"][0];
@@ -1894,7 +1902,80 @@ mod tests {
         assert!(entry
             .get("category")
             .is_some_and(serde_json::Value::is_null));
-        assert_eq!(entry.as_object().unwrap().len(), 6, "entry keys: {entry}");
+        assert!(entry
+            .get("cleared_by")
+            .is_some_and(serde_json::Value::is_null));
+        assert_eq!(entry.as_object().unwrap().len(), 7, "entry keys: {entry}");
+    }
+
+    #[test]
+    fn rollback_list_output_names_the_clearer_of_a_zeroed_twin() {
+        // Writing one half of a mutually exclusive sysctl pair zeroes the
+        // other in the kernel, and the ledger records the zeroed half with
+        // `applied = "0"` so a rollback can bring it back. Read on its own
+        // that row says ktuner chose to zero a knob nobody mentioned;
+        // `cleared_by` names the entry whose write put the 0 there — in the
+        // spelling the other row publishes as `param`, so the two are
+        // reconcilable without knowing the pair table.
+        let cleared = |param: &str, clearer: &str| tuner::RollbackPreview {
+            cleared_by: Some(clearer.to_string()),
+            ..preview_entry(
+                param,
+                "0",
+                "20",
+                Some(rules::Category::Performance),
+                Some("0"),
+                Some(false),
+            )
+        };
+        let clearer = preview_entry(
+            "vm.dirty_bytes",
+            "1073741824",
+            "0",
+            Some(rules::Category::Performance),
+            Some("1073741824"),
+            Some(false),
+        );
+        let out = rollback_list_output(&[cleared("vm.dirty_ratio", "vm.dirty_bytes"), clearer]);
+        assert_eq!(out["pending"][0]["cleared_by"], json!("vm.dirty_bytes"));
+        // The half that did the clearing was asked for: it names nobody, and
+        // carries the key as null rather than dropping it.
+        assert!(out["pending"][1]
+            .get("cleared_by")
+            .is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn rollback_list_output_names_the_other_half_for_both_zeroed_halves() {
+        // The ledger can hold both halves zeroed — writing either one zeroes
+        // the other — and then each row's 0 has an explanation in the listing.
+        // A zero the caller did ask for is the only case left with nothing to
+        // name, so the key is not a synonym for `applied == "0"`.
+        let entries = vec![
+            tuner::RollbackPreview {
+                cleared_by: Some("vm.dirty_ratio".to_string()),
+                ..preview_entry(
+                    "vm.dirty_bytes",
+                    "0",
+                    "1073741824",
+                    None,
+                    Some("0"),
+                    Some(false),
+                )
+            },
+            tuner::RollbackPreview {
+                cleared_by: Some("vm.dirty_bytes".to_string()),
+                ..preview_entry("vm.dirty_ratio", "0", "20", None, Some("0"), Some(false))
+            },
+            // A recorded 0 outside any pair: the value the caller asked for.
+            preview_entry("vm.swappiness", "0", "60", None, Some("0"), Some(false)),
+        ];
+        let out = rollback_list_output(&entries);
+        assert_eq!(out["pending"][0]["cleared_by"], json!("vm.dirty_ratio"));
+        assert_eq!(out["pending"][1]["cleared_by"], json!("vm.dirty_bytes"));
+        assert!(out["pending"][2]
+            .get("cleared_by")
+            .is_some_and(serde_json::Value::is_null));
     }
 
     #[test]

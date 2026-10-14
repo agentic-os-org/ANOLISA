@@ -6766,6 +6766,64 @@ mod tests {
         );
     }
 
+    /// Every row `--list` publishes names the entry whose write zeroed it when
+    /// the kernel did that as a side effect — the relation
+    /// [`is_cleared_twin`] recognizes, which the row would otherwise only show
+    /// as an `applied` of 0 that nothing asked for.
+    #[test]
+    fn preview_rows_name_the_entry_that_cleared_them() {
+        let dir = AtomicTestDir::new("preview-cleared-by");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("dirty_ratio");
+        let swappiness = dir.0.join("swappiness");
+        fs::write(&bytes, "1073741824").unwrap();
+        fs::write(&ratio, "0").unwrap();
+        fs::write(&swappiness, "0").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.dirty_bytes", "0", "1073741824", bytes.to_str().unwrap()),
+                ("vm.dirty_ratio", "20", "0", ratio.to_str().unwrap()),
+                ("vm.swappiness", "60", "0", swappiness.to_str().unwrap()),
+            ],
+        );
+
+        // Writing dirty_bytes zeroed dirty_ratio, and the listing says which
+        // entry did it. The half that was asked for names nobody, and a
+        // recorded 0 outside any pair names nobody either — the key is the
+        // cleared-twin relation, not a restatement of `applied == "0"`.
+        let listed: Vec<(String, Option<String>)> = rollback_preview_at(&ledger)
+            .unwrap()
+            .iter()
+            .map(|entry| (entry.param.clone(), entry.cleared_by.clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("vm.dirty_bytes".to_string(), None),
+                (
+                    "vm.dirty_ratio".to_string(),
+                    Some("vm.dirty_bytes".to_string())
+                ),
+                ("vm.swappiness".to_string(), None),
+            ]
+        );
+
+        // `--list <param>` publishes the pair the restore takes along, so the
+        // clearer is in the set the answer names — the selection cannot leave
+        // it out.
+        let named = rollback_preview_params_at(&["vm.dirty_ratio".to_string()], &ledger).unwrap();
+        assert_eq!(named.len(), 2, "the twin comes along: {named:?}");
+        assert_eq!(named[0].param, "vm.dirty_bytes");
+        assert_eq!(named[0].cleared_by, None);
+        assert_eq!(named[1].param, "vm.dirty_ratio");
+        assert_eq!(
+            named[1].cleared_by.as_deref(),
+            Some("vm.dirty_bytes"),
+            "the named twin's clearer: {named:?}"
+        );
+    }
+
     /// `rollback --list <param>...` lists only the entries the names resolve
     /// to — any spelling of a recorded parameter, each once — in the same
     /// param order the unfiltered `--list` uses, with the live reading every
