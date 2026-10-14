@@ -2730,45 +2730,76 @@ fn eval_dirty_writeback_centisecs(info: &SystemInfo, recs: &mut Vec<Recommendati
     1
 }
 
+/// The daemons whose presence means the host routes traffic for someone else.
+///
+/// The list must stay the union of the daemon classes that forward: a routing
+/// suite alone is not the only shape, and a host that fails this check gets
+/// `net.ipv4.ip_forward = 0` written, which cuts its peers off. Split out of
+/// [`host_needs_ip_forward`] so the list is assertable on a machine whose own
+/// interfaces happen to look bridged (the interface scan short-circuits the
+/// verdict there).
+const FORWARDING_DAEMONS: &[&str] = &[
+    // container runtimes
+    "docker",
+    "dockerd",
+    "kubelet",
+    "containerd",
+    "podman",
+    "conmon",
+    "crio",
+    "k3s",
+    "lxc",
+    "lxd",
+    // virtualization
+    "libvirtd",
+    "qemu",
+    "virtqemud",
+    "vhost",
+    // VPN / tunneling
+    "openvpn",
+    "wireguard",
+    "charon",
+    "strongswan",
+    "tincd",
+    "tailscaled",
+    // routing daemons
+    "bird",
+    "bird2",
+    "zebra",
+    "bgpd",
+    "ospfd",
+    "frr",
+    "quagga",
+    // NAT / DHCP gateways and access points: the inbound half of the same
+    // forwarding the container and routing daemons do outward. A LAN gateway
+    // or a hotspot runs dnsmasq (NetworkManager's shared mode starts it for
+    // the NAT) and hostapd for the radio; a VRRP router runs keepalived, which
+    // `eval_ip_nonlocal_bind` already treats as a router-class host; a VPN
+    // server runs pppd or xl2tpd behind the IKE daemon, and libreswan's pluto
+    // is the same IKE role as the strongswan `charon` above. None of them is a
+    // routing *suite*, so the list above never matched them: a gateway host
+    // was judged "no forwarding in use" and the write cut its LAN off.
+    "dnsmasq",
+    "hostapd",
+    "keepalived",
+    "pppd",
+    "xl2tpd",
+    "pluto",
+];
+
+/// Whether one of the daemons that forward traffic for others is running.
+fn runs_a_forwarding_daemon(info: &SystemInfo) -> bool {
+    FORWARDING_DAEMONS
+        .iter()
+        .any(|daemon| info.has_process(daemon))
+}
+
 /// Whether the host appears to legitimately need IP forwarding (router,
 /// hypervisor, container host, VPN/NAT gateway). Disabling forwarding on such a
 /// host silently breaks guest/pod/tunnel traffic, so we must be conservative
 /// and only suggest turning it off when we see no sign forwarding is in use.
 fn host_needs_ip_forward(info: &SystemInfo) -> bool {
-    const PROCS: &[&str] = &[
-        // container runtimes
-        "docker",
-        "dockerd",
-        "kubelet",
-        "containerd",
-        "podman",
-        "conmon",
-        "crio",
-        "k3s",
-        "lxc",
-        "lxd",
-        // virtualization
-        "libvirtd",
-        "qemu",
-        "virtqemud",
-        "vhost",
-        // VPN / tunneling
-        "openvpn",
-        "wireguard",
-        "charon",
-        "strongswan",
-        "tincd",
-        "tailscaled",
-        // routing daemons
-        "bird",
-        "bird2",
-        "zebra",
-        "bgpd",
-        "ospfd",
-        "frr",
-        "quagga",
-    ];
-    if PROCS.iter().any(|p| info.has_process(p)) {
+    if runs_a_forwarding_daemon(info) {
         return true;
     }
     // Bridge / tunnel / virtual interfaces are a strong signal of VM, container
@@ -11825,6 +11856,53 @@ mod tests {
                 assert_eq!(rec.recommended_value, "0");
             }
         }
+    }
+
+    #[test]
+    fn host_needs_ip_forward_counts_the_nat_and_vpn_daemons() {
+        // A host that forwards for its peers is not required to run a
+        // container runtime or a routing suite. A LAN gateway or hotspot runs
+        // dnsmasq (NetworkManager's shared mode starts it for the NAT) and
+        // hostapd for the radio; a VRRP router runs keepalived, which
+        // eval_ip_nonlocal_bind already recognizes as router-class; a VPN
+        // server runs pppd/xl2tpd behind its IKE daemon, and libreswan's pluto
+        // is the same role as the strongswan charon already in the list.
+        // Judging those hosts "no forwarding in use" writes
+        // net.ipv4.ip_forward = 0 and cuts the LAN, the hotspot or the VPN
+        // clients off.
+        for daemon in [
+            // Container/runtime, virtualization and tunnel daemons the list
+            // has always carried.
+            "docker",
+            "kubelet",
+            "libvirtd",
+            "openvpn",
+            "charon",
+            "bird",
+            // The gateway and VPN-endpoint daemons this change adds.
+            "dnsmasq",
+            "hostapd",
+            "keepalived",
+            "pppd",
+            "xl2tpd",
+            "pluto",
+        ] {
+            let mut info = make_test_info();
+            info.processes = vec![crate::detect::ProcessInfo {
+                name: daemon.to_string(),
+            }];
+            assert!(
+                runs_a_forwarding_daemon(&info),
+                "{daemon} forwards traffic for its peers"
+            );
+        }
+
+        // Control: an unrelated daemon does not claim forwarding.
+        let mut info = make_test_info();
+        info.processes = vec![crate::detect::ProcessInfo {
+            name: "nginx".to_string(),
+        }];
+        assert!(!runs_a_forwarding_daemon(&info));
     }
 
     #[test]
