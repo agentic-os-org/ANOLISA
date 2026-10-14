@@ -5917,28 +5917,57 @@ fn eval_hardlockup_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    // Hard-lockup detection relies on the NMI watchdog. ktuner separately
-    // recommends disabling nmi_watchdog for perf — if it is already off, this
-    // panic setting can never fire, so don't recommend a no-op.
-    let nmi = "/proc/sys/kernel/nmi_watchdog";
-    if std::path::Path::new(nmi).exists() && read_sysctl_u64(nmi) == 0 {
-        return 1;
-    }
     let _ = info;
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "kernel.hardlockup_panic".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: "CPU 硬锁死后不 panic 会导致系统假死无法自动恢复，应启用以触发自动重启"
-                .to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
+    // `None` when the kernel exposes no nmi_watchdog at all (aarch64): then
+    // there is no detector for the perf rule to disarm.
+    let nmi = "/proc/sys/kernel/nmi_watchdog";
+    let nmi_watchdog = std::path::Path::new(nmi)
+        .exists()
+        .then(|| read_sysctl_u64(nmi));
+    if let Some(rec) = hardlockup_panic_recommendation(read_sysctl_u64(path), nmi_watchdog) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the hardlockup_panic rule (the `*_recommendation`
+/// idiom), so both watchdog states are assertable against values instead of
+/// the live /proc.
+///
+/// Hard-lockup detection rides on the NMI watchdog, so the panic setting only
+/// matters while that watchdog runs — and ktuner itself turns it off: the perf
+/// rule writes `kernel.nmi_watchdog = 0` on every host that reads 1. Judging
+/// the current value alone therefore let a plan contain both
+/// `nmi_watchdog = 0` (Medium, Performance) and `hardlockup_panic = 1`
+/// (High, Security), where the first write disarms the detector the second
+/// needs: the security advice could never fire, which is exactly the no-op the
+/// guard already refuses when the watchdog is off to begin with. The value the
+/// perf rule leaves alone (the legacy `2`, and any other mask) keeps the
+/// advice, as does a kernel with no nmi_watchdog to disarm.
+fn hardlockup_panic_recommendation(
+    current: u64,
+    nmi_watchdog: Option<u64>,
+) -> Option<Recommendation> {
+    if current != 0 {
+        return None;
+    }
+    match nmi_watchdog {
+        // Absent: nothing in the plan disarms the detector.
+        None => {}
+        // Off, or turned off by the perf rule in this same evaluation.
+        Some(0) | Some(1) => return None,
+        // A value the perf rule does not touch.
+        Some(_) => {}
+    }
+    Some(Recommendation {
+        param: "kernel.hardlockup_panic".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: "CPU 硬锁死后不 panic 会导致系统假死无法自动恢复，应启用以触发自动重启".to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    })
 }
 
 // NOTE: kernel.softlockup_panic rule removed. A soft lockup is frequently a
@@ -12948,6 +12977,38 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hardlockup_panic_defers_to_the_watchdog_the_plan_disables() {
+        // The perf rule writes kernel.nmi_watchdog = 0 on EVERY host that
+        // reads 1 (eval_nmi_watchdog), and the hardlockup detector is driven
+        // by that watchdog: with the two entries in one plan the first write
+        // disarms the detector the second one needs, so the High-confidence
+        // security advice could never fire. The guard must therefore read the
+        // watchdog the way the plan leaves it, not the way it found it.
+        assert_eq!(
+            hardlockup_panic_recommendation(0, Some(1)).map(|rec| rec.recommended_value),
+            None,
+            "the plan disables the watchdog, so the panic setting cannot fire"
+        );
+        assert_eq!(
+            hardlockup_panic_recommendation(0, Some(0)).map(|rec| rec.recommended_value),
+            None,
+            "an already disabled watchdog is the case the guard always covered"
+        );
+        // A value the perf rule leaves alone, and a kernel without the knob:
+        // the detector stays armed either way.
+        assert_eq!(
+            hardlockup_panic_recommendation(0, Some(2)).map(|rec| rec.recommended_value),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            hardlockup_panic_recommendation(0, None).map(|rec| rec.recommended_value),
+            Some("1".to_string())
+        );
+        // Already enabled: nothing to recommend.
+        assert!(hardlockup_panic_recommendation(1, None).is_none());
     }
 
     #[test]
