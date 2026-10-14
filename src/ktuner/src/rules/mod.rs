@@ -4194,35 +4194,48 @@ fn shared_media_disabled_somewhere(conf_root: &std::path::Path) -> bool {
         .any(|entry| entry.file_name() != "all" && zero(&entry.path().join("shared_media")))
 }
 
-/// Whether every `accept_redirects` slot under `conf/` reads a zero, the only
-/// state this side can prove leaves the `IN_DEV_SEC_REDIRECTS` test of
-/// [`eval_secure_redirects_at`] unreachable: `__ip_do_redirect()`
+/// Whether no interface can reach the `IN_DEV_SEC_REDIRECTS` test of
+/// [`eval_secure_redirects_at`]: `__ip_do_redirect()`
 /// (net/ipv4/route.c) rejects the redirect on `!IN_DEV_RX_REDIRECTS(in_dev)`
 /// (v6.6 :768, 7.3-rc6 :803) several lines before that test (v6.6 :776,
 /// 7.3-rc6 :811), and `IN_DEV_RX_REDIRECTS`
-/// (include/linux/inetdevice.h:124 in v6.6, :126 in 7.3-rc6) is built from
-/// the same `accept_redirects` slots this predicate reads.
+/// (include/linux/inetdevice.h:124-128 in v6.6, :126 in 7.3-rc6) is built
+/// from the same `accept_redirects` slots this predicate reads — but not as
+/// one expression:
+///
+/// ```text
+/// (IN_DEV_FORWARD(in_dev) && IN_DEV_ANDCONF(ACCEPT_REDIRECTS))
+///  || (!IN_DEV_FORWARD(in_dev) && IN_DEV_ORCONF(ACCEPT_REDIRECTS))
+/// ```
+///
+/// A forwarding interface ANDs the `all` template with its own slot, a
+/// non-forwarding one ORs them, and `IN_DEV_FORWARD` is the device's own
+/// `forwarding` slot (`IN_DEV_CONF_GET`, not an ORCONF).
 ///
 /// The predicate is deliberately narrower than the kernel one, and fails
 /// open:
 ///
-/// - `all` and every other entry must read a zero, `default` included — the
-///   template seeds interfaces created later, so a zero only covers them all
-///   when it is zero too;
-/// - a slot that is missing or unparseable is not evidence of a zero, so the
+/// - `all` must read a zero: it gates the OR half of every non-forwarding
+///   interface and the AND half of every forwarding one;
+/// - `default` must read a zero too — the template seeds interfaces created
+///   later, and a device created from a forwarding template keeps the AND
+///   half, but one created from a non-forwarding template would inherit the
+///   nonzero slot and reach the test through the OR half;
+/// - an entry whose own slot is a readable zero needs nothing more, and a
+///   slot that is missing or unparseable is not evidence of a zero, so the
 ///   advice stays (the same fail-open rule the sibling switch gates follow);
-/// - the forwarding-dependent AND/OR combination is not modelled: on a
-///   forwarding interface with `all` at zero and the device slot nonzero the
-///   kernel also never reads the knob, but proving that needs the forwarding
-///   slot and the case is narrow enough to keep the advice for.
+/// - a forwarding interface with `all` already read as zero cannot reach the
+///   test through its own slot either: the AND half is false whatever that
+///   slot says, so a readable nonzero `forwarding` makes it irrelevant rather
+///   than evidence a redirect is judged. An unreadable `forwarding` proves
+///   nothing and keeps the advice.
 fn no_interface_accepts_redirects(conf_root: &std::path::Path) -> bool {
-    let zero = |path: std::path::PathBuf| {
+    let read = |path: std::path::PathBuf| {
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|value| value.trim().parse::<i64>().ok())
-            == Some(0)
     };
-    if !zero(conf_root.join("all").join("accept_redirects")) {
+    if read(conf_root.join("all").join("accept_redirects")) != Some(0) {
         return false;
     }
     let Ok(entries) = std::fs::read_dir(conf_root) else {
@@ -4231,7 +4244,10 @@ fn no_interface_accepts_redirects(conf_root: &std::path::Path) -> bool {
     entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_name() != "all")
-        .all(|entry| zero(entry.path().join("accept_redirects")))
+        .all(|entry| {
+            read(entry.path().join("accept_redirects")) == Some(0)
+                || read(entry.path().join("forwarding")).is_some_and(|on| on != 0)
+        })
 }
 
 fn eval_mmap_min_addr(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -17154,6 +17170,85 @@ mod tests {
             recs.len(),
             1,
             "an unreadable slot keeps the advice instead of guessing a zero"
+        );
+    }
+
+    #[test]
+    fn secure_redirects_ignores_an_accepting_forwarding_interface() {
+        // IN_DEV_RX_REDIRECTS is not one expression: a FORWARDING interface
+        // ANDs `conf/all` with its own accept_redirects slot, a non-forwarding
+        // one ORs them (v6.6 include/linux/inetdevice.h:124-128), and
+        // IN_DEV_FORWARD reads the device's own `forwarding` slot. With `all`
+        // already read as zero, a forwarding interface's own slot cannot turn
+        // the test back on, so it is not evidence that a redirect reaches the
+        // secure-redirects line: the write is inert there and the advice must
+        // be skipped.
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_secure_redirects_fwd_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |relative: &str, content: &str| {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let knob = write("all/secure_redirects", "1\n");
+        // The shared-media gate sits ahead of this one; both have to be open
+        // before the rule can speak at all.
+        for relative in ["all/shared_media", "eth0/shared_media"] {
+            write(relative, "0\n");
+        }
+        write("all/accept_redirects", "0\n");
+        write("eth0/accept_redirects", "1\n");
+
+        // The interface forwards, and `all` is zero: the AND half is false
+        // whatever the device slot says.
+        write("eth0/forwarding", "1\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert!(
+            recs.is_empty(),
+            "a forwarding interface cannot reach the test with `all` off"
+        );
+
+        // The same slot on a non-forwarding interface is read through the OR
+        // half, so the redirect does reach the test.
+        write("eth0/forwarding", "0\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert_eq!(
+            recs.len(),
+            1,
+            "a non-forwarding interface accepting through the OR half keeps the advice"
+        );
+
+        // A bypass is decided per interface: one forwarding interface that
+        // accepts does not cover a second, non-forwarding one that does.
+        write("eth0/forwarding", "1\n");
+        write("eth1/accept_redirects", "1\n");
+        write("eth1/forwarding", "0\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert_eq!(
+            recs.len(),
+            1,
+            "one interface that really accepts keeps the write relevant"
+        );
+        std::fs::remove_dir_all(dir.join("eth1")).ok();
+
+        // A `forwarding` slot that cannot be read proves nothing either way.
+        write("eth0/forwarding", "masked\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert_eq!(
+            recs.len(),
+            1,
+            "an unreadable forwarding slot keeps the advice instead of guessing the exemption"
         );
     }
 
