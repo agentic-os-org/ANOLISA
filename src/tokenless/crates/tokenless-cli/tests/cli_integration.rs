@@ -1833,6 +1833,97 @@ fn spawn_with_stdin(
         .unwrap()
 }
 
+#[test]
+fn locked_stats_warn_without_changing_compression_or_retrieval() {
+    let fixture = TempDataDir::new().expect("create isolated data directory");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let stats_db = fixture.data_dir.join("stats.db");
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+    let payload = "original payload\nwith no trailing newline";
+    let stash = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let hash = stash.stash(payload).unwrap().key;
+    let retrieve_request = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "retrieve",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {"hash_or_marker": hash, "visible_markers": [hash]}
+    })
+    .to_string();
+    let cases = [
+        (
+            vec!["compress-schema"],
+            r#"{"function":{"name":"test","parameters":{"type":"object","properties":{"value":{"type":"string","title":"Remove Me","examples":["example"]}}}}}"#.to_string(),
+        ),
+        (
+            vec!["compress"],
+            post_tool_request_json(&debug_laden_content(), false, "locked-stats"),
+        ),
+        (vec!["retrieve", hash.as_str()], String::new()),
+        (vec!["compress"], retrieve_request),
+    ];
+
+    for (args, input) in cases {
+        let mut command = fixture.command();
+        command
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0");
+        let baseline = spawn_with_stdin(&mut command, &args, &input);
+        assert!(baseline.status.success(), "{baseline:?}");
+        assert!(baseline.stderr.is_empty(), "{baseline:?}");
+        assert!(!baseline.stdout.is_empty());
+        if args[0] == "retrieve" {
+            assert_eq!(baseline.stdout, payload.as_bytes());
+        }
+
+        // Hold the writer lock before starting the child, and release it only
+        // after the child exits; no sleep-based lock acquisition race.
+        let conn = rusqlite::Connection::open(&stats_db).unwrap();
+        conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let before: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM stats), (SELECT COUNT(*) FROM retrieve_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        for enabled in ["1", "0"] {
+            let output = spawn_with_stdin(
+                fixture
+                    .command()
+                    .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                    .env("TOKENLESS_STATS_ENABLED", enabled)
+                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                &args,
+                &input,
+            );
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+            assert_eq!(output.stdout, baseline.stdout, "{args:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            if enabled == "1" {
+                assert_eq!(
+                    stderr.matches("[tokenless-stats] WARNING:").count(),
+                    1,
+                    "{args:?}: {stderr}"
+                );
+                assert!(stderr.contains("database is locked"), "{args:?}: {stderr}");
+            } else {
+                assert!(stderr.is_empty(), "{args:?}: {stderr}");
+            }
+        }
+        conn.execute_batch("ROLLBACK").unwrap();
+        let after: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM stats), (SELECT COUNT(*) FROM retrieve_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before, "failed or disabled stats must not add rows");
+    }
+    assert!(recorder.retrieve_totals().unwrap().hits >= 2);
+}
+
 fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &str) -> String {
     serde_json::json!({
         "protocol_version": 2,
@@ -2610,6 +2701,39 @@ fn dev_full() -> std::fs::File {
         .write(true)
         .open("/dev/full")
         .expect("open /dev/full")
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_open_warning_survives_an_unwritable_stderr() {
+    let fixture = TempDataDir::new().expect("create isolated data directory");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    std::fs::write(fixture.data_dir.join("stats.db"), "not a SQLite database").unwrap();
+    let input_file = fixture.data_dir.join("response.json");
+    std::fs::write(&input_file, COMPRESSIBLE_RESPONSE).unwrap();
+    let baseline = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["compress-response", "--file"])
+        .arg(&input_file)
+        .output()
+        .unwrap();
+    assert!(baseline.status.success(), "{baseline:?}");
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["compress-response", "--file"])
+        .arg(&input_file)
+        .stderr(std::process::Stdio::from(dev_full()))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, baseline.stdout);
 }
 
 /// A compressible response: dropping the debug/trace fields yields token
