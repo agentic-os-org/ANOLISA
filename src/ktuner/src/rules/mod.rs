@@ -1389,13 +1389,41 @@ fn port_range_recommendation(lo: u64, hi: u64, recs: &mut Vec<Recommendation>) {
 }
 
 fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let cc_path = "/proc/sys/net/ipv4/tcp_congestion_control";
-    let qdisc_path = "/proc/sys/net/core/default_qdisc";
+    eval_default_qdisc_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/core/default_qdisc",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
+    )
+}
+
+/// Path-injectable form of [`eval_default_qdisc`] (the `eval_*_at` idiom): the
+/// three sysctls come from test files and the module tree from a synthetic
+/// directory, `None` standing for a container.
+///
+/// The rule judges the congestion control this run's *plan* leaves in force,
+/// not the one on disk: [`eval_tcp_congestion_control_at`] writes `bbr` on
+/// every host where the algorithm is registered or merely loadable, and the
+/// reason this rule prints is that BBR needs fq for its pacing. Judging the
+/// pre-plan value alone left the very plan that switches a host to BBR without
+/// the queue discipline that plan's own advice says BBR needs: the entry was
+/// missing on a stock pfifo_fast host, the write the plan did carry turned BBR
+/// on, and the next run reported the same gap again. The plan-value judgement
+/// the hardlockup_panic, min_slab_ratio and SysRq gates follow.
+fn eval_default_qdisc_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    cc_path: &str,
+    qdisc_path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
+) -> usize {
     if !info.param_exists(cc_path) || !info.param_exists(qdisc_path) {
         return 1;
     }
-    let cc = read_sysctl_string(cc_path);
-    if cc != "bbr" {
+    if !bbr_will_be_in_force(info, cc_path, avail_path, module_tree) {
         return 1;
     }
     let qdisc = read_sysctl_string(qdisc_path);
@@ -1403,8 +1431,8 @@ fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
         return 1;
     }
 
-    let fq_available = is_qdisc_module_available("sch_fq");
-    let fq_codel_available = is_qdisc_module_available("sch_fq_codel");
+    let fq_available = qdisc_available("sch_fq", module_tree);
+    let fq_codel_available = qdisc_available("sch_fq_codel", module_tree);
     let (target, reason) = if fq_available {
         (
             "fq",
@@ -1436,7 +1464,10 @@ fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 /// probe must accept them all or an available qdisc looks unavailable.
 const MODULE_SUFFIXES: [&str; 4] = [".ko", ".ko.zst", ".ko.xz", ".ko.gz"];
 
-fn is_qdisc_module_available(module: &str) -> bool {
+/// Whether the qdisc `module` is available to the running kernel, against a
+/// caller-supplied module tree (the `eval_*_at` idiom, so tests need no real
+/// `/lib/modules`).
+fn qdisc_available(module: &str, module_tree: Option<&std::path::Path>) -> bool {
     // Non-destructive checks only. A previous version probed availability by
     // writing the candidate qdisc to net.core.default_qdisc and reading it
     // back, which mutated live kernel state as a side effect of read-only
@@ -1445,7 +1476,7 @@ fn is_qdisc_module_available(module: &str) -> bool {
     if std::path::Path::new(&format!("/sys/module/{module}")).exists() {
         return true;
     }
-    running_module_tree().is_some_and(|tree| module_in_tree(&tree, "kernel/net/sched", module))
+    module_tree.is_some_and(|tree| module_in_tree(tree, "kernel/net/sched", module))
 }
 
 /// The running kernel's module tree, `/lib/modules/<release>`, or `None`
@@ -1606,28 +1637,46 @@ fn eval_tcp_congestion_control_at(
         return 1;
     }
     let current = read_sysctl_string(path);
-    if current != "bbr" && info.param_exists(avail_path) {
-        let available = read_sysctl_string(avail_path);
-        // The available list names registered algorithms only, but a
-        // write of an unregistered name loads `tcp_<name>` first
-        // (`tcp_ca_find_autoload`, v6.6 net/ipv4/tcp_cong.c:49-58), so a
-        // tcp_bbr module that is not loaded yet is just as usable.
-        let bbr_loadable =
-            module_tree.is_some_and(|tree| module_in_tree(tree, "kernel/net/ipv4", "tcp_bbr"));
-        if congestion_algo_available(&available, "bbr") || bbr_loadable {
-            recs.push(Recommendation {
-                param: "net.ipv4.tcp_congestion_control".to_string(),
-                current_value: current,
-                recommended_value: "bbr".to_string(),
-                reason: "BBR 拥塞控制在云网络环境下比 cubic 表现更好，尤其是高延迟和有丢包的链路"
-                    .to_string(),
-                confidence: Confidence::Medium,
-                category: Category::Performance,
-                writable: true,
-            });
-        }
+    if current != "bbr" && bbr_will_be_in_force(info, path, avail_path, module_tree) {
+        recs.push(Recommendation {
+            param: "net.ipv4.tcp_congestion_control".to_string(),
+            current_value: current,
+            recommended_value: "bbr".to_string(),
+            reason: "BBR 拥塞控制在云网络环境下比 cubic 表现更好，尤其是高延迟和有丢包的链路"
+                .to_string(),
+            confidence: Confidence::Medium,
+            category: Category::Performance,
+            writable: true,
+        });
     }
     1
+}
+
+/// Whether BBR is the congestion control this run's plan leaves in force:
+/// already selected, or selected by the `net.ipv4.tcp_congestion_control`
+/// rule in the same run ([`eval_tcp_congestion_control_at`]).
+///
+/// The available list names registered algorithms only, but a write of an
+/// unregistered name loads `tcp_<name>` first (`tcp_ca_find_autoload`, v6.6
+/// net/ipv4/tcp_cong.c:49-58), so a `tcp_bbr` module that is not loaded yet is
+/// just as usable. Shared with [`eval_default_qdisc_at`], whose advice exists
+/// to serve the pacing BBR does on the qdisc this plan leaves behind.
+fn bbr_will_be_in_force(
+    info: &SystemInfo,
+    cc_path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
+) -> bool {
+    if read_sysctl_string(cc_path) == "bbr" {
+        return true;
+    }
+    if !info.param_exists(avail_path) {
+        return false;
+    }
+    let available = read_sysctl_string(avail_path);
+    let bbr_loadable =
+        module_tree.is_some_and(|tree| module_in_tree(tree, "kernel/net/ipv4", "tcp_bbr"));
+    congestion_algo_available(&available, "bbr") || bbr_loadable
 }
 
 fn eval_nf_conntrack_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -9895,6 +9944,96 @@ mod tests {
 
         // Inside a container the tree is not the host kernel's.
         assert!(eval(None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_qdisc_follows_the_plan_onto_bbr() {
+        // The congestion-control rule writes `bbr` on every host where the
+        // algorithm is registered or its module sits in the tree, and BBR
+        // paces on the fq qdisc — the reason the qdisc rule prints. Both
+        // entries therefore belong to the same plan: judging the pre-plan cc
+        // left a stock pfifo_fast host with BBR switched on and no qdisc
+        // advice at all.
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_qdisc_plan_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        let qdisc = dir.join("default_qdisc");
+        std::fs::write(&available, "reno cubic\n").unwrap();
+        std::fs::write(&qdisc, "pfifo_fast\n").unwrap();
+        let tree = dir.join("modules");
+        std::fs::create_dir_all(tree.join("kernel/net/ipv4")).unwrap();
+        std::fs::create_dir_all(tree.join("kernel/net/sched")).unwrap();
+        std::fs::write(tree.join("kernel/net/ipv4/tcp_bbr.ko"), b"").unwrap();
+        std::fs::write(tree.join("kernel/net/sched/sch_fq.ko"), b"").unwrap();
+
+        let plan = |cc_value: &str| {
+            std::fs::write(&cc, format!("{cc_value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_congestion_control_at(
+                &info,
+                &mut recs,
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                Some(&tree),
+            );
+            eval_default_qdisc_at(
+                &info,
+                &mut recs,
+                cc.to_str().unwrap(),
+                qdisc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                Some(&tree),
+            );
+            recs
+        };
+
+        // A cubic host: the plan switches BBR on and carries the qdisc BBR
+        // paces on.
+        let recs = plan("cubic");
+        assert_eq!(
+            recs.iter()
+                .filter(|r| r.param == "net.ipv4.tcp_congestion_control")
+                .count(),
+            1
+        );
+        let qdisc_rec = recs
+            .iter()
+            .find(|r| r.param == "net.core.default_qdisc")
+            .expect("the plan switches to BBR, so it needs the qdisc BBR paces on");
+        assert_eq!(qdisc_rec.recommended_value, "fq");
+        assert_eq!(qdisc_rec.current_value, "pfifo_fast");
+
+        // An already-BBR host keeps the advice.
+        assert_eq!(plan("bbr").len(), 1);
+
+        // A host BBR cannot be selected on gets neither entry.
+        let bare = dir.join("bare_modules");
+        std::fs::create_dir_all(bare.join("kernel/net/ipv4")).unwrap();
+        std::fs::create_dir_all(bare.join("kernel/net/sched")).unwrap();
+        std::fs::write(bare.join("kernel/net/sched/sch_fq.ko"), b"").unwrap();
+        std::fs::write(&cc, "cubic\n").unwrap();
+        let mut recs = Vec::new();
+        eval_default_qdisc_at(
+            &info,
+            &mut recs,
+            cc.to_str().unwrap(),
+            qdisc.to_str().unwrap(),
+            available.to_str().unwrap(),
+            Some(&bare),
+        );
+        assert!(
+            recs.is_empty(),
+            "no BBR anywhere: the qdisc advice has no consumer"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
