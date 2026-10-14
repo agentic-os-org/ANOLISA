@@ -341,6 +341,41 @@ fn recorded_previous_value(data: &RollbackData, param: &str) -> Option<String> {
         .map(|entry| entry.previous.clone())
 }
 
+/// The classification an imported write of `param` records, looked up in the
+/// ledger by the same canonicalized path [`recorded_previous_value`] keys on.
+///
+/// A write that MOVES the value records none: the live value is then the
+/// imported file's, not a rule's, and the ledger's classification is the rule
+/// layer's own ("latest write wins", the rule `applied` follows). A write that
+/// leaves the value where it was changed nothing the record describes — the
+/// live value is still the one the rules put there — so the classification
+/// they stamped on it stays. Clearing it would report a rule-tuned knob as
+/// unclassified on the strength of a write the kernel did not act on: no
+/// `--category` would select the entry, `rollback --category` would leave the
+/// rules' own write in place and echo the knob as one no category wrote. That
+/// is the same "a no-op write records nothing the kernel did not do" rule the
+/// twin recorder follows ([`ClearedSibling::cleared_by`]).
+///
+/// `previous` and `effective` are the canonical forms [`read_previous`] and
+/// the read-back produce, so an exact match is the no-op test; a value the
+/// kernel renders another way does not compare equal and keeps the
+/// conservative reading that the value moved.
+fn imported_category(
+    data: &RollbackData,
+    param: &str,
+    previous: &str,
+    effective: &str,
+) -> Option<Category> {
+    if previous != effective {
+        return None;
+    }
+    let identity = canonicalize_path(&param_to_path(param));
+    data.entries
+        .values()
+        .find(|entry| canonicalize_path(&entry.path) == identity)
+        .and_then(|entry| entry.category.clone())
+}
+
 /// Render an option-list reading, with whitespace-separated fields collapsed.
 /// Bracketed tokens denote the active option. Use [`active_value_for_path`]
 /// when the source path is known, since proc sysctl strings may contain
@@ -1362,7 +1397,7 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         );
     }
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
-    load_rollback()?;
+    let data = load_rollback()?;
     let previous = match read_previous(param) {
         Ok(previous) => Some(previous),
         Err(error) if current.is_some() => return Err(error),
@@ -1377,13 +1412,17 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
     let outcome = write_and_verify(param, value)?;
     let sibling = sibling.filter(|twin| twin.cleared_by(previous.as_deref(), &outcome));
     if let Some(previous) = previous {
-        // No category: the value came from an imported file, not from a rule
-        // recommendation, and a later `rollback --category` must not pretend
-        // otherwise (the ledger's classification is the rule layer's own).
+        // No category for a write that moved the value: it came from an
+        // imported file, not from a rule recommendation, and a later
+        // `rollback --category` must not pretend otherwise (the ledger's
+        // classification is the rule layer's own). A write that left the value
+        // where it was keeps the classification the record already holds: see
+        // [`imported_category`].
+        let category = imported_category(&data, param, &previous, &outcome.effective);
         merge_rollback_locked(
             &guard,
             ROLLBACK_PATH,
-            std::iter::once((param.to_string(), previous, outcome.effective, None))
+            std::iter::once((param.to_string(), previous, outcome.effective, category))
                 .chain(sibling.map(|twin| (twin.entry.0, twin.entry.1, twin.entry.2, None))),
         )?;
         persist_from_rollback(&guard)?;
@@ -5296,6 +5335,63 @@ mod tests {
         assert_eq!(entry.category, Some(Category::Performance));
         assert_eq!(entry.previous, "60");
         assert_eq!(entry.applied, "10");
+    }
+
+    #[test]
+    fn a_no_op_import_keeps_the_rule_category() {
+        // `apply_import`'s recording decision, without a writable /proc/sys: a
+        // write that moves the value records no classification (what is live
+        // is then the imported file's, not a rule's), while a write the kernel
+        // accepts without changing anything keeps the category the recording
+        // rule stamped on the entry — the record still describes the value the
+        // rules wrote, and clearing it would report a rule-tuned knob as one
+        // no `--category` selects.
+        let data = RollbackData {
+            version: 1,
+            entries: BTreeMap::from([(
+                "vm.swappiness".to_string(),
+                RollbackEntry {
+                    previous: "60".to_string(),
+                    applied: "1".to_string(),
+                    path: "/proc/sys/vm/swappiness".to_string(),
+                    category: Some(Category::Performance),
+                },
+            )]),
+        };
+        // The alias spelling of the same kernel file resolves to the same
+        // record, exactly as the merge keys it.
+        for spelling in ["vm.swappiness", "vm/swappiness"] {
+            assert_eq!(
+                imported_category(&data, spelling, "1", "1"),
+                Some(Category::Performance),
+                "{spelling}: a write that changes nothing keeps the rule's category"
+            );
+            assert_eq!(
+                imported_category(&data, spelling, "1", "10"),
+                None,
+                "{spelling}: a write that moves the value records no rule category"
+            );
+        }
+        // A knob the ledger does not record yet records no classification
+        // either: nothing is invented for it.
+        assert_eq!(imported_category(&data, "vm.dirty_ratio", "1", "1"), None);
+        // An entry a library import wrote carries no classification to keep.
+        let imported_only = RollbackData {
+            version: 1,
+            entries: BTreeMap::from([(
+                "vm.swappiness".to_string(),
+                RollbackEntry {
+                    previous: "60".to_string(),
+                    applied: "1".to_string(),
+                    path: "/proc/sys/vm/swappiness".to_string(),
+                    category: None,
+                },
+            )]),
+        };
+        assert_eq!(
+            imported_category(&imported_only, "vm.swappiness", "1", "1"),
+            None
+        );
     }
 
     #[test]
