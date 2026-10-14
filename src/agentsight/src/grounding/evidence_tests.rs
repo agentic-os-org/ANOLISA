@@ -1251,6 +1251,34 @@ fn strong_literals_require_complete_observed_values() {
 }
 
 #[test]
+fn a_pipe_delimited_column_still_grounds_its_literal() {
+    // The shape the extractor already reads for numbers: sqlite3 delimits
+    // columns with `|` by default, and a count was once invisible as evidence
+    // for exactly that reason. A text column (`SELECT id, path …`) is the same
+    // payload, so the literal matcher must read its columns too — the agent
+    // restating a value the query returned was reported as sourceless.
+    for (class, literal) in [
+        (ClaimClass::Path, "/tmp/report.txt"),
+        (ClaimClass::Version, "v1.2.3"),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(&mut pool, 3, Some("source".into()), &format!("1|{literal}"));
+        assert!(
+            matches!(ground_one(
+                &Claim {
+                    text: literal.into(),
+                    class,
+                    value: None,
+                },
+                &pool
+            ), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+            "a column delimiter must not hide {literal} from the pool"
+        );
+    }
+}
+
+#[test]
 fn weak_containment_and_numeric_rounding_remain_supported() {
     let mut pool = Vec::new();
     push_entry(&mut pool, 1, None, "qualified_name_suffix: 242391");
