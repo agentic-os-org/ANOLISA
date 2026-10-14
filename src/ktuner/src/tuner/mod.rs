@@ -1771,6 +1771,23 @@ fn persist_rollback_data_at(
              WantedBy=multi-user.target\n"
         );
 
+        // A host with no systemd unit directory cannot arm the replay at all,
+        // which is the state the refused `systemctl enable` below reports as
+        // `boot_unit_enabled: false` (README, "tune output"). It has to be
+        // reported rather than raised: the live restores and the regenerated
+        // sysctl file have already landed by this point, and an Err here
+        // returns before `save_ledger_at`, leaving the ledger on disk still
+        // listing the entries the run just restored — a later `rollback`
+        // would then undo values that are already back to their originals.
+        // The sysctl arm checks its own directory for the same reason; this one
+        // hands back the enable's verdict instead of an error.
+        let service_dir = Path::new(service_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"));
+        if !service_dir.is_dir() {
+            return Ok(false);
+        }
+
         write_atomic(service_path, service.as_bytes(), 0o644)
             .context("写入 systemd service 失败")?;
 
@@ -4653,6 +4670,50 @@ mod tests {
             error.contains("未持久化") && error.contains(missing.to_str().unwrap()),
             "{error}"
         );
+    }
+
+    /// A host with no systemd unit directory cannot arm the non-sysctl replay,
+    /// and that is a verdict, not a failure: the live writes and the
+    /// regenerated sysctl file have already landed by the time the unit is
+    /// written, so an error here returns before `save_ledger_at` and leaves the
+    /// ledger on disk still listing the entries the run just restored.
+    #[test]
+    fn persist_reports_an_unarmed_unit_without_a_systemd_directory() {
+        let dir = AtomicTestDir::new("persist-no-systemd");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let script = dir.0.join("apply-nonsysctl.sh");
+        // No systemd: the unit file's parent directory does not exist.
+        let service = dir.0.join("systemd").join("ktuner-nonsysctl.service");
+        let path = ledger.to_str().unwrap();
+        merge_rollback_at(
+            path,
+            [(
+                "block/sda/scheduler".to_string(),
+                "mq-deadline".to_string(),
+                "none".to_string(),
+                None,
+            )],
+        )
+        .unwrap();
+        let guard = lock_ledger_at(path).unwrap();
+        let enabled = persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            "true",
+        )
+        .expect("an unarmed replay is a verdict, not an error");
+        assert!(
+            !enabled,
+            "the unit cannot be written, so the replay is not armed"
+        );
+        assert!(
+            script.exists(),
+            "the script stays: it is what a later armed run replays"
+        );
+        assert!(!service.exists(), "no unit file was written");
     }
 
     #[test]
