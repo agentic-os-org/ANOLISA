@@ -596,7 +596,12 @@ fn eval_dirty_ratio(
     // The dirty limit this host ends up with: the write above only lowers it.
     let dirty_limit = info.sysctl.dirty_ratio.min(target_ratio);
     if info.sysctl.dirty_background_ratio > target_bg
-        && dirty_background_takes_effect(dirty_limit, target_bg)
+        && dirty_background_takes_effect(
+            info.sysctl.dirty_background_ratio,
+            info.sysctl.dirty_ratio,
+            dirty_limit,
+            target_bg,
+        )
     {
         recs.push(Recommendation {
             param: "vm.dirty_background_ratio".to_string(),
@@ -611,8 +616,8 @@ fn eval_dirty_ratio(
     2
 }
 
-/// Whether a `vm.dirty_background_ratio` target can change the effective
-/// threshold at all.
+/// The effective background dirtying threshold a
+/// `vm.dirty_background_ratio` setting leaves under a given dirty limit.
 ///
 /// `domain_dirty_limits()` (mm/page-writeback.c) replaces a background
 /// threshold at or above the dirty threshold with half of it:
@@ -622,14 +627,36 @@ fn eval_dirty_ratio(
 ///         bg_thresh = thresh / 2;
 /// ```
 ///
-/// A target that does not stay strictly below the dirty limit in force
-/// therefore leaves the effective background threshold at `limit / 2` — on a
-/// host that already sits there the write changes nothing, so a rule that
-/// promises an earlier background flush stays quiet instead. `dirty_limit` is
-/// the ratio this run's advice leaves in force, which may be lower than the
-/// current one.
-fn dirty_background_takes_effect(dirty_limit: u64, target: u64) -> bool {
-    target < dirty_limit
+/// Both thresholds are proportional to the ratio that configured them, so the
+/// halving is the same in ratio units.
+fn effective_dirty_background(bg: u64, limit: u64) -> u64 {
+    if bg >= limit {
+        limit / 2
+    } else {
+        bg
+    }
+}
+
+/// Whether a `vm.dirty_background_ratio` target moves the effective threshold
+/// *down*, i.e. whether the write delivers the earlier background flush the
+/// reason promises.
+///
+/// The configured percentage is not the effective threshold: a host already
+/// clamped by the rule above sits at half its dirty limit. With `dirty_ratio`
+/// 5 and `dirty_background_ratio` 10 the kernel starts background writeback at
+/// 2% (5 / 2), so a write of 3 would move that flush *later* — the opposite of
+/// the reason — and under a 6% ratio the same write is a strict no-op (both
+/// sides are 3). Only a target that lowers the effective threshold counts.
+/// `current_limit` is the ratio the host runs now, `limit` the one this run's
+/// advice leaves in force (which may be lower).
+fn dirty_background_takes_effect(
+    current_bg: u64,
+    current_limit: u64,
+    limit: u64,
+    target: u64,
+) -> bool {
+    effective_dirty_background(target, limit)
+        < effective_dirty_background(current_bg, current_limit)
 }
 
 fn eval_somaxconn(
@@ -3869,7 +3896,12 @@ fn eval_dirty_background_ratio_at(
     };
     // This rule leaves the dirty ratio alone, so the limit in force stays the
     // current one — see [`dirty_background_takes_effect`] for the clamp.
-    let takes_effect = dirty_background_takes_effect(info.sysctl.dirty_ratio, target as u64);
+    let takes_effect = dirty_background_takes_effect(
+        current,
+        info.sysctl.dirty_ratio,
+        info.sysctl.dirty_ratio,
+        target as u64,
+    );
     if takes_effect && current > target as u64 {
         let has_db = info.has_process("postgres")
             || info.has_process("mysqld")
@@ -12342,8 +12374,58 @@ mod tests {
         info.sysctl.dirty_ratio = 4;
         let mut recs = Vec::new();
         eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
-        assert_eq!(recs.len(), 1, "3% still fits under a 4% dirty ratio");
-        assert_eq!(recs[0].recommended_value, "3");
+        assert!(
+            recs.is_empty(),
+            "a 4% dirty ratio clamps the 15% background value to 2%, so a 3% \
+             write would move the effective threshold up"
+        );
+
+        // An 8% dirty ratio clamps to 4%: 3% is a real lowering, so the
+        // background advice stays reachable next to the dirty_ratio write.
+        info.sysctl.dirty_ratio = 8;
+        let mut recs = Vec::new();
+        eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
+        assert_eq!(recs.len(), 2, "3% stays below the clamped 4% (8 / 2)");
+        assert_eq!(recs[0].recommended_value, "5");
+        assert_eq!(recs[1].recommended_value, "3");
+    }
+
+    #[test]
+    fn dirty_background_advice_needs_to_lower_the_effective_threshold() {
+        // domain_dirty_limits() (mm/page-writeback.c) replaces a background
+        // threshold at or above the dirty threshold with half of it, so the
+        // effective threshold is *not* the configured percentage: a host with
+        // `dirty_ratio` 5 and the default `dirty_background_ratio` 10 already
+        // starts background writeback at 2% (5 / 2). Its clamped value sits
+        // below the rule's 3% target, and writing 3 would move the flush later
+        // — the opposite of the reason's "earlier background flush". The same
+        // arithmetic makes the write a strict no-op under a 6% ratio (both
+        // sides are 3), and only a host whose effective threshold is above the
+        // target gets the advice.
+        let mut info = make_test_info();
+        info.memory_total_gb = 32;
+        info.processes.clear();
+
+        for (ratio, bg) in [(5, 10), (6, 10), (6, 15)] {
+            info.sysctl.dirty_ratio = ratio;
+            info.sysctl.dirty_background_ratio = bg;
+            let mut recs = Vec::new();
+            eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
+            assert!(
+                !recs.iter().any(|r| r.param == "vm.dirty_background_ratio"),
+                "ratio {ratio} / bg {bg}: 3% does not lower the effective threshold"
+            );
+        }
+
+        info.sysctl.dirty_ratio = 20;
+        info.sysctl.dirty_background_ratio = 10;
+        let mut recs = Vec::new();
+        eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
+        let bg_rec = recs
+            .iter()
+            .find(|r| r.param == "vm.dirty_background_ratio")
+            .expect("10% is a real threshold and 3% lowers it");
+        assert_eq!(bg_rec.recommended_value, "3");
     }
 
     #[test]
