@@ -161,6 +161,7 @@ def check_inventory() -> None:
         ("aw-service", "qwenpaw"),
         ("aw-service", "pi"),
         ("aw-service", "claude_sdk"),
+        ("aw-service", "agentscope"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))

@@ -21,6 +21,9 @@ spec:
     openclaw:
       adapter: openclaw
       argv: [/absolute/path/to/node, /absolute/path/to/openclaw.mjs, gateway, run]
+    agentscope:
+      adapter: agentscope
+      argv: [/absolute/path/to/sdk-python, /absolute/path/to/application.py]
     qwenpaw:
       adapter: qwenpaw
       argv: [/absolute/path/to/qwenpaw, app]

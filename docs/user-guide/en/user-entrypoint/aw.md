@@ -9,7 +9,8 @@ execution records after the Agent session ends.
 
 The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
-Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers.
+Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers
+and AgentScope SDK 2.0.6 through explicitly wired public factories in a foreground Python worker.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
@@ -38,6 +39,7 @@ For optional lifecycle observation, see [AgentSight through aw run](aw-agentsigh
 | Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
 | Start a Pi SDK 0.84.2 worker | ✅ Public SDK factory; see [worker guide](#start-a-pi-sdk-worker) |
 | Start a Claude SDK 0.2.88 worker | ✅ Explicit public factory Bridge; see [worker guide](#start-a-claude-sdk-worker) |
+| Start AgentScope SDK through AW | ✅ [Explicit public factories](#start-agentscope-sdk) in one foreground Python worker |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
@@ -257,6 +259,61 @@ shared daemon remains available to later sessions using the same configuration.
 target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
+
+## Start AgentScope SDK
+
+Use a Python environment with `agentscope==2.0.6`; the SDK is separate from
+QwenPaw's verified AgentScope 2.0.8 runtime. `argv` selects the SDK environment's
+Python and a `.py` application or `-m MODULE`. AW verifies that exact SDK version,
+supplies `aw_agentscope` and a protected runtime configuration, and awaits a
+receipt after the real public factory has installed middleware.
+
+From `src/aw`, with that environment's `python3` on PATH:
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.agentscope.yaml --agent agentscope
+target/debug/aw status --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.agentscope.yaml
+```
+
+The example uses a deterministic offline model and a local Echo tool. It needs no
+credentials. Its before Boolean Hook returns false (no block match) and after
+returns true (observe). Change the before command to `printf true` to deny the
+tool; the native final response becomes denied and after observes that denial.
+Stop the service before editing its configuration.
+
+For an existing application, use `AwBridge().create_agent(...)` in **every** public
+factory, passing the existing middleware list unchanged. Existing trusted
+argument injection must precede the appended AW middleware. A readiness receipt
+covers the constructed Agent, not other factories or direct dispatch routes.
+The [factory contract](../../../../src/aw/docs/design/agentscope-adapter.md) details
+ordering, budgets, invocation identity and coverage.
+
+Before waits and can block before a tool side effect. After awaits one final
+`ToolResponse`, preserving success, error or interruption without repeating
+stream chunks. Native parameter/permission rejections before `on_acting`, direct
+Toolkit calls and external execution requests need separate integration. The
+launcher supports one foreground worker; forking Gunicorn supervisors and
+multi-worker/remote deployment are outside this contract. Long-lived processes
+must manage the service's 1024 event-correlation limit per instance explicitly.
+
+For PreTool retry suggestions and final PostTool compression, copy the
+[SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml),
+replace all paths and map your Toolkit's exact tool names/argument pointers in
+sec-core. It runs security checks before Tokenless PreTool, observes the original
+completed response, then compresses one successful text slot. Keep custom/native
+after Hooks before the final compression step; with replacement enabled AW runs
+this chain in declared order. Native and observation Hooks cannot replace the
+response; only the final admitted structured replacement step can change its
+model-visible text. Reported Hook failures retain the original input for subsequent
+steps. Observe-only chains keep native reverse unwind order.
+
+PreTool denies the original call and returns full retry arguments to the model;
+each new attempt passes native permissions and sec-core again. An attributed RTK
+retry avoids double compression even with a new call ID. Install RTK separately
+for PreTool; PostTool works without it. See [Tokenless behavior](aw-tokenless.md)
+for text-slot eligibility, failure handling and telemetry configuration. Invalid
+final-response replacement directives report failure and retain the original result.
 
 ## Start QwenPaw
 
@@ -633,7 +690,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi and Claude SDK reject this command |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
@@ -642,9 +699,10 @@ The local endpoint is a same-user boundary, not a sandbox.
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
-Claude SDK 0.2.88 and Pi SDK 0.84.2 workers. `aw install`
+Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw install`
 validates the configuration and dispatches to that adapter. Hermes supports
-persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi and Claude SDK reject it.
+persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and
+AgentScope SDK reject it.
 This command does not install AW packages or Agent software, start an Agent,
 or configure model credentials. `aw run` does not implicitly call `install`.
 
@@ -655,8 +713,9 @@ or configure model credentials. `aw run` does not implicitly call `install`.
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
-alone does not enable them for a framework. Pi and Claude SDK reject all these native
-override options. QwenPaw also rejects them and uses `QWENPAW_WORKING_DIR`. Pass
+alone does not enable them for a framework. Pi, Claude SDK and AgentScope SDK
+reject all these native override options. QwenPaw also rejects them and uses
+`QWENPAW_WORKING_DIR`. Pass
 supported AW options before `--`; arguments
 after it are forwarded literally to the Agent. `install` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.

@@ -186,6 +186,20 @@ pub enum Operation {
         /// Exact callback stdin, limited independently to one MiB.
         native_input: Vec<u8>,
     },
+    /// Cancel one native correlation, wait for cleanup and forbid later opens.
+    ///
+    /// Closing before an in-flight open wins must also prevent that open from
+    /// creating an abandoned event. Repeated closes are idempotent.
+    CloseHookEvent {
+        /// Owning binding instance.
+        instance_id: String,
+        /// Native event name.
+        event: String,
+        /// Session used by the normalized callback.
+        session_id: String,
+        /// Invocation-scoped normalized tool call identifier.
+        call_id: String,
+    },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {
         /// Open event identifier.
