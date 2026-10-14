@@ -2813,6 +2813,22 @@ fn oom_crash_groups_for_pid(
     .collect()
 }
 
+/// The failure message an interruption's own detail carries, if any.
+///
+/// This is the `error` key `InterruptionStore::exists_for_conversation`
+/// matches stored rows on.  An interruption detected from a call's request
+/// history (the detector's traced `tool_result` path) has no transport error:
+/// the call itself succeeded, so `call.error` is `None` and its message only
+/// exists here.
+fn detail_error_key(ie: &crate::interruption::InterruptionEvent) -> Option<String> {
+    let detail = ie.detail.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(detail).ok()?;
+    value
+        .get("error")
+        .and_then(|error| error.as_str())
+        .map(str::to_owned)
+}
+
 /// Store one detected interruption: message-matched dedup, the insert, the
 /// logtail export, the per-call `genai_events` stamp, and the RetryStorm
 /// threshold.
@@ -2830,7 +2846,13 @@ fn store_interruption(
     // 1 interruption; different errors each get 1.
     // NOTE: RetryStorm detection only fires when conversation_id is Some.
     // When None, each error inserts a separate row (no dedup, no storm detect).
-    let error = call.error.as_deref();
+    //
+    // The key is the message a caller retried on.  `call.error` is the
+    // transport error, which a traced tool failure does not have: keyed on its
+    // `None`, the store matches *any* unresolved row of the same type in the
+    // conversation, dropping a second, different failure.
+    let detail_error = detail_error_key(ie);
+    let error = call.error.as_deref().or(detail_error.as_deref());
     let duplicate = ie
         .conversation_id
         .as_deref()
@@ -3494,6 +3516,76 @@ mod tests {
         store_interruption(&replay, &call, &istore, Some(&genai_store));
         assert_eq!(istore.count_for_conversation("conv-store", &rate_limit), 5);
         assert_eq!(istore.count_for_conversation("conv-store", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tool failure detected from the call's *request history* — the
+    /// detector's traced `tool_result` path — carries no transport error:
+    /// `call.error` is `None` because the HTTP call itself succeeded, and the
+    /// failure message only exists in the event's detail. Keyed on that
+    /// `None`, the dedup matched any unresolved `ToolFailure` row of the
+    /// conversation, so a second, different failure was silently dropped.
+    #[test]
+    fn store_interruption_keeps_a_second_distinct_traced_tool_failure() {
+        fn traced_call(call_id: &str, message: &str) -> crate::genai::LLMCall {
+            let mut call = make_test_llm_call(call_id);
+            call.metadata
+                .insert("conversation_id".to_string(), "conv-traced".to_string());
+            call.request.messages = vec![crate::genai::semantic::InputMessage {
+                role: "user".to_string(),
+                parts: vec![crate::genai::semantic::MessagePart::ToolCallResponse {
+                    id: Some(format!("toolu-{call_id}")),
+                    response: serde_json::json!({
+                        "is_error": true,
+                        "content": message,
+                    }),
+                }],
+                name: None,
+            }];
+            call
+        }
+
+        let dir = unique_tmp_dir("store-traced-tool-failure");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+        let detector = crate::interruption::InterruptionDetector::default();
+        let tool_failure = crate::interruption::InterruptionType::ToolFailure;
+        let first_message = "read failed: ENOENT: no such file or directory, access '/tmp/missing'";
+        let second_message = "build failed: make check\n(exit code 2)";
+
+        let first = traced_call("traced-call-0", first_message);
+        let events = detector.detect(&first);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        assert_eq!(events[0].interruption_type, tool_failure);
+        assert!(first.error.is_none(), "precondition: no transport error");
+        store_interruption(&events[0], &first, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            1
+        );
+
+        // A different message is what the dedup is documented to keep.
+        let second = traced_call("traced-call-1", second_message);
+        let events = detector.detect(&second);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        assert_eq!(events[0].interruption_type, tool_failure);
+        assert!(second.error.is_none(), "precondition: no transport error");
+        store_interruption(&events[0], &second, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            2,
+            "a different traced tool failure is not a duplicate"
+        );
+
+        // The same message again is still the duplicate it always was.
+        let replay = traced_call("traced-call-2", first_message);
+        let events = detector.detect(&replay);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        store_interruption(&events[0], &replay, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            2
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
