@@ -231,11 +231,34 @@ fn a_run_without_exclude_carries_none_of_the_new_keys() {
         "a run without --exclude must not grow the new keys: {body}"
     );
     match body["status"].as_str() {
-        Some("planned") => assert_eq!(
-            keys,
-            vec!["blocked", "dry_run", "status", "would_apply", "would_skip"],
-            "the planned shape is unchanged: {body}"
-        ),
+        Some("planned") => {
+            // `would_clear` is the one conditional addition to this shape:
+            // 398858e7c added it whenever the plan applies half of a mutually
+            // exclusive pair (the dirty and overcommit pairs of
+            // tuner::cleared_sibling) and left the key out when the plan
+            // touches neither, the rule `fix --dry-run` follows. Pin the fixed
+            // base and allow exactly that key, so the contract is asserted on
+            // both shapes instead of only on the hosts whose plan clears none.
+            let expected = if body.get("would_clear").is_some() {
+                assert!(
+                    body["would_clear"]
+                        .as_array()
+                        .is_some_and(|twins| !twins.is_empty()),
+                    "would_clear is present only when it names a twin: {body}"
+                );
+                vec![
+                    "blocked",
+                    "dry_run",
+                    "status",
+                    "would_apply",
+                    "would_clear",
+                    "would_skip",
+                ]
+            } else {
+                vec!["blocked", "dry_run", "status", "would_apply", "would_skip"]
+            };
+            assert_eq!(keys, expected, "the planned shape is unchanged: {body}");
+        }
         Some("blocked") => assert_eq!(
             keys,
             vec![
