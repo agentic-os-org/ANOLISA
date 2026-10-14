@@ -384,7 +384,17 @@ impl SslSniff {
     /// which case the probes are re-attached and the old links are dropped
     /// only after the replacement succeeds.
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
-        let libs = ssl_libs_from_maps(pid)?;
+        let mut libs = ssl_libs_from_maps(pid)?;
+        if libs.is_empty() {
+            // No SSL library recognizable by name in maps: the process may
+            // statically link SSL under an unknown binary name (opencode and
+            // other Bun-compiled executables). Fall back to content detection
+            // on the main executable; the normal Static attach path (symbols →
+            // offset table → byte patterns) takes over from here.
+            if let Some(entry) = probe_exe_static_ssl(pid, &self.traced_files) {
+                libs.push(entry);
+            }
+        }
         if libs.is_empty() {
             log::warn!("[attach_process] pid={pid}: no SSL libraries found in maps");
             return Ok(());
@@ -865,6 +875,128 @@ fn fill_buf(file: &mut fs::File, mut dst: &mut [u8]) -> Option<usize> {
         }
     }
     Some(total)
+}
+
+/// String markers whose presence in an executable indicates a statically
+/// linked BoringSSL, regardless of the binary's name. BoringSSL builds keep
+/// vendor path strings (`vendor/boringssl/...`) and the
+/// `openssl_is_boringssl` symbol name in .rodata even when stripped.
+/// Deliberately BoringSSL-only: statically-linked OpenSSL binaries stay
+/// opt-in through the name-based fast path (codex, python3.x), keeping this
+/// fallback scoped to the Bun/Node binary shape it was built for. This is a
+/// cheap prefilter, not a verdict: a hit only justifies running the
+/// (expensive) three-tier detection, which remains the source of truth.
+///
+/// The marker is stored reversed and reassembled at runtime so the
+/// contiguous string never appears in AgentSight's own binary: AgentSight
+/// resolves the https-rule domains itself, and a self-match would trigger a
+/// pointless full byte-pattern scan of its own executable. (A capitalized
+/// `BoringSSL` variant is unusable anyway: the aws-lc dependency embeds
+/// that exact string, which would self-match the same way.)
+fn ssl_exe_markers() -> Vec<Vec<u8>> {
+    vec![b"lssgnirob".iter().copied().rev().collect()]
+}
+
+/// Probe the main executable of `pid` for statically-linked SSL when maps
+/// named no known SSL library.
+///
+/// Returns a synthetic `Static` lib entry (attach path `<pid>/exe`) after a
+/// marker prefilter passes, so the normal attach flow — `(dev, inode)`
+/// dedup, symbol attach, offset table, byte-pattern scan — applies
+/// unchanged. Returns `None` when the exe is unreadable, already present in
+/// `traced` (including Untraceable-marked), or carries no SSL marker.
+fn probe_exe_static_ssl(
+    pid: i32,
+    traced: &HashSet<FileKey>,
+) -> Option<(String, FileKey, SslLibKind, String)> {
+    let exe = proc_pid_entry(pid, "exe");
+    let meta = fs::metadata(&exe).ok()?;
+    use std::os::unix::fs::MetadataExt;
+    let key = (stat_dev_to_key(meta.dev()), meta.ino());
+    // Already traced, or previously scanned and marked Untraceable: skip the
+    // prefilter entirely. Without this check a binary that fails the
+    // byte-pattern scan (e.g. arm64, x86_64-only patterns) would be fully
+    // re-read on every attach sweep.
+    if traced.contains(&key) {
+        return None;
+    }
+    let exe_str = exe.to_string_lossy().into_owned();
+    if !file_has_ssl_markers(&exe_str) {
+        log::debug!(
+            "[attach_process] pid={pid}: no SSL markers in main executable, skipping content probe"
+        );
+        return None;
+    }
+    log::info!(
+        "[attach_process] pid={pid}: SSL markers found in main executable, probing for static SSL"
+    );
+    // Prefer the resolved on-disk path over `<pid>/exe` as the uprobe
+    // target: detection can take seconds (byte-pattern scan), and a
+    // short-lived process (a one-shot `opencode run`) exits before the
+    // attach completes, taking `<pid>/exe` down with it and failing the
+    // uprobe. The resolved path survives the exit, and the probe is
+    // inode-global anyway. Fall back to `<pid>/exe` when readlink fails or
+    // the file was replaced underneath (inode no longer matches).
+    let exe_str = exe.to_string_lossy().into_owned();
+    let attach_path = match fs::read_link(&exe) {
+        Ok(target) => {
+            let resolved = target.to_string_lossy().into_owned();
+            match fs::metadata(&resolved) {
+                Ok(m) if (stat_dev_to_key(m.dev()), m.ino()) == key => resolved,
+                _ => exe_str.clone(),
+            }
+        }
+        Err(_) => exe_str.clone(),
+    };
+    Some((attach_path, key, SslLibKind::Static, exe_str))
+}
+
+/// Translate a `stat(2)` `st_dev` into the `FileKey` device encoding used by
+/// [`parse_maps_dev`] (major in the high 32 bits), so the same binary keys
+/// identically whether discovered through maps or through metadata.
+fn stat_dev_to_key(dev: u64) -> u64 {
+    // glibc major()/minor() unpacking of a dev_t.
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff_u64);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff_u64);
+    (major << 32) | minor
+}
+
+/// True when any marker from [`ssl_exe_markers`] occurs in the file at
+/// `path`.
+///
+/// Streams in [`SCAN_CHUNK_BYTES`] windows and stops at the first hit, so a
+/// matching binary costs only the read up to its first marker. The window
+/// tail carries over by `max_marker_len - 1` bytes so a marker straddling a
+/// boundary is still seen.
+fn file_has_ssl_markers(path: &str) -> bool {
+    let markers = ssl_exe_markers();
+    let overlap = markers.iter().map(|m| m.len()).max().unwrap_or(1) - 1;
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
+    let mut carry = 0usize;
+    loop {
+        let Some(read) = fill_buf(&mut file, &mut buf[carry..]) else {
+            return false;
+        };
+        let filled = carry + read;
+        if filled == 0 {
+            return false;
+        }
+        let window = &buf[..filled];
+        if markers
+            .iter()
+            .any(|marker| window.windows(marker.len()).any(|w| w == marker.as_slice()))
+        {
+            return true;
+        }
+        if filled < buf.len() {
+            return false;
+        }
+        buf.copy_within(filled - overlap..filled, 0);
+        carry = overlap;
+    }
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
@@ -1996,6 +2128,88 @@ mod tests {
             "attach path resolves through the pid root: {}",
             libs[0].0
         );
+    }
+
+    #[test]
+    fn exe_markers_are_boringssl_only() {
+        // Policy decision: the exe content probe only admits BoringSSL
+        // shapes (Bun/Node-family binaries). Statically-linked OpenSSL
+        // stays opt-in via the name-based fast path. Pin the marker set so
+        // widening it is a visible, deliberate change. The marker itself is
+        // stored reversed in non-test code so the production binary never
+        // embeds the contiguous string (self-match guard).
+        assert_eq!(ssl_exe_markers(), vec![b"boringssl".to_vec()]);
+    }
+
+    #[test]
+    fn exe_marker_prefilter_detects_ssl_strings() {
+        // BoringSSL builds keep vendor paths in .rodata even when stripped
+        // (verified against a real Bun-compiled opencode binary): the
+        // prefilter must accept them without knowing the binary's name.
+        let dir = std::env::temp_dir();
+        let hit_path = dir.join(format!("agentsight-marker-hit-{}", std::process::id()));
+        let miss_path = dir.join(format!("agentsight-marker-miss-{}", std::process::id()));
+        fs::write(
+            &hit_path,
+            b"junk\x00../../vendor/boringssl/ssl/mem_internal.h\x00tail",
+        )
+        .unwrap();
+        fs::write(&miss_path, b"just a plain binary blob, no tls here").unwrap();
+
+        let hit = hit_path.to_string_lossy().into_owned();
+        let miss = miss_path.to_string_lossy().into_owned();
+        assert!(
+            file_has_ssl_markers(&hit),
+            "boringssl vendor path must match"
+        );
+        assert!(!file_has_ssl_markers(&miss), "plain file must not match");
+        assert!(
+            !file_has_ssl_markers("/nonexistent/agentsight-marker"),
+            "unreadable file must be a miss, not a panic"
+        );
+
+        let _ = fs::remove_file(&hit_path);
+        let _ = fs::remove_file(&miss_path);
+    }
+
+    #[test]
+    fn exe_marker_prefilter_sees_marker_straddling_window_boundary() {
+        // The scan carries only max_marker_len - 1 bytes across windows: a
+        // marker placed exactly on the SCAN_CHUNK_BYTES boundary must still
+        // be found, otherwise the prefilter silently drops real SSL binaries
+        // depending on where the linker happened to place .rodata.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("agentsight-marker-edge-{}", std::process::id()));
+        let marker = b"boringssl";
+        let mut data = vec![b'x'; SCAN_CHUNK_BYTES + marker.len()];
+        let split = SCAN_CHUNK_BYTES - marker.len() / 2;
+        data[split..split + marker.len()].copy_from_slice(marker);
+        fs::write(&path, &data).unwrap();
+
+        assert!(
+            file_has_ssl_markers(&path.to_string_lossy()),
+            "marker straddling the window boundary must match"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stat_dev_to_key_matches_maps_encoding() {
+        // The exe-probe FileKey comes from stat(2), the lib FileKeys from
+        // maps maj:min fields: if the encodings diverge, the same binary is
+        // deduped twice and its byte-pattern scan runs once per attach.
+        for (majmin, dev_t) in [
+            ("8:1", libc::makedev(8, 1) as u64),
+            ("fd:1", libc::makedev(0xfd, 0x1) as u64),
+            ("0:2a", libc::makedev(0, 0x2a) as u64),
+            ("108:3", libc::makedev(0x108, 0x3) as u64),
+        ] {
+            assert_eq!(
+                stat_dev_to_key(dev_t),
+                parse_maps_dev(majmin).unwrap(),
+                "stat dev_t and maps encoding disagree for {majmin}"
+            );
+        }
     }
 
     #[test]
