@@ -565,11 +565,29 @@ fn is_cleared_twin(
     param: &str,
     entry: &RollbackEntry,
 ) -> bool {
+    cleared_twin_of(entries, param, entry).is_some()
+}
+
+/// The ledger key whose write cleared `param`, or `None` when `param` holds no
+/// cleared twin — the identity [`is_cleared_twin`] answers yes or no, for a
+/// caller that has to name the clearer rather than only recognize the pair.
+///
+/// The key comes back in the spelling the ledger holds it under, not the
+/// canonical one: that is the spelling every listing publishes as `param`, so
+/// a caller can address the clearer's own row by the name it is given here.
+fn cleared_twin_of<'a>(
+    entries: &'a BTreeMap<String, RollbackEntry>,
+    param: &str,
+    entry: &RollbackEntry,
+) -> Option<&'a str> {
+    if entry.applied != "0" {
+        return None;
+    }
     let canonical = param.replace('/', ".");
-    entry.applied == "0"
-        && entries
-            .keys()
-            .any(|k| cleared_sibling(k).is_some_and(|twin| twin == canonical))
+    entries
+        .keys()
+        .find(|k| cleared_sibling(k).is_some_and(|twin| twin == canonical))
+        .map(String::as_str)
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -1672,6 +1690,14 @@ fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
 /// (JSON null) for a record written before the field existed and for one an
 /// imported file supplied, matching how the ledger treats them: no category
 /// ever selected them.
+///
+/// `cleared_by` names the entry whose write zeroed this one, when the kernel
+/// zeroed it as the side effect of a mutually exclusive pair — the relation
+/// `is_cleared_twin` recognizes, from the side that has to say which
+/// parameter is responsible. A row whose `applied` is 0 because a twin
+/// disabled it otherwise reads as though ktuner had chosen to zero the knob.
+/// It is `None` (JSON null) for every other row: a zero the caller asked for,
+/// and a pair whose clearer is not in the published set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackPreview {
     pub param: String,
@@ -1680,6 +1706,7 @@ pub struct RollbackPreview {
     pub category: Option<Category>,
     pub live: Option<String>,
     pub drifted: Option<bool>,
+    pub cleared_by: Option<String>,
 }
 
 /// The live value at `path` and whether it still matches `applied`, or
@@ -1716,6 +1743,10 @@ fn preview_entries(data: &RollbackData) -> Vec<RollbackPreview> {
         .iter()
         .map(|(param, entry)| {
             let (live, drifted) = live_reading(&entry.path, &entry.applied);
+            // Read off the published set, not the whole ledger: a clearer the
+            // selection left out cannot be named, and a name the listing does
+            // not carry would address no row.
+            let cleared_by = cleared_twin_of(&data.entries, param, entry).map(str::to_string);
             RollbackPreview {
                 param: param.clone(),
                 applied: entry.applied.clone(),
@@ -1723,6 +1754,7 @@ fn preview_entries(data: &RollbackData) -> Vec<RollbackPreview> {
                 category: entry.category.clone(),
                 live,
                 drifted,
+                cleared_by,
             }
         })
         .collect()
@@ -6459,6 +6491,7 @@ mod tests {
                     category: None,
                     live: Some("256".to_string()),
                     drifted: Some(false),
+                    cleared_by: None,
                 },
                 RollbackPreview {
                     param: "vm.swappiness".to_string(),
@@ -6467,6 +6500,7 @@ mod tests {
                     category: None,
                     live: Some("10".to_string()),
                     drifted: Some(false),
+                    cleared_by: None,
                 },
             ]
         );
@@ -6777,6 +6811,7 @@ mod tests {
                     category: None,
                     live: Some("1024".to_string()),
                     drifted: Some(true),
+                    cleared_by: None,
                 },
                 RollbackPreview {
                     param: "vm.swappiness".to_string(),
@@ -6785,6 +6820,7 @@ mod tests {
                     category: None,
                     live: Some("10".to_string()),
                     drifted: Some(false),
+                    cleared_by: None,
                 },
             ]
         );

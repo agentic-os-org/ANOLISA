@@ -1612,6 +1612,7 @@ mod tests {
             category,
             live: live.map(str::to_string),
             drifted,
+            cleared_by: None,
         }
     }
 
