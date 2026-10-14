@@ -1237,8 +1237,11 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     // rotational flag would mislabel them HDD and apply spinning-disk tuning.
     // Treat them as SSD-like (the SSD optimizations are safe and beneficial,
     // and a real spinning disk presented as vd* in modern clouds is vanishingly
-    // rare).
-    let is_virtual = name.starts_with("vd") || name.starts_with("xvd");
+    // rare). Hyper-V's storvsc disks are the same shape under a name that
+    // carries nothing — `sd*` is a real SCSI disk elsewhere — so they are
+    // identified by their device identity instead.
+    let is_virtual =
+        name.starts_with("vd") || name.starts_with("xvd") || is_hyperv_virtual_disk(dir);
 
     let rotational_path = dir.join("queue/rotational");
     if let Ok(val) = fs::read_to_string(rotational_path) {
@@ -1258,6 +1261,23 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     } else {
         DiskType::Unknown
     }
+}
+
+/// Whether the block device in `dir` is one of Hyper-V's virtual disks.
+///
+/// The storvsc driver presents the host's disks as ordinary SCSI devices with
+/// the vendor/product pair vmbus hands it — "Msft" and "Virtual Disk" — and,
+/// like virtio and Xen, the rotational flag follows what the hypervisor
+/// reports rather than the backing medium: every disk of a Hyper-V or Azure VM
+/// and of a WSL2 instance reads 1, including on an all-NVMe machine. The name
+/// carries nothing to key on, so the device identity decides.
+fn is_hyperv_virtual_disk(dir: &Path) -> bool {
+    let identity = |entry: &str| {
+        fs::read_to_string(dir.join("device").join(entry))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    identity("vendor") == "Msft" && identity("model") == "Virtual Disk"
 }
 
 fn read_current_scheduler(dir: &Path) -> String {
@@ -3024,6 +3044,41 @@ mod tests {
         let dir = Path::new("/sys/block/nvme0n1");
         assert_eq!(detect_disk_type(dir, "nvme0n1"), DiskType::NVMe);
         assert_eq!(detect_disk_type(dir, "nvme1n1"), DiskType::NVMe);
+    }
+
+    #[test]
+    fn storvsc_virtual_disks_are_not_hdds() {
+        // Hyper-V's storvsc driver presents the host's disks as SCSI devices
+        // with the vendor/product pair "Msft"/"Virtual Disk", and the
+        // rotational flag follows the hypervisor rather than the backing
+        // medium: every disk of a Hyper-V or Azure VM and of a WSL2 instance
+        // reads 1, including on an all-NVMe machine. The name cannot tell them
+        // from a real spinning SCSI disk, so the device identity decides - the
+        // carve-out virtio (vd*) and Xen (xvd*) already have.
+        let hyperv = device_tree(&[
+            ("device/", ""),
+            ("device/vendor", "Msft\n"),
+            ("device/model", "Virtual Disk\n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&hyperv, "sda"), DiskType::SSD);
+
+        // A real spinning SCSI disk keeps its type: same rotational flag, other
+        // identity.
+        let spinning = device_tree(&[
+            ("device/", ""),
+            ("device/vendor", "SEAGATE\n"),
+            ("device/model", "ST4000NM0033\n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&spinning, "sdb"), DiskType::HDD);
+
+        // A virtual disk that says it is non-rotational is SSD either way, and
+        // a directory without the identity files is not assumed virtual.
+        let bare = device_tree(&[("queue/", ""), ("queue/rotational", "1\n")]);
+        assert_eq!(detect_disk_type(&bare, "sdc"), DiskType::HDD);
     }
 
     /// A synthetic `/sys/block/<disk>` directory built from `(name, content)`
