@@ -188,6 +188,7 @@ Endpoint groups in 0.11:
 | Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
+| Tokenless records | `POST /api/tokenless/refresh`, `GET /api/tokenless/records`, `GET /api/tokenless/records/{cache_id}` | Refresh saved statistics, list metadata, and read details; content requires explicit `include_content=true`. All three routes require Dashboard credentials, including on loopback |
 | Token savings | `GET /api/token-savings`, `GET /api/token-savings/session/{id}` | Tokenless savings |
 | ATIF export | `GET /api/export/atif/session/{id}` (also `trace` and `conversation`) | Trajectory export |
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |

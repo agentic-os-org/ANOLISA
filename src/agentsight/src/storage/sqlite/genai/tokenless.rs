@@ -1,5 +1,7 @@
 //! AgentSight-owned copies of queried Tokenless statistics in the GenAI database.
 
+use std::collections::{BTreeSet, HashMap};
+
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -155,22 +157,35 @@ impl GenAISqliteStore {
                 ))
             },
         )?;
-        rows.map(|row| {
-            let (cache_id, source, payload) = row?;
-            let mut record: Value = serde_json::from_str(&payload)?;
-            // List responses must not disclose cached content implicitly.
-            for field in ["before_text", "after_text", "before_output", "after_output"] {
-                record[field] = Value::Null;
-            }
-            record["content_included"] = Value::Bool(false);
-            Ok(SavedTokenlessRecord {
-                cache_id,
-                source,
-                agentsight_session_id: associated_session(&conn, &record)?,
-                record,
+        let mut records = rows
+            .map(|row| {
+                let (cache_id, source, payload) = row?;
+                let mut record: Value = serde_json::from_str(&payload)?;
+                // List responses must not disclose cached content implicitly.
+                for field in ["before_text", "after_text", "before_output", "after_output"] {
+                    record[field] = Value::Null;
+                }
+                record["content_included"] = Value::Bool(false);
+                Ok(SavedTokenlessRecord {
+                    cache_id,
+                    source,
+                    agentsight_session_id: None,
+                    record,
+                })
             })
-        })
-        .collect()
+            .collect::<Result<Vec<_>, TokenlessRecordError>>()?;
+        let ids: Vec<_> = records
+            .iter()
+            .filter_map(|row| row.record["tool_use_id"].as_str())
+            .collect();
+        let sessions = associated_sessions(&conn, &ids)?;
+        for row in &mut records {
+            row.agentsight_session_id = row.record["tool_use_id"]
+                .as_str()
+                .and_then(|id| sessions.get(id))
+                .cloned();
+        }
+        Ok(records)
     }
 
     /// Read applied statistics, optionally restricted to the source records returned by this query.
@@ -210,24 +225,33 @@ impl GenAISqliteStore {
                 WHERE json_extract(fresh.value,'$[0]')=record_id
                 AND json_extract(fresh.value,'$[1]')=record_timestamp))",
         )?;
-        let rows = stmt.query_map(
-            params![
-                source,
-                start_ns,
-                end_ns,
-                serde_json::to_string(ids)?,
-                current
-            ],
-            |row| row.get::<_, String>(0),
-        )?;
+        let mut rows = stmt
+            .query_map(
+                params![
+                    source,
+                    start_ns,
+                    end_ns,
+                    serde_json::to_string(ids)?,
+                    current
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .peekable();
+        if rows.peek().is_none() {
+            return Ok(Vec::new());
+        }
+        let sessions = associated_sessions(&conn, ids)?;
         let mut result = Vec::new();
         for row in rows {
             let record: Value = serde_json::from_str(&row?)?;
-            let Some(session_id) = associated_session(&conn, &record)? else {
+            let Some(session_id) = record["tool_use_id"]
+                .as_str()
+                .and_then(|id| sessions.get(id))
+            else {
                 continue;
             };
             result.push(TokenlessStatRow {
-                session_id,
+                session_id: session_id.clone(),
                 tool_use_id: record["tool_use_id"].as_str().unwrap_or_default().into(),
                 operation: record["operation"].as_str().unwrap_or("unknown").into(),
                 before_tokens: record["before_tokens"]
@@ -272,15 +296,45 @@ impl GenAISqliteStore {
     }
 }
 
-fn associated_session(conn: &Connection, record: &Value) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
-        "SELECT CASE WHEN COUNT(DISTINCT session_id)=1 THEN MIN(session_id) END
-        FROM genai_events WHERE event_type='llm_call' AND session_id IS NOT NULL
-        AND (?1=call_id OR EXISTS (SELECT 1 FROM json_each(
-            CASE WHEN json_valid(tool_call_ids) THEN tool_call_ids ELSE '[]' END) WHERE value=?1))",
-        [record["tool_use_id"].as_str()],
-        |row| row.get(0),
-    )
+fn associated_session(
+    conn: &Connection,
+    record: &Value,
+) -> Result<Option<String>, TokenlessRecordError> {
+    let Some(id) = record["tool_use_id"].as_str() else {
+        return Ok(None);
+    };
+    Ok(associated_sessions(conn, &[id])?.remove(id))
+}
+
+fn associated_sessions(
+    conn: &Connection,
+    ids: &[&str],
+) -> Result<HashMap<String, String>, TokenlessRecordError> {
+    let ids: BTreeSet<_> = ids.iter().copied().collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // CROSS JOIN keeps JSON expansion outside the requested-ID loop, avoiding a scan per ID.
+    let mut stmt = conn.prepare(
+        "WITH requested AS MATERIALIZED (SELECT value AS tool_id FROM json_each(?1)),
+        matches AS (
+            SELECT requested.tool_id,event.session_id FROM requested
+            JOIN genai_events event ON event.call_id=requested.tool_id
+            WHERE event.event_type='llm_call' AND event.session_id IS NOT NULL
+            UNION ALL
+            SELECT requested.tool_id,event.session_id FROM genai_events event
+            CROSS JOIN json_each(CASE WHEN json_valid(event.tool_call_ids)
+                THEN event.tool_call_ids ELSE '[]' END) tool
+            CROSS JOIN requested
+            WHERE requested.tool_id=tool.value
+            AND event.event_type='llm_call' AND event.session_id IS NOT NULL)
+        SELECT tool_id,MIN(session_id) FROM matches GROUP BY tool_id
+        HAVING COUNT(DISTINCT session_id)=1",
+    )?;
+    let rows = stmt.query_map([serde_json::to_string(&ids)?], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 #[cfg(test)]
@@ -288,6 +342,157 @@ mod tests {
     use super::*;
     use crate::config::PeriodicStoragePolicy;
     use serde_json::json;
+
+    #[test]
+    fn batched_associations_preserve_unique_sessions_and_record_order() {
+        let dir = std::env::temp_dir().join(format!("stats-batch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai.db"),
+            PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        let ids: Vec<_> = (0..100).map(|id| format!("tool-{id}")).collect();
+        {
+            let conn = store.conn.lock().unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                for _ in 0..2 {
+                    conn.execute(
+                        "INSERT INTO genai_events (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+                        VALUES ('llm_call',?1,'local',1,?2,'{}')",
+                        params![format!("call-{index}"), json!([id, id]).to_string()],
+                    ).unwrap();
+                }
+            }
+            for (kind, call, session, tools) in [
+                ("llm_call", "direct", Some("direct-session"), "invalid JSON"),
+                ("llm_call", "conflict", Some("first"), "[]"),
+                ("llm_call", "other", Some("second"), "[\"conflict\"]"),
+                ("llm_call", "null-session", None, "[\"tool-0\"]"),
+                ("tool_call", "non-llm", Some("ignored"), "[\"tool-0\"]"),
+                (
+                    "llm_call",
+                    "json-types",
+                    Some("json-session"),
+                    "[1,\"1\",null]",
+                ),
+                (
+                    "llm_call",
+                    "object",
+                    Some("object-session"),
+                    "{\"key\":\"object-tool\"}",
+                ),
+                (
+                    "llm_call",
+                    "scalar",
+                    Some("scalar-session"),
+                    "\"scalar-tool\"",
+                ),
+                (
+                    "llm_call",
+                    "quoted",
+                    Some("quoted-session"),
+                    "[\"tool' OR 1=1\"]",
+                ),
+                ("llm_call", "empty", Some("empty-session"), "[\"\"]"),
+            ] {
+                conn.execute(
+                    "INSERT INTO genai_events (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+                    VALUES (?1,?2,?3,1,?4,'{}')", params![kind, call, session, tools],
+                ).unwrap();
+            }
+            let mut requested: Vec<_> = ids.iter().map(String::as_str).collect();
+            requested.extend([
+                "tool-0",
+                "direct",
+                "conflict",
+                "missing",
+                "1",
+                "object-tool",
+                "scalar-tool",
+                "tool' OR 1=1",
+                "",
+            ]);
+            let batch = associated_sessions(&conn, &requested).unwrap();
+            assert_eq!(batch.len(), 106);
+            for id in requested {
+                let expected: Option<String> = conn.query_row(
+                    "SELECT CASE WHEN COUNT(DISTINCT session_id)=1 THEN MIN(session_id) END
+                    FROM genai_events WHERE event_type='llm_call' AND session_id IS NOT NULL
+                    AND (?1=call_id OR EXISTS (SELECT 1 FROM json_each(
+                        CASE WHEN json_valid(tool_call_ids) THEN tool_call_ids ELSE '[]' END) WHERE value=?1))",
+                    [id], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(
+                    batch.get(id),
+                    expected.as_ref(),
+                    "association changed for {id:?}"
+                );
+            }
+            assert!(associated_sessions(&conn, &[]).unwrap().is_empty());
+            assert_eq!(associated_session(&conn, &json!({})).unwrap(), None);
+        }
+        let mut records: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(id, tool)| {
+                json!({
+                    "id":id + 1, "timestamp":"2026-01-01T00:00:00Z", "tool_use_id":tool,
+                    "mode":"active", "before_tokens":10, "after_tokens":2, "content_included":false,
+                })
+            })
+            .collect();
+        for (id, tool) in [
+            (101, Value::Null),
+            (102, json!("missing")),
+            (103, json!("conflict")),
+        ] {
+            records.push(
+                json!({"id":id,"timestamp":"2026-01-01T00:00:00Z","tool_use_id":tool,
+                "mode":"active","before_tokens":10,"after_tokens":2,"content_included":false}),
+            );
+        }
+        store.save_tokenless_records("fixture", &records).unwrap();
+        let first = store
+            .list_tokenless_records(0, i64::MAX, None, None, 100, None)
+            .unwrap();
+        assert_eq!(first.len(), 100);
+        assert!(
+            first
+                .windows(2)
+                .all(|rows| rows[0].cache_id > rows[1].cache_id)
+        );
+        assert!(
+            first[..3]
+                .iter()
+                .all(|row| row.agentsight_session_id.is_none())
+        );
+        assert!(
+            first[3..]
+                .iter()
+                .all(|row| row.agentsight_session_id.as_deref() == Some("local"))
+        );
+        let second = store
+            .list_tokenless_records(0, i64::MAX, None, None, 100, Some(first[99].cache_id))
+            .unwrap();
+        assert_eq!(second.len(), 3);
+        let mut requested: Vec<_> = ids.iter().map(String::as_str).collect();
+        requested.extend(["missing", "conflict"]);
+        let applied = store
+            .tokenless_applied_stats("fixture", &requested, 0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(applied.len(), 100);
+        assert!(applied.iter().all(|row| row.session_id == "local"));
+        assert_eq!(
+            applied
+                .iter()
+                .map(|row| row.before_tokens - row.after_tokens)
+                .sum::<i64>(),
+            800
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn deduplication_atomicity_content_and_restart() {
