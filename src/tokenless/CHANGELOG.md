@@ -9,6 +9,27 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-14
+
+### Added
+
+- Add a QwenWorkCN local-mode adapter with command rewriting, response compression, and explicit desktop plugin sideloading. The adapter ships in raw, npm, and RPM packages; security-workspace/VM sessions are not supported ([#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)).
+
+### Changed
+
+- **Breaking:** The OpenClaw adapter now requires OpenClaw 2026.6.6 or newer and applies lossless compression to supported live tool results before the same-turn model request. Results are no longer compressed a second time during persistence. Legacy hosts such as 2026.8.2 may truncate text before middleware runs; Tokenless cannot restore that missing content, and builds containing upstream fix `2f620b970a04` are recommended ([#7124](https://github.com/agentic-os-org/ANOLISA/pull/7124)).
+
+### Fixed
+
+- Quiet, print-only `sed` commands using long options, combined flags, or multiple expressions now preserve HTML source correctly. Commands that modify content or read scripts from files no longer qualify as plain file reads ([#4963](https://github.com/agentic-os-org/ANOLISA/pull/4963)).
+- HTML inline code containing consecutive backticks now receives a long enough Markdown delimiter to preserve the code span ([#6393](https://github.com/agentic-os-org/ANOLISA/pull/6393)).
+- On macOS, RTK command rewriting no longer rejects an otherwise successful result when cleanup encounters a process group containing only its exited leader ([#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)).
+- Shared and Codex stdin hooks now ignore JSON payloads that are not objects, and Codex response diagnostics ignore invalid payload shapes, avoiding tracebacks on unsupported input ([#6691](https://github.com/agentic-os-org/ANOLISA/pull/6691), [#6663](https://github.com/agentic-os-org/ANOLISA/pull/6663)).
+- AgentScope 2.x and QwenPaw now pass malformed tool arguments through to the host instead of aborting the whole Agent reply; response processing remains lossless for those calls ([#5288](https://github.com/agentic-os-org/ANOLISA/pull/5288), [#5299](https://github.com/agentic-os-org/ANOLISA/pull/5299)).
+- Stats and Stash library warnings no longer interrupt successful compression, statistics reads, or retrieval when stderr is unwritable ([#6911](https://github.com/agentic-os-org/ANOLISA/pull/6911)).
+- Selective-Claw returns each requested turn only once and preserves first-request order, avoiding duplicated recall output and token usage ([#4859](https://github.com/agentic-os-org/ANOLISA/pull/4859)).
+- Selective-Claw history reconciliation now distinguishes tool results by call ID, tool identity, and error state, retaining distinct results even when their text is identical ([#7040](https://github.com/agentic-os-org/ANOLISA/pull/7040)).
+
 ## [0.8.5] - 2026-10-11
 
 ### Added

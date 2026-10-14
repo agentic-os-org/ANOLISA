@@ -21,14 +21,14 @@ OpenCode 等产品 Adapter 单独记录在 [Agent 集成](../framework-integrati
 
 AgentScope 集成 Wheel 要求原生 Runtime Wheel 的版本与它完全相同。请从同一个
 Tokenless GitHub Release 同时安装两个产物。例如，在 Linux x86_64 上安装
-[v0.8.5](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.8.5)：
+[v0.8.6](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.8.6)：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.5/anolisa_tokenless-0.8.5-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.5/anolisa_tokenless_agentscope-0.8.5-py3-none-any.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.6/anolisa_tokenless-0.8.6-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.6/anolisa_tokenless_agentscope-0.8.6-py3-none-any.whl"
 ```
 
 在 Linux aarch64 或 macOS Apple 芯片上，请按 [SDK 概览](../sdk.md) 替换原生 Runtime

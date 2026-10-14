@@ -534,7 +534,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Oct 11 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Oct 14 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Add the QwenWork local-mode adapter
+- Deliver OpenClaw compression before model continuation; require OpenClaw 2026.6.6
+- Preserve HTML code spans, sed source reads and macOS RTK results
+- Keep malformed hooks and tool arguments from interrupting host calls
+- Fix fail-soft warnings and Selective-Claw recall reconciliation
+
+* Sun Oct 11 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.5-1
 - Enable HTML rendering by default while preserving shell-read page source
 - Reclaim expired Stash payloads on writes and improve stats reliability
 - Fix RTK deadlines, AgentScope callbacks, Hermes errors and OpenCode hook cleanup

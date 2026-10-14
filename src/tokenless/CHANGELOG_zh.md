@@ -9,6 +9,27 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.6] - 2026-10-14
+
+### 新增
+
+- 新增 QwenWorkCN 本地模式适配器，支持命令改写、响应压缩和显式侧载桌面插件。适配器随 raw、npm 和 RPM 包分发；不支持安全工作区或 VM 会话（[#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)）。
+
+### 变更
+
+- **不兼容变更：** OpenClaw 适配器现在要求 OpenClaw 2026.6.6 或更新版本，并在同一轮模型请求前对支持的实时工具结果进行无损压缩。持久化时不再重复压缩结果。2026.8.2 等旧宿主可能在中间件执行前截断文本，Tokenless 无法恢复已丢失的内容，建议使用包含上游修复 `2f620b970a04` 的构建（[#7124](https://github.com/agentic-os-org/ANOLISA/pull/7124)）。
+
+### 修复
+
+- 使用长选项、组合短选项或多个表达式的静默、仅打印 `sed` 命令现在能正确保留 HTML 源码。修改内容或从文件读取脚本的命令不再被视为普通文件读取（[#4963](https://github.com/agentic-os-org/ANOLISA/pull/4963)）。
+- HTML 行内代码包含连续反引号时，现在会使用足够长的 Markdown 分隔符，保持代码片段完整（[#6393](https://github.com/agentic-os-org/ANOLISA/pull/6393)）。
+- 在 macOS 上，RTK 命令改写清理仅包含已退出组长的进程组时，不再拒绝原本成功的结果（[#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)）。
+- 通用及 Codex stdin hook 现在会忽略非对象 JSON 载荷，Codex 响应诊断也会忽略结构无效的载荷，避免不支持的输入触发异常堆栈（[#6691](https://github.com/agentic-os-org/ANOLISA/pull/6691)、[#6663](https://github.com/agentic-os-org/ANOLISA/pull/6663)）。
+- AgentScope 2.x 和 QwenPaw 现在会将格式错误的工具参数原样交给宿主处理，不再中止整次 Agent 回复；这些调用的响应处理仍保持无损（[#5288](https://github.com/agentic-os-org/ANOLISA/pull/5288)、[#5299](https://github.com/agentic-os-org/ANOLISA/pull/5299)）。
+- stderr 不可写时，Stats 和 Stash 库的警告不再中断原本成功的压缩、统计读取或检索（[#6911](https://github.com/agentic-os-org/ANOLISA/pull/6911)）。
+- Selective-Claw 对每个请求轮次只返回一次，并保留首次请求的顺序，避免重复召回输出和 Token 开销（[#4859](https://github.com/agentic-os-org/ANOLISA/pull/4859)）。
+- Selective-Claw 历史对齐现在会区分工具结果的调用 ID、工具标识及错误状态，即使文本相同也能保留不同结果（[#7040](https://github.com/agentic-os-org/ANOLISA/pull/7040)）。
+
 ## [0.8.5] - 2026-10-11
 
 ### 新增
