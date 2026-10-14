@@ -7898,13 +7898,24 @@ fn eval_shmmni_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str)
     1
 }
 
-fn eval_protected_fifos(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/fs/protected_fifos";
-    if !std::path::Path::new(path).exists() {
-        return 1;
-    }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+fn eval_protected_fifos(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_protected_fifos_at(info, recs, "/proc/sys/fs/protected_fifos")
+}
+
+/// Path-injectable form of [`eval_protected_fifos`] (the `eval_*_at` idiom) so
+/// the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the protection is off — and [`read_sysctl_u64`]
+/// maps an unreadable or unparseable file to that same 0. Only a zero the
+/// reader could produce is evidence that the protection is off, so a masked or
+/// garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not need.
+fn eval_protected_fifos_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "fs.protected_fifos".to_string(),
             current_value: "0".to_string(),
@@ -19932,6 +19943,48 @@ mod tests {
             advice(&other, &off).is_empty(),
             "the Redis/Valkey precondition is untouched"
         );
+    }
+
+    #[test]
+    fn protected_fifos_advice_needs_a_readable_switch() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_protected_fifos_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let off = write("off", b"0\n");
+        let on = write("on", b"1\n");
+        let malformed = write("malformed", b"nonsense\n");
+        let empty = write("empty", b"");
+        // A directory is an IO error even for root.
+        let io_error = dir.join("io_error");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("missing");
+
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_protected_fifos_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 leaves FIFOs unprotected");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 protects them");
+        for path in [&malformed, &empty, &io_error, &missing] {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
