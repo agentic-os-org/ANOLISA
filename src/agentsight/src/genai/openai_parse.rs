@@ -589,6 +589,9 @@ impl GenAIBuilder {
         let mut finish_reason: Option<String> = None;
         // tool_call delta merging: index -> (id, name, arguments_accumulated)
         let mut tc_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Slot each choice's latest fragment landed in, so an index-less
+        // fragment without a name extends the call its choice is holding.
+        let mut current_slot: HashMap<u64, u32> = HashMap::new();
         // Legacy `function_call` delta merging: the pre-`tool_calls` spelling
         // streams its single call as fragments (the name once, then bare
         // argument fragments), so like tc_map it accumulates (name, arguments).
@@ -602,7 +605,11 @@ impl GenAIBuilder {
                 Some(c) => c,
                 None => continue,
             };
-            for choice in choices {
+            for (choice_pos, choice) in choices.iter().enumerate() {
+                let choice_index = choice
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(choice_pos as u64);
                 // A choice carries either a streaming `delta` or a cumulative
                 // `message` snapshot. SysOM's Copilot stream — and some
                 // OpenAI-compatible gateways, whose final frame is a whole
@@ -664,12 +671,39 @@ impl GenAIBuilder {
                         }
                     });
                 if let Some(calls) = tool_calls {
-                    for tc in calls {
+                    for (call_pos, tc) in calls.iter().enumerate() {
                         // `index` comes off the wire. A value outside the slot
                         // range must not be truncated into another slot, which
                         // would overwrite a valid tool call's id, name and
                         // arguments; drop it like the native envelope path does.
-                        let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let idx = match tc.get("index").and_then(|v| v.as_u64()) {
+                            Some(idx) => idx,
+                            // A cumulative frame repeats the whole call list, so
+                            // the position inside it names the call, exactly as
+                            // the token-side reconstruction reads it.
+                            None if cumulative => call_pos as u64,
+                            None => {
+                                // Compatible providers stream calls without an
+                                // index and mark each one with its name: a named
+                                // fragment starts the next call, an unnamed one
+                                // extends the call it belongs to. Keying every
+                                // index-less fragment to slot 0 folded a later
+                                // call into the first one's slot.
+                                let starts_call = tc
+                                    .get("function")
+                                    .and_then(|func| func.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|name| !name.is_empty());
+                                if starts_call {
+                                    tc_map
+                                        .keys()
+                                        .max()
+                                        .map_or(0, |slot| u64::from(*slot).saturating_add(1))
+                                } else {
+                                    u64::from(current_slot.get(&choice_index).copied().unwrap_or(0))
+                                }
+                            }
+                        };
                         if idx >= MAX_TOOL_CALL_SLOTS {
                             log::debug!(
                                 "[GenAI] dropping SSE tool_call with out-of-range index {idx}"
@@ -677,6 +711,7 @@ impl GenAIBuilder {
                             continue;
                         }
                         let idx = idx as u32;
+                        current_slot.insert(choice_index, idx);
                         let entry = tc_map
                             .entry(idx)
                             .or_insert_with(|| (String::new(), String::new(), String::new()));
@@ -2242,6 +2277,52 @@ mod tests {
                 assert_eq!(id.as_deref(), Some("tc_1"));
                 assert_eq!(name, "search");
                 assert_eq!(arguments.as_ref().unwrap()["q"], "rust");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// Compatible providers stream `tool_calls` deltas without an `index` and
+    /// mark each call with its name, the same shape the token-side
+    /// reconstruction and the analyzer's message parser already route into
+    /// separate calls. Keying every index-less delta to slot 0 overwrote the
+    /// first call's id and name with the second's and concatenated both
+    /// argument fragments into one invalid JSON string.
+    #[test]
+    fn test_extract_parts_from_sse_body_unindexed_tool_calls() {
+        let body = r#"[
+            {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]},"index":0}]},
+            {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"/tmp/a.md\"}"}}]},"index":0}]},
+            {"choices":[{"delta":{"tool_calls":[{"id":"call_b","function":{"name":"write_file","arguments":"{\"path\":\"/tmp/b.md\"}"}}]},"index":0,"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(
+            parts.len(),
+            2,
+            "a named fragment starts a new call; the second must not overwrite the first: {parts:?}"
+        );
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_a"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments.as_ref().unwrap()["path"], "/tmp/a.md");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_b"));
+                assert_eq!(name, "write_file");
+                assert_eq!(arguments.as_ref().unwrap()["path"], "/tmp/b.md");
             }
             _ => panic!("expected ToolCall"),
         }
