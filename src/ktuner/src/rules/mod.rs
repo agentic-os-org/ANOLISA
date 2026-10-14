@@ -6993,8 +6993,11 @@ fn interfaces_accepting_ra(conf_root: &std::path::Path) -> Vec<String> {
         // (v6.6 include/net/ipv6.h:537-544) honours a plain 1 only while the
         // interface does not forward, and `ip6_rcv_core()` (net/ipv6/
         // ip6_input.c:171-173) drops every IPv6 packet on an interface whose
-        // disable_ipv6 is set, so no RA reaches it at all.
-        let read = |file: &str| read_sysctl_i64(&entry.path().join(file).to_string_lossy());
+        // disable_ipv6 is set, so no RA reaches it at all. Every slot is read
+        // through the entry's own path — an interface name can be non-UTF-8,
+        // and the lossy form resolves to no file, which would drop the
+        // interface out of the reason instead of out of the list.
+        let read = |file: &str| read_sysctl_i64_path(&entry.path().join(file));
         if read("disable_ipv6") != 0 {
             continue;
         }
@@ -14464,6 +14467,41 @@ mod tests {
             rec.reason.contains("现有接口 eth0 仍在接受 RA"),
             "only eth0 is named; the loopback device receives no Router Advertisements: {}",
             rec.reason
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The interfaces the `default` template write leaves accepting Router
+    /// Advertisements are found by walking `conf/`, and an entry name can carry
+    /// non-UTF-8 bytes. Reading the per-device slots through the entry name's
+    /// lossy form made every slot unreadable, so the interface was left out of
+    /// the reason entirely and the operator's per-interface plan missed it —
+    /// the advice then names fewer interfaces than the host actually runs.
+    #[test]
+    fn ra_reason_counts_a_non_utf8_interface() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_accept_ra_raw_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let conf = dir.join("conf");
+        for iface in ["default", "all", "lo"] {
+            std::fs::create_dir_all(conf.join(iface)).unwrap();
+            std::fs::write(conf.join(iface).join("forwarding"), "0\n").unwrap();
+            std::fs::write(conf.join(iface).join("accept_ra"), "1\n").unwrap();
+        }
+        // The one interface that accepts RAs carries a raw 0xFF byte.
+        let raw = conf.join(std::ffi::OsStr::from_bytes(b"eth\xff0"));
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::write(raw.join("forwarding"), "0\n").unwrap();
+        std::fs::write(raw.join("accept_ra"), "1\n").unwrap();
+
+        assert_eq!(
+            interfaces_accepting_ra(&conf).len(),
+            1,
+            "the non-UTF-8 interface accepts RAs and must be counted"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
