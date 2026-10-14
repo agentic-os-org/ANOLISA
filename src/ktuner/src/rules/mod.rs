@@ -584,7 +584,20 @@ fn eval_dirty_ratio(
         // its redo/undo write bursts are the same dirty-page spikes this
         // bound heads off.
         || info.has_process("oracle");
-    let is_latency_sensitive = is_db || *workload == WorkloadType::IoLatency;
+    // The class this bound is written for is the whole latency side of
+    // `classify`, not only its OLTP databases: eval_swappiness takes the
+    // classification itself, the THP and vfs_cache_pressure gates list every
+    // member of both classes, and eval_thp's own comment records that "the
+    // sibling rules that share this gate (eval_swappiness, eval_dirty_ratio)
+    // take the classification itself" — while this predicate only ever matched
+    // IoLatency. A host whose only workload is a memory-resident cache or a
+    // search server therefore kept the stock dirty limit while its swappiness,
+    // vfs pressure and THP advice all moved.
+    let is_latency_sensitive = is_db
+        || matches!(
+            workload,
+            WorkloadType::IoLatency | WorkloadType::MemoryIntensive
+        );
 
     // dirty_ratio and dirty_bytes are mutually exclusive in the kernel (setting
     // one zeroes the other). Big-memory machines are handled by the bytes-based
@@ -4083,7 +4096,16 @@ fn eval_dirty_background_ratio_at(
             // oracle is the one OLTP database is_database_present already
             // counts; the same OLTP write-burst bound gates it in.
             || info.has_process("oracle");
-        if has_db || matches!(workload, WorkloadType::IoLatency) || current > 10 {
+        // The same latency class eval_dirty_ratio sizes (see there): the
+        // databases, the IoLatency verdict and the caches/search servers of
+        // the classification's MemoryIntensive half.
+        if has_db
+            || matches!(
+                workload,
+                WorkloadType::IoLatency | WorkloadType::MemoryIntensive
+            )
+            || current > 10
+        {
             recs.push(Recommendation {
                 param: "vm.dirty_background_ratio".to_string(),
                 current_value: current.to_string(),
@@ -11777,6 +11799,50 @@ mod tests {
         let bg = recs.iter().find(|r| r.param == "vm.dirty_background_ratio");
         assert!(bg.is_some());
         assert_eq!(bg.unwrap().recommended_value, "3");
+    }
+
+    #[test]
+    fn dirty_ratio_covers_the_cache_and_search_workloads() {
+        // `classify` puts both halves of the latency side on the same verdict
+        // path: an OLTP database is IoLatency, a memory-resident cache or a
+        // search server is MemoryIntensive, and the sibling gates
+        // (eval_swappiness, eval_thp, eval_vfs_cache_pressure) advise both.
+        // The dirty bound only ever matched IoLatency, so a host whose only
+        // workload is redis/etcd/elasticsearch kept the stock 20/10 limits
+        // while its swappiness, vfs pressure and THP advice all moved.
+        for (service, workload, bg_target) in [
+            ("redis-server", WorkloadType::MemoryIntensive, "5"),
+            ("etcd", WorkloadType::MemoryIntensive, "5"),
+            ("elasticsearch", WorkloadType::MemoryIntensive, "5"),
+            ("postgres", WorkloadType::IoLatency, "3"),
+        ] {
+            let mut info = make_test_info();
+            info.memory_total_gb = 32; // <64GB uses the ratio form
+            info.sysctl.dirty_ratio = 20;
+            info.sysctl.dirty_background_ratio = 10;
+            info.processes = vec![ProcessInfo {
+                name: service.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_dirty_ratio(&info, &workload, &mut recs);
+            let ratio = recs
+                .iter()
+                .find(|r| r.param == "vm.dirty_ratio")
+                .unwrap_or_else(|| panic!("{service}: the dirty limit comes down"));
+            assert_eq!(ratio.recommended_value, "5");
+            let bg = recs
+                .iter()
+                .find(|r| r.param == "vm.dirty_background_ratio")
+                .unwrap_or_else(|| panic!("{service}: the background threshold follows"));
+            assert_eq!(bg.recommended_value, "3");
+
+            // The standalone background rule agrees with the deduction above
+            // (they are deduped to one entry when both fire).
+            let mut bg_recs = Vec::new();
+            eval_dirty_background_ratio(&info, &workload, &mut bg_recs);
+            assert_eq!(bg_recs.len(), 1, "{service}: the background rule fires");
+            assert_eq!(bg_recs[0].recommended_value, bg_target);
+        }
     }
 
     #[test]
