@@ -915,37 +915,51 @@ fn eval_kptr_restrict_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
 }
 
 fn eval_protected_links(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let hardlinks_path = "/proc/sys/fs/protected_hardlinks";
-    let symlinks_path = "/proc/sys/fs/protected_symlinks";
+    eval_protected_links_at(
+        info,
+        recs,
+        "/proc/sys/fs/protected_hardlinks",
+        "/proc/sys/fs/protected_symlinks",
+    )
+}
 
-    if info.param_exists(hardlinks_path) {
-        let current = read_sysctl_u64(hardlinks_path);
-        if current == 0 {
-            recs.push(Recommendation {
-                param: "fs.protected_hardlinks".to_string(),
-                current_value: "0".to_string(),
-                recommended_value: "1".to_string(),
-                reason: "未启用硬链接保护，非特权用户可能利用硬链接进行提权攻击".to_string(),
-                confidence: Confidence::High,
-                category: Category::Security,
-                writable: true,
-            });
-        }
+/// Path-injectable form of [`eval_protected_links`] (the `eval_*_at` idiom) so
+/// both switch reads are assertable against synthetic files.
+///
+/// Both rules fire on a zero — the protection is off — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence that the protection is
+/// off, so a masked or garbled proc entry (a container's, typically) neither
+/// reports a `current_value` the host does not have nor asks for a write it
+/// may not need. A missing file already reported nothing and still does.
+fn eval_protected_links_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    hardlinks_path: &str,
+    symlinks_path: &str,
+) -> usize {
+    if read_switch(hardlinks_path) == Some(0) {
+        recs.push(Recommendation {
+            param: "fs.protected_hardlinks".to_string(),
+            current_value: "0".to_string(),
+            recommended_value: "1".to_string(),
+            reason: "未启用硬链接保护，非特权用户可能利用硬链接进行提权攻击".to_string(),
+            confidence: Confidence::High,
+            category: Category::Security,
+            writable: true,
+        });
     }
 
-    if info.param_exists(symlinks_path) {
-        let current = read_sysctl_u64(symlinks_path);
-        if current == 0 {
-            recs.push(Recommendation {
-                param: "fs.protected_symlinks".to_string(),
-                current_value: "0".to_string(),
-                recommended_value: "1".to_string(),
-                reason: "未启用符号链接保护，存在 TOCTOU 竞态条件攻击风险".to_string(),
-                confidence: Confidence::High,
-                category: Category::Security,
-                writable: true,
-            });
-        }
+    if read_switch(symlinks_path) == Some(0) {
+        recs.push(Recommendation {
+            param: "fs.protected_symlinks".to_string(),
+            current_value: "0".to_string(),
+            recommended_value: "1".to_string(),
+            reason: "未启用符号链接保护，存在 TOCTOU 竞态条件攻击风险".to_string(),
+            confidence: Confidence::High,
+            category: Category::Security,
+            writable: true,
+        });
     }
     2
 }
@@ -10317,6 +10331,74 @@ mod tests {
             assert!(
                 advice(path).is_empty(),
                 "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn protected_links_advice_needs_a_readable_switch() {
+        // Both halves of the rule fire on 0 and both read through the same
+        // reader, so each half is driven on its own: a readable 0 still
+        // advises, while a missing, malformed, empty or unreadable file does
+        // not — the protection is not known to be off.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_protected_links_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let off = dir.join("protected.0");
+        std::fs::write(&off, b"0\n").unwrap();
+        let on = dir.join("protected.1");
+        std::fs::write(&on, b"1\n").unwrap();
+        let malformed = dir.join("protected.malformed");
+        std::fs::write(&malformed, b"yes\n").unwrap();
+        let empty = dir.join("protected.empty");
+        std::fs::write(&empty, b"").unwrap();
+        let io_error = dir.join("protected.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("protected.missing");
+
+        let info = make_test_info();
+        let advice = |hardlinks: &std::path::Path, symlinks: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_protected_links_at(
+                &info,
+                &mut recs,
+                hardlinks.to_str().unwrap(),
+                symlinks.to_str().unwrap(),
+            );
+            recs
+        };
+
+        // Both switches at 0: one advice each, in registration order.
+        let recs = advice(&off, &off);
+        assert_eq!(recs.len(), 2, "both protections are off: {recs:?}");
+        assert_eq!(recs[0].param, "fs.protected_hardlinks");
+        assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[1].param, "fs.protected_symlinks");
+
+        // A readable non-zero on either side silences that side only.
+        let recs = advice(&on, &off);
+        assert_eq!(recs.len(), 1, "hardlink protection is on: {recs:?}");
+        assert_eq!(recs[0].param, "fs.protected_symlinks");
+        let recs = advice(&off, &on);
+        assert_eq!(recs.len(), 1, "symlink protection is on: {recs:?}");
+        assert_eq!(recs[0].param, "fs.protected_hardlinks");
+
+        // Anything the reader cannot interpret is not the value 0, and a
+        // missing file keeps reporting nothing at all. The other half is held
+        // at a readable 1, so an empty result means this half stayed quiet.
+        for path in [&malformed, &empty, &io_error, &missing] {
+            assert!(
+                advice(path, &on).is_empty(),
+                "{}: an unreadable hardlinks switch is not the value 0",
+                path.display()
+            );
+            assert!(
+                advice(&on, path).is_empty(),
+                "{}: an unreadable symlinks switch is not the value 0",
                 path.display()
             );
         }
