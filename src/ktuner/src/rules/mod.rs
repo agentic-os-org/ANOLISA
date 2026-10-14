@@ -884,12 +884,23 @@ fn eval_dmesg_restrict_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
 }
 
 fn eval_kptr_restrict(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/kptr_restrict";
+    eval_kptr_restrict_at(info, recs, "/proc/sys/kernel/kptr_restrict")
+}
+
+/// Path-injectable form of [`eval_kptr_restrict`] (the `eval_*_at` idiom) so
+/// the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — kernel pointers are visible — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence of the exposure, so a
+/// masked or garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not
+/// need.
+fn eval_kptr_restrict_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.kptr_restrict".to_string(),
             current_value: "0".to_string(),
@@ -10260,6 +10271,48 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 0 leaves the kernel log open");
         assert_eq!(recs[0].current_value, "0");
         assert!(advice(&on).is_empty(), "a readable 1 is restricted");
+        for path in [&malformed, &empty, &io_error] {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn kptr_restrict_advice_needs_a_readable_switch() {
+        // Same shape: only a zero the reader could produce is evidence that
+        // kernel pointers are visible, so an unreadable or unparseable file
+        // neither reports `current_value: "0"` nor asks for a write.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_kptr_restrict_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let off = dir.join("kptr_restrict.0");
+        std::fs::write(&off, b"0\n").unwrap();
+        let on = dir.join("kptr_restrict.2");
+        std::fs::write(&on, b"2\n").unwrap();
+        let malformed = dir.join("kptr_restrict.malformed");
+        std::fs::write(&malformed, b"hidden\n").unwrap();
+        let empty = dir.join("kptr_restrict.empty");
+        std::fs::write(&empty, b"").unwrap();
+        let io_error = dir.join("kptr_restrict.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_kptr_restrict_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 exposes the pointers");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 2 hides them");
         for path in [&malformed, &empty, &io_error] {
             assert!(
                 advice(path).is_empty(),
