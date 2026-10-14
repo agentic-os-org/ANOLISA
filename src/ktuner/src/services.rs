@@ -66,6 +66,12 @@ const KNOWN_SERVICES: &[(&str, &str)] = &[
     ("logstash", "Logstash"),
     ("solr", "Solr"),
     ("tomcat", "Tomcat"),
+    // The runtimes the engine's gates count under their own name. `java` has
+    // always had an entry (any JVM reports Java); `node` had none, so a
+    // Node.js-only host published `"services": []` while the max_map_count
+    // gate sized its mmap limit from `has_process_exact("node")` — the hole
+    // the oracle entry closed for the database gates.
+    ("node", "Node.js"),
 ];
 
 pub fn detect_services(info: &SystemInfo) -> Vec<&'static str> {
@@ -246,5 +252,22 @@ mod tests {
         // The server, not a client tool with a shared prefix.
         let info = info_with(&["apache2ctl"]);
         assert!(!detect_services(&info).contains(&"Apache"));
+    }
+
+    #[test]
+    fn test_detect_services_reports_node() {
+        // `node` is the runtime the max_map_count gate counts
+        // (`has_process_exact("node")`) and the detector's own name list
+        // classes as a service rather than a collector, but the report's
+        // table had no entry for it: a Node.js-only host published
+        // `"services": []` although the engine sized its mmap limit for that
+        // workload.
+        let info = info_with(&["node"]);
+        let svcs = detect_services(&info);
+        assert!(svcs.contains(&"Node.js"), "{svcs:?}");
+        // node_exporter is a collector of the runtime, not the runtime: the
+        // entry must not report Node.js for a metrics-only host.
+        let info = info_with(&["node_exporter"]);
+        assert!(!detect_services(&info).contains(&"Node.js"));
     }
 }
