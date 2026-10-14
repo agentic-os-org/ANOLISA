@@ -1312,24 +1312,44 @@ fn eval_tcp_slow_start_after_idle(info: &SystemInfo, recs: &mut Vec<Recommendati
         recs,
         "/proc/sys/net/ipv4/tcp_slow_start_after_idle",
         "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
     )
 }
 
 /// Path-injectable form of [`eval_tcp_slow_start_after_idle`] (the `eval_*_at`
-/// idiom) so the value and the congestion control both come from test files
-/// instead of the live /proc.
+/// idiom) so the value, the congestion control and its available list all come
+/// from test files instead of the live /proc.
+///
+/// The congestion control this rule judges is the one the run's *plan* leaves
+/// in force: the sibling `net.ipv4.tcp_congestion_control` rule raises a
+/// non-BBR host to bbr whenever bbr is registered or loadable
+/// ([`bbr_will_be_in_force`]), and both readers of this knob bail out on a
+/// control that defines `cong_control`. Judging the pre-plan value let one plan
+/// carry `cc = bbr` and `slow_start_after_idle = 0` together — the second write
+/// changing nothing of what its reason promises, the same no-op the
+/// hardlockup_panic, min_slab_ratio, qdisc and bpf-harden gates were fixed to
+/// refuse.
 fn eval_tcp_slow_start_after_idle_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
     congestion_control_path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
 ) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
+    let congestion_control =
+        if bbr_will_be_in_force(info, congestion_control_path, avail_path, module_tree) {
+            "bbr".to_string()
+        } else {
+            read_sysctl_string(congestion_control_path)
+        };
     if let Some(rec) = slow_start_after_idle_recommendation(
         read_sysctl_i64(path),
-        &read_sysctl_string(congestion_control_path),
+        &congestion_control,
         info.has_listen_sockets(),
     ) {
         recs.push(rec);
@@ -12584,7 +12604,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let value = dir.join("tcp_slow_start_after_idle");
         let cc = dir.join("tcp_congestion_control");
+        let avail = dir.join("tcp_available_congestion_control");
         std::fs::write(&cc, "cubic\n").unwrap();
+        // No bbr in the available list and no module tree: the live cubic stays
+        // in force, so the reader is what these rows exercise.
+        std::fs::write(&avail, "reno cubic\n").unwrap();
         for (raw, expects_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
             std::fs::write(&value, format!("{raw}\n")).unwrap();
             let mut recs = Vec::new();
@@ -12593,6 +12617,8 @@ mod tests {
                 &mut recs,
                 value.to_str().unwrap(),
                 cc.to_str().unwrap(),
+                avail.to_str().unwrap(),
+                None,
             );
             assert_eq!(
                 recs.len(),
@@ -12605,6 +12631,83 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "0");
             }
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn slow_start_after_idle_defers_to_the_plan_congestion_control() {
+        // One `ktuner tune` run carries both writes: the sibling
+        // net.ipv4.tcp_congestion_control rule raises a non-BBR host to bbr
+        // whenever bbr is registered (`tcp_available_congestion_control`) or
+        // loadable (`tcp_bbr` in the module tree), and this rule's reason
+        // promises exactly what BBR does by design. Both readers of the knob
+        // skip a control that defines `cong_control`, so the second entry of
+        // that plan changes nothing and the next run drops it again.
+        let info = make_test_info();
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_slow_start_plan_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let value = dir.join("tcp_slow_start_after_idle");
+        let cc = dir.join("tcp_congestion_control");
+        let avail = dir.join("tcp_available_congestion_control");
+        std::fs::write(&value, "1\n").unwrap();
+        std::fs::write(&cc, "cubic\n").unwrap();
+
+        // The plan's own bbr write leaves the knob with no reader.
+        std::fs::write(&avail, "reno cubic bbr\n").unwrap();
+        let mut recs = Vec::new();
+        eval_tcp_slow_start_after_idle_at(
+            &info,
+            &mut recs,
+            value.to_str().unwrap(),
+            cc.to_str().unwrap(),
+            avail.to_str().unwrap(),
+            None,
+        );
+        assert!(
+            recs.is_empty(),
+            "the plan's bbr leaves the knob unread: {recs:?}"
+        );
+
+        // A loadable-but-unregistered bbr is just as usable
+        // (tcp_ca_find_autoload), so the module tree alone voided the advice.
+        let tree = dir.join("modules");
+        std::fs::create_dir_all(tree.join("kernel/net/ipv4")).unwrap();
+        std::fs::write(tree.join("kernel/net/ipv4/tcp_bbr.ko"), "").unwrap();
+        std::fs::write(&avail, "reno cubic\n").unwrap();
+        let mut recs = Vec::new();
+        eval_tcp_slow_start_after_idle_at(
+            &info,
+            &mut recs,
+            value.to_str().unwrap(),
+            cc.to_str().unwrap(),
+            avail.to_str().unwrap(),
+            Some(tree.as_path()),
+        );
+        assert!(
+            recs.is_empty(),
+            "a loadable tcp_bbr is still the plan's control: {recs:?}"
+        );
+
+        // No bbr anywhere: the live cubic stays in force and the advice stands.
+        let mut recs = Vec::new();
+        eval_tcp_slow_start_after_idle_at(
+            &info,
+            &mut recs,
+            value.to_str().unwrap(),
+            cc.to_str().unwrap(),
+            avail.to_str().unwrap(),
+            None,
+        );
+        assert_eq!(recs.len(), 1, "a cubic host keeps the advice");
+        assert_eq!(recs[0].param, "net.ipv4.tcp_slow_start_after_idle");
+        assert_eq!(recs[0].recommended_value, "0");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
