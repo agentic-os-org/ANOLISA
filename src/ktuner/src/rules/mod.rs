@@ -7840,24 +7840,50 @@ fn eval_tcp_min_tso_segs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
     1
 }
 
-fn eval_neigh_default_gc_interval(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+fn eval_neigh_default_gc_interval(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_interval";
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current < 30 {
-        recs.push(Recommendation {
-            param: "net.ipv4.neigh.default.gc_interval".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "30".to_string(),
-            reason: format!("ARP 垃圾回收间隔 {current}s 过短，频繁 GC 增加 CPU 开销"),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = neigh_gc_interval_recommendation(read_sysctl_u64(path), &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.neigh.default.gc_interval` recommendation for an
+/// already-read value.
+///
+/// Split out from the file probe so the version gate is testable on any host.
+fn neigh_gc_interval_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
+    // Nothing reads the knob. `neigh_periodic_work()` re-arms itself from
+    // `NEIGH_VAR(&tbl->parms, BASE_REACHABLE_TIME) >> 1` — "cycle through all
+    // hash buckets every BASE_REACHABLE_TIME/2 ticks" (v6.6
+    // net/core/neighbour.c:1031-1036) — and the sysctl's only other
+    // occurrences are its table entry and the netlink get/set (:2189, :2478,
+    // :3831). That has been true for as far back as the record goes: in
+    // 2.6.12 the sysctl entry is the file's only occurrence and the timer
+    // already ran from `base_reachable_time`. So on every kernel ktuner runs
+    // on, the advice misdescribes the kernel — it promises a shorter ARP GC
+    // interval saves CPU while no GC interval change can happen — and the
+    // write changes nothing. Keep it only below 2.6, the version-gate shape of
+    // the tcp_fack (4.15), sched_child_runs_first (6.6) and read-ahead rules.
+    if kernel_at_least(kernel_version, 2, 6) {
+        return None;
+    }
+    if current >= 30 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.neigh.default.gc_interval".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "30".to_string(),
+        reason: format!("ARP 垃圾回收间隔 {current}s 过短，频繁 GC 增加 CPU 开销"),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_neigh_default_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -12403,6 +12429,31 @@ mod tests {
             rec.is_none(),
             "Should not recommend sched_min_granularity for small CPU count"
         );
+    }
+
+    #[test]
+    fn neigh_gc_interval_is_dead_advice_on_modern_kernels() {
+        // `neigh_periodic_work()` re-arms the GC work from
+        // `BASE_REACHABLE_TIME >> 1`, and 2.6.12 (the earliest tree the record
+        // reaches) already has the sysctl entry as the knob's only occurrence:
+        // nothing consumes the value, so the recommendation misdescribes the
+        // kernel and its write changes nothing on every kernel ktuner runs on.
+        for version in ["6.6.0", "5.4.0", "3.10.0-1160.el7", "2.6.12"] {
+            assert!(
+                neigh_gc_interval_recommendation(10, version).is_none(),
+                "{version}: no reader, no advice"
+            );
+        }
+
+        let rec = neigh_gc_interval_recommendation(10, "2.4.0")
+            .expect("a pre-2.6 kernel keeps the advice");
+        assert_eq!(rec.param, "net.ipv4.neigh.default.gc_interval");
+        assert_eq!(rec.current_value, "10");
+        assert_eq!(rec.recommended_value, "30");
+
+        // The value gate still applies below the version gate.
+        assert!(neigh_gc_interval_recommendation(30, "2.4.0").is_none());
+        assert!(neigh_gc_interval_recommendation(120, "2.4.0").is_none());
     }
 
     #[test]
