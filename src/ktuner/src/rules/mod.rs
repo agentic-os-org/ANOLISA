@@ -8307,12 +8307,13 @@ fn eval_bpf_jit_enable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     1
 }
 
-fn eval_bpf_jit_harden(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+fn eval_bpf_jit_harden(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     eval_bpf_jit_harden_at(
+        info,
+        recs,
         "/proc/sys/net/core/bpf_jit_harden",
         "/proc/sys/net/core/bpf_jit_enable",
         "/proc/sys/kernel/unprivileged_bpf_disabled",
-        recs,
     )
 }
 
@@ -8344,11 +8345,23 @@ fn eval_bpf_jit_harden(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 /// change what the host can do while the report still claims a hardening gap
 /// was closed. Both gates fail open: a switch that cannot be read is not
 /// evidence that it is off.
+///
+/// The unprivileged switch is judged by the value this run's plan leaves
+/// behind, not only by the one on disk: on 5.13+ the sibling
+/// `kernel.unprivileged_bpf_disabled` rule writes 2 out of a readable 0
+/// (`eval_unprivileged_bpf` -> `recommend_unprivileged_bpf`), so the plan that
+/// carries this hardening entry also removes every non-capable loader the
+/// level-1 blinding could apply to. Judging the pre-plan value alone let the
+/// same plan contain `unprivileged_bpf_disabled = 2` and
+/// `bpf_jit_harden = 1` — the second write could never change a compiled
+/// program, the no-op the sibling gates already refuse, and the judgement the
+/// hardlockup_panic and min_slab_ratio gates made when they were fixed.
 fn eval_bpf_jit_harden_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
     path: &str,
     jit_enable_path: &str,
     unprivileged_path: &str,
-    recs: &mut Vec<Recommendation>,
 ) -> usize {
     let Some(current) = read_switch(path) else {
         return 1;
@@ -8359,7 +8372,7 @@ fn eval_bpf_jit_harden_at(
     if read_switch(jit_enable_path) == Some(0) {
         return 1;
     }
-    if read_switch(unprivileged_path).is_some_and(|value| value != 0) {
+    if level_one_blinding_has_no_loader(read_switch(unprivileged_path), &info.kernel_version) {
         return 1;
     }
     recs.push(Recommendation {
@@ -8372,6 +8385,24 @@ fn eval_bpf_jit_harden_at(
         writable: true,
     });
     1
+}
+
+/// Whether every loader that can still load a program will be `bpf_capable()`
+/// once this run's plan has been applied, i.e. whether level-1 JIT hardening
+/// has no loader left to blind.
+///
+/// A non-zero `unprivileged_bpf_disabled` denies `bpf()` to anyone without
+/// CAP_BPF/CAP_SYS_ADMIN (v6.6 kernel/bpf/syscall.c:2635), and a 0 on 5.13+
+/// gets the value 2 from the sibling rule in the same plan — the value `2`
+/// exists only from 5.13 (see `recommend_unprivileged_bpf` for why there is no
+/// reversible target below it). An unreadable switch is not evidence of either
+/// state, so it fails open like the other gates of this rule.
+fn level_one_blinding_has_no_loader(unprivileged: Option<u64>, kernel_version: &str) -> bool {
+    match unprivileged {
+        Some(0) => kernel_at_least(kernel_version, 5, 13),
+        Some(_) => true,
+        None => false,
+    }
 }
 
 #[allow(clippy::ptr_arg)]
@@ -15709,17 +15740,19 @@ mod tests {
     /// `bpf_jit_enable == 0` leaves every program's `jit_requested` false, so
     /// nothing can be blinded; a non-zero `unprivileged_bpf_disabled` leaves
     /// only `bpf_capable()` loaders, and hardening level 1 does not blind
-    /// those. Either switch voids the advice, which is why the live assertion
-    /// below has to model them.
-    fn bpf_jit_harden_is_voided_by_a_switch() -> bool {
+    /// those — and so does a 0 on 5.13+, where the rule's sibling writes 2 in
+    /// the same plan. Either switch voids the advice, which is why the live
+    /// assertion below has to model them.
+    fn bpf_jit_harden_is_voided_by_a_switch(kernel_version: &str) -> bool {
         let switch = |path: &str| {
             std::fs::read_to_string(path)
                 .ok()
                 .map(|raw| raw.trim().to_string())
         };
+        let unprivileged = switch("/proc/sys/kernel/unprivileged_bpf_disabled");
         switch("/proc/sys/net/core/bpf_jit_enable").as_deref() == Some("0")
-            || switch("/proc/sys/kernel/unprivileged_bpf_disabled")
-                .is_some_and(|value| value != "0")
+            || unprivileged.as_deref().is_some_and(|value| value != "0")
+            || (unprivileged.as_deref() == Some("0") && kernel_at_least(kernel_version, 5, 13))
     }
 
     #[test]
@@ -15740,7 +15773,7 @@ mod tests {
         // design (#6829), so the expectation has to follow. Without them this
         // assertion fails on every stock Ubuntu 24.04 host, where
         // `kernel.unprivileged_bpf_disabled` defaults to 2.
-        let voided = bpf_jit_harden_is_voided_by_a_switch();
+        let voided = bpf_jit_harden_is_voided_by_a_switch(&info.kernel_version);
         match std::fs::read_to_string("/proc/sys/net/core/bpf_jit_harden") {
             Ok(raw) => {
                 assert_eq!(
@@ -15763,8 +15796,9 @@ mod tests {
     fn bpf_jit_harden_skips_an_unreadable_sysctl() {
         // A directory is the portable stand-in for "exists but cannot be
         // read" (EISDIR), which works for root and unprivileged runs alike.
+        let info = make_test_info();
         let mut recs = Vec::new();
-        assert_eq!(eval_bpf_jit_harden_at("/", "/", "/", &mut recs), 1);
+        assert_eq!(eval_bpf_jit_harden_at(&info, &mut recs, "/", "/", "/"), 1);
         assert!(
             recs.is_empty(),
             "a failed read must not report a hardening gap: {recs:?}"
@@ -15773,6 +15807,7 @@ mod tests {
 
     #[test]
     fn bpf_jit_harden_reads_real_values() {
+        let info = make_test_info();
         let dir = std::env::temp_dir().join(format!("ktuner-bpf-harden-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("bpf_jit_harden");
@@ -15786,7 +15821,7 @@ mod tests {
 
         std::fs::write(path, "0\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(path, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, path, jit, unprivileged);
         assert_eq!(recs.len(), 1, "a readable 0 is still a finding");
         assert_eq!(recs[0].param, "net.core.bpf_jit_harden");
         assert_eq!(recs[0].current_value, "0");
@@ -15794,13 +15829,13 @@ mod tests {
 
         std::fs::write(path, "1\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(path, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, path, jit, unprivileged);
         assert!(recs.is_empty(), "a hardened host has no finding");
 
         // Garbage is a failed parse, not a value either.
         std::fs::write(path, "not-a-number\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(path, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, path, jit, unprivileged);
         assert!(recs.is_empty(), "unparseable content is not the value 0");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -15809,6 +15844,7 @@ mod tests {
     /// consumer, and the fail-open rule for a switch that cannot be read.
     #[test]
     fn bpf_jit_harden_keeps_quiet_without_a_consumer() {
+        let info = make_test_info();
         let dir = std::env::temp_dir().join(format!("ktuner-bpf-gates-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let harden = dir.join("bpf_jit_harden");
@@ -15826,13 +15862,13 @@ mod tests {
         std::fs::write(jit, "1\n").expect("write fixture");
         std::fs::write(unprivileged, "0\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
         assert_eq!(recs.len(), 1, "a consumer exists: the gap is a finding");
 
         // JIT off: no program asks for JITed code, so nothing is blinded.
         std::fs::write(jit, "0\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
         assert!(recs.is_empty(), "the JIT is off: nothing to blind");
 
         // Unprivileged BPF denied: every loader that can still load a program
@@ -15841,29 +15877,52 @@ mod tests {
         std::fs::write(jit, "1\n").expect("write fixture");
         std::fs::write(unprivileged, "1\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
         assert!(recs.is_empty(), "no unprivileged loader to blind");
         std::fs::write(unprivileged, "2\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, jit, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
         assert!(recs.is_empty(), "level 2 denies unprivileged loads too");
 
         // Fail open: a switch that cannot be read, or is not there, is not
         // evidence that it is off.
         std::fs::write(unprivileged, "0\n").expect("write fixture");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, "/", unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, "/", unprivileged);
         assert_eq!(recs.len(), 1, "an unreadable jit switch keeps the advice");
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, jit, "/", &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, "/");
         assert_eq!(
             recs.len(),
             1,
             "an unreadable unprivileged switch keeps the advice"
         );
         let mut recs = Vec::new();
-        eval_bpf_jit_harden_at(harden, absent, unprivileged, &mut recs);
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, absent, unprivileged);
         assert_eq!(recs.len(), 1, "a missing switch is not the value 0");
+
+        // A readable 0 on 5.13+ is denied by this run's own plan: the sibling
+        // unprivileged_bpf_disabled rule writes 2 out of it, which leaves no
+        // non-capable loader for level-1 blinding, so the hardening entry the
+        // same plan carries can never change a compiled program.
+        let mut modern = make_test_info();
+        modern.kernel_version = "6.6.0".to_string();
+        std::fs::write(unprivileged, "0\n").expect("write fixture");
+        let mut recs = Vec::new();
+        eval_bpf_jit_harden_at(&modern, &mut recs, harden, jit, unprivileged);
+        assert!(
+            recs.is_empty(),
+            "the plan's own unprivileged_bpf_disabled = 2 removes the loader"
+        );
+        // Below 5.13 the value 2 does not exist, so the plan writes nothing
+        // and the advice keeps the loader it has.
+        let mut recs = Vec::new();
+        eval_bpf_jit_harden_at(&info, &mut recs, harden, jit, unprivileged);
+        assert_eq!(
+            recs.len(),
+            1,
+            "no companion write exists below 5.13, so the advice stays"
+        );
 
         std::fs::remove_file(harden).ok();
         std::fs::remove_file(jit).ok();
