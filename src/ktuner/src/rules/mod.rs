@@ -4673,9 +4673,19 @@ fn swap_configured(path: &str) -> bool {
 /// host reported, i.e. the advice's "on an SSD" premise is provably false for
 /// the area it sizes.
 ///
-/// The area's device field is resolved against the whole-disk names in
-/// `info.disks` (`/dev/sdb2` against `sdb`, `/dev/nvme0n1p2` against
-/// `nvme0n1`); anything else — a swap file, a zram node, a device-mapper path —
+/// The area's device field resolves against the whole-disk inventory by name
+/// (`/dev/sdb2` against `sdb`, `/dev/nvme0n1p2` against `nvme0n1`) or as a
+/// holder of a disk: a device-mapper node that claims a whole disk is recorded
+/// in that disk's `holders` directory, named after the holding gendisk
+/// (`bd_link_disk_holder()`, v6.6 block/holder.c:33-48: "from holders
+/// directory of the @bdev to the holder @disk", `/sys/block/dm-0/slaves/sda`
+/// and `/sys/block/sda/holders/dm-0`), and the area's I/O goes to that disk,
+/// so it inherits its medium. The holder link is on the whole disk only while
+/// the mapper node claims the disk itself: a mapper node over one of its
+/// partitions, and a mapper node stacked on another mapper node, are in no
+/// directory of this inventory.
+///
+/// Anything else — a swap file, a zram node, a `/dev/mapper/<name>` alias —
 /// resolves to no disk and is left alone, so a medium this inventory cannot see
 /// keeps today's advice instead of losing it.
 ///
@@ -4694,21 +4704,26 @@ fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
         let Some(name) = area.strip_prefix(b"/dev/") else {
             return false;
         };
-        // A whole device or one of its partitions: nothing after the disk name
-        // (`/dev/sdb`), or a partition suffix (`2`, and `p2` as nvme/mmcblk
-        // write it). A bare prefix match would attribute `/dev/sdaa2` to a disk
-        // named `sda` and `/dev/sdb2bak` to `sdb`, and quietly drop the advice
-        // for the disk the area is really on.
         info.disks.iter().any(|disk| {
             disk.disk_type == DiskType::HDD
-                && name.strip_prefix(disk.name.as_bytes()).is_some_and(|rest| {
-                    rest.is_empty()
-                        || rest
-                            .strip_prefix(b"p")
-                            .unwrap_or(rest)
-                            .iter()
-                            .all(|byte| byte.is_ascii_digit())
-                })
+                && (disk
+                    .holders
+                    .iter()
+                    .any(|holder| holder.as_bytes() == name)
+                    // A whole device or one of its partitions: nothing after the
+                    // disk name (`/dev/sdb`), or a partition suffix (`2`, and
+                    // `p2` as nvme/mmcblk write it). A bare prefix match would
+                    // attribute `/dev/sdaa2` to a disk named `sda` and
+                    // `/dev/sdb2bak` to `sdb`, and quietly drop the advice for
+                    // the disk the area is really on.
+                    || name.strip_prefix(disk.name.as_bytes()).is_some_and(|rest| {
+                        rest.is_empty()
+                            || rest
+                                .strip_prefix(b"p")
+                                .unwrap_or(rest)
+                                .iter()
+                                .all(|byte| byte.is_ascii_digit())
+                    }))
         })
     })
 }
@@ -13044,12 +13059,57 @@ mod tests {
         )
         .unwrap();
         assert!(std::str::from_utf8(&std::fs::read(&mixed_encoding).unwrap()).is_err());
+        // Device-mapper areas: `dm-3` claims the rotational disk `sdb` (it is
+        // in that disk's holders), `dm-4` claims the SSD `sdc`, `dm-9` claims
+        // nothing the inventory reports, and `dm-30` is a different node from
+        // the `dm-3` holder a prefix comparison would resolve.
+        let on_a_mapper_over_hdd = dir.join("swaps-mapper-hdd");
+        std::fs::write(
+            &on_a_mapper_over_hdd,
+            [
+                header.as_slice(),
+                b"/dev/dm-3                                partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let on_a_mapper_over_ssd = dir.join("swaps-mapper-ssd");
+        std::fs::write(
+            &on_a_mapper_over_ssd,
+            [
+                header.as_slice(),
+                b"/dev/dm-4                                partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let on_an_unclaimed_mapper = dir.join("swaps-mapper-unclaimed");
+        std::fs::write(
+            &on_an_unclaimed_mapper,
+            [
+                header.as_slice(),
+                b"/dev/dm-9                                partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let on_a_longer_mapper_name = dir.join("swaps-mapper-longer-name");
+        std::fs::write(
+            &on_a_longer_mapper_name,
+            [
+                header.as_slice(),
+                b"/dev/dm-30                               partition\t16776188\t0\t\t-2\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
 
         // make_test_info carries one NVMe disk; add the rotational disks the
         // HDD fixtures' areas name (`sda` is the shorter name `sdaa2` merely
-        // starts with).
+        // starts with), with the mapper node `dm-3` claiming `sdb`, and the SSD
+        // `sdc` that `dm-4` claims.
         let mut info = make_test_info();
-        for name in ["sdb", "sda"] {
+        for (name, holders) in [("sdb", vec!["dm-3".to_string()]), ("sda", vec![])] {
             info.disks.push(DiskInfo {
                 name: name.to_string(),
                 disk_type: DiskType::HDD,
@@ -13059,9 +13119,20 @@ mod tests {
                 read_ahead_kb: 128,
                 rq_affinity: 1,
                 hidden: false,
-                holders: vec![],
+                holders,
             });
         }
+        info.disks.push(DiskInfo {
+            name: "sdc".to_string(),
+            disk_type: DiskType::SSD,
+            scheduler: "mq-deadline".to_string(),
+            available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
+            nr_requests: 128,
+            read_ahead_kb: 128,
+            rq_affinity: 1,
+            hidden: false,
+            holders: vec!["dm-4".to_string()],
+        });
 
         for (swaps, expected, why) in [
             (&on_nvme, true, "the swap area is on the NVMe disk"),
@@ -13090,6 +13161,26 @@ mod tests {
                 &mixed_encoding,
                 false,
                 "a non-UTF-8 sibling name does not hide the HDD area",
+            ),
+            (
+                &on_a_mapper_over_hdd,
+                false,
+                "the area's mapper node claims the rotational disk",
+            ),
+            (
+                &on_a_mapper_over_ssd,
+                true,
+                "the area's mapper node claims the SSD disk",
+            ),
+            (
+                &on_an_unclaimed_mapper,
+                true,
+                "a mapper node no reported disk holds claims no medium",
+            ),
+            (
+                &on_a_longer_mapper_name,
+                true,
+                "dm-30 is a different node from the dm-3 holder",
             ),
         ] {
             let mut recs = Vec::new();
