@@ -151,6 +151,43 @@ describe('ShellTool', () => {
       );
     });
 
+    it('should reject a sibling-prefix directory that merely starts with the workspace path', () => {
+      // '/test/dir-evil'.startsWith('/test/dir') is true, but the directory
+      // is a sibling of the workspace, not inside it.
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir-evil',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/test/dir-evil' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should reject a directory that traverses out of the workspace with ..', () => {
+      // Resolves to /test/escape, outside the workspace, while the raw
+      // string still starts with the workspace path.
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir/../escape',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/test/dir/../escape' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should accept the workspace root itself as the directory', () => {
+      const invocation = shellTool.build({
+        command: 'ls',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      expect(invocation).toBeDefined();
+    });
+
     it('should throw an error for a directory within the user skills directory', () => {
       expect(() =>
         shellTool.build({

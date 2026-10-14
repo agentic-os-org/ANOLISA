@@ -660,9 +660,18 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
-      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
-      const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
+      // Containment must run on the fully resolved path, including symlink
+      // resolution, via WorkspaceContext.isPathWithinWorkspace() — the same
+      // boundary check the file tools use. path.resolve only folds '..': it
+      // keeps the symlinked spelling, so isSubpath(workspace, '/ws/link')
+      // still accepts a link whose target lives outside the workspace while
+      // the execution layer spawns with the raw link path as cwd. Checking
+      // the dereferenced path also keeps rejecting sibling prefixes
+      // ('/ws-evil' vs workspace '/ws') and '..' traversal
+      // ('/ws/../escape'), and matches the cwd the shell will actually get.
+      const workspaceContext = this.config.getWorkspaceContext();
+      const isWithinWorkspace = workspaceContext.isPathWithinWorkspace(
+        resolvedDirectoryPath,
       );
 
       if (!isWithinWorkspace) {
