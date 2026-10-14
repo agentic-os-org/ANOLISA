@@ -2017,7 +2017,14 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
         // oracle is the one OLTP database is_database_present already counts;
         // its random-IO-dominated access pattern is the same reason the
         // window shrinks for the sibling databases.
-        || info.has_process("oracle");
+        || info.has_process("oracle")
+        // TiDB is the classifier's OLTP database and TiKV its distributed KV
+        // store (`classify`'s has_db -> IoLatency): the two remaining members
+        // of the database class this hand-rolled list skipped, so their disks
+        // kept the default window while the sibling gates that take the
+        // classification already sized their other knobs.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server");
 
     for disk in &info.disks {
         // The window this rule resizes belongs to the device a filesystem is
@@ -10916,6 +10923,41 @@ mod tests {
         assert_eq!(rec.recommended_value, "128");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// profile::classify calls a TiDB host io-latency — TiDB is an OLTP
+    /// database and TiKV its distributed KV store — but this hand-rolled db
+    /// list still skips both process names, so the host kept the default
+    /// read-ahead window on the disks the rule is written for. Both names are
+    /// in the sibling lists that take the classification (the THP gate, the
+    /// swappiness/dirty_ratio rules); this gate is the only place the window
+    /// is sized, so it stayed silent.
+    #[test]
+    fn tidb_and_tikv_gate_the_read_ahead_rule() {
+        for name in ["tidb-server", "tikv-server"] {
+            let mut info = info_with_processes(&[name]);
+            info.disks[0].disk_type = DiskType::NVMe;
+            info.disks[0].read_ahead_kb = 512;
+
+            let mut recs = Vec::new();
+            eval_read_ahead_kb(&info, &mut recs);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "block/nvme0n1/read_ahead_kb")
+                .unwrap_or_else(|| panic!("{name} must gate the read-ahead rule in"));
+            assert_eq!(rec.recommended_value, "128");
+        }
+        // A workload outside the database class keeps the window it has.
+        let mut info = info_with_processes(&["make"]);
+        info.disks[0].disk_type = DiskType::NVMe;
+        info.disks[0].read_ahead_kb = 512;
+        let mut recs = Vec::new();
+        eval_read_ahead_kb(&info, &mut recs);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "block/nvme0n1/read_ahead_kb"),
+            "a build job is not a database"
+        );
     }
 
     #[test]
