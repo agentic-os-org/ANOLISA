@@ -9,6 +9,13 @@ const KNOWN_SERVICES: &[(&str, &str)] = &[
     ("mariadbd", "MariaDB"),
     ("mongod", "MongoDB"),
     ("clickhouse", "ClickHouse"),
+    // Oracle's instance processes all run the `oracle` binary, and the engine
+    // already matches that name: `is_database_present` and the swappiness,
+    // THP, dirty-ratio, dirty-background, NUMA-balancing and read-ahead rules
+    // gate on it, and `classify` turns the process into the io-latency
+    // workload — without this entry an Oracle-only host reported no database
+    // service at all, the hole the mariadbd entry closed for MariaDB.
+    ("oracle", "Oracle"),
     ("redis-server", "Redis"),
     // Valkey is the Linux Foundation's fork of Redis 7.2.4; the daemon comm
     // is `valkey-server`. Without this entry a Valkey host reported no
@@ -185,6 +192,21 @@ mod tests {
         let svcs = detect_services(&info);
         assert!(svcs.contains(&"Nginx"), "{svcs:?}");
         assert!(svcs.contains(&"PostgreSQL"), "{svcs:?}");
+    }
+
+    #[test]
+    fn test_detect_services_reports_oracle() {
+        // oracle is the one database the engine's gates already count that
+        // the report could not name: `is_database_present` and the swappiness,
+        // THP, dirty-ratio, dirty-background, NUMA-balancing and read-ahead
+        // rules all gate on `has_process("oracle")`, and `classify` turns the
+        // process into the io-latency workload — while an Oracle-only host
+        // ended up with an empty `services` list. The mariadbd entry and the
+        // runtime marker entries closed the same "engine-detected service the
+        // report cannot name" hole for their names.
+        let info = info_with(&["oracle"]);
+        assert_eq!(detect_services(&info), vec!["Oracle"]);
+        assert!(info.has_process("oracle"));
     }
 
     #[test]
