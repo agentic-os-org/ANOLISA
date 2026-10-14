@@ -1895,7 +1895,20 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     ("zookeeper", "zookeeper"),
     ("org.apache.flink", "flink"),
     ("flink", "flink"),
-    ("org.apache.spark", "spark"),
+    // Spark maps its standalone daemons (sbin/start-master.sh,
+    // start-worker.sh, start-history-server.sh) and its Connect server
+    // (SparkConnectServer) — and NOT the bare `org.apache.spark` root, for
+    // the reason the Kafka markers above spell out: `bin/spark-submit` execs
+    // the JVM with org.apache.spark.deploy.SparkSubmit, the client's own
+    // class, so only the class is left to decide once the launcher has exec'd
+    // and the bare root read a host that only submits jobs as the cluster.
+    ("org.apache.spark.deploy.master.Master", "spark"),
+    ("org.apache.spark.deploy.worker.Worker", "spark"),
+    ("org.apache.spark.deploy.history.HistoryServer", "spark"),
+    (
+        "org.apache.spark.sql.connect.service.SparkConnectServer",
+        "spark",
+    ),
     ("spark", "spark"),
     ("org.apache.cassandra", "cassandra"),
     ("cassandra", "cassandra"),
@@ -4373,6 +4386,42 @@ mod tests {
             assert_eq!(
                 runtime_service_from_cmdline(&cmdline),
                 Some("zookeeper"),
+                "{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_the_spark_client() {
+        // `bin/spark-submit` execs the JVM with the client's own main class
+        // (apache/spark bin/spark-submit: org.apache.spark.deploy.SparkSubmit
+        // through spark-class), so the `spark-submit` argv[0] every
+        // `spark-*` name check looks for is gone by the time the process is
+        // sampled — `program_names_service_tool` even names spark-submit as an
+        // executable that "can only be one of its tools", and the bare
+        // `org.apache.spark` root read the class anyway. A host that only
+        // submits jobs to a cluster running elsewhere reported "Spark",
+        // classified as the streaming workload and earned the 2048 KB
+        // read-ahead window on spinning disks.
+        let cmdline = concat!(
+            "java\0-cp\0/opt/spark/conf:/opt/spark/jars/*\0",
+            "org.apache.spark.deploy.SparkSubmit\0--master\0spark://master:7077\0app.jar",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // The standalone cluster daemons keep deciding: sbin/start-master.sh,
+        // start-worker.sh and start-history-server.sh run these classes, and
+        // the Spark Connect server is a daemon of its own.
+        for class in [
+            "org.apache.spark.deploy.master.Master",
+            "org.apache.spark.deploy.worker.Worker",
+            "org.apache.spark.deploy.history.HistoryServer",
+            "org.apache.spark.sql.connect.service.SparkConnectServer",
+        ] {
+            let cmdline = format!("java\0-Xmx1g\0{class}\0--host\0node1");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("spark"),
                 "{class}"
             );
         }
