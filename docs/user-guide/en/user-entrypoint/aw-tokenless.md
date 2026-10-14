@@ -5,7 +5,7 @@
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
 checks replacement bounds; it does not independently prove semantic losslessness.
-Qoder, OpenClaw, QwenPaw, Hermes and Pi share one Provider configuration for PreTool retry suggestions and PostTool
+Qoder, OpenClaw, QwenPaw, Hermes, Pi and Claude SDK native Bash share one Provider configuration for PreTool retry suggestions and PostTool
 compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
@@ -27,7 +27,7 @@ checks before execution, append PreTool, retain its completion observer, and app
 compression after the existing after steps. Installing a component
 does not enable it. The existing plain `sec-core` selection retains its behavior.
 
-For all five frameworks, copy the
+For supported targets, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml),
 replace its executable paths, and keep both state directories outside the immutable
 installation prefix. Use the framework-specific profile and launch flags from the
@@ -91,6 +91,7 @@ PreTool does not provide those capabilities or Schema compression.
 | QwenPaw | Final AgentScope `ToolResponse` returned by acting middleware |
 | Hermes | `transform_tool_result` final string callback |
 | Pi SDK | Core `afterToolCall` content override after the original callback |
+| Claude SDK | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` native Bash envelope |
 
 OpenClaw requires its middleware API and explicit plugin enablement; AW's generated
 native profile declares the middleware contract. An observational `after_tool_call`
@@ -159,6 +160,8 @@ To disable PostTool, remove the compression step; remove its Provider only if no
 PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
+
+Claude SDK uses the explicit worker factory described in the [AW guide](aw.md#start-a-claude-sdk-worker). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
 
 ## Read-only Panel queries
 

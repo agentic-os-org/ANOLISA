@@ -3,7 +3,7 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI >=1.1.64, OpenClaw, QwenPaw and Hermes through supported native
+Linux, it starts Qoder CLI >=1.1.64, OpenClaw, QwenPaw, Hermes and explicit Claude SDK workers through supported native
 entrypoints, runs external Providers and retains execution metadata after Agent
 sessions end. Frameworks keep their native interfaces, model configuration,
 scheduling and permissions. It also manages public Pi SDK workers. The current release is a Preview.
@@ -16,7 +16,7 @@ scheduling and permissions. It also manages public Pi SDK workers. The current r
 | Build from source and connect your component | [Integration walkthrough](../../docs/developer-guide/en/aw/integration.md) |
 | Write and validate configuration | [Configuration reference](../../docs/developer-guide/en/aw/configuration.md) |
 | Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
-| Compress model-visible results across four frameworks | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
+| Compress model-visible results across six frameworks, including Pi and Claude SDK | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
@@ -35,6 +35,7 @@ includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | Public SDK factory in an AW-owned foreground Node worker |
+| Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | Foreground Python worker using its public AW client factory |
 
 Runtime supports tool-before `observe`/`block` and tool-after `observe` or single-text
 `replace_result`, plus
@@ -107,3 +108,9 @@ are independently versioned.
 - [Core execution and durable journal](docs/design/core-execution.md)
 
 - [AgentSight lifecycle and phase-one contracts](docs/design/agentsight-integration.md)
+
+Claude SDK workers explicitly compose `aw_claude.create_client(options)`; see the
+[factory and launcher guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-a-claude-sdk-worker)
+and [Adapter contract](docs/design/claude-sdk-adapter.md).
+
+Claude SDK additionally supports Tokenless Bash retry suggestions and stdout compression; MCP results remain observation-only.

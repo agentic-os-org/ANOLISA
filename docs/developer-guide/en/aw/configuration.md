@@ -11,7 +11,8 @@ defines the public shape. Rust validation also checks references and relationshi
 between fields. The local Host performs Provider discovery and admission; the
 selected Adapter performs its native preparation checks before binding. Qoder
 requires CLI >=1.1.64 and records the probed version instead of an exact-release gate; OpenClaw,
-QwenPaw and Hermes retain their adapter-specific version or revision restrictions.
+QwenPaw, Hermes, Pi and Claude SDK retain their adapter-specific version or revision
+restrictions.
 For a working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
@@ -30,7 +31,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes` or `pi`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes`, `pi` or `claude-sdk`; recognition is not runtime certification |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
 | `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
 | `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
@@ -89,12 +90,17 @@ input must remain identical across AW steps; sequential rewrite chains and
 approval flows are outside the accepted native combinations. Changed input is
 rejected and handled through the affected step's `on_error`.
 
+For Claude SDK `PreToolUse`, a native command's exit-0
+`hookSpecificOutput.permissionDecision: deny` uses the same veto path as exit 2,
+including its optional reason and early-event closure. This does not enable
+native approvals or input rewrites.
+
 Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
 with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, exact selectors, guards and stronger execution guarantees
-are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes and Pi have launch Adapters; their supported versions, entrypoints and
+are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi and Claude SDK have launch Adapters; their supported versions, entrypoints and
 after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
 
 ## Events, effects and tool selection
@@ -141,7 +147,7 @@ a history entry is insufficient. Required redaction must not use `report`.
 The service must enforce these requirements at admission and execution.
 
 Selectors are `*`, `bash`, `file_read`, `file_write`, or
-`native:<adapter>:<exact-name>` for any of the four adapter IDs. Native selectors
+`native:<adapter>:<exact-name>` for any declared adapter ID. Native selectors
 are host-specific, not portable tool semantics. There are no regex/glob selectors
 other than the single `*`. All-tools routing includes native custom tools and
 preserves their input; it does not make every Provider understand every tool.

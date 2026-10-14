@@ -3,7 +3,7 @@
 [English](README.md)
 
 AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过受支持的原生入口
-启动 Qoder CLI >=1.1.64、OpenClaw、QwenPaw 和 Hermes，运行外部 Provider，并在 Agent
+启动 Qoder CLI >=1.1.64、OpenClaw、QwenPaw、Hermes 及显式接入的 Claude SDK worker，运行外部 Provider，并在 Agent
 会话结束后保留执行元数据。框架继续管理自己的界面、模型配置、调度与权限。
 同时支持公开 Pi SDK worker 的受管启动。当前交付为 Preview。
 
@@ -15,7 +15,7 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 | 从源码构建并接入自己的组件 | [组件接入教程](../../docs/developer-guide/zh/aw/integration.md) |
 | 编写和校验配置 | [配置参考](../../docs/developer-guide/zh/aw/configuration.md) |
 | 四框架共用策略、验证并清理 | [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md#四框架使用同一份配置) |
-| 四框架模型可见结果压缩 | [Tokenless Provider](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md) |
+| 六框架（含 Pi 与 Claude SDK）模型可见结果压缩 | [Tokenless Provider](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md) |
 | 使用已有 sec-core 后端 | [sec-core Provider](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md) |
 | 容器部署与审计持久化 | [运行与持久化](../../docs/user-guide/zh/user-entrypoint/aw.md#容器与持久化数据) |
 
@@ -33,6 +33,7 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | AW 管理的前台 Node worker 中的公共 SDK 工厂 |
+| Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | 使用公共 AW client 工厂的前台 Python worker |
 
 运行时支持工具前 `observe`/`block`、工具后 `observe` 或单文本 `replace_result`，以及各框架的原生命令。
 完成观察和用户 Hook 可位于最后一个替换步骤之前（OpenClaw 在压缩后执行原生观察）；sec-core/Tokenless 联合模板保留扫描及观察，新增执行前的 Tokenless PreTool 重试建议和最终 PostTool 压缩。
@@ -89,3 +90,9 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 - [Core 执行与持久 Journal](docs/design/core-execution_zh.md)
 
 - [AgentSight 生命周期与一期合同](docs/design/agentsight-integration_zh.md)
+
+Claude SDK 0.2.88（bundled CLI 2.1.161）的前台 Python worker 在公共工厂中显式
+使用 `aw_claude.create_client(options)`；见[接入指南](../../docs/user-guide/zh/user-entrypoint/aw.md#启动-claude-sdk-worker)
+及 [Adapter 合同](docs/design/claude-sdk-adapter_zh.md)。
+
+Claude SDK 另外支持 Tokenless Bash 重试建议与 stdout 压缩；MCP 结果保持仅观察。

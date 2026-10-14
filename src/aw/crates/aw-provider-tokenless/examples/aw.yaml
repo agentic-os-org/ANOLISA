@@ -30,6 +30,9 @@ spec:
     pi:
       adapter: pi
       argv: [/absolute/path/to/node, /absolute/path/to/pi-application.mjs]
+    claude:
+      adapter: claude-sdk
+      argv: [/absolute/path/to/python, /absolute/path/to/claude-worker.py]
   providers:
     tokenless:
       protocol: aw-provider/v1alpha1

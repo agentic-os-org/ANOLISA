@@ -4,7 +4,7 @@
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
-Qoder、OpenClaw、QwenPaw、Hermes 和 Pi 共用一份 Provider 配置，支持 PreTool 重试建议
+Qoder、OpenClaw、QwenPaw、Hermes、Pi 及 Claude SDK 原生 Bash 共用一份 Provider 配置，支持 PreTool 重试建议
 与 PostTool 压缩。Schema 压缩和授权恢复仍是独立能力。
 
 ## 安装与启用
@@ -22,7 +22,7 @@ Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生
 sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。
 
-五框架接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
+受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
 替换可执行路径，并将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
 启动参数见 [AW 指南](aw.md#四框架使用同一份配置)。
 
@@ -76,6 +76,7 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，�
 | QwenPaw | Acting middleware 返回的最终 AgentScope `ToolResponse` |
 | Hermes | `transform_tool_result` 最终字符串回调 |
 | Pi SDK | 原 callback 之后的 Core `afterToolCall` content override |
+| Claude SDK | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` 原生 Bash envelope |
 
 OpenClaw 要求 middleware API 和显式插件启用；AW 生成的原生 profile 声明 middleware
 合同。观察型 `after_tool_call` 的返回值无法替换模型可见内容。
@@ -126,6 +127,8 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 禁用 PostTool 时删除压缩步骤；仅在没有 PreTool 步骤继续引用时删除 Provider。
 停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
+
+Claude SDK 使用 [AW 指南](aw.md#启动-claude-sdk-worker) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
 
 ## Panel 只读查询
 

@@ -70,7 +70,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 let native = parts.next() == Some("native")
                     && matches!(
                         parts.next(),
-                        Some("pi" | "qwenpaw" | "qoder" | "openclaw" | "hermes")
+                        Some("pi" | "qwenpaw" | "qoder" | "openclaw" | "hermes" | "claude-sdk")
                     )
                     && parts.next().is_some_and(|name| {
                         !name.is_empty()

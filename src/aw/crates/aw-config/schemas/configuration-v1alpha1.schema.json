@@ -244,7 +244,8 @@
             "qwenpaw",
             "qoder",
             "openclaw",
-            "hermes"
+            "hermes",
+            "claude-sdk"
           ]
         },
         "argv": {

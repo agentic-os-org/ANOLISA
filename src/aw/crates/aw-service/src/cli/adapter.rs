@@ -85,6 +85,7 @@ pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) ->
     }
     match adapter {
         "qoder" | "qwenpaw" => reply.stderr = format!("{text}\n").into_bytes(),
+        "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
@@ -113,6 +114,7 @@ pub(super) trait Adapter: Sync {
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
     match name {
         "pi" => Ok(&super::adapters::pi::Pi),
+        "claude-sdk" => Ok(&super::adapters::claude_sdk::ClaudeSdk),
         "qoder" => Ok(&super::qoder::Qoder),
         "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
         "hermes" => Ok(&super::adapters::hermes::Hermes),
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn retry_reasons_preserve_every_dialects_denial_and_never_emit_updates() {
         let message = "Retry: literal ; $(touch NEVER) ' spaces\nnot executable";
-        for name in ["qoder", "qwenpaw", "hermes", "openclaw", "pi"] {
+        for name in ["qoder", "qwenpaw", "hermes", "openclaw", "pi", "claude-sdk"] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
             block_reason(name, &mut reply, message).unwrap();
@@ -184,6 +186,13 @@ mod tests {
                 assert!(matches!(reply.exit, Exit::Code(2)));
                 assert!(reply.stdout.is_empty());
                 assert_eq!(reply.stderr, format!("{message}\n").as_bytes());
+            } else if name == "claude-sdk" {
+                assert!(matches!(reply.exit, Exit::Code(2)));
+                assert!(reply.stderr.is_empty());
+                assert_eq!(
+                    serde_json::from_slice::<String>(&reply.stdout).unwrap(),
+                    message
+                );
             } else {
                 let value: Value = serde_json::from_slice(&reply.stdout).unwrap();
                 if name == "openclaw" {

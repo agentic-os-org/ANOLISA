@@ -145,12 +145,11 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         )
         .map_err(Into::into)
         .and_then(|output| response(adapter, event, on_error, output, &binding.adapter, &value));
-    // Pi stops its SDK callback loop on JSON denial (exit 0), including a
-    // fail-closed callback error. Unvisited steps must not keep the lease live.
-    if binding.adapter == "pi"
+    // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
+    if matches!(binding.adapter.as_str(), "pi" | "claude-sdk")
         && event == "tool.before"
         && handle.steps.last().map(String::as_str) != Some(step)
-        && pi_stops_before(&result, on_error)
+        && stops_before(&binding.adapter, &result, on_error)
     {
         if let Err(error) = client.call(
             Operation::CloseEvent {
@@ -166,8 +165,12 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     emit(result?)
 }
 
-fn pi_stops_before(result: &Result<HookOutput>, on_error: &str) -> bool {
+fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> bool {
     match result {
+        Ok(output) if adapter == "claude-sdk" => {
+            matches!(output.exit, Exit::Code(2))
+                || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
+        }
         Ok(output) => serde_json::from_slice::<Value>(&output.stdout)
             .is_ok_and(|value| value["block"] == true),
         Err(_) => on_error == "block",
@@ -209,13 +212,51 @@ fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
+        let claude_before = adapter_id == "claude-sdk" && event == "tool.before";
+        // Validate before success so fail-closed vetoes use the existing event closure.
+        if claude_before {
+            std::io::stderr().write_all(&stderr)?;
+            std::io::stderr().flush()?;
+            if code == Some(2) {
+                // Native exit 2 explicitly designates stderr as the blocking reason.
+                let mut reply = adapter.reply(true);
+                let reason = String::from_utf8_lossy(&stderr);
+                if !reason.trim().is_empty() {
+                    adapter::block_reason(adapter_id, &mut reply, reason.trim())?;
+                }
+                return Ok(reply);
+            }
+        }
+        if claude_before && code == Some(0) {
+            let value: Value =
+                serde_json::from_slice(if stdout.iter().all(u8::is_ascii_whitespace) {
+                    b"{}"
+                } else {
+                    &stdout
+                })?;
+            let specific = &value["hookSpecificOutput"];
+            if specific["hookEventName"] == "PreToolUse" && specific["permissionDecision"] == "deny"
+            {
+                let mut reply = adapter.reply(true);
+                if let Some(reason) = specific["permissionDecisionReason"]
+                    .as_str()
+                    .filter(|reason| !reason.is_empty())
+                {
+                    adapter::block_reason(adapter_id, &mut reply, reason)?;
+                }
+                return Ok(reply);
+            }
+            if value != serde_json::json!({}) {
+                return Err("invalid_native_response".into());
+            }
+        }
         if adapter_id == "pi" {
             validate_pi_native(event, &exit, &stdout)?;
         }
         return Ok(HookOutput {
             exit,
             stdout,
-            stderr,
+            stderr: if claude_before { Vec::new() } else { stderr },
         });
     }
     if output["kind"] != "provider" {
@@ -348,10 +389,10 @@ mod tests {
     #[test]
     fn pi_early_close_uses_json_denial_even_with_report_errors() {
         let adapter = adapter::select("pi").unwrap();
-        assert!(pi_stops_before(&Ok(adapter.reply(true)), "report"));
-        assert!(!pi_stops_before(&Ok(adapter.reply(false)), "block"));
-        assert!(pi_stops_before(&Err("failure".into()), "block"));
-        assert!(!pi_stops_before(&Err("failure".into()), "report"));
+        assert!(stops_before("pi", &Ok(adapter.reply(true)), "report"));
+        assert!(!stops_before("pi", &Ok(adapter.reply(false)), "block"));
+        assert!(stops_before("pi", &Err("failure".into()), "block"));
+        assert!(!stops_before("pi", &Err("failure".into()), "report"));
     }
 
     #[test]

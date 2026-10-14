@@ -133,7 +133,7 @@ pub fn preflight(
         agent["adapter"] == capabilities.adapter
             && matches!(
                 capabilities.adapter.as_str(),
-                "qoder" | "openclaw" | "hermes" | "qwenpaw" | "pi"
+                "qoder" | "openclaw" | "hermes" | "qwenpaw" | "pi" | "claude-sdk"
             ),
         "Adapter evidence does not match the configured target",
     )?;

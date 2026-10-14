@@ -8,7 +8,8 @@ starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
 The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`.
+QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
+Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
@@ -33,6 +34,8 @@ live in the [configuration reference](../../../developer-guide/en/aw/configurati
 | Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
 | Start QwenPaw through AW | ✅ the official App/API entrypoint |
 | Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
+| Start a Pi SDK 0.84.2 worker | ✅ Public SDK factory; see [worker guide](#start-a-pi-sdk-worker) |
+| Start a Claude SDK 0.2.88 worker | ✅ Explicit public factory Bridge; see [worker guide](#start-a-claude-sdk-worker) |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
@@ -628,17 +631,18 @@ The local endpoint is a same-user boundary, not a sandbox.
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw and QwenPaw reject this command |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi and Claude SDK reject this command |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
-the implementation. This build implements Qoder CLI, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`. `aw install`
+the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
+QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
+Claude SDK 0.2.88 and Pi SDK 0.84.2 workers. `aw install`
 validates the configuration and dispatches to that adapter. Hermes supports
-persistent plugin installation; Qoder, OpenClaw and QwenPaw reject it.
+persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi and Claude SDK reject it.
 This command does not install AW packages or Agent software, start an Agent,
 or configure model credentials. `aw run` does not implicitly call `install`.
 
@@ -649,9 +653,9 @@ or configure model credentials. `aw run` does not implicitly call `install`.
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
-alone does not enable them for a framework. QwenPaw rejects all these native
-override options and uses `QWENPAW_WORKING_DIR`. Pass supported AW options before
-`--`; arguments
+alone does not enable them for a framework. Pi and Claude SDK reject all these native
+override options. QwenPaw also rejects them and uses `QWENPAW_WORKING_DIR`. Pass
+supported AW options before `--`; arguments
 after it are forwarded literally to the Agent. `install` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.
 
@@ -834,3 +838,115 @@ See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/s
 for exact callback semantics, identity, cancellation, capacity and reproducible
 SDK acceptance. Exit Agents and stop the original service before changing policy;
 retain/remove the audit state using the same local-service cleanup procedure.
+
+## Start a Claude SDK worker
+
+Use Claude Agent SDK 0.2.88 with its bundled CLI 2.1.161. The Adapter launches one
+foreground Python script or `-m` module and requires the worker's public factory
+to use `aw_claude.create_client(options)`. Model credentials remain SDK settings.
+AW supplies this module on `PYTHONPATH` for the launched worker; it does not
+inject hooks into an arbitrary SDK application automatically.
+
+For the source example, prepare the selected Python environment and run from
+`src/aw`. The MCP pin addresses a reproduced incompatibility with MCP 2.x:
+
+```bash
+python3 -m venv target/claude-sdk-venv
+target/claude-sdk-venv/bin/pip install -r tests/claude-sdk-requirements.txt
+```
+
+Copy `crates/aw-service/examples/aw.claude-sdk.yaml` to your configuration and set
+its Agent argv interpreter to the absolute `target/claude-sdk-venv/bin/python`
+path. Keep the foreground example worker path or replace it with your script.
+Its options factory should use this pattern after constructing its normal MCP
+tools, permissions, resume settings and existing hooks:
+
+```python
+from aw_claude import create_client
+
+async with create_client(options) as client:
+    await client.query(prompt)
+    async for message in client.receive_response():
+        handle_message(message)
+```
+
+```bash
+target/debug/aw run --config /absolute/aw.claude-sdk.yaml --agent claude -- 'Use echo to return hello.'
+target/debug/aw status --config /absolute/aw.claude-sdk.yaml
+target/debug/aw stop --config /absolute/aw.claude-sdk.yaml
+```
+
+Claude SDK event budgets must be 1..55,000 ms. Each `tool.before` or `tool.after`
+route uses `events.<name>.budget_ms` when set, otherwise
+`execution.default_event_budget_ms`. `aw run` enforces this adapter-specific
+limit after static configuration validation.
+
+The worker's options cwd must equal the launch cwd. Readiness is published after
+the real SDK initialization handshake accepts callbacks. AW observes or denies
+`PreToolUse`; `PostToolUse` and `PostToolUseFailure` both supply after observations.
+Denied tools do not produce a synthetic after. Existing hook vetoes and native
+permissions remain effective. Existing pre-hook `updatedInput` and permission
+`updated_input` changes are denied, because concurrent callbacks cannot establish
+that AW inspected the final arguments. When `tool.before` is active, nonempty
+`PermissionRequest` matchers are rejected before initialization; use supported
+`PreToolUse` or `can_use_tool` callbacks instead. Caller-specified
+`permission_prompt_tool_name` is also rejected with `tool.before`; SDK-owned stdio
+permissions for the wrapped `can_use_tool` remain supported. Caller `cli_path` overrides and missing
+bundled binaries are rejected. The worker must not detach or start multiple
+SDK clients/tasks within one launcher binding; Gunicorn and business deployments
+need their own task lifecycle integration.
+
+CLI 2.1.161 emits `PostToolUse` for SDK MCP `isError: true` responses and omits that
+flag from callback data. After observation therefore does not classify every
+business failure. Native Bash execution failure does use `PostToolUseFailure`.
+See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/claude-sdk-adapter.md)
+for identity, cancellation and validation limits.
+
+For model-free native adoption checks, build AW and use the real SDK/bundled CLI
+against the local deterministic HTTP fixture. The test creates its own profile
+and creates private UDS directories under the output directory. It removes them
+after stopping owned services and rejects socket paths over 107 bytes:
+
+```bash
+target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/debug/aw --output target/claude-sdk-native
+```
+
+Once the evidence and environment are no longer needed, remove only the created
+`target/claude-sdk-native` and `target/claude-sdk-venv` directories. The AW policy
+is a demo, not a production security rule; business deployment is separate from
+these local native checks.
+
+The options factory requires `setting_sources=[]`, no `settings` override and no
+CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
+`strict_mcp_config` option is also preserved. Model/authentication options are
+unchanged. Applications which discover project skills through settings sources
+need an explicit integration design before using this restricted first bridge.
+Only one client can be created in each foreground worker.
+
+The `claude-sdk` adapter supports this restricted foreground worker factory;
+`aw install` does not provide persistent installation for it, and all `--native-*`
+overrides are unsupported.
+
+### Enable Bash PreTool and PostTool optimization
+
+Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml),
+select its `claude` target, and replace the absolute executable, worker and state
+paths. The source `claude-worker.py` example explicitly exposes and allows native
+Bash in addition to its echo tool. Keep your application's own permission policy
+when composing its factory. See the [Tokenless guide](aw-tokenless.md) for Provider
+installation, RTK requirements and statistics settings.
+
+PreTool blocks the original Bash attempt and returns retry arguments to the model;
+the new call passes all policies and native permissions again. PostTool replaces
+only completed, non-image, non-interrupted Bash stdout. Put completion observers
+and custom steps before the single final `replace_result` step. They see the
+original result; stderr and other native fields are retained. Failure/report keeps
+the original result. MCP tools remain observable but are not compressed because
+the native callback does not expose reliable business-error status.
+
+After building AW, its Tokenless Provider and the current Tokenless Protocol v2
+CLI, extend the native acceptance run (RTK must be available on PATH):
+
+```bash
+target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/debug/aw --output target/claude-sdk-native --tokenless ../tokenless/target/debug/tokenless
+```

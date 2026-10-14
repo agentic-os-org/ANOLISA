@@ -6,6 +6,14 @@ use serde_json::{json, Value};
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
         "qoder" | "qwenpaw" | "pi" => &native["tool_response"],
+        "claude-sdk"
+            if native["hook_event_name"] == "PostToolUse"
+                && native["tool_name"] == "Bash"
+                && native["tool_response"]["interrupted"] == false
+                && native["tool_response"]["isImage"] == false =>
+        {
+            &native["tool_response"]
+        }
         "openclaw" => &native["event"]["result"],
         "hermes" => &native["extra"]["result"],
         _ => &Value::Null,
@@ -14,7 +22,10 @@ fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
 
 // Only one text block is replaceable: media and multiple blocks retain their
 // native structure and ordering. Qoder/Hermes also expose whole string slots.
-fn text_slot(result: &Value) -> Option<(&str, &str)> {
+fn text_slot<'a>(adapter: &str, result: &'a Value) -> Option<(&'static str, &'a str)> {
+    if adapter == "claude-sdk" {
+        return result["stdout"].as_str().map(|text| ("/stdout", text));
+    }
     if let Some(text) = result.as_str() {
         return Some(("", text));
     }
@@ -43,7 +54,7 @@ fn text_slot(result: &Value) -> Option<(&str, &str)> {
 
 fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
     match adapter {
-        "qoder" | "hermes" => (
+        "qoder" | "hermes" | "claude-sdk" => (
             native["tool_name"].as_str().unwrap_or(""),
             &native["tool_input"],
         ),
@@ -121,7 +132,7 @@ fn openclaw_result_failed(value: &Value) -> bool {
 
 pub(super) fn project(adapter: &str, native: &Value) -> Option<Value> {
     let value = decoded_result(adapter, native);
-    let (_, text) = text_slot(&value)?;
+    let (_, text) = text_slot(adapter, &value)?;
     let (name, input) = tool(adapter, native);
     let origin = match name.to_ascii_lowercase().as_str() {
         "bash" | "exec" | "terminal" | "execute_shell_command" | "run_shell_command" => {
@@ -179,7 +190,8 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
         return Err("replacement text must be nonempty and bounded".into());
     }
     let mut value = decoded_result(adapter, native);
-    let (pointer, _) = text_slot(&value).ok_or("native result has no replaceable text slot")?;
+    let (pointer, _) =
+        text_slot(adapter, &value).ok_or("native result has no replaceable text slot")?;
     let pointer = pointer.to_owned();
     *value
         .pointer_mut(&pointer)
@@ -187,6 +199,9 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
     let response = match adapter {
         "qoder" => json!({"hookSpecificOutput":{"hookEventName":"PostToolUse", "updatedToolOutput":
             if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}}}),
+        "claude-sdk" => {
+            json!({"hookSpecificOutput":{"hookEventName":"PostToolUse", "updatedToolOutput":value}})
+        }
         "hermes" => {
             json!({"aw_replacement": if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}})
         }
@@ -203,6 +218,45 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_replaces_only_completed_bash_stdout_and_preserves_the_envelope() {
+        let native = json!({"hook_event_name":"PostToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "tool_response":{"stdout":"original long output", "stderr":"warning", "interrupted":false, "isImage":false, "content":[{"type":"text","text":"metadata"}], "metadata":{"kept":true}}});
+        let projection = project("claude-sdk", &native).unwrap();
+        assert_eq!(projection["command"], "git status");
+        assert_eq!(projection["status"], "success");
+        assert_eq!(projection["text"], "original long output");
+        let response: Value =
+            serde_json::from_slice(&reply("claude-sdk", &native, "compact").unwrap().stdout)
+                .unwrap();
+        let mut expected = native["tool_response"].clone();
+        expected["stdout"] = json!("compact");
+        assert_eq!(
+            response,
+            json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":expected}})
+        );
+        for (key, value) in [
+            ("hook_event_name", json!("PostToolUseFailure")),
+            ("tool_name", json!("mcp__local__Bash")),
+            (
+                "tool_response",
+                json!([{"type":"text","text":"MCP status unknown"}]),
+            ),
+            (
+                "tool_response",
+                json!({"stdout":"image", "isImage":true, "interrupted":false}),
+            ),
+            (
+                "tool_response",
+                json!({"stdout":"partial", "isImage":false, "interrupted":true}),
+            ),
+        ] {
+            let mut unsupported = native.clone();
+            unsupported[key] = value;
+            assert!(project("claude-sdk", &unsupported).is_none());
+            assert!(reply("claude-sdk", &unsupported, "compact").is_err());
+        }
+    }
 
     #[test]
     fn empty_or_unbounded_replacements_are_rejected_for_every_adapter() {
