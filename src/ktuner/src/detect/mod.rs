@@ -1910,7 +1910,15 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
         "spark",
     ),
     ("spark", "spark"),
-    ("org.apache.cassandra", "cassandra"),
+    // Cassandra maps the daemon package — `bin/cassandra` sets
+    // classname=org.apache.cassandra.service.CassandraDaemon — and NOT the
+    // bare `org.apache.cassandra` root, for the reason the Kafka markers
+    // above spell out: `bin/nodetool` (org.apache.cassandra.tools.NodeTool)
+    // and `tools/bin/cassandra-stress` (org.apache.cassandra.stress.Stress)
+    // exec the JVM with the tool's own main class, so only the class is left
+    // to decide and the bare root reported a host that only administers a
+    // remote cluster as a database host.
+    ("org.apache.cassandra.service", "cassandra"),
     ("cassandra", "cassandra"),
     ("org.apache.hadoop", "hadoop"),
     ("hadoop", "hadoop"),
@@ -4425,6 +4433,33 @@ mod tests {
                 "{class}"
             );
         }
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_the_cassandra_tools() {
+        // `bin/nodetool` runs org.apache.cassandra.tools.NodeTool, the
+        // administration client, and `tools/bin/cassandra-stress` runs
+        // org.apache.cassandra.stress.Stress, the load generator. Both exec
+        // the JVM with their own main class, and the bare
+        // `org.apache.cassandra` root read them as the database itself — the
+        // same client/load-generator shape the Pulsar markers above refuse —
+        // so a host that only administers or benchmarks a cluster running
+        // elsewhere reported "Cassandra" in `check.services`.
+        for class in [
+            "org.apache.cassandra.tools.NodeTool",
+            "org.apache.cassandra.stress.Stress",
+        ] {
+            let cmdline = format!("java\0-cp\0/opt/cassandra/lib/*\0{class}\0status");
+            assert_eq!(runtime_service_from_cmdline(&cmdline), None, "{class}");
+        }
+
+        // `bin/cassandra` sets classname=org.apache.cassandra.service.
+        // CassandraDaemon, which keeps deciding.
+        let cmdline = concat!(
+            "java\0-Dcassandra.logdir=/var/log/cassandra\0-cp\0/opt/cassandra/lib/*\0",
+            "org.apache.cassandra.service.CassandraDaemon\0-f",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("cassandra"));
     }
 
     #[test]
