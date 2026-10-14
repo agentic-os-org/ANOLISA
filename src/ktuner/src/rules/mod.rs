@@ -8000,6 +8000,14 @@ fn eval_min_slab_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 /// behavior — the "never recommend a no-op" rule the hardlockup_panic and
 /// page-cluster gates already follow. An unreadable mode file counts as "off",
 /// so the rule stays quiet rather than promising a reclaim it cannot verify.
+///
+/// The plan that switches node reclaim off is the one this rule ships in:
+/// `eval_zone_reclaim_mode` recommends `vm.zone_reclaim_mode = 0` on every
+/// host with more than one NUMA node whose mode is non-zero — the exact state
+/// the guard above has just established — so testing the CURRENT mode alone
+/// only refuses the no-op on hosts where it was off to begin with, and the
+/// multi-NUMA host the rule exists for still got both entries with the
+/// min_slab write already inert. Judge the mode the plan leaves behind.
 fn eval_min_slab_ratio_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -8013,6 +8021,12 @@ fn eval_min_slab_ratio_at(
         return 1;
     }
     if read_sysctl_u64(zone_reclaim_path) == 0 {
+        return 1;
+    }
+    // The multi-NUMA plan zeroes the mode this rule just checked: the sibling
+    // recommendation is High-confidence performance advice, so the write this
+    // rule asks for would be neutralized by the plan it belongs to.
+    if info.numa_nodes > 1 {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -14599,6 +14613,25 @@ mod tests {
             mode_on.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "small memory still skips the rule");
+
+        // The multi-NUMA host is the one whose plan disables node reclaim:
+        // eval_zone_reclaim_mode recommends vm.zone_reclaim_mode = 0 whenever
+        // numa_nodes > 1 and the mode reads non-zero — the state this guard
+        // has just established. Recommending the min_slab write there ships an
+        // entry the plan itself neutralizes.
+        info.memory_total_gb = 256;
+        info.numa_nodes = 2;
+        let mut recs = Vec::new();
+        eval_min_slab_ratio_at(
+            &info,
+            &mut recs,
+            param.to_str().unwrap(),
+            mode_on.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "the plan zeroes the mode on a multi-NUMA host, so the write is a no-op"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
