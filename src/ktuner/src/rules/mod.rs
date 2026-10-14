@@ -3685,7 +3685,29 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
         // cache workload, so the redis-server gates must count it too.
         || info.has_process("valkey-server")
         || info.has_process("memcached")
+        // The rest of the classification's cache class (has_cache: etcd,
+        // zookeeper, consul) and its whole search class (has_search:
+        // elasticsearch, opensearch): the same in-memory coordination-KV and
+        // Lucene-shaped latency workloads redis and memcached stand for, and
+        // every sibling gate (the THP and vfs_cache_pressure lists,
+        // swappiness through the classification) counts them - this pair
+        // stayed silent for them.
+        || info.has_process("etcd")
+        || info.has_process("zookeeper")
+        || info.has_process("consul")
+        || info.has_process("elasticsearch")
+        || info.has_process("opensearch")
         || info.has_process("nginx")
+        // The rest of the classifier's web/proxy class (has_web: httpd,
+        // apache2, envoy, haproxy, caddy). A per-connection request-path
+        // round-trip is the shape nginx is listed for, and the feature's
+        // intended consumer documents it: HAProxy's own `busy-polling` option
+        // is a performance tuning knob for the same request path.
+        || info.has_process("httpd")
+        || info.has_process("apache2")
+        || info.has_process("envoy")
+        || info.has_process("haproxy")
+        || info.has_process("caddy")
         || info.has_process("postgres")
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
@@ -13261,6 +13283,19 @@ mod tests {
             "tidb-server",
             "tikv-server",
             "oracle",
+            // The rest of the classifier's cache and search classes, and its
+            // other proxies: the same request-path shape the first twelve
+            // stand for.
+            "etcd",
+            "zookeeper",
+            "consul",
+            "elasticsearch",
+            "opensearch",
+            "httpd",
+            "apache2",
+            "envoy",
+            "haproxy",
+            "caddy",
         ] {
             let mut info = make_test_info();
             info.network = vec![NetInfo {
