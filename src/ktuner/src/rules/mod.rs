@@ -7253,15 +7253,28 @@ fn eval_sched_energy_aware(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 }
 
 fn eval_percpu_pagelist_high_fraction(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/percpu_pagelist_high_fraction";
-    if !std::path::Path::new(path).exists() {
-        return 1;
-    }
+    eval_percpu_pagelist_high_fraction_at(info, recs, "/proc/sys/vm/percpu_pagelist_high_fraction")
+}
+
+/// Path-injectable form of [`eval_percpu_pagelist_high_fraction`] (the
+/// `eval_*_at` idiom) so the switch read is assertable against synthetic
+/// files.
+///
+/// The rule fires on a zero — the fraction is left to the kernel's own
+/// sizing — and [`read_sysctl_u64`] maps an unreadable or unparseable file to
+/// that same 0. Only a zero the reader could produce is evidence of the
+/// unset switch, so a masked or garbled proc entry (a container's, typically)
+/// neither reports a `current_value` the host does not have nor asks for a
+/// write it may not need.
+fn eval_percpu_pagelist_high_fraction_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if info.memory_total_gb < 64 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "vm.percpu_pagelist_high_fraction".to_string(),
             current_value: "0".to_string(),
@@ -15335,6 +15348,43 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn percpu_pagelist_advice_needs_a_readable_switch() {
+        let (off, on, others) = switch_fixture("percpu_pagelist");
+        let mut info = make_test_info();
+        info.memory_total_gb = 256;
+        let advice = |info: &SystemInfo, path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_percpu_pagelist_high_fraction_at(info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&info, &off);
+        assert_eq!(
+            recs.len(),
+            1,
+            "a readable 0 leaves the fraction to the kernel"
+        );
+        assert_eq!(recs[0].current_value, "0");
+        assert!(
+            advice(&info, &on).is_empty(),
+            "a readable 1 is already sized"
+        );
+        for path in &others {
+            assert!(
+                advice(&info, path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        // The gate's own precondition is untouched: a smaller host gets no
+        // advice even from a readable 0.
+        let mut small = make_test_info();
+        small.memory_total_gb = 16;
+        assert!(advice(&small, &off).is_empty());
     }
 
     #[test]
