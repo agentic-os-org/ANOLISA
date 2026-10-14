@@ -326,22 +326,30 @@ fn most_frequent_model(events: &[TraceEventDetail]) -> Option<String> {
 }
 
 /// Collect unique tool definitions from all parsed LLM calls.
+///
+/// Deduplication is keyed on the tool's name when the request carries one
+/// (OpenAI's `function.name`, Anthropic's `name`), and on the definition
+/// itself otherwise: a definition need not have a name at all — the Responses
+/// API's built-in tools are `{"type": "web_search"}` / `{"type": "file_search"}`
+/// (platform.openai.com/docs/guides/tools) — and every nameless definition
+/// used to key on the empty string, so the first one took the slot and the
+/// rest were dropped from the exported agent's tool list. A definition whose
+/// text is genuinely identical still collapses to one entry.
 fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json::Value>> {
-    let mut seen_names = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
     let mut defs = Vec::new();
 
     for call in parsed.iter().filter_map(|p| p.as_ref()) {
         if let Some(ref tools) = call.request.tools {
             for tool in tools {
                 // Extract tool name for deduplication
-                let name = tool
+                let key = tool
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .or_else(|| tool.get("name"))
                     .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if seen_names.insert(name) {
+                    .map_or_else(|| tool.to_string(), str::to_string);
+                if seen.insert(key) {
                     defs.push(tool.clone());
                 }
             }
@@ -865,6 +873,86 @@ fn ns_to_iso8601(ns: u64) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::genai::semantic::{InputMessage, MessagePart};
+
+    /// Minimal LLM call carrying one request's tool definitions, for the
+    /// `collect_tool_definitions` dedup contract.
+    fn call_with_tools(tools: serde_json::Value) -> LLMCall {
+        LLMCall {
+            call_id: "call-tools".into(),
+            start_timestamp_ns: 0,
+            end_timestamp_ns: 1,
+            duration_ns: 1,
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            request: crate::genai::semantic::LLMRequest {
+                messages: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: Some(tools.as_array().expect("tools fixture is an array").clone()),
+                raw_body: None,
+            },
+            response: crate::genai::semantic::LLMResponse {
+                messages: Vec::new(),
+                streamed: false,
+                raw_body: None,
+            },
+            token_usage: None,
+            error: None,
+            pid: 1,
+            process_name: "agent".into(),
+            agent_name: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn tool_definitions_keep_distinct_nameless_tools() {
+        // Dedup is by tool name, but a definition need not carry one: the
+        // Responses API's built-in tools are `{"type": "web_search"}` /
+        // `{"type": "file_search"}` with no `name` at all
+        // (platform.openai.com/docs/guides/tools), so one request can hold
+        // several nameless definitions. An unreadable name collapsed to the
+        // empty string, which merged them: the ATIF agent listed the first
+        // built-in tool and dropped the others, while a repeated named
+        // definition still collapsed as intended.
+        let parsed = vec![Some(call_with_tools(serde_json::json!([
+            {"type": "web_search"},
+            {"type": "file_search"},
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "read_file"}},
+        ])))];
+        let defs = collect_tool_definitions(&parsed).expect("definitions are present");
+        let names: Vec<String> = defs.iter().map(|d| d.to_string()).collect();
+        assert_eq!(
+            defs.len(),
+            3,
+            "the two nameless built-in tools and one named function survive: {names:?}"
+        );
+        assert!(
+            defs.contains(&serde_json::json!({"type": "file_search"})),
+            "the second built-in tool must not be deduplicated away: {names:?}"
+        );
+        assert_eq!(
+            defs.iter()
+                .filter(|d| d["function"]["name"] == "read_file")
+                .count(),
+            1,
+            "a repeated named definition is still one entry: {names:?}"
+        );
+        // The same nameless definition repeated twice is still one entry.
+        let parsed = vec![Some(call_with_tools(serde_json::json!([
+            {"type": "web_search"},
+            {"type": "web_search"},
+        ])))];
+        assert_eq!(collect_tool_definitions(&parsed).map(|d| d.len()), Some(1));
+    }
 
     /// Minimal LLM call record: an agent turn that emits one tool call, plus the
     /// tool response that the *next* call replays back to the model.
