@@ -50,9 +50,15 @@ function displayLabel(doc: AtifDocument): string {
   return name.startsWith(AGENT_NAME_PREFIX) ? name.slice(AGENT_NAME_PREFIX.length) : name;
 }
 
-/** Identity of an embedded subagent, preferring the id that refs point at. */
+/**
+ * Identity of an embedded subagent, preferring the id that refs point at.
+ *
+ * An empty id counts as absent, the way `findNodeByRef` already reads it:
+ * `??` keeps "" and hands the node the root's own key (`encodeNodePath([])`),
+ * which collapses the centre map and leaves its edge on the root's row.
+ */
 function subagentKey(doc: AtifDocument, index: number): string {
-  return doc.trajectory_id ?? doc.session_id ?? `#${index}`;
+  return doc.trajectory_id || doc.session_id || `#${index}`;
 }
 
 function sumPromptTokens(doc: AtifDocument): number {

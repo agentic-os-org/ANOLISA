@@ -194,7 +194,7 @@ test('embedded document identities survive validation and render in the actual g
   assert.equal(data.subagent_trajectories[0].trajectory_id, 'child/id');
 });
 
-const { buildTrajectoryTree, findNodeByRef } = require(process.env.AGENTSIGHT_TRAJECTORY_TREE_BUILD);
+const { buildTrajectoryTree, findNodeByRef, layoutTree, NODE_H } = require(process.env.AGENTSIGHT_TRAJECTORY_TREE_BUILD);
 
 test('an explicit subagent trajectory wins over a shared run session', () => {
   const data = document({
@@ -226,4 +226,33 @@ test('legacy session-only references and nested explicit references still resolv
   assert.equal(findNodeByRef(tree, { session_id: 'run' }).doc.trajectory_id, 'parent');
   assert.equal(findNodeByRef(tree, { trajectory_id: '', session_id: 'child-run' }).doc.trajectory_id, 'child');
   assert.equal(findNodeByRef(tree, { trajectory_id: 'nested', session_id: 'child-run' }).doc.trajectory_id, 'nested');
+});
+
+test('an embedded subagent with an empty id keeps its own key and row', () => {
+  // `findNodeByRef` already reads an empty trajectory id as absent
+  // (`ref.trajectory_id || ref.session_id`), so identity has to agree: the
+  // empty id otherwise becomes the node key "", the same key the root carries
+  // (`encodeNodePath([])`), which collapses the centre map and draws the edge
+  // to that child at the root's row.
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent', session_id: 'run',
+    subagent_trajectories: [
+      document({ trajectory_id: '', session_id: '', steps: [] }),
+      document({ trajectory_id: 'b', session_id: 'run-b' }),
+    ],
+  }));
+  assert.notEqual(tree.children[0].key, tree.key, 'the child must not reuse the root key');
+
+  const layout = layoutTree(tree);
+  const keys = layout.nodes.map((n) => n.node.key);
+  assert.equal(new Set(keys).size, keys.length, `duplicate node keys: ${JSON.stringify(keys)}`);
+
+  const centres = new Map(layout.nodes.map((n) => [n.node.key, n.y + NODE_H / 2]));
+  for (const edge of layout.edges) {
+    assert.equal(
+      edge.y2,
+      centres.get(edge.toKey),
+      `edge ${JSON.stringify(edge.fromKey)}->${JSON.stringify(edge.toKey)} leaves the target row`,
+    );
+  }
 });
