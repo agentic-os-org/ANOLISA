@@ -1663,8 +1663,9 @@ fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
 /// uses; `drifted` compares it against `applied` with the same equality the
 /// write path uses (`live_reading` below). Both are `None` (JSON null) when
 /// the path cannot be read: a device that is gone, a module that is not
-/// loaded, a write-only tunable or unreadable content is reported as
-/// unreadable, never guessed — an absent reading is not an error.
+/// loaded, a write-only tunable is reported as
+/// unreadable, never guessed — an absent reading is not an error, and bytes
+/// the kernel stored outside UTF-8 are a value, not a read failure.
 ///
 /// `category` is the rule-layer category of the recommendation that recorded
 /// the entry, carried from the ledger as it was recorded (never re-derived
@@ -1684,7 +1685,7 @@ pub struct RollbackPreview {
 
 /// The live value at `path` and whether it still matches `applied`, or
 /// `(None, None)` when the path cannot be read — a device that is gone, a
-/// module that is not loaded, a write-only tunable, unreadable content.
+/// module that is not loaded, a write-only tunable.
 ///
 /// The value is rendered through [`active_value_for_path`], the reader `why`,
 /// the ledger's original and the write read-back share, and `drifted` reuses
@@ -1693,11 +1694,16 @@ pub struct RollbackPreview {
 /// (a bracketed sysfs option, a TAB-separated multi-value sysctl, the
 /// leading-token echo of a scalar) from being reported as drift, and keeps
 /// the preview from inventing a second, stricter comparison of its own. The
-/// read is deliberately silent: an unreadable path is reported in the JSON,
-/// never printed and never an error.
+/// read is silently lossy: bytes that are not text decode to the replacement
+/// character, exactly as `why`'s reader and detect's comm / cmdline / cpuinfo
+/// readers decode the raw bytes the kernel stores (a latin-1
+/// `kernel.hostname` is a value, not an unreadable path), while a path that
+/// really cannot be read is reported as unreadable in the JSON, never printed
+/// and never an error.
 fn live_reading(path: &str, applied: &str) -> (Option<String>, Option<bool>) {
-    match fs::read_to_string(path) {
-        Ok(raw) => {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let raw = String::from_utf8_lossy(&bytes);
             let drifted = matches!(
                 classify_readback_for_path(path, applied, raw.trim()),
                 ReadbackVerdict::Clamped { .. }
@@ -6518,8 +6524,8 @@ mod tests {
 
     #[test]
     fn test_rollback_preview_reports_nulls_for_an_unreadable_path() {
-        // A path that exists but cannot be read as text (here: a directory)
-        // is unreadable, not empty and not an error: null, null.
+        // A path that exists but cannot be read (here: a directory) is
+        // unreadable, not empty and not an error: null, null.
         let dir = AtomicTestDir::new("preview-unreadable");
         let ledger = dir.0.join("rollback.json");
         let path = ledger.to_str().unwrap();
@@ -6533,6 +6539,62 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].live, None);
         assert_eq!(entries[0].drifted, None);
+    }
+
+    #[test]
+    fn test_rollback_preview_reports_a_raw_byte_value_lossily() {
+        // The kernel stores a string sysctl as raw bytes: `sethostname(2)`
+        // refuses only NUL and names past the length limit (v6.6
+        // kernel/sys.c __sethostname), so `kernel.hostname` — and
+        // `kernel.domainname`, which root writes the same way — can hold a
+        // name outside UTF-8. Every other reader in the crate decodes such a
+        // file lossily, and `why` answers the value of the very same knob; a
+        // strict read here made the listing claim the path cannot be read at
+        // all — the shape the README reserves for a device that is gone, a
+        // module that is not loaded and a write-only tunable — and lost the
+        // drift answer with it.
+        let dir = AtomicTestDir::new("preview-raw-bytes");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        let drifted_target = dir.0.join("hostname");
+        fs::write(&drifted_target, b"node-\xff.lan\n").unwrap();
+        let matching_target = dir.0.join("domainname");
+        fs::write(&matching_target, b"lan-\xfe.example\n").unwrap();
+        write_preview_ledger(
+            path,
+            &[
+                (
+                    "kernel.hostname",
+                    "node-1.lan",
+                    "node-1.lan",
+                    drifted_target.to_str().unwrap(),
+                ),
+                (
+                    "kernel.domainname",
+                    "lan-\u{fffd}.example",
+                    "lan-\u{fffd}.example",
+                    matching_target.to_str().unwrap(),
+                ),
+            ],
+        );
+        let entries = rollback_preview_at(path).unwrap();
+        assert_eq!(entries.len(), 2);
+        // A value that differs from the record is still compared, so the
+        // operator sees the drift instead of an unreadable path.
+        let hostname = entries
+            .iter()
+            .find(|entry| entry.param == "kernel.hostname")
+            .expect("the hostname entry is listed");
+        assert_eq!(hostname.live.as_deref(), Some("node-\u{fffd}.lan"));
+        assert_eq!(hostname.drifted, Some(true));
+        // And one that only differs in the bytes the kernel cannot render is
+        // not drift: the comparison runs on the lossy value.
+        let domainname = entries
+            .iter()
+            .find(|entry| entry.param == "kernel.domainname")
+            .expect("the domainname entry is listed");
+        assert_eq!(domainname.live.as_deref(), Some("lan-\u{fffd}.example"));
+        assert_eq!(domainname.drifted, Some(false));
     }
 
     #[test]
