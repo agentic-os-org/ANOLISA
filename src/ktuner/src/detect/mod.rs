@@ -1845,7 +1845,35 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     // under the same root but keep no ledger storage.
     ("org.apache.bookkeeper.server", "bookkeeper"),
     ("org.apache.bookkeeper.proto.BookieServer", "bookkeeper"),
-    ("org.apache.pulsar", "pulsar"),
+    // Pulsar maps its five daemon starters — the entry points `bin/pulsar`
+    // execs for `broker`, `standalone`, `proxy`, `websocket` and
+    // `functions-worker` (apache/pulsar bin/pulsar) — and NOT the bare
+    // `org.apache.pulsar` package root, for the reason the Kafka markers
+    // above spell out: the root is shared with the clients and every
+    // maintenance tool. `bin/pulsar-admin`, `bin/pulsar-perf` and
+    // `bin/pulsar-client` exec the JVM with the tool's own main class
+    // (org.apache.pulsar.admin.cli.PulsarAdminTool,
+    // org.apache.pulsar.testclient.PulsarPerfTestTool,
+    // org.apache.pulsar.client.cli.PulsarClientTool), so the tool's argv[0]
+    // is gone by the time the process is sampled and only the class is left
+    // to match. Mapping the root made a host that only runs a client or a
+    // load generator report "Pulsar" in `check.services` and classify as the
+    // streaming workload, firing the streaming and read-ahead rules on a host
+    // that stores no ledgers.
+    ("org.apache.pulsar.PulsarBrokerStarter", "pulsar"),
+    ("org.apache.pulsar.PulsarStandaloneStarter", "pulsar"),
+    (
+        "org.apache.pulsar.proxy.server.ProxyServiceStarter",
+        "pulsar",
+    ),
+    (
+        "org.apache.pulsar.websocket.service.WebSocketServiceStarter",
+        "pulsar",
+    ),
+    (
+        "org.apache.pulsar.functions.worker.FunctionWorkerStarter",
+        "pulsar",
+    ),
     ("pulsar", "pulsar"),
     ("org.apache.catalina", "tomcat"),
     ("catalina", "tomcat"),
@@ -4037,6 +4065,48 @@ mod tests {
         // The broker is still Pulsar.
         let cmdline = "java\0org.apache.pulsar.PulsarBrokerStarter\0--broker-conf";
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("pulsar"));
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_the_pulsar_client_tools() {
+        // `bin/pulsar-admin`, `bin/pulsar-perf` and `bin/pulsar-client` exec
+        // the JVM with the tool's own main class, so by the time the process
+        // is sampled its argv[0] is `java` and the `pulsar-*` name the tool
+        // filter looks for is gone — only the class is left to decide. Mapping
+        // the bare `org.apache.pulsar` package root (the way Kafka's markers
+        // deliberately do NOT map `org.apache.kafka`) classified a host that
+        // only runs a client or the load generator as a Pulsar broker:
+        // `check.services` reported "Pulsar" and the workload classified as
+        // streaming, so the streaming and read-ahead rules fired on a host
+        // that stores no ledgers.
+        for class in [
+            "org.apache.pulsar.admin.cli.PulsarAdminTool",
+            "org.apache.pulsar.testclient.PulsarPerfTestTool",
+            "org.apache.pulsar.client.cli.PulsarClientTool",
+            // The broker ships its own maintenance tools under the same root.
+            "org.apache.pulsar.broker.tools.BrokerTool",
+            "org.apache.pulsar.compaction.CompactorTool",
+            "org.apache.pulsar.PulsarVersionStarter",
+        ] {
+            let cmdline = format!("java\0-Xmx2g\0{class}\0--url\0pulsar://broker:6650");
+            assert_eq!(runtime_service_from_cmdline(&cmdline), None, "{class}");
+        }
+
+        // Every daemon `bin/pulsar` execs is still the service itself.
+        for class in [
+            "org.apache.pulsar.PulsarBrokerStarter",
+            "org.apache.pulsar.PulsarStandaloneStarter",
+            "org.apache.pulsar.proxy.server.ProxyServiceStarter",
+            "org.apache.pulsar.websocket.service.WebSocketServiceStarter",
+            "org.apache.pulsar.functions.worker.FunctionWorkerStarter",
+        ] {
+            let cmdline = format!("java\0-Xmx2g\0{class}\0--config\0/pulsar/conf/broker.conf");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("pulsar"),
+                "{class}"
+            );
+        }
     }
 
     #[test]
