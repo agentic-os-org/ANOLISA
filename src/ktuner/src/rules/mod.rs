@@ -1455,8 +1455,37 @@ fn running_module_tree() -> Option<std::path::PathBuf> {
     if crate::detect::detect_runtime_env() == crate::detect::RuntimeEnv::Container {
         return None;
     }
-    let uname = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
-    Some(std::path::Path::new("/lib/modules").join(uname.trim()))
+    running_module_tree_from(
+        "/proc/sys/kernel/osrelease",
+        std::path::Path::new("/lib/modules"),
+    )
+}
+
+/// Path-injectable form of [`running_module_tree`] (the `eval_*_at` idiom):
+/// `release_path` is the release file and `modules_root` the tree it names.
+///
+/// The release is decoded by the detector's own reader
+/// ([`crate::detect::read_kernel_version_from`]), not by a strict
+/// `read_to_string`: `/proc/sys/kernel/osrelease` is the byte array
+/// `init_uts_ns.name.release` handed to the reader verbatim (v6.6
+/// kernel/utsname_sysctl.c:93-99) and nothing checks its encoding, so one
+/// stray byte emptied the release here — the tree collapsed onto
+/// `modules_root` itself, every probe under it found nothing, and the qdisc
+/// and BBR availability gates went silent on a host whose modules were all
+/// installed. The detect layer reads the same file through the same decode,
+/// so the two readers cannot drift apart again.
+///
+/// `None` when the release cannot be read at all: nothing then names a tree,
+/// and a probe must not report a module as unavailable because it guessed one.
+fn running_module_tree_from(
+    release_path: &str,
+    modules_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let release = crate::detect::read_kernel_version_from(release_path).ok()?;
+    if release.is_empty() {
+        return None;
+    }
+    Some(modules_root.join(release))
 }
 
 /// Whether the module tree `tree` ships `module` under `subdir` (e.g.
@@ -9987,6 +10016,58 @@ mod tests {
         // Listed elsewhere or under another name is not this module.
         assert!(!module_in_tree(&tree.0, "kernel/net/sched", "sch_fq"));
         assert!(!module_in_tree(&tree.0, "kernel/net/ipv4", "sch_fq_codel"));
+    }
+
+    /// `/proc/sys/kernel/osrelease` is a raw byte array
+    /// (`init_uts_ns.name.release`, v6.6 kernel/utsname_sysctl.c:93-99) that
+    /// nothing checks the encoding of, and the module tree is named after it.
+    /// A strict `read_to_string` emptied the release on one such byte, so the
+    /// tree collapsed onto `/lib/modules` itself and every probe under it
+    /// found nothing: the qdisc and BBR availability gates went silent on a
+    /// host whose modules were all installed. The release is decoded by the
+    /// detector's own reader now, and a fixture release carrying one such byte
+    /// must still resolve the tree the modules live in.
+    #[test]
+    fn the_module_tree_reads_the_release_lossily() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_module_tree_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let release_file = dir.join("osrelease");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&release_file, b"6.6.87-node\xff\n").unwrap();
+
+        let modules_root = dir.join("lib/modules");
+        let tree = modules_root.join("6.6.87-node\u{fffd}");
+        std::fs::create_dir_all(tree.join("kernel/net/sched")).unwrap();
+        std::fs::write(tree.join("kernel/net/sched/sch_fq.ko"), b"").unwrap();
+
+        let resolved = running_module_tree_from(release_file.to_str().unwrap(), &modules_root)
+            .expect("a release with one raw byte must still name the tree it belongs to");
+        assert_eq!(resolved, tree);
+        assert!(
+            module_in_tree(&resolved, "kernel/net/sched", "sch_fq"),
+            "the module the release names must be found in its tree"
+        );
+
+        // A release that cannot be read at all names no tree, so nothing is
+        // reported as unavailable from a guessed one.
+        let missing = dir.join("no-such-osrelease");
+        assert!(
+            running_module_tree_from(missing.to_str().unwrap(), &modules_root).is_none(),
+            "an unreadable release must not resolve a tree"
+        );
+        // An empty release is the same case.
+        let empty = dir.join("empty-osrelease");
+        std::fs::write(&empty, b"   \n").unwrap();
+        assert!(
+            running_module_tree_from(empty.to_str().unwrap(), &modules_root).is_none(),
+            "a blank release must not resolve a tree"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -457,7 +457,10 @@ fn read_kernel_version() -> Result<String> {
 /// such byte, which made [`gather_system_info`] fail and took every command
 /// with it, although the version is reported and compared as a `major.minor`
 /// prefix that a replacement character cannot impersonate.
-fn read_kernel_version_from(path: &str) -> Result<String> {
+///
+/// The single reader for this file: the rules that name a release directory
+/// (the `/lib/modules` tree) decode it exactly as this one does.
+pub(crate) fn read_kernel_version_from(path: &str) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {path}"))?;
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
