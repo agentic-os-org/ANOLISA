@@ -537,6 +537,50 @@ fn scenario_unlinked_calls_drive_the_unknown_ratio() {
 }
 
 #[test]
+fn scenario_a_failed_read_is_blamed_for_a_date_the_file_would_carry() {
+    // A failed read supplies nothing, and dates are what a file's own content
+    // carries most often (log lines, headers) — the same reasoning that admits
+    // their `Number`s and `Version`s into the read domain. Only `Date` was
+    // missing from `read`/`glob`/`grep`/`search`, while every name outside
+    // those branches takes the default domain, which admits every class: the
+    // identical failure and claim produced the directed finding under `Bash`
+    // and nothing but the bare onset under `Read`. The claim is already
+    // reported as ungrounded, so the link adds the failed call, not an
+    // accusation.
+    let doc = traj(vec![
+        user(1, "日志是哪天轮转的"),
+        acting_agent(
+            2,
+            "查找日志",
+            vec![call(
+                "c1",
+                "Read",
+                serde_json::json!({"file_path": "/var/log/app.log"}),
+            )],
+            vec![failed_result(
+                "c1",
+                "Error: ENOENT: no such file or directory",
+            )],
+        ),
+        agent(3, "日志在 2025-03-08 轮转过。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(has_onset(&index), "the date is still ungrounded");
+    match fabrication(&index) {
+        Some(Finding::FailureThenFabrication {
+            function_name,
+            claim,
+            ..
+        }) => {
+            assert_eq!(function_name, "Read");
+            assert_eq!(claim.class, ClaimClass::Date);
+        }
+        other => panic!("a failed read must be blamed for a date it would carry, got {other:?}"),
+    }
+}
+
+#[test]
 fn scenario_failed_tool_is_not_blamed_outside_its_output_domain() {
     let doc = traj(vec![
         user(1, "抓一下页面"),

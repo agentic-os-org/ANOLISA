@@ -839,11 +839,15 @@ fn output_domain(function_name: &str) -> &'static [ClaimClass] {
         || name.contains("grep")
         || name.contains("search")
     {
+        // Dates belong here with the numbers and versions: a read returns the
+        // file's own content, and dates (log lines, headers, timestamps) are
+        // among what that content carries.
         return &[
             ClaimClass::Path,
             ClaimClass::Quoted,
             ClaimClass::Identifier,
             ClaimClass::Number,
+            ClaimClass::Date,
             ClaimClass::Version,
         ];
     }
