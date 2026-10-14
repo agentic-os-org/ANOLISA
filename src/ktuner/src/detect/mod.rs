@@ -2084,6 +2084,12 @@ fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
             candidates.clear();
             args = cmdline.split('\0').filter(nonempty);
             continue;
+        } else if bound_java_entrypoint && arg.starts_with("-D") {
+            // An application started by a generic launcher carries its identity
+            // nowhere else on the command line (see IDENTITY_JVM_PROPERTIES).
+            if let Some(service) = identity_property_service(arg) {
+                return Some(service);
+            }
         } else if arg == "-jar" || (bound_java_entrypoint && matches!(arg, "-m" | "--module")) {
             if let Some(entrypoint) = args.next() {
                 if bound_java_entrypoint && argument_files_enabled && is_argument_file(entrypoint) {
@@ -2161,6 +2167,32 @@ fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// JVM system properties that identify the application a generic launcher
+/// starts.
+///
+/// A launcher that runs a jar it does not own leaves no candidate for the
+/// marker table: `bin/solr` execs
+/// `java <SOLR_START_OPTS> -jar start.jar --module=http` (apache/solr
+/// `solr/bin/solr`, the `exec "$JAVA" "${SOLR_START_OPTS[@]}" … -jar start.jar`
+/// line, with `-Dsolr.solr.home=`, `-Dsolr.install.dir=` and
+/// `-Dsolr.install.symDir=` in SOLR_START_OPTS), so the jar is Jetty's generic
+/// `start.jar` and every other argument is a JVM option whose value the scan
+/// deliberately skips. The property is then the only identity the command line
+/// carries. Only property names unique to one launcher belong here — `start.jar`
+/// alone must not be mapped, since any Jetty application starts that way.
+const IDENTITY_JVM_PROPERTIES: &[(&str, &str)] =
+    &[("solr.solr.home", "solr"), ("solr.install.dir", "solr")];
+
+/// The service a `-D<name>=<value>` argument identifies, if any.
+fn identity_property_service(arg: &str) -> Option<&'static str> {
+    let property = arg.strip_prefix("-D")?;
+    let name = property.split('=').next().unwrap_or(property);
+    IDENTITY_JVM_PROPERTIES
+        .iter()
+        .find(|(property_name, _)| *property_name == name)
+        .map(|(_, service)| *service)
 }
 
 /// One candidate argument, tokenized for marker matching.
@@ -4652,12 +4684,26 @@ mod tests {
         let cmdline = "java\0org.apache.catalina.startup.Bootstrap\0start";
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("tomcat"));
 
-        // Solr and Pulsar main classes likewise carry the service only in
-        // their package run, not in the class name.
-        let cmdline = "java\0org.apache.solr.servlet.SolrDispatchFilter";
-        assert_eq!(runtime_service_from_cmdline(cmdline), Some("solr"));
+        // Pulsar's main class likewise carries the service only in its package
+        // run, not in the class name.
         let cmdline = "java\0org.apache.pulsar.PulsarBrokerStarter\0--broker-conf";
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("pulsar"));
+
+        // Solr is started by a generic launcher: `bin/solr` execs
+        // `java <opts> -jar start.jar --module=http`, so the jar is Jetty's and
+        // the service is only in the property the launcher always sets. The
+        // previous fixture (`java org.apache.solr.servlet.SolrDispatchFilter`)
+        // was a servlet filter with no main, a command line no Solr can
+        // produce, and it certified the two markers as reachable while every
+        // stock deployment ran as plain Java.
+        let cmdline = "java\0-server\0-Xms512m\0-Dsolr.log.dir=/var/solr/logs\0\
+                       -Djetty.port=8983\0-Djetty.home=/opt/solr/server\0\
+                       -Dsolr.solr.home=/var/solr\0-Dsolr.install.dir=/opt/solr\0\
+                       -jar\0start.jar\0--module=http";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("solr"));
+        // The same command line without Solr's property is another Jetty app.
+        let cmdline = "java\0-Djetty.home=/opt/jetty\0-jar\0start.jar\0--module=http";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
 
         // Elasticsearch, including a versioned jar basename.
         let cmdline = "java\0-jar\0/usr/share/elasticsearch-8.12.0/lib/elasticsearch-8.12.0.jar";
