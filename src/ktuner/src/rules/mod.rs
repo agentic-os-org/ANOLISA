@@ -9099,6 +9099,15 @@ fn is_database_present(info: &SystemInfo) -> bool {
         // but were missing from this shared memory-oriented predicate.
         || info.has_process("mongod")
         || info.has_process("clickhouse")
+        // TiDB is the classifier's OLTP database and TiKV its distributed KV
+        // store (`classify`'s has_db -> IoLatency), and the sibling rule lists
+        // count both since the sweep of 095903d24 and its three twins. This
+        // list is the last one that skipped them, and it is the only way into
+        // the huge-page, SysV IPC and overcommit rules -- none of which take
+        // the classification -- so a TiDB-only host kept those knobs at their
+        // defaults while a mongod or clickhouse host was sized.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
 }
 
 /// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
@@ -9444,7 +9453,9 @@ mod tests {
         // Real database servers, including role-prefixed worker comms.
         // mongod and clickhouse are databases in every sibling gate
         // (eval_swappiness, eval_thp, eval_dirty_ratio, eval_readahead)
-        // but were missing from this shared predicate.
+        // but were missing from this shared predicate; TiDB and TiKV are the
+        // classifier's OLTP database and its distributed KV store, which the
+        // sibling rule lists count since 095903d24.
         for name in [
             "postgres",
             "postgres: writer",
@@ -9454,6 +9465,8 @@ mod tests {
             "mongod: shard",
             "clickhouse",
             "clickhouse: writer",
+            "tidb-server",
+            "tikv-server",
         ] {
             assert!(
                 is_database_present(&info_with(&[name])),
@@ -9505,8 +9518,15 @@ mod tests {
         std::fs::write(&shmmni_path, b"4096\n").unwrap();
 
         // Role-suffixed worker comms are the database: the recommendations
-        // must fire.
-        for name in ["postgres: writer", "mysqld: foo"] {
+        // must fire. The TiDB pair is the same database class (the classifier
+        // calls a TiDB host IoLatency), and these rules take no classification
+        // of their own, so the predicate is their only gate.
+        for name in [
+            "postgres: writer",
+            "mysqld: foo",
+            "tidb-server",
+            "tikv-server",
+        ] {
             let info = info_with(&[name]);
             let mut recs = Vec::new();
             eval_sem_at(&info, &mut recs, sem_path.to_str().unwrap());
