@@ -2768,9 +2768,14 @@ fn eval_dirty_expire_centisecs_at(
 /// Whether the periodic (kupdate) flush can run at all, i.e. whether
 /// `vm.dirty_expire_centisecs` has a consumer: a non-zero
 /// `/proc/sys/vm/dirty_writeback_centisecs`. A missing file counts as on —
-/// the kernel default is 500 and only a synthetic path can be absent.
+/// the kernel default is 500 and only a synthetic path can be absent — and so
+/// does a file the reader cannot interpret: `read_sysctl_u64` maps a failed
+/// read or a malformed value to 0, which would read as "the periodic flush is
+/// off" on a masked or garbled proc entry (a container's, typically) and
+/// silence advice a live flush asked for. Only a successfully read 0 is the
+/// off switch, the same rule the watchdog_thresh gate follows.
 fn periodic_writeback_is_on(writeback_path: &str) -> bool {
-    !std::path::Path::new(writeback_path).exists() || read_sysctl_u64(writeback_path) != 0
+    read_switch(writeback_path) != Some(0)
 }
 
 fn eval_dirty_writeback_centisecs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -15147,6 +15152,18 @@ mod tests {
         let writeback_on = dir.join("dirty_writeback_centisecs.on");
         std::fs::write(&writeback_on, b"500\n").unwrap();
         let writeback_missing = dir.join("dirty_writeback_centisecs.missing");
+        // A switch that exists but cannot be read or parsed is not evidence
+        // that periodic writeback is off: `read_sysctl_u64` maps those to 0,
+        // so the gate has to parse the file itself and keep the advice for
+        // anything the reader cannot interpret, exactly as the watchdog_thresh
+        // gate does. Malformed content, an empty file and a directory (an IO
+        // error even for root) all keep the rule.
+        let writeback_malformed = dir.join("dirty_writeback_centisecs.malformed");
+        std::fs::write(&writeback_malformed, b"off\n").unwrap();
+        let writeback_empty = dir.join("dirty_writeback_centisecs.empty");
+        std::fs::write(&writeback_empty, b"").unwrap();
+        let writeback_dir = dir.join("dirty_writeback_centisecs.dir");
+        std::fs::create_dir_all(&writeback_dir).unwrap();
 
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -15161,7 +15178,13 @@ mod tests {
             "periodic writeback is off: a shorter expiry selects nothing"
         );
 
-        for writeback in [&writeback_on, &writeback_missing] {
+        for writeback in [
+            &writeback_on,
+            &writeback_missing,
+            &writeback_malformed,
+            &writeback_empty,
+            &writeback_dir,
+        ] {
             let mut recs = Vec::new();
             eval_dirty_expire_centisecs_at(
                 &info,
