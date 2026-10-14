@@ -5999,15 +5999,27 @@ fn tcp_adv_win_scale_recommendation(current: i64, kernel_version: &str) -> Optio
 }
 
 fn eval_sched_tunable_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_tunable_scaling";
-    if !std::path::Path::new(path).exists() {
-        return 1;
-    }
+    eval_sched_tunable_scaling_at(info, recs, "/proc/sys/kernel/sched_tunable_scaling")
+}
+
+/// Path-injectable form of [`eval_sched_tunable_scaling`] (the `eval_*_at`
+/// idiom) so the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the scheduler cannot scale its tunables with the
+/// CPU count — and [`read_sysctl_u64`] maps an unreadable or unparseable file
+/// to that same 0. Only a zero the reader could produce is evidence of the
+/// disabled scaling, so a masked or garbled proc entry (a container's,
+/// typically) neither reports a `current_value` the host does not have nor
+/// asks for a write it may not need.
+fn eval_sched_tunable_scaling_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if info.cpu_cores <= 16 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.sched_tunable_scaling".to_string(),
             current_value: "0".to_string(),
@@ -13596,6 +13608,36 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn sched_tunable_scaling_advice_needs_a_readable_switch() {
+        // Same shape on a CPU-count-gated rule: the precondition is kept, and
+        // an unreadable switch no longer reports the scaling as disabled.
+        let (off, on, others) = zero_switch_paths("sched_tunable_scaling", b"1\n");
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        let advice = |info: &SystemInfo, path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_sched_tunable_scaling_at(info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&info, &off);
+        assert_eq!(recs.len(), 1, "a readable 0 disables the scaling");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&info, &on).is_empty(), "a readable 1 scales");
+        for path in &others {
+            assert!(
+                advice(&info, path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
+        }
+
+        let mut small = make_test_info();
+        small.cpu_cores = 8;
+        assert!(advice(&small, &off).is_empty());
     }
 
     #[test]
