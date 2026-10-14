@@ -7019,13 +7019,25 @@ fn eval_user_reserve_kbytes_at(
     1
 }
 
-fn eval_shm_rmid_forced(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/shm_rmid_forced";
-    if !std::path::Path::new(path).exists() {
-        return 1;
-    }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+fn eval_shm_rmid_forced(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_shm_rmid_forced_at(info, recs, "/proc/sys/kernel/shm_rmid_forced")
+}
+
+/// Path-injectable form of [`eval_shm_rmid_forced`] (the `eval_*_at` idiom) so
+/// the switch read is assertable against synthetic files.
+///
+/// The rule fires on a zero — orphaned segments are never reclaimed — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence of the unset switch, so a
+/// masked or garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not
+/// need.
+fn eval_shm_rmid_forced_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.shm_rmid_forced".to_string(),
             current_value: "0".to_string(),
@@ -15259,6 +15271,69 @@ mod tests {
         if let Some(rec) = recs.iter().find(|r| r.param == "kernel.shm_rmid_forced") {
             assert_eq!(rec.recommended_value, "1");
             assert_eq!(rec.category, Category::Performance);
+        }
+    }
+
+    /// Synthetic `<file>.0` / `.1` / `.malformed` / `.empty` / `.dir` trio for
+    /// the "a failed read is not the value 0" gates: the reader maps an
+    /// missing, unreadable or unparseable file alike, so each shape gets its
+    /// own path. `.dir` is an IO error even for root.
+    fn switch_fixture(
+        prefix: &str,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        [std::path::PathBuf; 4],
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_{prefix}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let off = dir.join("switch.0");
+        std::fs::write(&off, b"0\n").unwrap();
+        let on = dir.join("switch.1");
+        std::fs::write(&on, b"1\n").unwrap();
+        let malformed = dir.join("switch.malformed");
+        std::fs::write(&malformed, b"off\n").unwrap();
+        let empty = dir.join("switch.empty");
+        std::fs::write(&empty, b"").unwrap();
+        let io_error = dir.join("switch.dir");
+        std::fs::create_dir_all(&io_error).unwrap();
+        let missing = dir.join("switch.missing");
+        (off, on, [malformed, empty, io_error, missing])
+    }
+
+    #[test]
+    fn shm_rmid_forced_advice_needs_a_readable_switch() {
+        // kernel.shm_rmid_forced is read with read_sysctl_u64, which maps an
+        // unreadable or unparseable file to 0 — the value this rule fires on.
+        // A masked or garbled proc entry (a container's, typically) was
+        // therefore reported as `current_value: "0"` and answered with a write
+        // of 1 on a host whose switch was never read.
+        let (off, on, others) = switch_fixture("shm_rmid_forced");
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_shm_rmid_forced_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(
+            recs.len(),
+            1,
+            "a readable 0 leaves the segments unreclaimed"
+        );
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 reclaims them");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
         }
     }
 
