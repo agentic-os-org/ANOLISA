@@ -1277,3 +1277,31 @@ fn weak_containment_and_numeric_rounding_remain_supported() {
         Grounding::Grounded { .. }
     ));
 }
+
+#[test]
+fn scenario_json_object_key_is_evidence_for_a_restatement() {
+    // A status-code histogram keys its counts by the code itself. The payload
+    // does carry the 404, so restating it is not invention.
+    let doc = traj(vec![
+        user(1, "统计一下这次运行的状态码"),
+        acting_agent(
+            2,
+            "统计中",
+            vec![call(
+                "c1",
+                "Bash",
+                serde_json::json!({"command": "jq '.status_counts' /tmp/run.json"}),
+            )],
+            vec![ok_result("c1", r#"{"404":119}"#)],
+        ),
+        agent(3, "其中 404 出现了 119 次。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(grounding_for(&index, "404"), Grounding::Grounded { .. }),
+        "a number the payload keyed on is still a payload fact: {:?}",
+        index.claims
+    );
+    assert!(!has_onset(&index), "findings={:?}", index.findings);
+}

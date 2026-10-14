@@ -507,3 +507,21 @@ fn json_strings_keep_human_numeric_grouping() {
         assert!(claims.iter().any(|c| c.class == class), "{class:?}");
     }
 }
+
+#[test]
+fn json_object_keys_keep_their_numeric_facts() {
+    // A payload keyed by a number, as a status-code histogram is, carries that
+    // number exactly as an array element does. The typed replay that replaces
+    // the text pass's numbers must read keys as well as values, or a figure the
+    // payload did hold disappears from the claims and from the evidence pool.
+    for (text, expected) in [
+        (r#"{"404":119,"500":120}"#, vec![404.0, 500.0, 119.0, 120.0]),
+        (r#"{"counts":{"404":119}}"#, vec![404.0, 119.0]),
+    ] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, expected, "{text}");
+    }
+}

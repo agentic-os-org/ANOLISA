@@ -267,7 +267,18 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                     );
                 }
                 serde_json::Value::Array(values) => pending.extend(values.iter().rev()),
-                serde_json::Value::Object(values) => pending.extend(values.values().rev()),
+                serde_json::Value::Object(values) => {
+                    // Keys are payload too: a histogram keyed by status code
+                    // carries its codes in the keys, and dropping them loses
+                    // facts the text pass this walk replaces did read.
+                    claims.extend(
+                        values
+                            .keys()
+                            .flat_map(|key| extract_claims(key))
+                            .filter(|claim| claim.class == ClaimClass::Number),
+                    );
+                    pending.extend(values.values().rev());
+                }
                 _ => {}
             }
         }
