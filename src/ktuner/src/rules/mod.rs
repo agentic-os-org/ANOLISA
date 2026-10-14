@@ -3530,6 +3530,12 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
         || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse")
+        // TiDB is the classifier's OLTP database and TiKV its distributed KV
+        // store (`classify`'s has_db -> IoLatency); a TiDB host's per-query
+        // round-trip to its region store is the request-path shape this gate
+        // lists, and both names were still missing from it.
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
 }
 
 /// Path-injectable form of [`eval_busy_poll`] (the `eval_*_at` idiom) so the
@@ -3538,11 +3544,13 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
 /// The gate lists every workload whose network round-trips sit on the
 /// request path: the caches (redis, memcached), the proxies (nginx), the
 /// OLTP databases (postgres, mysqld — MariaDB 10.4+ runs as mariadbd, the
-/// same OLTP shape — and mongod) and clickhouse. The OLTP databases appear
-/// in every sibling latency gate — eval_thp's `is_latency_sensitive`, the
-/// swappiness/dirty_ratio db lists, classify's IoLatency — but were missing
-/// here, so a database host never got the busy-polling advice its
-/// synchronous per-query round-trip profile asks for.
+/// same OLTP shape — and mongod), clickhouse, and TiDB with its TiKV region
+/// store, whose per-query round-trip is the distributed shape of the same
+/// class. The OLTP databases appear in every sibling latency gate —
+/// eval_thp's `is_latency_sensitive`, the swappiness/dirty_ratio db lists,
+/// classify's IoLatency — but were missing here, so a database host never
+/// got the busy-polling advice its synchronous per-query round-trip profile
+/// asks for.
 fn eval_busy_poll_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -12629,7 +12637,10 @@ mod tests {
     /// busy_read gates on "the same services as the twin", so every service
     /// that earns a 10 GbE host the busy_poll advice must earn it busy_read
     /// too: the twin's list grew the OLTP databases and valkey after the
-    /// busy_read gate copied it.
+    /// busy_read gate copied it, and TiDB and TiKV (the classifier's OLTP
+    /// database and its distributed KV store) are the remaining members of
+    /// that database class - a TiDB host's per-query round-trip to its region
+    /// store is the request-path shape this pair of rules exists for.
     #[test]
     fn busy_read_counts_every_service_its_twin_counts() {
         let dir = std::env::temp_dir().join(format!(
@@ -12654,6 +12665,8 @@ mod tests {
             "mariadbd",
             "mongod",
             "clickhouse",
+            "tidb-server",
+            "tikv-server",
         ] {
             let mut info = make_test_info();
             info.network = vec![NetInfo {
