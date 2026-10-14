@@ -1882,7 +1882,16 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     ("org.apache.kafka.connect", "kafka"),
     ("kafka.kafka", "kafka"),
     ("kafka", "kafka"),
-    ("org.apache.zookeeper", "zookeeper"),
+    // ZooKeeper maps its server package — `bin/zkServer.sh` runs
+    // org.apache.zookeeper.server.quorum.QuorumPeerMain (or
+    // org.apache.zookeeper.server.ZooKeeperServerMain for a standalone
+    // server) — and NOT the bare `org.apache.zookeeper` root, for the reason
+    // the Kafka markers above spell out: `bin/zkCli.sh` execs the JVM with
+    // org.apache.zookeeper.ZooKeeperMain, the client's own class, so the
+    // tool's argv[0] is gone by the time the process is sampled and the bare
+    // root read a host that only administers a remote ensemble as a member of
+    // it.
+    ("org.apache.zookeeper.server", "zookeeper"),
     ("zookeeper", "zookeeper"),
     ("org.apache.flink", "flink"),
     ("flink", "flink"),
@@ -4329,6 +4338,41 @@ mod tests {
             assert_eq!(
                 runtime_service_from_cmdline(&cmdline),
                 Some("pulsar"),
+                "{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_the_zookeeper_client() {
+        // `bin/zkCli.sh` execs the JVM with the client's own main class
+        // (apache/zookeeper bin/zkCli.sh: org.apache.zookeeper.ZooKeeperMain),
+        // so by the time the process is sampled its argv[0] is `java` and only
+        // the class is left to decide — the case the Pulsar markers above
+        // spell out for the tools whose launcher execs the JVM. The bare
+        // `org.apache.zookeeper` root read the client's class as an ensemble
+        // member, so a host that only administers a remote ensemble reported
+        // "ZooKeeper" and classified as the in-memory coordination-KV workload,
+        // earning the THP and vfs_cache_pressure advice for a service that
+        // runs elsewhere.
+        let cmdline = concat!(
+            "java\0-Dzookeeper.log.dir=/var/log/zookeeper\0",
+            "-cp\0/usr/share/zookeeper/lib/*:conf\0",
+            "org.apache.zookeeper.ZooKeeperMain\0-server\0zk1:2181",
+        );
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // The ensemble members keep deciding: `zkServer.sh` runs
+        // org.apache.zookeeper.server.quorum.QuorumPeerMain, and its
+        // ZOO_MAIN_CLASS override names the same package in standalone form.
+        for class in [
+            "org.apache.zookeeper.server.quorum.QuorumPeerMain",
+            "org.apache.zookeeper.server.ZooKeeperServerMain",
+        ] {
+            let cmdline = format!("java\0-Xmx1g\0{class}\0/opt/zookeeper/conf/zoo.cfg");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("zookeeper"),
                 "{class}"
             );
         }
