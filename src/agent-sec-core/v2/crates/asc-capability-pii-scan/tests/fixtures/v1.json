@@ -1,17 +1,17 @@
 {
-  "source_commit": "ca99014ee0a481c9055fe26de8b5903c9ef9c309",
+  "source_commit": "1c2e15c638a742150718fb1c3902b771ba672e7f",
   "source_sha256": {
     "__init__.py": "db8577291eea29c9b4893530ccb51dc60a983f9845f6c0f2998594b0400184ae",
     "audit.py": "b222a9f3c9cf1ec8e0be196be75a5e187afffe43e2ad09950b9f7abdb5094db0",
-    "cli.py": "8e9fe4489465de6866af292ad49237bd03bd0234fe5ea70d16135d666c459a80",
+    "cli.py": "fe4d01e2352790c5fb3b04dd804bcd1616721c4e018e7d9f3a7c810c7f793cd7",
     "custom_rules.py": "fb717313fa1cfeec34a8d66fc952fecce6f362bcf7e08e9501ff177c58285ed1",
     "detectors/__init__.py": "9b84a0abe465df5923e346abe5eacf59d0139548c55282ef983e4510dc628b80",
     "detectors/base.py": "a0c6152e1b216ea7b3c170ad77e663fc6ad27d54b71d4c473cb5d71dd299b110",
     "detectors/custom.py": "6b37b9032fd9e34d333233f995f48591b9a0ca4cbe6b901dfd071032ed30db36",
-    "detectors/regex.py": "3964ce9fb1f401c2c078ade3fcb87260bb93b879b550514250f6ae27ea0c31ac",
+    "detectors/regex.py": "8dabe7853cd5b84395a400cecfcb8f262ea165bca6479ce161442535b3d351d5",
     "models.py": "c738376f07f8d23d31b0478cf84f914946b92df0c9c8340fa84c7386cf7f9a25",
     "redactor.py": "3f9a99855f957f8ce6add215dab0810cedd405651ae1d2f672334390ea59aaa7",
-    "scanner.py": "512d2b9357b91116d4db6e391e2cd412e39274a5504387be2c233f72b53b8ce1",
+    "scanner.py": "1dfe71a4da56c3377148ff7ae3926dcf5223b94aec724262dc7bac991742722b",
     "validators.py": "074419664ec0b648250ab8b0744bd7093f42750f89c8027b8fea15fb0fbd4e6e"
   },
   "python": "3.11.6",
@@ -3287,6 +3287,4441 @@
       }
     },
     {
+      "text": "备注🙂é alice@company.co.uk",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 33,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 34,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk."
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk...",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 36,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk..."
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk. Next sentence",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 48,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk. Next sentence"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.\n",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.\n"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.\t",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.\t"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk. ",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 36,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk. "
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.\u001c",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.\u001c"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk,",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 34,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk,"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk。",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 36,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk。"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.\"",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.\""
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.'",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.'"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.)",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.)"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.]",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.]"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.}",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.}"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.>",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.>"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.,",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.,"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.;",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.;"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.:",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.:"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.!",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.!"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.?",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 35,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.?"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.，",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.，"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.。",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.。"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.；",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.；"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.：",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.："
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.！",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.！"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.？",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.？"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.、",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.、"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.）",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.）"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.］",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.］"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.｝",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.｝"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.】",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.】"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.〕",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.〕"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.》",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.》"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.〉",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.〉"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.」",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.」"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.』",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.』"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.”",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.”"
+      }
+    },
+    {
+      "text": "备注🙂é alice@company.co.uk.’",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.co.uk",
+            "span": {
+              "start": 6,
+              "end": 25
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.co.uk"
+          }
+        ],
+        "redacted_text": "备注🙂é a***@company.co.uk.’"
+      }
+    },
+    {
+      "text": "asc-pii-cosh-20261008@pii-fixture-20261008.net",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 46,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@pii-fixture-20261008.net",
+            "span": {
+              "start": 0,
+              "end": 46
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+          }
+        ]
+      }
+    },
+    {
+      "text": "asc-pii-cosh-20261008@pii-fixture-20261008.net.",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 47,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@pii-fixture-20261008.net",
+            "span": {
+              "start": 0,
+              "end": 46
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+          }
+        ]
+      }
+    },
+    {
+      "text": "Reply with exactly this synthetic test email address and nothing else: asc-pii-cosh-20261008@pii-fixture-20261008.net. Do not call any tools. The address is invented test data.",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 176,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@pii-fixture-20261008.net",
+            "span": {
+              "start": 71,
+              "end": 117
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+          }
+        ]
+      }
+    },
+    {
+      "text": "Reply with exactly this synthetic test email address and nothing else: asc-pii-cosh-20261008@pii-fixture-20261008.net Do not call any tools. The address is invented test data.",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 175,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@pii-fixture-20261008.net",
+            "span": {
+              "start": 71,
+              "end": 117
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn.123 bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 39,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 21,
+              "end": 38
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.123 b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.c bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.c b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.-bad bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 40,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 22,
+              "end": 39
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.-bad b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn._bad bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 40,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 22,
+              "end": 39
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn._bad b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn..evil bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 41,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 23,
+              "end": 40
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn..evil b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.cn- bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 39,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 21,
+              "end": 38
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.cn- b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn中 bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 38,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 18,
+              "end": 35
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn中 b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn_ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 36,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 18,
+              "end": 35
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn_ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn- bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 36,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 18,
+              "end": 35
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn- b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.中 bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 39,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.中 b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.🙂 bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 40,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.🙂 b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn./ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn./ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.@ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.@ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.+ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.+ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.% bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.% b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.` bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.` b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.( bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.( b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.[ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.[ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.{ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.{ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.< bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.< b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.\\ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 37,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 19,
+              "end": 36
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.\\ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn...123 bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 41,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 23,
+              "end": 40
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn...123 b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.../ bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 39,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 21,
+              "end": 38
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.../ b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@company.cn.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bob@securecorp.cn.",
+      "options": {
+        "raw_evidence": true,
+        "redact_output": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 100,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "b***@securecorp.cn",
+            "span": {
+              "start": 82,
+              "end": 99
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "bob@securecorp.cn"
+          }
+        ],
+        "redacted_text": "alice@company.cn.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b***@securecorp.cn."
+      }
+    },
+    {
+      "text": "alice@example.com.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@example.com.",
+      "options": {
+        "include_low_confidence": true,
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.35,
+            "evidence_redacted": "a***@example.com",
+            "span": {
+              "start": 0,
+              "end": 17
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "context": "reserved_domain",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@example.com"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@sub.example.net.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 22,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@sub.example.net.",
+      "options": {
+        "include_low_confidence": true,
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 22,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.35,
+            "evidence_redacted": "a***@sub.example.net",
+            "span": {
+              "start": 0,
+              "end": 21
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "context": "reserved_domain",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@sub.example.net"
+          }
+        ]
+      }
+    },
+    {
+      "text": "ssh://alice@company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 23,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "ssh://alice@company.cn.",
+      "options": {
+        "include_low_confidence": true,
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 23,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.35,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 6,
+              "end": 22
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "context": "remote_identity",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn/",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn@",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn+",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn%",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn`",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn(",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 17,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cn🙂",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 20,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": "alice@company.cń",
+      "options": {
+        "raw_evidence": true
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "warn",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "email": 1
+          },
+          "by_category": {
+            "personal_data": 1
+          },
+          "by_severity": {
+            "warn": 1
+          },
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "email",
+            "category": "personal_data",
+            "severity": "warn",
+            "confidence": 0.82,
+            "evidence_redacted": "a***@company.cn",
+            "span": {
+              "start": 0,
+              "end": 16
+            },
+            "metadata": {
+              "validator": "email_syntax",
+              "detector": "regex",
+              "engine": "regex_v1"
+            },
+            "raw_evidence": "alice@company.cn"
+          }
+        ]
+      }
+    },
+    {
+      "text": ".alice@company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice.@company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice..bob@company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 22,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@-company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@company-.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@company..cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 18,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@bad_domain.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 20,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@company.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 77,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "alice@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 74,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.cn.",
+      "options": {},
+      "expected": {
+        "ok": true,
+        "verdict": "pass",
+        "summary": {
+          "total": 0,
+          "by_type": {},
+          "by_category": {},
+          "by_severity": {},
+          "source": "unknown",
+          "bytes_scanned": 260,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": []
+      }
+    },
+    {
       "text": "email alice@company.cn",
       "options": {},
       "expected": {
@@ -3570,6 +8005,56 @@
           }
         },
         "findings": []
+      }
+    },
+    {
+      "text": "sk-test9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA",
+      "options": {
+        "source": "model_input"
+      },
+      "expected": {
+        "ok": true,
+        "verdict": "deny",
+        "summary": {
+          "total": 1,
+          "by_type": {
+            "api_key": 1
+          },
+          "by_category": {
+            "credential": 1
+          },
+          "by_severity": {
+            "deny": 1
+          },
+          "source": "model_input",
+          "bytes_scanned": 43,
+          "truncated": false,
+          "custom_rules": {
+            "status": "absent",
+            "rule_count": 0,
+            "runtime_error_count": 0,
+            "budget_exhausted": false,
+            "truncated": false
+          }
+        },
+        "findings": [
+          {
+            "type": "api_key",
+            "category": "credential",
+            "severity": "deny",
+            "confidence": 0.51,
+            "evidence_redacted": "sk-t...[REDACTED]...DCBA",
+            "span": {
+              "start": 0,
+              "end": 43
+            },
+            "metadata": {
+              "pattern": "token_prefix",
+              "detector": "regex",
+              "engine": "regex_v1"
+            }
+          }
+        ]
       }
     },
     {

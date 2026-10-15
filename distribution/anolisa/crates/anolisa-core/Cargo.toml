@@ -11,6 +11,8 @@ anolisa-env.workspace = true
 anolisa-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+json5.workspace = true
+plist.workspace = true
 serde_yaml_ng.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
@@ -30,3 +32,9 @@ nix.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xattr.workspace = true
+
+[features]
+# Compiles the in-memory test executors (FakeServiceManager,
+# FakeCapabilityManager) that cross-crate tests drive through dev-
+# dependencies. Release builds of the CLI enable none of it.
+test-util = []

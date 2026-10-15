@@ -130,7 +130,8 @@ else
     pass "installer fails when qwenpaw exits 0 without installing"
 fi
 
-if run env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" | grep -q '^DRY-RUN: ' && [ ! -d "$PLUGIN_DST" ]; then
+run env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" >"$SANDBOX/install-dry-run.out"
+if [ "$?" -eq 0 ] && grep -q '^DRY-RUN: ' "$SANDBOX/install-dry-run.out" && [ ! -d "$PLUGIN_DST" ]; then
     pass "dry-run install prints the command and changes nothing"
 else
     fail "dry-run install misbehaved"
@@ -231,7 +232,8 @@ if run bash "$UNINSTALL_SH" >/dev/null && [ ! -d "$PLUGIN_DST" ] && \
 else
     fail "uninstaller missed the plugin in ~/.qwenpaw after ~/.copaw appeared"
 fi
-if run bash "$UNINSTALL_SH" | grep -q 'no tokenless plugin is installed'; then
+run bash "$UNINSTALL_SH" >"$SANDBOX/uninstall-empty.out"
+if [ "$?" -eq 0 ] && grep -q 'no tokenless plugin is installed' "$SANDBOX/uninstall-empty.out"; then
     pass "uninstaller reports where it looked when nothing is installed"
 else
     fail "uninstaller claimed success although nothing was installed"
@@ -264,12 +266,14 @@ mkdir -p "$SANDBOX/sdk-ok/anolisa_tokenless" "$SANDBOX/sdk-old/anolisa_tokenless
 printf '__version__ = "0.0.0-test"\nRecoveryMethod = object\n' > "$SANDBOX/sdk-ok/anolisa_tokenless/__init__.py"
 printf '__version__ = "0.0.0-old"\n' > "$SANDBOX/sdk-old/anolisa_tokenless/__init__.py"
 PYTHON3="$(command -v python3)"
-if run bash "$INSTALL_SH" 2>&1 | grep -q 'import left unverified'; then
+run bash "$INSTALL_SH" >"$SANDBOX/install-sdk-unverified.out" 2>&1
+if [ "$?" -eq 0 ] && grep -q 'import left unverified' "$SANDBOX/install-sdk-unverified.out"; then
     pass "installer reports an unverified SDK when the CLI has no Python shebang"
 else
     fail "installer did not report the unverified SDK"
 fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$INSTALL_SH" | grep -q 'anolisa_tokenless 0.0.0-test is importable'; then
+run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$INSTALL_SH" >"$SANDBOX/install-sdk-ok.out"
+if [ "$?" -eq 0 ] && grep -q 'anolisa_tokenless 0.0.0-test is importable' "$SANDBOX/install-sdk-ok.out"; then
     pass "installer verifies the SDK through QwenPaw's Python"
 else
     fail "installer did not verify the SDK through QwenPaw's Python"
@@ -290,15 +294,17 @@ if [ "$?" -eq 1 ] && grep -q 'not importable' "$SANDBOX/detect-old.out"; then
 else
     fail "detect did not report the outdated SDK"
 fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$DETECT_SH" | grep -q 'importable (0.0.0-test)'; then
+run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$DETECT_SH" >"$SANDBOX/detect-sdk-ok.out"
+if [ "$?" -eq 0 ] && grep -q 'importable (0.0.0-test)' "$SANDBOX/detect-sdk-ok.out"; then
     pass "detect reports the importable SDK version"
 else
     fail "detect did not report the importable SDK version"
 fi
 run bash "$UNINSTALL_SH" >/dev/null || fail "failed to uninstall plugin after SDK coverage"
 
-if run env PATH="$SANDBOX/emptybin:/usr/bin:/bin" QWENPAW_HOME="$SANDBOX/nowhere" \
-        bash "$INSTALL_SH" 2>/dev/null | grep -q 'skipping plugin installation' && [ ! -d "$PLUGIN_DST" ]; then
+run env PATH="$SANDBOX/emptybin:/usr/bin:/bin" QWENPAW_HOME="$SANDBOX/nowhere" \
+    bash "$INSTALL_SH" >"$SANDBOX/install-no-cli.out" 2>/dev/null
+if [ "$?" -eq 0 ] && grep -q 'skipping plugin installation' "$SANDBOX/install-no-cli.out" && [ ! -d "$PLUGIN_DST" ]; then
     pass "installer skips without a qwenpaw CLI"
 else
     fail "installer did not skip cleanly without a qwenpaw CLI"

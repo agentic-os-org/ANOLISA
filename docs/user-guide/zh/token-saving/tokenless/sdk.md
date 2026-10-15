@@ -23,7 +23,7 @@ Agent 生命周期时使用 `TokenlessSdk`。不需要接入生命周期、只�
 
 ### 从 GitHub Release 安装
 
-从 [v0.7.14](https://github.com/alibaba/anolisa/releases/tag/tokenless/v0.7.14) 开始，
+从 [v0.7.14](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.7.14) 开始，
 Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 或更高版本，
 请根据目标系统选择原生 `anolisa-tokenless` Wheel：
 
@@ -33,13 +33,13 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple 芯片 | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
 
-下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.8.4 安装到虚拟环境：
+下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.8.6 安装到虚拟环境：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.4/anolisa_tokenless-0.8.4-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.6/anolisa_tokenless-0.8.6-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。
@@ -243,11 +243,15 @@ result = await sdk.post_tool(
         output_optimization=call.output_optimization,
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
+        command=None,  # shell 工具填实际执行的命令行
     )
 )
 ```
 
-`content_origin` 必须来自工具注册契约，不得从结果文本推断。Core 统一路由 Retrieve 输出、
+`content_origin` 必须来自工具注册契约，不得从结果文本推断。Shell 工具应把实际执行的命令行
+（RTK 改写时为 PreTool 返回的那条）作为 `command` 传入：Core 会把只打印本地文件的结果报告为
+`file_read`，打印出的 HTML 页面保持原样，输出中的数据仍照常压缩；其他工具不要设置
+`command`。Core 统一路由 Retrieve 输出、
 错误、中断或拒绝、RTK 已优化输出和普通成功输出，并返回最终内容、Disposition、操作轨迹、
 可恢复性、Token 数量、Stash Key 与可选诊断上下文。Adapter 应透传中间 Streaming Chunk，
 只对最终模型可见文本调用 PostTool。

@@ -2386,51 +2386,54 @@ fn untracked_test_handoff_state(emitted_at_event_index: usize) -> InlineState {
 
 #[test]
 fn untracked_shell_handoff_closes_on_shell_ready_after_emit() {
-    let mut state = untracked_test_handoff_state(2);
-    let events = vec![
-        untracked_test_event(ShellEventKind::ShellReady, None),
-        untracked_test_event(ShellEventKind::ShellReady, None),
-        untracked_test_event(ShellEventKind::ShellReady, None),
-    ];
+    for history_base in [0, 100] {
+        let mut state = untracked_test_handoff_state(history_base + 2);
+        let events = vec![
+            untracked_test_event(ShellEventKind::ShellReady, None),
+            untracked_test_event(ShellEventKind::ShellReady, None),
+            untracked_test_event(ShellEventKind::ShellReady, None),
+        ];
 
-    let ids = close_untracked_shell_handoffs(&mut state, &events);
+        let ids =
+            close_untracked_shell_handoffs_with_history_base(&mut state, &events, history_base);
 
-    assert_eq!(ids, vec!["handoff-1"]);
-    assert!(state.control.shell_handoff().pending_front().is_none());
-    let evidence = state
-        .evidence
-        .latest_shell_command_completed()
-        .expect("degraded evidence");
-    assert_eq!(evidence.status, "completed_untracked");
-    // Decision: the degraded path never reports a real exit code or output.
-    assert_eq!(evidence.exit_code, -1);
-    assert!(evidence.terminal_output_ref.is_none());
-    let row = state
-        .activity
-        .rows
-        .iter()
-        .find(|row| row.id == "handoff-1")
-        .expect("handoff row");
-    assert_eq!(row.status, "completed_untracked");
-    assert!(
-        row.detail.contains("preexec_marker_missing"),
-        "{}",
-        row.detail
-    );
-    assert!(
-        row.detail.contains("exit_code: unavailable"),
-        "{}",
-        row.detail
-    );
-    assert!(row.detail.contains("output_id: <none>"), "{}", row.detail);
-    // The degraded evidence must feed the existing continuation recovery.
-    assert_eq!(
-        state
+        assert_eq!(ids, vec!["handoff-1"]);
+        assert!(state.control.shell_handoff().pending_front().is_none());
+        let evidence = state
             .evidence
-            .claim_pending_shell_handoff_continuations()
-            .len(),
-        1
-    );
+            .latest_shell_command_completed()
+            .expect("degraded evidence");
+        assert_eq!(evidence.status, "completed_untracked");
+        // Decision: the degraded path never reports a real exit code or output.
+        assert_eq!(evidence.exit_code, -1);
+        assert!(evidence.terminal_output_ref.is_none());
+        let row = state
+            .activity
+            .rows
+            .iter()
+            .find(|row| row.id == "handoff-1")
+            .expect("handoff row");
+        assert_eq!(row.status, "completed_untracked");
+        assert!(
+            row.detail.contains("preexec_marker_missing"),
+            "{}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("exit_code: unavailable"),
+            "{}",
+            row.detail
+        );
+        assert!(row.detail.contains("output_id: <none>"), "{}", row.detail);
+        // The degraded evidence must feed the existing continuation recovery.
+        assert_eq!(
+            state
+                .evidence
+                .claim_pending_shell_handoff_continuations()
+                .len(),
+            1
+        );
+    }
 }
 
 #[test]

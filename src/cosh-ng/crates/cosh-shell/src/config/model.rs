@@ -35,7 +35,20 @@ pub struct CoshConfig {
     pub recommendations: RecommendationsConfig,
     pub trusted_commands: Vec<String>,
     pub trusted_project_roots: Vec<PathBuf>,
+    /// Project hook roots the user consented to, bound to the approved content.
+    pub consented_project_hooks: Vec<ConsentedProjectHook>,
     pub(super) readonly: RuntimeReadonlyConfig,
+}
+
+/// One user-consented project hook root.
+///
+/// `digest` is the content fingerprint approved at consent time. `None` marks a
+/// legacy store entry written before content binding existed; a legacy entry is
+/// never treated as consent for the current content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentedProjectHook {
+    pub root: PathBuf,
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +132,7 @@ impl Default for CoshConfig {
             recommendations: RecommendationsConfig::default(),
             trusted_commands: Vec::new(),
             trusted_project_roots: Vec::new(),
+            consented_project_hooks: Vec::new(),
             readonly: RuntimeReadonlyConfig::default(),
         }
     }

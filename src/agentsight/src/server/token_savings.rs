@@ -39,9 +39,10 @@ pub struct SavingsSummary {
     pub baseline_tokens: i64,
     pub total_saved_tokens: i64,
     pub total_compounded_saved: i64,
-    /// Fraction of tokens saved: `total_saved_tokens / total_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `total_saved_tokens / total_tokens`, clamped
+    /// to [0.0, 1.0].
     pub savings_rate: f64,
-    /// Fraction saved including the compounding effect, in [0.0, 1.0].
+    /// Fraction saved including the compounding effect, clamped to [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub total_tool_saved: i64,
     pub total_mcp_saved: i64,
@@ -92,9 +93,10 @@ pub struct SessionSavingsDto {
     pub baseline_tokens: i64,
     pub saved_tokens: i64,
     pub compounded_saved: i64,
-    /// Fraction of tokens saved: `saved_tokens / total_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `saved_tokens / total_tokens`, clamped to
+    /// [0.0, 1.0].
     pub savings_rate: f64,
-    /// Fraction saved including the compounding effect, in [0.0, 1.0].
+    /// Fraction saved including the compounding effect, clamped to [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub request_count: i64,
     pub tool_saved: i64,
@@ -127,9 +129,29 @@ pub struct SessionSavingsDetail {
     pub total_actual_tokens: i64,
     pub total_compounded_saved: i64,
     pub total_original_tokens: i64,
-    /// Fraction of tokens saved: `total_compounded_saved / total_actual_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `total_compounded_saved / total_actual_tokens`,
+    /// clamped to [0.0, 1.0].
     pub savings_rate: f64,
     pub items: Vec<OptimizationItemDto>,
+}
+
+// ─── Rate helpers ────────────────────────────────────────────────────────────
+
+/// Fraction of tokens saved, clamped to the documented `[0, 1]` range.
+///
+/// The ratio is `saved / total`, and a hard-compressed tool output can save
+/// more than the run it belongs to ever billed: tokenless shortens the output
+/// before it enters the prompt, so the saving is measured against a baseline
+/// the model never paid for. The field documents a fraction, so an
+/// out-of-range ratio is clamped here — the same treatment the negative
+/// saving gets where it is computed, and the same range the sibling
+/// `compression_ratio` already enforces.
+fn savings_fraction(saved: i64, total: i64) -> f64 {
+    if total > 0 {
+        (saved as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 // ─── Mapping helpers ─────────────────────────────────────────────────────────
@@ -178,7 +200,10 @@ fn map_operation_to_strategy_label(operation: &str) -> &str {
 
 /// Generate a human-readable optimization reason for a given operation.
 fn generate_optimization_reason(operation: &str, before_tokens: i64, after_tokens: i64) -> String {
-    let saved = before_tokens - after_tokens;
+    // Clamp at 0 — a record can never legitimately expand, but guard against
+    // it rather than report a negative saving. The callers clamp the same way
+    // before summing, so this sentence agrees with the item's `saved_tokens`.
+    let saved = (before_tokens - after_tokens).max(0);
     let pct = if before_tokens > 0 {
         (saved as f64 / before_tokens as f64 * 100.0).round() as i64
     } else {
@@ -355,13 +380,11 @@ pub(crate) fn build_explanation(
 ) -> String {
     if category == "mcp_response" {
         format!(
-            "MCP Response Compression: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "MCP Response Compression: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     } else {
         format!(
-            "Tool Output Optimization: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "Tool Output Optimization: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     }
 }
@@ -420,7 +443,7 @@ pub(crate) fn generate_optimization_tips(
     if zero_savings_sessions > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: format!("Found {} unoptimized sessions", zero_savings_sessions),
+            title: format!("Found {zero_savings_sessions} unoptimized sessions"),
             description: "Some sessions have high consumption but no optimization records; the corresponding agents may not have tokenless enabled or make few tool calls. Check the agent configuration for these sessions.".to_string(),
         });
     }
@@ -459,10 +482,18 @@ pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
 ) -> impl Responder {
+    if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match super::handlers::start_or_default(
+        query.start_ns,
+        end_ns,
+        super::handlers::DEFAULT_WINDOW_NS,
+    ) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
@@ -526,6 +557,23 @@ pub async fn get_token_savings(
     for session in &sessions {
         let total_tokens = session.total_input_tokens + session.total_output_tokens;
         let request_count = session.request_count;
+        // `request_count` counts only the calls inside the queried window,
+        // while `turn_indices` numbers every call of the session. M must be
+        // the last turn INSIDE the window: a call after `end_ns` cannot carry
+        // the shortened output, so letting its global turn index extend the
+        // horizon inflated the reported savings whenever the window was
+        // narrowed. When no in-window call is mapped (e.g. a NULL call_id from
+        // a foreign writer), the windowed count is the best bound available.
+        let session_total_turns = turn_indices
+            .values()
+            .filter(|info| {
+                info.session_id == session.session_id
+                    && info.start_timestamp_ns >= start_ns
+                    && info.start_timestamp_ns <= end_ns
+            })
+            .map(|info| info.turn_index as i64)
+            .max()
+            .unwrap_or(request_count);
         let mut session_saved: i64 = 0;
         let mut session_compounded_saved: i64 = 0;
         let mut session_tool_saved: i64 = 0;
@@ -536,19 +584,22 @@ pub async fn get_token_savings(
 
         if let Some(stat_rows) = stats_by_session.get(&session.session_id) {
             for row in stat_rows {
-                let saved = row.before_tokens - row.after_tokens;
+                // Clamp at 0 — a record can never legitimately expand, but
+                // guard against it rather than report a negative saving.
+                let saved = (row.before_tokens - row.after_tokens).max(0);
                 let category = map_operation_to_category(&row.operation);
                 let title = map_operation_to_title(&row.operation);
 
                 // Compounding: the shortened tool output appears in the
                 // context of all LLM calls AFTER the one that triggered the
                 // tool use. If the tool was invoked at turn N (1-based) out
-                // of M total turns, the savings persist for (M - N) turns.
+                // of M turns in the queried window, the savings persist for
+                // (M - N) turns.
                 let turn_index = turn_indices
                     .get(&row.tool_use_id)
                     .map(|info| info.turn_index)
                     .unwrap_or(1) as i64;
-                let compounding_turns = (request_count - turn_index).max(1);
+                let compounding_turns = (session_total_turns - turn_index).max(1);
                 let compounded = saved * compounding_turns;
 
                 if category == "mcp_response" {
@@ -621,16 +672,8 @@ pub async fn get_token_savings(
         }
 
         // FIX(#1): use compounded/total_tokens for both list and detail pages
-        let savings_rate = if total_tokens > 0 {
-            session_saved as f64 / total_tokens as f64
-        } else {
-            0.0
-        };
-        let compounded_savings_rate = if total_tokens > 0 {
-            session_compounded_saved as f64 / total_tokens as f64
-        } else {
-            0.0
-        };
+        let savings_rate = savings_fraction(session_saved, total_tokens);
+        let compounded_savings_rate = savings_fraction(session_compounded_saved, total_tokens);
 
         grand_input += session.total_input_tokens;
         grand_output += session.total_output_tokens;
@@ -660,16 +703,8 @@ pub async fn get_token_savings(
     }
 
     let grand_total = grand_input + grand_output;
-    let grand_rate = if grand_total > 0 {
-        grand_saved as f64 / grand_total as f64
-    } else {
-        0.0
-    };
-    let grand_compounded_rate = if grand_total > 0 {
-        grand_compounded_saved as f64 / grand_total as f64
-    } else {
-        0.0
-    };
+    let grand_rate = savings_fraction(grand_saved, grand_total);
+    let grand_compounded_rate = savings_fraction(grand_compounded_saved, grand_total);
 
     // FIX(#2): strategy = operation key (for frontend color lookup),
     //           label = Chinese display name
@@ -782,7 +817,9 @@ pub async fn get_session_savings(
                 continue;
             }
 
-            let saved = row.before_tokens - row.after_tokens;
+            // Clamp at 0 — a record can never legitimately expand, but
+            // guard against it rather than report a negative saving.
+            let saved = (row.before_tokens - row.after_tokens).max(0);
             let category = map_operation_to_category(&row.operation);
             let title = map_operation_to_title(&row.operation);
             let strategy = row.operation.clone();
@@ -834,11 +871,7 @@ pub async fn get_session_savings(
     }
 
     // FIX(#1): use compounded/total_tokens — consistent with get_token_savings
-    let savings_rate = if total_tokens > 0 {
-        total_compounded_saved as f64 / total_tokens as f64
-    } else {
-        0.0
-    };
+    let savings_rate = savings_fraction(total_compounded_saved, total_tokens);
 
     HttpResponse::Ok().json(SessionSavingsDetail {
         session_id,
@@ -932,6 +965,11 @@ mod tests {
         )
         .unwrap();
         AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -959,6 +997,17 @@ mod tests {
     }
 
     // ─── Unit tests for mapping functions ─────────────────────────────────
+
+    #[test]
+    fn savings_fraction_guards_zero_and_bounds_both_ends() {
+        // No total to divide by: the rate is zero, never a NaN/inf.
+        assert_eq!(savings_fraction(100, 0), 0.0);
+        // In range: the ratio is reported as-is.
+        assert!((savings_fraction(2200, 2700) - 2200.0 / 2700.0).abs() < 1e-9);
+        // Out of range on either side is clamped to the documented fraction.
+        assert_eq!(savings_fraction(9000, 150), 1.0);
+        assert_eq!(savings_fraction(-5, 150), 0.0);
+    }
 
     #[test]
     fn test_map_operation_to_category() {
@@ -1016,6 +1065,50 @@ mod tests {
 
     // ─── Integration tests for handlers ───────────────────────────────────
 
+    #[actix_web::test]
+    async fn test_token_savings_rejects_an_inverted_window() {
+        // Every sibling window endpoint rejects `start_ns > end_ns` with 400.
+        // This one answered an empty 200 instead, which a caller reads as "no
+        // savings in that range". No HOME juggling: the guard runs before the
+        // stats store is touched.
+        let tmp = std::env::temp_dir().join(format!("agentsight_inv_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=2000&end_ns=1000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected"
+        );
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // Same guard when only `start_ns` is supplied: the end defaults to
+        // now, so a future start is inverted and used to answer an empty 200.
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=9223372036854775807")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "a start beyond the defaulted end must be rejected"
+        );
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[actix_web::test]
     async fn test_get_token_savings_no_stats_db() {
@@ -1050,6 +1143,136 @@ mod tests {
         assert!(!body["sessions"].as_array().unwrap().is_empty());
 
         // Restore HOME to avoid polluting other tests
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Add a third LLM call to the fixture session: turn 3, no tool calls.
+    fn add_third_call(db_path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-1', 'call-3', 'test-agent', 'gpt-4', 600, 300, 300000000, '{}', '[]')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_savings_compounding_uses_session_turns_in_a_window() {
+        // Window covers only the session's last two calls. tc-1 was invoked
+        // on turn 1 of 3, so its shortened output rides along in turns 2 and
+        // 3: compounding must be 2, not the window-scoped (2 - 1) = 1.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_window_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        add_third_call(&db_path);
+        let _stats_path = setup_stats_db(&tmp);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=150000000&end_ns=300000000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+
+        let items = body["sessions"][0]["optimization_items"]
+            .as_array()
+            .expect("optimization items");
+        let tc1 = items
+            .iter()
+            .find(|item| item["id"] == "tc-1")
+            .expect("tc-1 item");
+        assert_eq!(tc1["saved_tokens"], 1500);
+        assert_eq!(
+            tc1["compounding_turns"], 2,
+            "turn 1 of a 3-turn session compounds over turns 2 and 3"
+        );
+        assert_eq!(tc1["compounded_saved"], 3000);
+
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn savings_compounding_stops_at_the_window_end() {
+        // The session has a third call at t=300M outside this window. Its
+        // turn index must not extend the compounding horizon past the
+        // queried end: tc-1 was invoked on the window's first call (of two),
+        // so it compounds over a single turn, not two. Using the
+        // session-global max inflated `compounded_savings_rate` above the
+        // documented [0, 1] range.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_window_end_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        add_third_call(&db_path);
+        let _stats_path = setup_stats_db(&tmp);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=100000000&end_ns=200000000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+
+        let items = body["sessions"][0]["optimization_items"]
+            .as_array()
+            .expect("optimization items");
+        let tc1 = items
+            .iter()
+            .find(|item| item["id"] == "tc-1")
+            .expect("tc-1 item");
+        assert_eq!(tc1["saved_tokens"], 1500);
+        assert_eq!(
+            tc1["compounding_turns"], 1,
+            "turn 1 of a 2-turn window compounds over the window's second turn only"
+        );
+        assert_eq!(tc1["compounded_saved"], 1500);
+
+        let compounded_rate = body["summary"]["compounded_savings_rate"]
+            .as_f64()
+            .expect("compounded savings rate");
+        assert!(
+            compounded_rate <= 1.0,
+            "the compounded rate is documented as a fraction in [0, 1], got {compounded_rate}"
+        );
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -1110,6 +1333,136 @@ mod tests {
         );
 
         // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The rate fields document "a fraction in [0.0, 1.0]", but the ratio is
+    /// `saved / total` against the COMPRESSED run's token total: tokenless
+    /// shortens a tool output before it ever enters the prompt, so the saved
+    /// amount is measured against a baseline that never billed the model and
+    /// can exceed the run's own total. The rate then left the documented
+    /// range (a small session with one hard-compressed tool output reported
+    /// 60x), and every consumer that treats the field as a percentage — the
+    /// dashboard's savings ring included — read a number that cannot exist.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn savings_rates_stay_within_the_documented_unit_interval() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_ratio_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // One small call: 100 input + 50 output tokens.
+        let db_path = tmp.join("genai_events.db");
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-big-saving', 'call-1', 'test-agent', 'gpt-4', 100, 50, 100000000, '{}', '[\"tc-big\"]')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // One tool output shortened from 10_000 to 1_000 tokens: 9_000 saved
+        // against a run that billed 150.
+        let stats_dir = tmp.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        let stats = rusqlite::Connection::open(stats_dir.join("stats.db")).unwrap();
+        stats
+            .execute_batch(
+                "CREATE TABLE stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER,
+                    after_tokens INTEGER,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT
+                );",
+            )
+            .unwrap();
+        stats
+            .execute(
+                "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+                 VALUES ('sess-big-saving', 'tc-big', 10000, 1000, 'long text', 'short', 'compress-response')",
+                [],
+            )
+            .unwrap();
+        drop(stats);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings)
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        assert!(
+            body["summary"]["total_saved_tokens"].as_i64().unwrap_or(0) > 150,
+            "fixture must save more than the run billed: {body}"
+        );
+
+        let summary = &body["summary"];
+        for field in ["savings_rate", "compounded_savings_rate"] {
+            let rate = summary[field]
+                .as_f64()
+                .expect("summary rate must be a number");
+            assert!(
+                (0.0..=1.0).contains(&rate),
+                "summary.{field} is documented as a fraction in [0, 1], got {rate}"
+            );
+        }
+        let session = &body["sessions"][0];
+        for field in ["savings_rate", "compounded_savings_rate"] {
+            let rate = session[field]
+                .as_f64()
+                .expect("session rate must be a number");
+            assert!(
+                (0.0..=1.0).contains(&rate),
+                "session.{field} is documented as a fraction in [0, 1], got {rate}"
+            );
+        }
+
+        // The session page documents the same range on the same numbers.
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-big-saving")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let detail: serde_json::Value = actix_test::read_body_json(resp).await;
+        let rate = detail["savings_rate"]
+            .as_f64()
+            .expect("detail rate must be a number");
+        assert!(
+            (0.0..=1.0).contains(&rate),
+            "detail.savings_rate is documented as a fraction in [0, 1], got {rate}"
+        );
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -1205,6 +1558,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// A stats row whose `after_tokens` exceeds `before_tokens` (a record can
+    /// never legitimately expand) must be reported as a zero saving, not a
+    /// negative one that drags per-item, per-session and summary totals down
+    /// — mirroring the `.max(0)` guard `TokenlessWindowSummary::saved_tokens`
+    /// already applies when reading the same table.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn expanding_stats_row_must_not_report_negative_savings() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_expand_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let stats_dir = tmp.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        {
+            let conn = rusqlite::Connection::open(stats_dir.join("stats.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER,
+                    after_tokens INTEGER,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT
+                );",
+            )
+            .unwrap();
+            // Expanding row: 1000 after > 800 before => unclamped -200 saved.
+            conn.execute(
+                "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+                 VALUES ('sess-1', 'tc-1', 800, 1000, 'short', 'long text', 'compress-response')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Point HOME at tmp so default_stats_path() finds .tokenless/stats.db
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        // List endpoint: item, session and summary savings clamp at 0.
+        let state = make_app_state(db_path.clone());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(
+            body["sessions"][0]["optimization_items"][0]["saved_tokens"]
+                .as_i64()
+                .unwrap(),
+            0,
+            "item saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["sessions"][0]["saved_tokens"].as_i64().unwrap(),
+            0,
+            "session saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["summary"]["total_saved_tokens"].as_i64().unwrap(),
+            0,
+            "summary total_saved_tokens must clamp at 0"
+        );
+        let reason = body["sessions"][0]["optimization_items"][0]["optimization_reason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "the sentence sitting next to saved_tokens must not claim a negative saving: {reason}"
+        );
+
+        // Detail endpoint: same clamp.
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-1")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(
+            body["items"][0]["saved_tokens"].as_i64().unwrap(),
+            0,
+            "detail item saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["total_compounded_saved"].as_i64().unwrap(),
+            0,
+            "detail total_compounded_saved must clamp at 0"
+        );
+        let reason = body["items"][0]["optimization_reason"].as_str().unwrap();
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "the detail sentence must not claim a negative saving: {reason}"
+        );
+
+        // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ─── Unit tests for generate_optimization_reason ────────────────────
 
     #[test]
@@ -1247,6 +1726,18 @@ mod tests {
     fn test_generate_optimization_reason_zero_before() {
         let reason = generate_optimization_reason("compress-response", 0, 0);
         assert!(reason.contains("0%"));
+    }
+
+    /// A row whose `after_tokens` exceeds `before_tokens` has no saving to
+    /// report: the item's `saved_tokens` clamps at 0, so the sentence next to
+    /// it in the same DTO must not claim a negative one.
+    #[test]
+    fn test_generate_optimization_reason_never_reports_a_negative_saving() {
+        let reason = generate_optimization_reason("compress-response", 800, 1000);
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "an expanding row saves nothing: {reason}"
+        );
     }
 
     // ─── Unit tests for compute_diff_lines ────────────────────────────

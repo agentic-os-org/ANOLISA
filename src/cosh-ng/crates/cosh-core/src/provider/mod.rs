@@ -202,6 +202,39 @@ impl Default for GenerateConfig {
 /// leaving either unbounded would let the real request outspend the reserve.
 const OUTPUT_CAP_FIELDS: [&str; 2] = ["max_tokens", "max_completion_tokens"];
 
+/// Rejects `extra_params` keys that would replace fields the builder owns.
+///
+/// `extra_params` exists so a deployment can pass model-specific extensions
+/// (`enable_thinking`, `top_p`, ...). It must not become a way to replace the
+/// conversation, the tool declarations, or the transport/protocol controls the
+/// program constructed, so conflicts are an explicit error naming every
+/// offending key rather than a silent merge or a silent drop.
+///
+/// Output-cap aliases are deliberately *not* owned fields: they are merged and
+/// then clamped by [`clamp_output_cap_fields`], preserving #2240 semantics.
+/// Sampling knobs such as `temperature` stay overridable because they are model
+/// parameters, not request structure.
+pub(crate) fn reject_owned_field_overrides(
+    owned: &[&str],
+    extra: Option<&Value>,
+) -> Result<(), String> {
+    let Some(extra) = extra.and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let conflicts: Vec<&str> = owned
+        .iter()
+        .filter(|field| extra.contains_key(**field))
+        .copied()
+        .collect();
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "extra_params must not override program-owned request fields: {}",
+        conflicts.join(", ")
+    ))
+}
+
 /// Clamps every output-cap field already present in a serialized request body
 /// to `max_tokens`.
 ///

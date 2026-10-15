@@ -441,6 +441,71 @@ fn maintenance_enforces_size_for_unreferenced_events() {
 }
 
 #[test]
+fn maintenance_keeps_a_case_graph_with_recent_action_activity() {
+    // A failed attach/detach updates only `containment_actions`, never the case
+    // row. The size path must count that action activity as graph activity, or
+    // this graph sorts first on its stale case timestamp and its failure record
+    // is deleted in the first round.
+    let path = security_db_path("maintenance-action-activity");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+
+    let protected_case = Uuid::new_v4();
+    let mut protected = fixture_case(protected_case, RiskCaseStatus::Resolved);
+    protected.updated_at_ns = 1;
+    store
+        .upsert_case(&protected, &[])
+        .expect("protected case should persist");
+    let mut action = containment_action(ContainmentLifecycle::Failed);
+    action.case_id = protected_case;
+    action.created_at_ns = 2;
+    action.updated_at_ns = 1_800_000_000_000_000_000;
+    store
+        .insert_containment_action(&action)
+        .expect("failed action should persist");
+
+    // Older candidate graphs so the protected graph is the natural first
+    // victim of an oldest-first prune without the fix.
+    for index in 0..1_000_u64 {
+        let mut case = fixture_case(Uuid::new_v4(), RiskCaseStatus::Resolved);
+        case.updated_at_ns = index + 10;
+        store
+            .upsert_case(&case, &[])
+            .expect("filler case should persist");
+    }
+
+    // Bulk unreferenced events push the file past the 1 MiB limit so size
+    // maintenance runs and can converge from the events alone.
+    for index in 0..20 {
+        let event = fixture_file_action(&"x".repeat(256 * 1024), index + 1);
+        store
+            .insert_event(&event)
+            .expect("bulk event should insert");
+    }
+
+    let report = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 0,
+            max_db_size_mb: 1,
+        })
+        .expect("size maintenance should succeed");
+
+    assert!(
+        report.size.deleted_rows > 0,
+        "size maintenance must prune something"
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work"),
+        Some(action),
+        "the graph with the newest action activity must be pruned last"
+    );
+
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
 fn case_detail_rejects_a_dangling_evidence_link() {
     let path = security_db_path("dangling-evidence");
     let case_id = Uuid::new_v4();
@@ -733,6 +798,35 @@ fn count_by_rejects_unknown_columns() {
         .expect_err("unknown grouping must fail");
 
     assert!(matches!(error, SecurityStoreError::InvalidFilter(_)));
+}
+
+#[test]
+fn count_by_returns_one_row_per_key_when_null_and_unknown_coexist() {
+    // `AuditCountBy.key` documents that absent values are returned as
+    // `unknown`. Grouping by the raw column while projecting the coalesced
+    // value split a NULL destination (file events) and the literal `unknown`
+    // that `DestinationClass::Unknown` writes into two rows with the same key,
+    // so a caller keyed by `key` silently lost one of the two counts.
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    store
+        .insert_event(&fixture_file_action("~/.ssh/id_rsa", 100))
+        .expect("file event should insert");
+
+    let mut unknown_sink = fixture_network_action(200, true);
+    let SecurityEventKind::NetworkAction(action) = &mut unknown_sink.kind else {
+        panic!("fixture must be a network action");
+    };
+    action.destination_class = DestinationClass::Unknown;
+    store
+        .insert_event(&unknown_sink)
+        .expect("network event should insert");
+
+    let counts = store
+        .count_by("destination_class")
+        .expect("grouping should work");
+    let unknown: Vec<_> = counts.iter().filter(|item| item.key == "unknown").collect();
+    assert_eq!(unknown.len(), 1, "one key must appear once, got {counts:?}");
+    assert_eq!(unknown[0].count, 2);
 }
 
 #[test]

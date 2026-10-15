@@ -12,11 +12,12 @@ build: ## Build agentsight binary
 		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
 		cargo build --release
 
+ENFORCER_BUILD = env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
+	LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" ./scripts/build-enforcer.sh
+
 .PHONY: build-enforcer
-build-enforcer: ## Build the privileged ActPlane enforcement daemon
-	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
-		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
-		./scripts/build-enforcer.sh
+build-enforcer: ## Build the privileged daemon; print its private verified path
+	@$(ENFORCER_BUILD)
 
 .PHONY: build-frontend
 build-frontend: ## Build and embed frontend into frontend-dist/
@@ -59,11 +60,15 @@ SERVICE_BINDIR ?= $(BINDIR)
 SETCAP ?= auto
 
 .PHONY: install uninstall
-install: build-all ## Build and install agentsight binary and set BPF capabilities
-	install -d -m 0755 $(DESTDIR)$(BINDIR)
+install: build-frontend build ## Build and install agentsight binary and set BPF capabilities
+	@enforcer_bin="$(ENFORCER_BIN)"; \
+		if [ -z "$$enforcer_bin" ]; then \
+			enforcer_bin=$$($(ENFORCER_BUILD)) || exit $$?; \
+		fi; \
+		install -d -m 0755 "$(DESTDIR)$(BINDIR)" && \
+		python3 scripts/copy-enforcer.py "$$enforcer_bin" "$(DESTDIR)$(BINDIR)/agentsight-enforcer"
 	install -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/agentsight
 	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
-	install -p -m 0755 target/release/agentsight-enforcer $(DESTDIR)$(BINDIR)/
 	install -p -m 0644 agentsight.json $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
 	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
 		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \

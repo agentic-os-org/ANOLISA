@@ -135,6 +135,8 @@ pub(super) fn resolve_pty_emit<W: Write>(
     recovery_request_file: &Path,
     handoff_request_file: &Path,
     bounded_bash_handoff: bool,
+    committed_slice_emit: bool,
+    reset: Option<&super::CaptureRepresentationReset>,
 ) -> io::Result<RawObserverAction> {
     // #2142 R4: a command-less prompt boundary expired an unclaimed handoff
     // (the runtime closes it as untracked at the same boundary). Remove the
@@ -159,8 +161,14 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 handoff_request_file,
                 false,
                 bounded_bash_handoff,
+                committed_slice_emit,
+                reset,
             )?;
-            Ok(RawObserverAction::RawPassthrough)
+            Ok(if reset.is_some_and(|reset| reset.display_is_failed()) {
+                RawObserverAction::HoldShellOutput
+            } else {
+                RawObserverAction::RawPassthrough
+            })
         }
         RawObserverAction::EmitToPtyWithPromptRestore(request) => {
             emit_to_pty(
@@ -176,11 +184,22 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 handoff_request_file,
                 true,
                 bounded_bash_handoff,
+                committed_slice_emit,
+                reset,
             )?;
-            Ok(RawObserverAction::RawPassthrough)
+            Ok(if reset.is_some_and(|reset| reset.display_is_failed()) {
+                RawObserverAction::HoldShellOutput
+            } else {
+                RawObserverAction::RawPassthrough
+            })
         }
         RawObserverAction::InterruptForeground => {
-            output.flush()?;
+            if let Err(error) = super::degraded::PhysicalDisplayWriter(output).flush() {
+                match reset {
+                    Some(reset) => reset.defer_physical_error(error)?,
+                    None => return Err(error),
+                }
+            }
             pending_terminal_restore
                 .mark_owner(TerminalRecoveryOwner::CoshTimeoutInterrupt, terminal_fd);
             signal_foreground_process_group(
@@ -192,7 +211,11 @@ pub(super) fn resolve_pty_emit<W: Write>(
             pending_terminal_restore.restore_modes(terminal_fd)?;
             pending_terminal_restore.request_shell_recovery(recovery_request_file)?;
             parser.push_control_event("timeout_interrupt");
-            Ok(RawObserverAction::Continue)
+            Ok(if reset.is_some_and(|reset| reset.display_is_failed()) {
+                RawObserverAction::HoldShellOutput
+            } else {
+                RawObserverAction::Continue
+            })
         }
         RawObserverAction::RestorePrompt {
             ghost_text,
@@ -254,16 +277,28 @@ fn emit_to_pty<W: Write>(
     handoff_request_file: &Path,
     restore_prompt: bool,
     bounded_bash_handoff: bool,
+    committed_slice_emit: bool,
+    reset: Option<&super::CaptureRepresentationReset>,
 ) -> io::Result<()> {
-    output.flush()?;
-    if restore_prompt {
-        restore_prompt_display_before_handoff(
-            parser,
-            output,
-            display_start,
-            prompt_replay,
-            prompt_presentation,
-        )?;
+    let presentation_result = (|| {
+        let mut output = super::degraded::PhysicalDisplayWriter(output);
+        output.flush()?;
+        if restore_prompt {
+            restore_prompt_display_before_handoff(
+                parser,
+                &mut output,
+                display_start,
+                prompt_replay,
+                prompt_presentation,
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = &presentation_result {
+        if !committed_slice_emit || !super::degraded::physical_error(error) {
+            return presentation_result;
+        }
+        tracing::warn!(error = ?error, "committed handoff prompt presentation failed");
     }
     let bytes = if bounded_bash_handoff {
         request.bounded_handoff_pty_bytes()
@@ -309,6 +344,14 @@ fn emit_to_pty<W: Write>(
             }
         }
         return Err(err);
+    }
+    if committed_slice_emit {
+        if let Some(reset) = reset {
+            reset.bind_display_handoff(&request.token);
+            if let Err(error) = presentation_result {
+                reset.defer_physical_error(error)?;
+            }
+        }
     }
     Ok(())
 }

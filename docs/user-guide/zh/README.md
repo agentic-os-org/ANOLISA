@@ -39,8 +39,10 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | 统一 CLI 组件管理 |
+| [AW](user-entrypoint/aw.md) | aw | Qoder、OpenClaw、QwenPaw、Hermes 共用策略配置与原生工具 Hook；Linux Preview |
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | 集成 Agent runtime 的 AI 原生 Linux 终端 |
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI 终端助手与命令网关 |
+| [ktuner](user-entrypoint/ktuner.md) | ktuner | 确定性内核调优引擎，提供 JSON 建议与安全回滚 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
 
 ### 可观测性 `agent-observability/`
@@ -91,7 +93,6 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
-| [Blaze Sandbox Runtime](runtime/blaze.md) | blaze | Managed sandbox 的可选 VM 网络与周期存储制品同步 |
 | [工作区快照](runtime/ws-ckpt.md) | ws-ckpt | 基于 btrfs COW 的工作区检查点/回滚 |
 | [技能文件系统](runtime/skillfs.md) | skillfs | FUSE 虚拟视图、渐进披露 |
 | [SkillFS Kubernetes Sidecar](runtime/skillfs-kubernetes-sidecar.md) | skillfs | 在 Kubernetes 中以 FUSE Sidecar 运行 SkillFS |

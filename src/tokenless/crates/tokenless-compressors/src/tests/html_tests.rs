@@ -366,6 +366,45 @@ fn code_blocks_keep_language_and_verbatim_whitespace() {
 }
 
 #[test]
+fn inline_code_spans_containing_double_backticks_keep_one_fence() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Run <code>a``b</code>, <kbd>ctl``alt</kbd> and <samp>x `` y</samp>,          plain <code>a`b</code> stays.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}
+
+Run ```a``b```, ```ctl``alt``` and ```x `` y```, plain ``a`b`` stays."
+        )
+    );
+}
+
+#[test]
+fn inline_code_fence_choice_scans_a_long_backtick_run_once() {
+    // Fence selection is one linear pass over the span text: probing with
+    // `contains` for every prefix length is quadratic in the run length,
+    // and untrusted HTML controls that length (a 64 KiB run inside a code
+    // element stalled the quadratic form for seconds through the real
+    // compress path). A large run here doubles as the complexity guard.
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(64 * 1024 + 1);
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Run <code>a{run}b</code> now.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}
+
+Run {fence}a{run}b{fence} now."
+        )
+    );
+}
+
+#[test]
 fn lists_nest_and_ordered_lists_honor_start() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><ul><li>one<ul><li>one.a</li><li>one.b</li></ul></li>\

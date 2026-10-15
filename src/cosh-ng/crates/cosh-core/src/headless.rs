@@ -23,7 +23,9 @@ use crate::protocol::{
     BROKERED_CONTROL_PROTOCOL_VERSION, BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
     CONTROL_PROTOCOL_VERSION,
 };
-use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
+use crate::session::{
+    PersistedSession, ProviderSessionId, SessionError, SessionLock, SessionStore,
+};
 use crate::sls;
 use crate::tool::SessionWorkspace;
 
@@ -843,16 +845,65 @@ struct HeadlessExtensionRuntime<'a> {
 
 struct SessionRuntime {
     store: Option<SessionStore>,
+    /// Held for the whole life of this process so a task-budget sweep from any
+    /// other process treats the session as being interacted with right now.
+    /// Dropped implicitly on exit, and released by the kernel if the process dies.
+    live_lease: Option<SessionLock>,
     workspace_scope: String,
     record: PersistedSession,
     auto_persist: bool,
     resumed: bool,
+    notice: PersistenceNotice,
+}
+
+/// Limits how often one refusal reason is logged, not how often it is retried.
+///
+/// Each user turn makes exactly one persistence attempt. Nothing about a refused
+/// commit is permanent for the rest of the process: another process can reclaim
+/// sessions, and the retention leg re-runs on every later turn, so the next turn
+/// has to try again. What must not repeat is the log line.
+#[derive(Default)]
+struct PersistenceNotice {
+    budget_refusal_logged: bool,
+}
+
+impl PersistenceNotice {
+    fn record(&mut self, error: &SessionError) {
+        if matches!(error, SessionError::BudgetExhausted { .. }) && !self.budget_refusal_logged {
+            self.budget_refusal_logged = true;
+            // The turn error tells the user; this is the durable evidence that
+            // commits started being refused. Suppressing the *attempt* here as
+            // well would report every later turn as persisted while its
+            // transcript was silently dropped, and would never notice the budget
+            // being freed.
+            tracing::warn!("session persistence refused by the task budget: {error:?}");
+        }
+    }
+}
+
+impl Drop for SessionRuntime {
+    fn drop(&mut self) {
+        if !self.record.was_loaded {
+            if let (Some(store), Some(lease)) = (self.store.as_ref(), self.live_lease.as_ref()) {
+                if let Err(cleanup_error) =
+                    store.cleanup_rejected_commit(&self.record.session_id, lease)
+                {
+                    tracing::warn!("uncommitted session exit cleanup failed: {cleanup_error}");
+                }
+            }
+        }
+    }
 }
 
 impl SessionRuntime {
     fn initialize(args: &CliArgs, config: &CoreConfig) -> Result<Self, SessionError> {
         let workspace = args.workspace_root();
-        let store = match SessionStore::for_workspace(&config.session.persist_dir, &workspace) {
+        #[cfg(not(test))]
+        let store_result = SessionStore::for_workspace(&config.session.persist_dir, &workspace);
+        #[cfg(test)]
+        let store_result =
+            SessionStore::for_test_workspace(&config.session.persist_dir, &workspace);
+        let store = match store_result {
             Ok(store) => Some(store),
             // Resume cannot proceed without the store, but a fresh turn can:
             // degrade to a non-resumable session instead of refusing to run.
@@ -868,10 +919,43 @@ impl SessionRuntime {
             .as_ref()
             .map(|store| store.workspace_scope().to_string())
             .unwrap_or_else(|| workspace.to_string_lossy().into_owned());
+        let mut live_lease = None;
         let record = match (args.resume.as_deref(), store.as_ref()) {
             (Some(value), Some(store)) => {
                 let session_id = ProviderSessionId::parse(value)?;
-                store.load(&session_id)?
+                live_lease = store.acquire_resume_live_lease(&session_id)?;
+                let mut resumed = match store.load(&session_id) {
+                    Ok(resumed) => resumed,
+                    Err(error) => {
+                        if let Some(lease) = live_lease.as_ref() {
+                            if let Err(cleanup_error) =
+                                store.cleanup_failed_resume(&session_id, lease)
+                            {
+                                tracing::warn!(
+                                    "failed resume activity cleanup failed: {cleanup_error}"
+                                );
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                // A resumed session is being interacted with right now, but its
+                // envelope still carries the clock of the last turn before the
+                // idle gap. Without a re-commit here, the task budget's
+                // least-recently-interacted ordering sees the oldest session of
+                // this user, so a sweep from any other process can reclaim it
+                // mid-turn; this turn's own commit then fails with Conflict and
+                // the work is lost.
+                //
+                // Best effort on purpose: refusing the resume when the stamp
+                // cannot be written would block the current interaction, which
+                // the budget contract forbids. The turn's own commit retries it.
+                if config.session.auto_persist {
+                    if let Err(error) = store.persist(&mut resumed) {
+                        tracing::warn!("resumed session clock not refreshed: {error}");
+                    }
+                }
+                resumed
             }
             _ => PersistedSession::new(
                 ProviderSessionId::new(),
@@ -882,10 +966,12 @@ impl SessionRuntime {
         };
         Ok(Self {
             store,
+            live_lease,
             workspace_scope,
             record,
             auto_persist: config.session.auto_persist,
             resumed: args.resume.is_some(),
+            notice: PersistenceNotice::default(),
         })
     }
 
@@ -900,10 +986,7 @@ impl SessionRuntime {
     }
 
     fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {
-        let Some(store) = self.store.as_ref() else {
-            return Ok(());
-        };
-        if !self.auto_persist {
+        if !self.auto_persist || self.store.is_none() {
             return Ok(());
         }
         self.record.messages = engine.messages.clone();
@@ -914,7 +997,39 @@ impl SessionRuntime {
         // The revision clock is persisted even when no projection survives, so
         // the next commit cannot reuse an already published revision.
         self.record.compaction_revision = engine.compaction.revision();
-        store.persist(&mut self.record)
+        self.commit()
+    }
+
+    /// Commits the current record once. Split out of [`Self::persist`] so the
+    /// retry contract is testable without building a provider-backed engine.
+    fn commit(&mut self) -> Result<(), SessionError> {
+        if !self.auto_persist {
+            return Ok(());
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let result = (|| {
+            if self.live_lease.is_none() {
+                self.live_lease = store.acquire_live_lease(&self.record.session_id)?;
+            }
+            store.persist(&mut self.record)
+        })();
+        if let Err(error) = &result {
+            self.notice.record(error);
+            if let Some(lease) = self.live_lease.as_ref() {
+                match store.cleanup_rejected_commit(&self.record.session_id, lease) {
+                    Ok(true) => {
+                        self.live_lease.take();
+                    }
+                    Ok(false) => {}
+                    Err(cleanup_error) => tracing::warn!(
+                        "uncommitted session activity cleanup failed: {cleanup_error}"
+                    ),
+                }
+            }
+        }
+        result
     }
 
     fn resumable(&self) -> bool {
@@ -1343,5 +1458,375 @@ mod tests {
 
         assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
         assert!(!config.session.auto_persist);
+    }
+
+    /// Builds a runtime around an already-configured store, so the commit
+    /// contract can be driven without a provider-backed engine.
+    fn runtime_for_store(store: SessionStore) -> SessionRuntime {
+        let workspace_scope = store.workspace_scope().to_string();
+        let record = PersistedSession::new(
+            ProviderSessionId::new(),
+            workspace_scope.clone(),
+            "mock-model".to_string(),
+            Vec::new(),
+        );
+        SessionRuntime {
+            store: Some(store),
+            live_lease: None,
+            workspace_scope,
+            record,
+            auto_persist: true,
+            resumed: false,
+            notice: PersistenceNotice::default(),
+        }
+    }
+
+    #[test]
+    fn a_registry_error_cleans_first_commit_controls_and_allows_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let root = temp.path().join("sessions");
+        let store = store_at(&root, &workspace);
+        let mut runtime = runtime_for_store(store);
+        let store = runtime.store.as_ref().unwrap();
+        runtime.live_lease = store
+            .acquire_live_lease(&runtime.record.session_id)
+            .unwrap();
+        let index = root.join(".budget/00000000-0000-4000-8000-000000000000.json");
+        let original = fs::read(&index).unwrap();
+        fs::write(&index, b"invalid location index").unwrap();
+        runtime.record.messages = vec![crate::provider::Message::user("before registry failure")];
+        let result = runtime.commit();
+        assert!(matches!(result, Err(SessionError::Io { .. })));
+        let envelope = runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .session_file(&runtime.record.session_id);
+        let scope = envelope.parent().unwrap();
+        assert!(
+            !scope
+                .join(format!(".{}.lock", runtime.record.session_id))
+                .exists(),
+            "registry failure must not retain generation control"
+        );
+        assert!(
+            !scope
+                .join(format!(".{}.live", runtime.record.session_id))
+                .exists(),
+            "registry failure must not retain activity control"
+        );
+        assert!(runtime.live_lease.is_none());
+        fs::write(&index, original).unwrap();
+        runtime
+            .record
+            .messages
+            .push(crate::provider::Message::assistant("after registry repair"));
+        runtime.commit().unwrap();
+        let stored: PersistedSession =
+            serde_json::from_slice(&fs::read(&envelope).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored.messages).unwrap(),
+            serde_json::to_value(&runtime.record.messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn dropping_an_uncommitted_runtime_removes_its_created_activity_control() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let root = temp.path().join("sessions");
+        let mut runtime = runtime_for_store(store_at(&root, &workspace));
+        let store = runtime.store.as_ref().unwrap();
+        runtime.live_lease = store
+            .acquire_live_lease(&runtime.record.session_id)
+            .unwrap();
+        let envelope = store.session_file(&runtime.record.session_id);
+        let activity = envelope
+            .parent()
+            .unwrap()
+            .join(format!(".{}.live", runtime.record.session_id));
+        assert!(activity.exists());
+        drop(runtime);
+        assert!(
+            !activity.exists(),
+            "normal uncommitted exit leaked activity control"
+        );
+        assert!(!envelope.exists());
+    }
+
+    fn store_at(root: &std::path::Path, workspace: &std::path::Path) -> SessionStore {
+        SessionStore::for_test_workspace(root.to_str().expect("utf-8 root"), workspace)
+            .expect("build store")
+    }
+
+    /// A budget refusal must cost the process only the log line, never the later
+    /// attempts: another process can reclaim sessions and the retention leg re-runs
+    /// every turn, so the next turn has to probe again. Suppressing the attempt as
+    /// well would report every later turn as persisted while its transcript was
+    /// silently dropped, and would never notice the budget being freed.
+    #[test]
+    fn a_freed_budget_lets_a_later_turn_persist_again() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path().to_path_buf();
+        let root = temp.path().join("sessions");
+
+        // Another live process owns a session too large to leave room for this
+        // one, and holds its activity lease, so no leg may reclaim it.
+        let other = store_at(&root, &workspace);
+        let mut filler = PersistedSession::new(
+            ProviderSessionId::new(),
+            other.workspace_scope().to_string(),
+            "mock-model".to_string(),
+            vec![crate::provider::Message::user(&"x".repeat(64 * 1024))],
+        );
+        other.persist(&mut filler).expect("commit filler");
+        let filler_bytes = fs::metadata(other.session_file(&filler.session_id))
+            .expect("filler metadata")
+            .len();
+        let lease = other
+            .acquire_live_lease(&filler.session_id)
+            .expect("lease")
+            .expect("a committed session has a scoped directory to lease in");
+
+        let store = store_at(&root, &workspace).with_task_budget(7, filler_bytes);
+        let mut runtime = runtime_for_store(store);
+        runtime.record.messages = vec![crate::provider::Message::user("turn one")];
+        let refused = runtime.commit();
+        assert!(
+            matches!(refused, Err(SessionError::BudgetExhausted { .. })),
+            "the first turn must be refused while nothing may be reclaimed, got {refused:?}"
+        );
+
+        assert!(runtime.live_lease.is_none());
+        let envelope = runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .session_file(&runtime.record.session_id);
+        let scope = envelope.parent().unwrap();
+        assert!(!scope
+            .join(format!(".{}.lock", runtime.record.session_id))
+            .exists());
+        assert!(!scope
+            .join(format!(".{}.live", runtime.record.session_id))
+            .exists());
+
+        // The other process exits, which is exactly what the recovery hint tells
+        // the user to arrange. Its lease dies with it.
+        drop(lease);
+
+        let generation_before_recovery = runtime.record.generation;
+        let envelope = runtime
+            .store
+            .as_ref()
+            .expect("store")
+            .session_file(&runtime.record.session_id);
+        runtime
+            .record
+            .messages
+            .push(crate::provider::Message::assistant("turn two"));
+        runtime
+            .commit()
+            .expect("a later turn must persist again once the budget has room");
+
+        // A suppressed attempt also returns Ok, which is the silent drop this case
+        // exists to catch, so the recovery has to be proved on disk and not by the
+        // absence of an error.
+        assert!(
+            envelope.exists(),
+            "the recovered turn reported success but wrote no envelope"
+        );
+        assert_eq!(
+            runtime.record.generation,
+            generation_before_recovery + 1,
+            "the recovered turn must have committed, not been skipped"
+        );
+        let stored: PersistedSession =
+            serde_json::from_slice(&fs::read(&envelope).expect("read envelope")).expect("parse");
+        assert_eq!(
+            stored.generation, runtime.record.generation,
+            "the envelope on disk must carry the recovered turn"
+        );
+        assert!(
+            runtime.live_lease.is_some(),
+            "a committed session must hold its activity lease"
+        );
+    }
+
+    #[test]
+    fn a_budget_refusal_is_logged_once_and_still_retries() {
+        let mut notice = PersistenceNotice::default();
+        let refusal = SessionError::BudgetExhausted {
+            projected_bytes: 2048,
+            budget_bytes: 1024,
+        };
+
+        notice.record(&refusal);
+        assert!(
+            notice.budget_refusal_logged,
+            "the first refusal is the one that must be logged"
+        );
+        // The flag is what suppresses the repeat; nothing here may suppress the
+        // attempt, so the notice carries no "stop trying" state at all.
+        notice.record(&refusal);
+        assert!(notice.budget_refusal_logged);
+    }
+
+    /// A running session holds no session lock between turns, so its envelope clock
+    /// is the only thing a sweep has to judge it by. Past the retention window that
+    /// clock says "reclaimable" even though the next turn is about to run, and the
+    /// turn would then commit against a missing generation and lose the work. The
+    /// process-lifetime lease is what makes the sweep skip it.
+    #[test]
+    fn a_long_lived_runtime_survives_a_concurrent_budget_sweep() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path().to_path_buf();
+        let root = temp.path().join("sessions");
+
+        let store = store_at(&root, &workspace);
+        let mut runtime = runtime_for_store(store);
+        runtime.record.messages = vec![crate::provider::Message::user("first turn")];
+        runtime.commit().expect("first turn commits");
+        let session_id = runtime.record.session_id.clone();
+        let generation_before = runtime.record.generation;
+        assert!(
+            runtime.live_lease.is_some(),
+            "the first commit must have taken the activity lease"
+        );
+
+        // The process now stays alive across the whole retention window without
+        // committing, which is the case the resume-time stamp cannot cover.
+        let path = runtime
+            .store
+            .as_ref()
+            .expect("store")
+            .session_file(&session_id);
+        let mut planted: PersistedSession =
+            serde_json::from_slice(&fs::read(&path).expect("read envelope")).expect("parse");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_millis() as u64;
+        planted.updated_at_ms = now - 8 * 24 * 60 * 60 * 1000;
+        fs::write(&path, serde_json::to_vec_pretty(&planted).unwrap()).expect("backdate");
+
+        // Another process sweeps this user's sessions while the turn runs.
+        let sweeper = store_at(&root, &workspace);
+        sweeper
+            .enforce_task_budget(&ProviderSessionId::new(), 0)
+            .expect("a sweep with room to spare is not a refusal");
+        assert!(
+            path.exists(),
+            "a sweep reclaimed the envelope of a session whose process is still running"
+        );
+
+        runtime
+            .record
+            .messages
+            .push(crate::provider::Message::user("next turn"));
+        runtime.commit().expect("the next turn must still commit");
+        assert_eq!(
+            runtime.record.generation,
+            generation_before + 1,
+            "the surviving envelope must carry the turn forward, not restart from a \
+             Conflict-induced reload"
+        );
+    }
+
+    #[test]
+    fn a_transient_write_failure_does_not_stop_persistence() {
+        // ENOSPC, a read-only mount or a transient I/O error can clear up while the
+        // session runs, so it must not even suppress the budget notice.
+        let mut notice = PersistenceNotice::default();
+
+        notice.record(&SessionError::Io {
+            operation: "write temporary file",
+            path: std::path::PathBuf::from("/home/user/.copilot-shell/cosh-core/sessions"),
+            message: "No space left on device (os error 28)".to_string(),
+        });
+
+        assert!(
+            !notice.budget_refusal_logged,
+            "a recoverable write failure is not a budget refusal and must not be \
+             reported as one"
+        );
+    }
+
+    /// Commits a session and then rewrites its authoritative clock, so the
+    /// envelope on disk looks like one whose last turn ended `updated_at_ms`.
+    fn plant_idle_session(
+        sessions_root: &std::path::Path,
+        workspace: &std::path::Path,
+        updated_at_ms: u64,
+    ) -> ProviderSessionId {
+        let store = SessionStore::for_test_workspace(
+            sessions_root.to_str().expect("utf-8 root"),
+            workspace,
+        )
+        .expect("build store");
+        let mut envelope = PersistedSession::new(
+            ProviderSessionId::new(),
+            store.workspace_scope().to_string(),
+            "mock-model".to_string(),
+            vec![crate::provider::Message::user("before the idle gap")],
+        );
+        store
+            .persist(&mut envelope)
+            .expect("commit planted session");
+        let path = store.session_file(&envelope.session_id);
+        let mut planted: PersistedSession =
+            serde_json::from_slice(&fs::read(&path).expect("read envelope")).expect("parse");
+        planted.updated_at_ms = updated_at_ms;
+        fs::write(&path, serde_json::to_vec_pretty(&planted).unwrap()).expect("backdate");
+        envelope.session_id
+    }
+
+    #[test]
+    fn resuming_a_long_idle_session_refreshes_its_commit_clock() {
+        // C2: the resumed session is being interacted with right now, but its
+        // envelope still carries the clock from before the idle gap, so another
+        // process's task-budget sweep sees it as the least recently interacted
+        // session and reclaims it mid-turn; the resumed turn's own commit then
+        // fails with Conflict and that work is lost. Resuming must re-commit at
+        // once so the clock says what is actually true.
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path().join("workspace");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(workspace.join(".copilot-shell")).expect("create config dir");
+        fs::write(
+            workspace.join(".copilot-shell/config.toml"),
+            format!("[session]\npersist_dir = \"{}\"\n", sessions.display()),
+        )
+        .expect("write project config");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_millis() as u64;
+        let session_id = plant_idle_session(&sessions, &workspace, now - 8 * 24 * 60 * 60 * 1000);
+
+        let args = CliArgs::try_parse_from([
+            "cosh-core",
+            "--headless",
+            "--workspace",
+            workspace.to_str().expect("utf-8 workspace"),
+            "--resume",
+            session_id.as_str(),
+        ])
+        .expect("parse resume args");
+        let config = load_runtime_config(&args, &workspace);
+
+        SessionRuntime::initialize(&args, &config).expect("resume must succeed");
+
+        let store =
+            SessionStore::for_test_workspace(sessions.to_str().expect("utf-8 root"), &workspace)
+                .expect("build store");
+        let loaded = store.load(&session_id).expect("load resumed session");
+        let age_ms = now.saturating_sub(loaded.updated_at_ms);
+        assert!(
+            age_ms < 60_000,
+            "resume left the commit clock {age_ms} ms old, so a concurrent budget              sweep can still reclaim the session mid-turn"
+        );
     }
 }

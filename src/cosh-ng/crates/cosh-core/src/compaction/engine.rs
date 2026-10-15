@@ -244,6 +244,10 @@ pub async fn compact_session(
         return Err(CompactionError::Disabled);
     }
 
+    let _activity = store
+        .acquire_compaction_lease(session_id)
+        .map_err(CompactionError::Session)?;
+
     // 1. Snapshot: capture generation and digest before any provider work.
     let session = store.load(session_id).map_err(CompactionError::Session)?;
     let base_generation = session.generation;

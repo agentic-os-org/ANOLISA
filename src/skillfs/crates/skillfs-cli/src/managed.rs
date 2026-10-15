@@ -26,7 +26,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,68 @@ pub struct ManagedState {
     pub desired_state: DesiredState,
 }
 
+/// Sequence that makes every staging path unique inside this process.
+static STATE_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// How many staging names one save may try before giving up. A name can only
+/// be taken by an entry stranded by a crashed save under the same pid.
+const MAX_STAGING_ATTEMPTS: usize = 16;
+
+/// Create the exclusive staging file for one state save, next to `path`.
+///
+/// The name carries the target's file name plus the pid (separating
+/// processes) and a fresh sequence number from `counter` (separating saves
+/// inside one process, threads included), so no two saves ever share a path
+/// and no call can unlink, write through, or publish another call's staging
+/// entry. `create_new` refuses to write through an entry already sitting at
+/// a candidate name — a planted symlink included — and the next name is used
+/// instead; only the writer that created a staging file may remove it.
+///
+/// `counter` is a parameter (and production passes the process-global
+/// [`STATE_STAGING_SEQUENCE`]) so the security tests can inject a private
+/// counter and know the exact candidate names their save will try,
+/// independently of what other tests running in parallel do to the global
+/// one — a pre-planted entry is then guaranteed to be hit, not merely
+/// likely.
+fn create_staging_file(
+    path: &Path,
+    counter: &AtomicU64,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "state path has no parent directory to stage in",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "state path has no file name to stage under",
+        )
+    })?;
+    let prefix = file_name.to_string_lossy();
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let candidate = dir.join(format!(
+            ".{prefix}.{}.{}.tmp",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every candidate staging path for the managed state file is taken",
+    ))
+}
+
 impl ManagedState {
     fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         let raw = std::fs::read_to_string(path)?;
@@ -83,13 +145,32 @@ impl ManagedState {
     }
 
     fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        self.save_with_counter(path, &STATE_STAGING_SEQUENCE)
+    }
+
+    /// [`Self::save`] with the staging-sequence source injected. Production
+    /// always saves through [`Self::save`] and the process-global counter;
+    /// tests pass a private counter so the candidate names their save will
+    /// try are fully deterministic under default parallel `cargo test`.
+    fn save_with_counter(&self, path: &Path, counter: &AtomicU64) -> Result<(), Box<dyn Error>> {
         let raw = serde_json::to_string_pretty(self)?;
         // Write-and-rename for atomicity so a concurrent reader never sees a
-        // half-written file.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        // half-written file. Every save stages on its own exclusive path and
+        // removes only the file it created, so concurrent savers — the
+        // client, the supervisor's stopped marker, and a racing teardown —
+        // never write through or publish another call's staging entry.
+        let (tmp, mut file) = create_staging_file(path, counter)?;
+        let result = (|| {
+            use std::io::Write;
+            file.write_all(raw.as_bytes())?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            // No other save ever stages at this path, so this removes only
+            // the file this call created.
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map_err(Into::into)
     }
 }
 
@@ -309,15 +390,14 @@ pub enum MountState {
 /// How long to keep retrying unmount of a stale endpoint before giving up.
 const UNMOUNT_TIMEOUT_MS: u64 = 3_000;
 
-/// Whether the mountpoint currently appears in `/proc/mounts`.
+/// Whether the mountpoint currently appears in `/proc/mounts`. Matching is
+/// byte-exact against the escape-decoded mount field (see
+/// [`skillfs_fuse::proc_mounts`]): a lossy UTF-8 view would conflate a
+/// mounted invalid-byte path with a different queried U+FFFD path.
 pub fn is_mounted(mountpoint: &Path) -> bool {
-    let target = mountpoint.to_string_lossy();
-    match std::fs::read_to_string("/proc/mounts") {
-        Ok(info) => info
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target)),
-        Err(_) => false,
-    }
+    use std::os::unix::ffi::OsStrExt;
+    let mounts = std::fs::read("/proc/mounts").unwrap_or_default();
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, mountpoint.as_os_str().as_bytes())
 }
 
 /// Classify the mountpoint: distinguish a healthy mount from a dead FUSE
@@ -341,9 +421,15 @@ fn is_mount_ready(mountpoint: &Path) -> bool {
 
 /// Attempt a single unmount pass: `fusermount3 -u`, then `umount` as a
 /// fallback. Returns `true` if the mountpoint is gone afterward.
+///
+/// The mountpoint is passed as the raw OS string, matching the byte-exact
+/// `is_mounted` probe: `to_string_lossy()` would turn an invalid-byte
+/// mountpoint into a different (nonexistent) path, so fusermount3 would
+/// fail and only the `umount` fallback would address the real mount.
 fn unmount_once(mountpoint: &Path) -> bool {
     let _ = std::process::Command::new("fusermount3")
-        .args(["-u", &mountpoint.to_string_lossy()])
+        .arg("-u")
+        .arg(mountpoint.as_os_str())
         .output();
     if !is_mounted(mountpoint) {
         return true;
@@ -381,6 +467,19 @@ fn clear_mount(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 // ---------------------------------------------------------------------------
 // Client: `skillfs mount --managed ...`
 // ---------------------------------------------------------------------------
+
+/// Whether the recorded state of a live managed instance matches the
+/// requested source and mountpoint pair.
+///
+/// Pure so the refusal can be tested without a live supervisor.
+fn active_instance_matches(
+    state: &ManagedState,
+    source_norm: &Path,
+    mountpoint_norm: &Path,
+) -> bool {
+    state.source == source_norm.to_string_lossy()
+        && state.mountpoint == mountpoint_norm.to_string_lossy()
+}
 
 /// Entry point for a managed mount request. Validates the source, writes the
 /// managed state, spawns a detached supervisor, and waits for readiness.
@@ -425,6 +524,35 @@ pub fn run_client(
     // incumbent over the mountpoint.
     if let Some(pid) = read_pid(&paths.supervisor_pid) {
         if pid_alive(pid) {
+            // The instance id is derived from the mountpoint, so a second
+            // `--managed` request for the same mountpoint but a different
+            // source resolves to this instance. Reporting it as "already
+            // active" would leave the caller believing the new source is
+            // served; refuse instead.
+            //
+            // The recorded state is the only proof of what the incumbent
+            // serves, so a missing or corrupt state file must not be
+            // skipped either: fail explicitly and leave the incumbent
+            // running rather than vouching for an unverified source.
+            let active = ManagedState::load(&paths.state).map_err(|e| {
+                format!(
+                    "managed supervisor (pid {pid}) is active for {} but its state \
+                     cannot be read ({e}); run `skillfs stop {}` first",
+                    normalized.display(),
+                    normalized.display()
+                )
+            })?;
+            if !active_instance_matches(&active, &source_norm, &normalized) {
+                return Err(format!(
+                    "managed mount '{}' is already active from source '{}' (requested '{}'); \
+                     run `skillfs stop {}` first",
+                    active.mountpoint,
+                    active.source,
+                    source_norm.display(),
+                    normalized.display()
+                )
+                .into());
+            }
             if is_mount_ready(&normalized) {
                 info!(
                     mountpoint = %normalized.display(),
@@ -477,21 +605,9 @@ pub fn run_client(
                 mountpoint = %normalized.display(),
                 "found orphan managed worker without a live supervisor; replacing it"
             );
-            send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-            while pid_alive(pid) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if pid_alive(pid) {
-                send_signal(pid, libc::SIGKILL);
-            }
         }
-        let _ = std::fs::remove_file(&paths.worker_pid);
     }
-    if is_mounted(&normalized) {
-        clear_mount(&normalized)?;
-    }
-    let _ = std::fs::remove_file(&paths.supervisor_pid);
+    teardown_instance(&paths, &normalized)?;
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
@@ -671,7 +787,18 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .spawn()
             .map_err(|e| format!("failed to spawn worker: {e}"))?;
         let worker_pid = child.id();
-        let _ = write_pid(&paths.worker_pid, worker_pid);
+        // teardown_instance uses this file to signal the worker directly when
+        // the supervisor is gone. A missing file loses only that fallback:
+        // clear_mount() in teardown still unmounts, and a successful unmount
+        // makes the FUSE loop return and the worker exit — so the worker is
+        // orphaned only when unmount also fails or the worker is stuck. The
+        // warn makes the lost fallback visible for diagnosing that case.
+        if let Err(error) = write_pid(&paths.worker_pid, worker_pid) {
+            warn!(
+                error = %error,
+                "failed to write worker pid file; stop cannot signal this worker directly if the supervisor dies"
+            );
+        }
         info!(worker_pid, "managed worker started");
 
         // Wait for the worker, watching for shutdown.
@@ -684,7 +811,16 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     "stopping managed worker (desired state cleared)"
                 );
                 send_signal(worker_pid as i32, libc::SIGTERM);
-                let _ = wait_child_timeout(&mut child, Duration::from_millis(STOP_TIMEOUT_MS));
+                if let Err(e) = wait_for_shutdown(&mountpoint, || {
+                    child.try_wait().map(|status| status.is_some())
+                }) {
+                    warn!(error = %e, "managed worker shutdown failed");
+                }
+                if matches!(child.try_wait(), Ok(None)) {
+                    warn!(worker_pid, "managed worker shutdown timed out; forcing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 let _ = std::fs::remove_file(&paths.worker_pid);
                 finish(&paths, &mountpoint);
                 return Ok(());
@@ -745,11 +881,30 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     mountpoint = %mountpoint.display(),
                     "managed worker keeps failing fast; giving up crash-loop remount"
                 );
-                // Mark the instance stopped so nothing resurrects it, then fall
-                // through to finish(): unmount and clear residual state.
-                if let Ok(mut state) = ManagedState::load(&paths.state) {
-                    state.desired_state = DesiredState::Stopped;
-                    let _ = state.save(&paths.state);
+                // Best-effort persistence of the stopped marker. A failure
+                // here is not itself a resurrection: finish() below deletes
+                // the state file, and current_desired_state() treats a
+                // missing or unreadable state as Stopped, so the common
+                // path still converges. The log makes the swallowed error
+                // visible so operators can see when the marker was not
+                // written; only a stale pre-Mounted state that survives
+                // cleanup could mislead a later start.
+                match ManagedState::load(&paths.state) {
+                    Ok(mut state) => {
+                        state.desired_state = DesiredState::Stopped;
+                        if let Err(error) = state.save(&paths.state) {
+                            warn!(
+                                error = %error,
+                                "failed to persist stopped marker; the state file may be stale"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to load state for stopped marker; treating as stopped"
+                        );
+                    }
                 }
                 break;
             }
@@ -769,6 +924,11 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
     }
 
+    // No worker is alive on this path (shutdown during backoff or crash-loop
+    // exhaustion), so only a stale endpoint can need cleanup.
+    if let Err(e) = clear_mount(&mountpoint) {
+        warn!(error = %e, "failed to unmount during supervisor cleanup");
+    }
     finish(&paths, &mountpoint);
     Ok(())
 }
@@ -781,30 +941,36 @@ fn current_desired_state(state_path: &Path) -> DesiredState {
         .unwrap_or(DesiredState::Stopped)
 }
 
-fn wait_child_timeout(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<()> {
-    let deadline = Instant::now() + timeout;
+// Keep retrying while the worker owns backing cleanup. After a successful
+// unmount, wait only for its exit; never unmount after forcing that owner out.
+fn wait_for_shutdown(
+    mountpoint: &Path,
+    mut exited: impl FnMut() -> std::io::Result<bool>,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
+    let mut unmounted = false;
     loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(()),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(WORKER_POLL_MS));
-            }
+        let processes_gone = exited()?;
+        if !unmounted {
+            unmounted = !is_mounted(mountpoint) || unmount_once(mountpoint);
         }
+        if (unmounted && processes_gone) || Instant::now() >= deadline {
+            return if unmounted {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to unmount '{}' via fusermount3 and umount",
+                    mountpoint.display()
+                )
+                .into())
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Final cleanup: ensure the mount is gone and remove instance state.
+/// Remove instance state after worker shutdown or crash-loop exhaustion.
 fn finish(paths: &ManagedPaths, mountpoint: &Path) {
-    if is_mounted(mountpoint) {
-        if let Err(e) = clear_mount(mountpoint) {
-            warn!(error = %e, "failed to unmount during supervisor cleanup");
-        }
-    }
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
@@ -816,12 +982,12 @@ fn finish(paths: &ManagedPaths, mountpoint: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Tear down a managed instance: mark it stopped, signal the supervisor
-/// (falling back to the worker), wait for exit, unmount, and remove residual
+/// (falling back to the worker), unmount, wait for exit, and remove residual
 /// pid/state files. Returns the unmount result so callers can surface a cleanup
 /// failure; every other step is best-effort.
 ///
 /// Shared by `stop` and by the client's startup-abort path so neither has to
-/// duplicate the signal/wait/unmount sequence.
+/// duplicate the signal/unmount/wait sequence.
 fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
@@ -850,40 +1016,17 @@ fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<
         }
     }
 
-    // Wait for the managed processes to exit. The supervisor unmounts cleanly
-    // on SIGTERM, so once it is gone the mount is normally already down; any
-    // remaining endpoint is cleared explicitly below.
-    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-    loop {
-        let sup_gone = sup_pid.is_none_or(|p| !pid_alive(p));
-        let worker_gone = worker_pid.is_none_or(|p| !pid_alive(p));
-        if sup_gone && worker_gone {
-            break;
-        }
-        if Instant::now() >= deadline {
-            warn!("teardown timed out waiting for clean shutdown; forcing");
-            if let Some(p) = sup_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
+    let processes_gone =
+        || sup_pid.is_none_or(|p| !pid_alive(p)) && worker_pid.is_none_or(|p| !pid_alive(p));
+    let unmount_result = wait_for_shutdown(mountpoint, || Ok(processes_gone()));
+    if !processes_gone() {
+        warn!("teardown timed out waiting for clean shutdown; forcing");
+        for p in [sup_pid, worker_pid].into_iter().flatten() {
+            if pid_alive(p) {
+                send_signal(p, libc::SIGKILL);
             }
-            if let Some(p) = worker_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
-            }
-            break;
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-
-    // Ensure the mount is gone, clearing any stale/dead endpoint a killed
-    // worker left behind. The error is surfaced after state cleanup.
-    let unmount_result = if is_mounted(mountpoint) {
-        clear_mount(mountpoint)
-    } else {
-        Ok(())
-    };
 
     // Best-effort final cleanup of any residual state files.
     let _ = std::fs::remove_file(&paths.worker_pid);
@@ -945,11 +1088,70 @@ mod tests {
         assert_eq!(a, b, "instance id must be deterministic");
     }
 
+    /// A live supervisor pid with a missing or corrupt state file must
+    /// fail the request with the explicit state error instead of falling
+    /// through to an "already active" success: the state is the only
+    /// proof of which source the incumbent serves. (Previously a ready
+    /// mount with unreadable state reported success.)
+    #[test]
+    fn unreadable_incumbent_state_fails_instead_of_already_active() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let normalized = normalize_mountpoint(mountpoint.path());
+        let paths = ManagedPaths::new(&instance_id_for(&normalized));
+        secure_runtime_dir().expect("runtime dir");
+        // The test process itself plays the live supervisor: its pid is
+        // alive by definition.
+        std::fs::write(&paths.supervisor_pid, std::process::id().to_string())
+            .expect("write supervisor pid");
+
+        let err = run_client(&[], source.path(), mountpoint.path())
+            .expect_err("a missing state file must fail the request");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("state cannot be read") && msg.contains("skillfs stop"),
+            "expected the explicit state-read failure, got: {msg}"
+        );
+
+        // Corrupt state fails the same way, without touching the
+        // incumbent.
+        std::fs::write(&paths.state, "{not json").expect("write corrupt state");
+        let err = run_client(&[], source.path(), mountpoint.path())
+            .expect_err("a corrupt state file must fail the request");
+        assert!(
+            err.to_string().contains("state cannot be read"),
+            "expected the explicit state-read failure, got: {err}"
+        );
+
+        std::fs::remove_file(&paths.supervisor_pid).ok();
+        std::fs::remove_file(&paths.state).ok();
+    }
+
     #[test]
     fn instance_id_differs_for_different_paths() {
         let a = instance_id_for(Path::new("/tmp/mount-a"));
         let b = instance_id_for(Path::new("/tmp/mount-b"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn is_mounted_matches_escaped_and_invalid_byte_paths() {
+        // The matcher lives in skillfs_fuse::proc_mounts (unit-tested there);
+        // this pins the wiring: escaped mountpoints match their real path and
+        // an invalid-byte mount never collides with a U+FFFD query.
+        let mounts = b"fuse.skillfs /mnt/my\\040skills fuse.skillfs rw 0 0\nfuse.skillfs /mnt/\xff fuse.skillfs rw 0 0\n";
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/my skills"
+        ));
+        assert!(!skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            "/mnt/\u{FFFD}".as_bytes()
+        ));
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/\xff"
+        ));
     }
 
     #[test]
@@ -1036,6 +1238,163 @@ mod tests {
         assert_eq!(parsed, DesiredState::Mounted);
     }
 
+    fn sample_state(instance_id: &str) -> ManagedState {
+        ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: instance_id.to_string(),
+            mountpoint: "/mnt/skillfs".to_string(),
+            source: "/srv/skills".to_string(),
+            worker_program: "/usr/bin/skillfs".to_string(),
+            worker_args: vec![
+                "mount".to_string(),
+                "--foreground".to_string(),
+                "/srv/skills".to_string(),
+                "/mnt/skillfs".to_string(),
+            ],
+            desired_state: DesiredState::Mounted,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_publish_through_a_planted_staging_entry() {
+        // A fixed staging path makes any entry already sitting there the
+        // publication vehicle: writing through a symlink would clobber its
+        // target and rename the link itself onto the state path. Plant
+        // entries at the legacy fixed name and at the first candidates of a
+        // private counter (injected via `save_with_counter`), so the save
+        // deterministically hits every planted name — parallel tests can no
+        // longer advance the sequence between the plant and the save and
+        // leave the collision unexercised.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000dead.state.json");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        // Legacy fixed staging name (`with_extension("json.tmp")`).
+        std::os::unix::fs::symlink(&victim, state_path.with_extension("json.tmp")).unwrap();
+        let counter = AtomicU64::new(0);
+        // The first two candidates this save must refuse and skip.
+        let planted: Vec<PathBuf> = (0..2)
+            .map(|seq| {
+                dir.path().join(format!(
+                    ".mnt-0000dead.state.json.{}.{}.tmp",
+                    std::process::id(),
+                    seq
+                ))
+            })
+            .collect();
+        for candidate in &planted {
+            std::os::unix::fs::symlink(&victim, candidate).unwrap();
+        }
+
+        sample_state("mnt-0000dead")
+            .save_with_counter(&state_path, &counter)
+            .unwrap();
+
+        // The save really collided with both planted candidates: a private
+        // counter starting at 0 makes the save consume 0, 1 (refused) and
+        // then 2 (created), and exactly that.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            3,
+            "the save must have refused both planted candidates and \
+             published on the third name"
+        );
+        // The skipped entries are still the planted symlinks, untouched.
+        for candidate in &planted {
+            assert!(
+                std::fs::symlink_metadata(candidate)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "a refused candidate must be left as-is, not removed: {candidate:?}"
+            );
+        }
+        assert!(
+            !std::fs::symlink_metadata(&state_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the published state must be a regular file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "untouched",
+            "no planted staging entry may be written through"
+        );
+        let loaded = ManagedState::load(&state_path).unwrap();
+        assert_eq!(loaded.instance_id, "mnt-0000dead");
+        assert_eq!(loaded.desired_state, DesiredState::Mounted);
+    }
+
+    #[test]
+    fn concurrent_saves_in_one_process_all_publish() {
+        // Every save must own its staging path. With one path shared by all
+        // saves in the process, concurrent callers truncate each other's
+        // staging bytes and the last rename can publish a torn file.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000beef.state.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|worker| {
+                let state_path = state_path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut state = sample_state("mnt-0000beef");
+                    state.mountpoint = format!("/mnt/skillfs-{worker}");
+                    barrier.wait();
+                    (0..40).filter(|_| state.save(&state_path).is_ok()).count()
+                })
+            })
+            .collect();
+        let published: usize = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .sum();
+        assert_eq!(published, 320, "every concurrent save must publish");
+        // Whichever save won, the published state is complete, never torn.
+        let loaded = ManagedState::load(&state_path).unwrap();
+        assert_eq!(loaded.instance_id, "mnt-0000beef");
+        assert_eq!(loaded.desired_state, DesiredState::Mounted);
+    }
+
+    #[test]
+    fn save_leaves_a_foreign_staging_entry_alone() {
+        // Only the call that created a staging file may remove it: an entry
+        // left by a crashed save (or a concurrent writer) must survive a
+        // failing save's cleanup. The entry is planted at the first
+        // candidate of a private counter (injected via `save_with_counter`),
+        // so this save deterministically collides with it regardless of
+        // parallel tests advancing the process-global sequence.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000cafe.state.json");
+        let counter = AtomicU64::new(0);
+        let foreign = dir.path().join(format!(
+            ".mnt-0000cafe.state.json.{}.0.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&foreign, "foreign leftover").unwrap();
+
+        sample_state("mnt-0000cafe")
+            .save_with_counter(&state_path, &counter)
+            .unwrap();
+
+        // The save collided with the foreign entry (candidate 0 refused)
+        // and published on the next name — exactly two counter draws.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "the save must have refused the foreign candidate and \
+             published on the next name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&foreign).unwrap(),
+            "foreign leftover",
+            "a foreign staging entry must be left alone"
+        );
+        assert!(ManagedState::load(&state_path).is_ok());
+    }
+
     #[test]
     fn current_desired_state_missing_file_is_stopped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1110,6 +1469,37 @@ mod tests {
             err.to_string().contains("symlink"),
             "expected symlink rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn active_instance_matches_only_the_recorded_source_and_mountpoint() {
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: "abc".to_string(),
+            mountpoint: "/mnt/skills".to_string(),
+            source: "/srv/src-a".to_string(),
+            worker_program: "/usr/bin/skillfs".to_string(),
+            worker_args: vec![],
+            desired_state: DesiredState::Mounted,
+        };
+        let mnt = Path::new("/mnt/skills");
+        assert!(active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            mnt
+        ));
+        // Same mountpoint, different source: the instance id collides, so the
+        // request must be refused rather than reported as already active.
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-b"),
+            mnt
+        ));
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            Path::new("/mnt/other")
+        ));
     }
 
     #[test]

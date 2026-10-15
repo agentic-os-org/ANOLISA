@@ -130,7 +130,10 @@ legacy_adopt = true
 name = "ws-ckpt"
 display_name = "Workspace Checkpoint"
 summary = "Workspace checkpoint and rollback service"
-targets = [{ os = "linux", arch = "x86_64" }]
+targets = [
+  { os = "linux", arch = "x86_64" },
+  { os = "linux", arch = "aarch64" },
+]
 
 [[components.backends]]
 kind = "raw"
@@ -147,6 +150,10 @@ name = "sec-core"
 display_name = "Agent Security Core"
 summary = "Agent security core adapters and runtime"
 targets = [{ os = "linux", arch = "x86_64" }]
+
+[[components.backends]]
+kind = "raw"
+package = "sec-core"
 
 [[components.backends]]
 kind = "rpm"

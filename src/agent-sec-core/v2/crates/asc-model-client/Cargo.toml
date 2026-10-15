@@ -1,0 +1,20 @@
+[package]
+name = "asc-model-client"
+description = "Shared HTTP client for local model inference backends (Ollama)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

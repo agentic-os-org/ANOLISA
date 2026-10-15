@@ -42,14 +42,6 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentsight/config.json";
 
-/// Load `ServerAuthConfig` from the agentsight config file.
-///
-/// Falls back to defaults if the file cannot be read or parsed.
-#[cfg(all(feature = "server", target_os = "linux"))]
-pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerAuthConfig {
-    load_server_config(config_path).server_auth
-}
-
 /// Loads the server configuration, falling back to safe defaults.
 ///
 /// Not Linux-only: every function it calls is platform-independent, and the
@@ -59,7 +51,7 @@ pub fn load_server_config(config_path: &str) -> agentsight::config::AgentsightCo
     use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
 
     let path = std::path::Path::new(config_path);
-    let mut config = AgentsightConfig::new();
+    let mut config = AgentsightConfig::new().set_config_path(path.to_path_buf());
 
     if let Err(e) = ensure_default_agents_config(path) {
         log::warn!("Failed to ensure default config at {config_path:?}: {e}, using defaults");
@@ -90,10 +82,44 @@ pub fn parse_period(s: &str) -> agentsight::TimePeriod {
 /// Calculate nanosecond timestamp for N hours ago
 #[cfg(target_os = "linux")]
 pub fn hours_ago_ns(hours: u64) -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    now.saturating_sub(hours * 3600 * 1_000_000_000)
+    // A pre-epoch realtime clock degrades to 0 (the `epoch_nanos` family
+    // contract) instead of unwrapping the elapsed-time error.
+    let now = agentsight::utils::epoch_nanos(std::time::SystemTime::now());
+    // Saturate so an absurd --last (up to u64::MAX) degrades to "everything"
+    // (a zero start) instead of overflowing: the nanosecond product leaves u64
+    // above ~5.12 million hours, and a debug build aborts on the multiply.
+    now.saturating_sub(hours.saturating_mul(3_600_000_000_000))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{hours_ago_ns, load_server_config};
+
+    #[test]
+    fn load_server_config_retains_the_runtime_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-server-config-path-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let config = load_server_config(path.to_str().unwrap());
+
+        assert_eq!(config.config_path.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hours_ago_saturates_for_absurd_hours() {
+        // 5_124_096 hours is the first value whose nanosecond product leaves
+        // u64; asking for a window wider than the recorded history must clamp
+        // to "everything" rather than overflow.
+        assert_eq!(hours_ago_ns(5_124_096), 0);
+        assert_eq!(hours_ago_ns(u64::MAX), 0);
+
+        // A normal window still starts in the past, and stays ordered.
+        assert!(hours_ago_ns(24) > 0);
+        assert!(hours_ago_ns(48) < hours_ago_ns(24));
+    }
 }

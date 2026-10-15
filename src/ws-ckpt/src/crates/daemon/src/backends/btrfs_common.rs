@@ -1227,8 +1227,27 @@ pub async fn cleanup_snapshots_batch(
     fs_root: &Path,
     snapshot_ids: &[String],
 ) -> Vec<(String, SnapshotDeleteOutcome)> {
-    let paths: Vec<PathBuf> = snapshot_ids.iter().map(|id| snap_dir.join(id)).collect();
-    let outcomes = delete_subvolumes_space_aware(&paths, fs_root).await;
+    // Refuse ids that are not a single path component BEFORE any path is
+    // constructed: the batch contract keeps per-item outcomes, so an unsafe
+    // id fails its own entry while valid ids in the same batch still delete.
+    let mut slots: Vec<Option<SnapshotDeleteOutcome>> = snapshot_ids.iter().map(|_| None).collect();
+    let mut valid: Vec<(usize, PathBuf)> = Vec::new();
+    for (index, id) in snapshot_ids.iter().enumerate() {
+        match ensure_snapshot_id_is_single_component(id) {
+            Ok(()) => valid.push((index, snap_dir.join(id))),
+            Err(error) => slots[index] = Some(SnapshotDeleteOutcome::Failed(format!("{error:#}"))),
+        }
+    }
+    if !valid.is_empty() {
+        let valid_paths: Vec<PathBuf> = valid.iter().map(|(_, path)| path.clone()).collect();
+        let outcomes = delete_subvolumes_space_aware(&valid_paths, fs_root).await;
+        for ((index, _), outcome) in valid.into_iter().zip(outcomes) {
+            slots[index] = Some(outcome);
+        }
+    }
+    let outcomes = slots
+        .into_iter()
+        .map(|slot| slot.expect("every slot is filled"));
     snapshot_ids
         .iter()
         .cloned()
@@ -1371,10 +1390,260 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
         .context("diff task panicked")?
 }
 
+/// Name of the daemon-owned directory under the backend data root that
+/// holds internal diff temp snapshots: `<data-root>/.diff-tmp/<ws-id>/<random>`.
+///
+/// Internal temporary snapshots live OUTSIDE `snapshots/` on purpose: no
+/// workspace or snapshot recovery scan can then ever index a crash leftover
+/// as a phantom "still available" snapshot record, and no sweep can collide
+/// with a user-visible name — older daemon versions allowed users to create
+/// formal, even pinned, snapshots named `.diff-tmp-*`, so a name prefix
+/// proves nothing about ownership.
+pub(crate) const DIFF_TMP_DIR_NAME: &str = ".diff-tmp";
+
+/// Reject snapshot ids that are not a single, safe path component.
+///
+/// The guarded entry points validate ids with `validate_checkpoint_id_v2`,
+/// but the legacy IPC path forwards ids without upstream validation, and
+/// `Path::join` normalizes `./` components away, so a string check anywhere
+/// above the backend can be bypassed with ids like `./.diff-tmp-backup`.
+/// The backend is the one choke point both request families share, so every
+/// method that joins a snapshot id into a path validates here — the check is
+/// about the shape of the id, never about any reserved prefix.
+pub(crate) fn ensure_snapshot_id_is_single_component(snapshot_id: &str) -> Result<()> {
+    if snapshot_id.is_empty() {
+        bail!("snapshot id must not be empty");
+    }
+    if snapshot_id == "." || snapshot_id == ".." {
+        bail!("snapshot id must not be '.' or '..'");
+    }
+    if snapshot_id.contains('/') {
+        bail!(
+            "snapshot id must be a single path component (contains '/'): {:?}",
+            snapshot_id
+        );
+    }
+    if snapshot_id.contains('\0') {
+        bail!("snapshot id must not contain NUL: {:?}", snapshot_id);
+    }
+    Ok(())
+}
+
+/// Best-effort sweep of one workspace's internal diff temp directory.
+///
+/// Deletes crash-leftover temp snapshots (each a read-only subvolume pinning
+/// backend space exactly like the cleaner-stalled zombies of #3053) with the
+/// space-aware delete, so a full backend's kernel cleaner is still driven
+/// the same way as for user snapshots. Entries that are not directories —
+/// symlinks in particular — are REFUSED and left in place with a warning:
+/// the internal directory is daemon-owned, so an unexpected entry type means
+/// manual inspection, not silent deletion, and the path check never follows
+/// a symlink. Deletion failures warn and keep the entry: the sweep re-runs
+/// on that workspace's next diff and on every bootstrap, so a failed cleanup
+/// is retried instead of being treated as done.
+pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) -> Vec<String> {
+    // Leftover paths the caller must be told about: entries whose
+    // space-aware delete failed, non-directory entries the sweep refuses
+    // to touch, and the directory itself when it cannot even be scanned.
+    // Empty means fully cleaned.
+    let mut leftovers: Vec<String> = Vec::new();
+    let mut entries = match tokio::fs::read_dir(tmp_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return leftovers,
+        Err(error) => {
+            warn!(
+                "cannot scan internal diff temp directory {}: {:#}",
+                tmp_dir.display(),
+                error
+            );
+            leftovers.push(tmp_dir.display().to_string());
+            return leftovers;
+        }
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    "failed to scan internal diff temp directory {}: {:#}",
+                    tmp_dir.display(),
+                    error
+                );
+                leftovers.push(tmp_dir.display().to_string());
+                return leftovers;
+            }
+        };
+        let path = entry.path();
+        // Never follow symlinks: symlink_metadata describes the entry itself,
+        // so a link planted inside the daemon-owned directory is refused
+        // below instead of resolving to whatever it points at.
+        let file_type = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!(
+                    "failed to inspect internal diff temp entry {}: {:#}",
+                    path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            warn!(
+                "internal diff temp entry {} is not a directory; refusing to clean it, \
+                 inspect and remove it manually",
+                path.display()
+            );
+            leftovers.push(path.display().to_string());
+            continue;
+        }
+        match delete_subvolume_space_aware(&path, fs_root).await {
+            Ok(()) => info!(
+                "removed temp diff snapshot {} left by an interrupted diff",
+                path.display()
+            ),
+            Err(error) => {
+                warn!(
+                    "failed to remove temp diff snapshot {}: {:#}; will retry on the next \
+                     diff or bootstrap",
+                    path.display(),
+                    error
+                );
+                leftovers.push(path.display().to_string());
+            }
+        }
+    }
+
+    leftovers
+}
+
+/// Bootstrap-time sweep of the whole internal diff temp root.
+///
+/// Runs inside `bootstrap`, which the daemon awaits before rebuilding
+/// workspace watchers or serving any request, so no live diff can exist and
+/// every entry under `<data-root>/.diff-tmp/<ws-id>/` is by construction a
+/// crash leftover. Each workspace directory is swept and then removed when
+/// empty; non-directory entries are refused and warned about, and failures
+/// stay for the next bootstrap or that workspace's next diff.
+pub(crate) async fn sweep_diff_tmp_root(diff_tmp_root: &Path, fs_root: &Path) {
+    let mut workspaces = match tokio::fs::read_dir(diff_tmp_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!(
+                "cannot scan internal diff temp root {}: {:#}",
+                diff_tmp_root.display(),
+                error
+            );
+            return;
+        }
+    };
+    loop {
+        let entry = match workspaces.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    "failed to scan internal diff temp root {}: {:#}",
+                    diff_tmp_root.display(),
+                    error
+                );
+                return;
+            }
+        };
+        let ws_dir = entry.path();
+        let file_type = match tokio::fs::symlink_metadata(&ws_dir).await {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!(
+                    "failed to inspect internal diff temp workspace dir {}: {:#}",
+                    ws_dir.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            warn!(
+                "internal diff temp root entry {} is not a directory; refusing to clean \
+                 it, inspect and remove it manually",
+                ws_dir.display()
+            );
+            continue;
+        }
+        sweep_diff_tmp_dir(&ws_dir, fs_root).await;
+        if let Err(error) = tokio::fs::remove_dir(&ws_dir).await {
+            warn!(
+                "internal diff temp directory {} is not empty after the sweep ({:#}); \
+                 leftover entries retry on the next bootstrap or diff",
+                ws_dir.display(),
+                error
+            );
+        }
+    }
+}
+
+/// Warn about legacy-named `.diff-tmp-*` snapshots without touching them.
+///
+/// Older daemon versions created their diff temp snapshots inside
+/// `snapshots/<ws-id>/` and allowed users to create formal — even pinned —
+/// snapshots with the same prefix, so neither the name, the presence of an
+/// index record, nor the pin state can tell a historical user snapshot from
+/// a crash leftover. They are deliberately kept: inspect them and remove
+/// unwanted ones with the existing explicit delete command, which updates
+/// the index together with the disk state.
+pub(crate) async fn warn_legacy_diff_tmp_snapshots(snapshots_root: &Path) {
+    let mut workspaces = match tokio::fs::read_dir(snapshots_root).await {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    loop {
+        let entry = match workspaces.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(_) => return,
+        };
+        let ws_dir = entry.path();
+        let mut entries = match tokio::fs::read_dir(&ws_dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        let mut legacy: Vec<String> = Vec::new();
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(snapshot)) => {
+                    if let Ok(name) = snapshot.file_name().into_string() {
+                        if name.starts_with(".diff-tmp-") {
+                            legacy.push(name);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        if !legacy.is_empty() {
+            warn!(
+                "workspace snapshot directory {} holds legacy-named snapshot(s) [{}]: older \
+                 daemon versions allowed users to create formal snapshots with this prefix, so \
+                 they are kept untouched; inspect them and delete unwanted ones with the \
+                 explicit snapshot delete command so the index stays in sync",
+                ws_dir.display(),
+                legacy.join(", ")
+            );
+        }
+    }
+}
+
 /// Diff a snapshot against the live (writable) workspace subvolume.
 ///
-/// Creates a temporary read-only snapshot of `live_subvol` inside `snap_dir`,
-/// runs the diff, then removes the temporary snapshot regardless of outcome.
+/// Creates a temporary read-only snapshot of `live_subvol` inside `tmp_dir`
+/// (the workspace's daemon-owned directory under `<data-root>/.diff-tmp/`),
+/// runs the diff, then removes the temporary snapshot and the now-empty
+/// directory regardless of outcome.
 ///
 /// `fs_root` is the backend filesystem root used for space-risk assessment:
 /// the temp snapshot is read-only and shares extents (little space to free),
@@ -1384,31 +1653,50 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
 pub async fn diff_against_live(
     snap_from: &Path,
     live_subvol: &Path,
-    snap_dir: &Path,
+    tmp_dir: &Path,
     fs_root: &Path,
 ) -> Result<Vec<DiffEntry>> {
     use std::hash::{BuildHasher, Hasher, RandomState};
 
+    // Sweep leftovers from an interrupted prior diff BEFORE creating the new
+    // one. Both daemon diff entry points hold the workspace mutation lock
+    // across this call, so nothing else can own a live entry here; entries
+    // whose space-aware delete fails warn and stay for the next sweep
+    // instead of being treated as cleaned.
+    sweep_diff_tmp_dir(tmp_dir, fs_root).await;
+
+    tokio::fs::create_dir_all(tmp_dir).await.with_context(|| {
+        format!(
+            "failed to create internal diff temp directory {}",
+            tmp_dir.display()
+        )
+    })?;
+
     let h = RandomState::new().build_hasher().finish();
-    let tmp_snap = snap_dir.join(format!(".diff-tmp-{:06x}", h & 0xFFFFFF));
+    let tmp_snap = tmp_dir.join(format!("{:06x}", h & 0xFFFFFF));
 
-    // Clean up stale temp snapshot from a prior crash before creating a new one.
-    if path_exists_fallible(&tmp_snap).await? {
+    if let Err(e) = create_snapshot(live_subvol, &tmp_snap, true).await {
+        // Best-effort removal of whatever a partially failed create left
+        // behind; the directory itself only disappears when empty.
         let _ = delete_subvolume_space_aware(&tmp_snap, fs_root).await;
+        let _ = tokio::fs::remove_dir(tmp_dir).await;
+        return Err(e).context("failed to create temporary snapshot of live workspace for diff");
     }
-
-    create_snapshot(live_subvol, &tmp_snap, true)
-        .await
-        .context("failed to create temporary snapshot of live workspace for diff")?;
 
     let result = diff_between_snapshots(snap_from, &tmp_snap).await;
 
     // Reassess after the diff because send/receive activity can materially
     // change free data or metadata space. Cleanup still runs when diff fails.
     if let Err(e) = delete_subvolume_space_aware(&tmp_snap, fs_root).await {
-        warn!(error = %e, path = %tmp_snap.display(), "failed to remove temp diff snapshot");
+        warn!(
+            error = %e,
+            path = %tmp_snap.display(),
+            "failed to remove temp diff snapshot; will retry on the next diff or bootstrap"
+        );
     }
-
+    // Remove the per-diff directory when empty; a temp snapshot whose delete
+    // failed above stays put and is retried by the next sweep.
+    let _ = tokio::fs::remove_dir(tmp_dir).await;
     result
 }
 
@@ -2036,7 +2324,14 @@ mod tests {
             .await
             .unwrap();
 
-        let entries = diff_against_live(&snap1, &src, &base, &base).await.unwrap();
+        let entries = diff_against_live(
+            &snap1,
+            &src,
+            &base.join(DIFF_TMP_DIR_NAME).join("test-diff-live-src"),
+            &base,
+        )
+        .await
+        .unwrap();
         assert!(!entries.is_empty());
 
         // Cleanup
@@ -3662,5 +3957,32 @@ proc /proc proc rw 0 0
             wait_clean_baseline(&mount).await,
             "cleaner did not drain after the shared-sweep kick"
         );
+    }
+
+    /// The id check is about path shape, never about a reserved prefix: a
+    /// legacy-named `.diff-tmp-backup` id is a legal single component (old
+    /// daemon versions let users create such formal snapshots), while
+    /// separators, traversal, and the dot components are refused — including
+    /// the `./` spelling that `Path::join` would silently normalize away.
+    #[test]
+    fn snapshot_id_single_component_is_enforced() {
+        assert!(ensure_snapshot_id_is_single_component(".diff-tmp-backup").is_ok());
+        assert!(ensure_snapshot_id_is_single_component(".diff-tmp-000001").is_ok());
+        assert!(ensure_snapshot_id_is_single_component("ckpt-20261006T120000.000").is_ok());
+        assert!(ensure_snapshot_id_is_single_component(".hidden").is_ok());
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "./.diff-tmp-backup",
+            ".diff-tmp-backup/..",
+            "a\u{0}b",
+        ] {
+            assert!(
+                ensure_snapshot_id_is_single_component(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }

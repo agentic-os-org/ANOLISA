@@ -102,7 +102,15 @@ impl Protocol {
     /// consistency; callers still perform configuration and Adapter admission.
     pub fn parse_request(&self, bytes: &[u8]) -> Result<Request, Error> {
         let value = parsing::parse(bytes)?;
-        if !self.request.is_valid(&value) {
+        self.check_request_shape(&value)?;
+        if value["method"] == "invoke" && value["input_digest"] != binding(&value)? {
+            return Err(Error::Invalid("invocation binding mismatch"));
+        }
+        Ok(Request(value))
+    }
+
+    fn check_request_shape(&self, value: &Value) -> Result<(), Error> {
+        if !self.request.is_valid(value) {
             return Err(Error::Invalid("request schema mismatch"));
         }
         if value["method"] == "invoke" {
@@ -115,11 +123,8 @@ impl Protocol {
             if before && !value["event"]["tool"]["result"].is_null() {
                 return Err(Error::Invalid("tool.before cannot supply a tool result"));
             }
-            if value["input_digest"] != binding(&value)? {
-                return Err(Error::Invalid("invocation binding mismatch"));
-            }
         }
-        Ok(Request(value))
+        Ok(())
     }
 
     /// Binds a locally constructed invoke request before its digest field is added.
@@ -140,6 +145,48 @@ impl Protocol {
             .ok_or(Error::Invalid("expected request object"))?;
         object.insert("input_digest".into(), Value::String(digest));
         self.parse_request(&encode(&value)?)
+    }
+
+    /// Binds a local boolean Hook invocation, applying limits to its bare event.
+    ///
+    /// The validated envelope stays inside AW; only the event is sent to the
+    /// command. Envelope fields must not consume the event's size/depth quota.
+    /// Structured Provider wire requests retain their full-message limits.
+    ///
+    /// # Errors
+    /// Rejects an existing digest, an operation other than invoke, nonempty
+    /// configuration, invalid request fields or an event exceeding its limits.
+    pub fn bind_hook_invocation(&self, mut value: Value) -> Result<Request, Error> {
+        if value["method"] != "invoke"
+            || value["operation"] != "invoke"
+            || value.get("input_digest").is_some()
+            || !value["config"]
+                .as_object()
+                .is_some_and(|config| config.is_empty())
+        {
+            return Err(Error::Invalid(
+                "expected an unbound boolean Hook invocation",
+            ));
+        }
+        encode(&value["event"])?;
+        let object = value
+            .as_object_mut()
+            .ok_or(Error::Invalid("expected request object"))?;
+        object.insert(
+            "input_digest".into(),
+            Value::String(format!("sha256:{}", "0".repeat(64))),
+        );
+        self.check_request_shape(&value)?;
+        value
+            .as_object_mut()
+            .ok_or(Error::Invalid("expected request object"))?
+            .remove("input_digest");
+        // Event limits were checked above; the schema bounds the remaining
+        // envelope fields, and Hook configuration must be empty before encoding.
+        let bytes =
+            serde_json::to_vec(&value).map_err(|_| Error::Invalid("request encoding failed"))?;
+        value["input_digest"] = Value::String(format!("sha256:{:x}", Sha256::digest(bytes)));
+        Ok(Request(value))
     }
 
     /// Checks one stdout response against its exact request after a successful exit.

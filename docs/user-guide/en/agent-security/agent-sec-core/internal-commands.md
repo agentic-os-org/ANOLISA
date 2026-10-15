@@ -16,6 +16,24 @@ and plugins. Their contracts are documented here for audit and debugging.
 
 The two hidden integration points support explicit `--help`.
 
+## `agent-sec-daemon-health`
+
+V2 raw and RPM packages install this standalone Rust probe for container health
+checks. It connects directly to the daemon and verifies Linux `SO_PEERCRED` UID
+0 before sending any request. It uses `AGENT_SEC_DAEMON_SOCKET`, defaulting to
+`/run/agent-sec-core/daemon.sock`; `AGENT_SEC_HEALTH_TIMEOUT_SECONDS` is a positive
+number of seconds, defaulting to `1`, for the entire request.
+
+```sh
+AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock agent-sec-daemon-health
+```
+
+A healthy `daemon.health` response produces no output and exit `0`. Server
+identity, connection, timeout, protocol and unhealthy-status failures print a
+diagnostic to stderr and exit `1`. `--help` prints usage. `--require-model` and
+`--require-same-cgroup` are unsupported. This checks daemon responsiveness;
+model, Job and enforcement readiness require their own checks.
+
 ## `log-sandbox`
 
 Records one sandbox pre-hook decision as a Security Event. This is the audit

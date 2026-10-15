@@ -2,7 +2,7 @@ manifest_version = 2
 
 [component]
 name = "sec-core"
-version = "0.13.2"
+version = "1.0.0"
 layer = "runtime"
 domain = "security"
 display_name = "Agent Security Core"
@@ -74,6 +74,12 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "bin/agent-sec-daemon-health"
+target = "{bindir}/agent-sec-daemon-health"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
 source = "bin/agent-sec-python"
 target = "{bindir}/agent-sec-python"
 mode = "0755"
@@ -107,18 +113,13 @@ target = "{libdir}/sec-core/python3.11/runtime/LICENSES.sha256"
 mode = "0644"
 
 [[component.layout.files]]
-source = "lib/anolisa/sec-core/python3.11/site-packages/"
-target = "{libdir}/sec-core/python3.11/site-packages/"
-mode = "0644"
-
-[[component.layout.files]]
 source = "share/anolisa/skills/"
 target = "{datadir}/skills/"
 mode = "0644"
 
 [[component.layout.files]]
 source = "share/anolisa/sec-core/agent-sec-core.service.in"
-target = "{userunitdir}/agent-sec-core.service"
+target = "{unitdir}/agent-sec-core.service"
 mode = "0644"
 render = "anolisa-paths-v1"
 
@@ -129,7 +130,7 @@ mode = "0644"
 
 [[component.services]]
 unit = "agent-sec-core.service"
-scope = "user"
+scope = "system"
 enable = false
 start = false
 

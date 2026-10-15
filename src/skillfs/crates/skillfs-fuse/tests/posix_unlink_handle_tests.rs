@@ -16,7 +16,7 @@
 //! mapping is gone. These tests exercise the three callbacks end-to-end.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use common::{MountFixture, create_skill_dir};
 
@@ -116,4 +116,63 @@ fn test_write_then_read_after_unlink_via_handle() {
         payload.len() + 5,
         "size grew via post-unlink write"
     );
+}
+
+#[test]
+fn test_setattr_after_unlink_via_handle() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "harness");
+    });
+    open_passthrough_for(&fx, "harness", "sandbox/keep", b"abcdef");
+
+    let mount_path = fx.skill_path("harness").join("sandbox").join("keep");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&mount_path)
+        .expect("open RW before unlink");
+    std::fs::remove_file(&mount_path).expect("unlink through mount");
+
+    // ftruncate on the still-open fd (POSIX: the inode lives until last
+    // close). The daemon dropped the ino→path mapping on unlink, so the
+    // path-based setattr path cannot serve this; the fh must.
+    file.set_len(2).expect("ftruncate after unlink");
+    assert_eq!(file.metadata().expect("fstat").size(), 2);
+
+    // fchmod through the same fd.
+    let mut perms = file.metadata().expect("fstat").permissions();
+    perms.set_mode(0o640);
+    file.set_permissions(perms).expect("fchmod after unlink");
+    assert_eq!(
+        file.metadata().expect("fstat").permissions().mode() & 0o777,
+        0o640,
+        "mode must change through the unlinked fd"
+    );
+
+    // futimens through the same fd.
+    let times = [
+        libc::timespec {
+            tv_sec: 1_000_000,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: 2_000_000,
+            tv_nsec: 0,
+        },
+    ];
+    let fd = {
+        use std::os::unix::io::AsRawFd;
+        file.as_raw_fd()
+    };
+    let rc = unsafe { libc::futimens(fd, times.as_ptr()) };
+    assert_eq!(
+        rc,
+        0,
+        "futimens after unlink: {}",
+        std::io::Error::last_os_error()
+    );
+    let meta = file.metadata().expect("fstat");
+    assert_eq!(meta.mtime(), 2_000_000, "mtime set through the unlinked fd");
 }

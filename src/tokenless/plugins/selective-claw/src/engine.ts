@@ -12,10 +12,52 @@ import type { SelectiveClawConfig } from "./types.js";
 import type { SummarizeFn } from "./summarize.js";
 import { runMigrations } from "./db/migration.js";
 import { MessageStore } from "./store/message-store.js";
+import type { MessageRecord } from "./store/message-store.js";
 import { Assembler } from "./assembler.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
+
+type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
+
+function toolIdentity(message: AgentMessage): string | null {
+  if (!["tool", "toolResult", "tool_result"].includes(message.role)) return null;
+  // Compare stable tool semantics; replay timestamps do not identify a result.
+  return JSON.stringify([
+    message.toolCallId ?? null,
+    message.toolUseId ?? null,
+    message.toolName ?? null,
+    message.isError ?? null,
+  ]);
+}
+
+function messagesMatch(left: ReconcileMessage, right: ReconcileMessage): boolean {
+  return left.role === right.role && left.content === right.content && left.toolIdentity === right.toolIdentity;
+}
+
+function suffixOverlap(stored: ReconcileMessage[], incoming: ReconcileMessage[]): number {
+  if (stored.length === 0 || incoming.length === 0) return 0;
+
+  // Prefix fallback keeps matching linear even for repeated message patterns.
+  const fallback = new Array<number>(incoming.length).fill(0);
+  let matched = 0;
+  for (let i = 1; i < incoming.length; i++) {
+    while (matched > 0 && !messagesMatch(incoming[i], incoming[matched])) {
+      matched = fallback[matched - 1];
+    }
+    if (messagesMatch(incoming[i], incoming[matched])) matched++;
+    fallback[i] = matched;
+  }
+
+  matched = 0;
+  for (const message of stored) {
+    while (matched > 0 && (matched === incoming.length || !messagesMatch(message, incoming[matched]))) {
+      matched = fallback[matched - 1];
+    }
+    if (messagesMatch(message, incoming[matched])) matched++;
+  }
+  return matched;
+}
 
 export class SelectiveContextEngine implements ContextEngine {
   readonly info: ContextEngineInfo = {
@@ -110,6 +152,7 @@ export class SelectiveContextEngine implements ContextEngine {
       role,
       content,
       tokenCount: estimateTokens(content),
+      rawMessage: JSON.stringify(message),
     });
 
     return { ingested: true };
@@ -125,22 +168,22 @@ export class SelectiveContextEngine implements ContextEngine {
     this.activeSessionId = params.sessionId;
     this.touchSession(params.sessionId);
 
+    let records: MessageRecord[];
     if (params.messages && params.messages.length > 0) {
-      this.reconcileMessages(params.sessionId, params.messages);
+      records = this.reconcileMessages(params.sessionId, params.messages);
+    } else {
+      records = this.store.getMessages(params.sessionId);
     }
 
     let messages: AgentMessage[];
     if (params.messages && params.messages.length > 0) {
       messages = params.messages;
     } else {
-      const stored = this.store.getMessages(params.sessionId);
+      const stored = records;
       if (stored.length === 0) {
         return { messages: [], estimatedTokens: 0 };
       }
-      messages = stored.map((m) => ({
-        role: m.role as string,
-        content: m.content,
-      }));
+      messages = stored.map((message) => this.restoreMessage(message));
     }
 
     const tokenBudget =
@@ -151,11 +194,8 @@ export class SelectiveContextEngine implements ContextEngine {
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
-    if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      await this.generateMissingSummaries(params.sessionId, turns);
-    }
-
-    const summaries = this.getSummariesForSession(params.sessionId);
+    const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
+    const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
     const result = this.assembler.assemble({
       messages,
@@ -191,15 +231,13 @@ export class SelectiveContextEngine implements ContextEngine {
     const stored = this.store.getMessages(params.sessionId);
     if (stored.length === 0) return;
 
-    const messages: AgentMessage[] = stored.map((m) => ({
-      role: m.role as string,
-      content: m.content,
-    }));
+    const messages = stored.map((message) => this.restoreMessage(message));
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      await this.generateMissingSummaries(params.sessionId, turns);
+      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
+      await this.generateMissingSummaries(params.sessionId, turns, bindings);
     }
   }
 
@@ -220,59 +258,66 @@ export class SelectiveContextEngine implements ContextEngine {
     found: number;
     turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
   } {
+    const requestedTurns = [...new Set(turnSeqs)];
     const cache = this.turnMessagesCache.get(sessionId);
-    if (cache) {
-      const result: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }> = [];
-      for (const seq of turnSeqs) {
-        const msgs = cache.get(seq);
-        if (msgs) {
-          result.push({
-            turnSeq: seq,
-            messages: msgs.map((m) => ({
-              role: m.role,
-              content: this.extractContent(m),
-            })),
-          });
-        }
+    const turnMap = new Map<number, Array<{ role: string; content: string }>>();
+    for (const seq of requestedTurns) {
+      const messages = cache?.get(seq);
+      if (messages) {
+        turnMap.set(seq, messages.map((message) => ({
+          role: message.role,
+          content: this.extractContent(message),
+        })));
       }
-      if (result.length > 0) return { found: result.length, turns: result };
     }
 
-    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, turnSeqs);
-    const turnMap = new Map<number, Array<{ role: string; content: string }>>();
+    const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
+    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
     for (const m of storeMessages) {
       const arr = turnMap.get(m.turnSeq) ?? [];
       arr.push({ role: m.role, content: m.content });
       turnMap.set(m.turnSeq, arr);
     }
 
-    const result = turnSeqs
+    const result = requestedTurns
       .filter((ts) => turnMap.has(ts))
       .map((ts) => ({ turnSeq: ts, messages: turnMap.get(ts)! }));
 
     return { found: result.length, turns: result };
   }
 
-  private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
-    const stored = this.store.getMessages(sessionId);
+  private reconcileMessages(sessionId: string, messages: AgentMessage[]): MessageRecord[] {
+    const records = this.store.getMessages(sessionId);
+    const stored = records.map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolIdentity: toolIdentity(this.restoreMessage(message)),
+    }));
+    const incoming = messages.map((message) => ({
+      role: this.normalizeRole(message.role),
+      content: this.extractContent(message),
+      toolIdentity: toolIdentity(message),
+    }));
 
     let matchLen = 0;
     const minLen = Math.min(stored.length, messages.length);
     for (let i = 0; i < minLen; i++) {
-      const storedRole = stored[i].role;
-      const incomingRole = this.normalizeRole(messages[i].role);
-      const incomingContent = this.extractContent(messages[i]);
-      if (storedRole === incomingRole && stored[i].content === incomingContent) {
+      if (messagesMatch(stored[i], incoming[i])) {
         matchLen++;
       } else {
         break;
       }
     }
 
-    if (matchLen < messages.length) {
-      const toImport = messages.slice(matchLen);
-      this.importMessages(sessionId, toImport);
-    }
+    const overlap = suffixOverlap(stored.slice(matchLen), incoming.slice(matchLen));
+    const toImport = messages.slice(matchLen + overlap);
+    this.importMessages(sessionId, toImport);
+    const imported = this.store.getMessages(sessionId).slice(stored.length);
+    return [
+      ...records.slice(0, matchLen),
+      ...records.slice(records.length - overlap),
+      ...imported,
+    ];
   }
 
   private importMessages(sessionId: string, messages: AgentMessage[]): void {
@@ -296,48 +341,83 @@ export class SelectiveContextEngine implements ContextEngine {
         role,
         content,
         tokenCount: estimateTokens(content),
+        rawMessage: JSON.stringify(msg),
       });
       seq++;
     }
   }
 
+  private bindSummaryTurns(
+    sessionId: string,
+    turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
+    records: MessageRecord[],
+  ): Map<number, number> {
+    const archived = new Map<number, MessageRecord[]>();
+    for (const record of this.store.getMessages(sessionId)) {
+      const group = archived.get(record.turnSeq) ?? [];
+      group.push(record);
+      archived.set(record.turnSeq, group);
+    }
+
+    const bindings = new Map<number, number>();
+    let offset = 0;
+    for (const turn of turns) {
+      const group = records.slice(offset, offset + turn.messages.length);
+      offset += turn.messages.length;
+      const archiveTurn = group[0]?.turnSeq;
+      if (archiveTurn === undefined) continue;
+      const complete = archived.get(archiveTurn);
+      // Partial or rewritten turns keep a live summary without replacing an archive anchor.
+      if (
+        complete && group.length === complete.length &&
+        group.every((record, index) => record.seq === complete[index].seq)
+      ) {
+        bindings.set(turn.turnSeq, archiveTurn);
+      }
+    }
+    return bindings;
+  }
+
   private async generateMissingSummaries(
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
-  ): Promise<void> {
+    bindings: Map<number, number>,
+  ): Promise<Map<number, string>> {
+    const archived = this.getSummariesForSession(sessionId);
+    const summaries = new Map<number, string>();
+    for (const [liveTurn, archiveTurn] of bindings) {
+      const summary = archived.get(archiveTurn);
+      if (summary !== undefined) summaries.set(liveTurn, summary);
+    }
+
     const olderTurns = turns.slice(0, -this.config.freshTailTurns);
-    if (olderTurns.length === 0) return;
-
-    const summaries = this.getSummariesForSession(sessionId);
-    const needSummary = olderTurns.filter((t) => !summaries.has(t.turnSeq));
-    if (needSummary.length === 0) return;
-
-    const summarizeFn = this.summarizeFn!;
+    const summarizeFn = this.summarizeFn;
+    if (!summarizeFn || olderTurns.length === 0) return summaries;
+    const needSummary = olderTurns.filter((turn) => !summaries.has(turn.turnSeq));
 
     const results = await Promise.allSettled(
       needSummary.map((turn) => {
         const text = turn.messages
-          .map((m) => `${m.role}: ${this.extractContent(m)}`)
+          .map((message) => `${message.role}: ${this.extractContent(message)}`)
           .join("\n");
         return summarizeFn(text).then((summary) => ({ turnSeq: turn.turnSeq, summary }));
       }),
     );
 
-    if (!this.turnSummaryCache.has(sessionId)) {
-      this.turnSummaryCache.set(sessionId, new Map());
-    }
-    const cache = this.turnSummaryCache.get(sessionId)!;
-
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        cache.set(r.value.turnSeq, r.value.summary);
-        try {
-          this.store.setTurnSummary(sessionId, r.value.turnSeq, r.value.summary);
-        } catch {
-          // best-effort persist
-        }
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      const { turnSeq, summary } = result.value;
+      summaries.set(turnSeq, summary);
+      const archiveTurn = bindings.get(turnSeq);
+      if (archiveTurn === undefined) continue;
+      archived.set(archiveTurn, summary);
+      try {
+        this.store.setTurnSummary(sessionId, archiveTurn, summary);
+      } catch {
+        // best-effort persist
       }
     }
+    return summaries;
   }
 
   private cacheTurnMessages(
@@ -378,7 +458,8 @@ export class SelectiveContextEngine implements ContextEngine {
         turns.push(current);
       }
       if (!current) {
-        current = { turnSeq: 1, messages: [] };
+        turnSeq = 1;
+        current = { turnSeq, messages: [] };
         turns.push(current);
       }
       current.messages.push(msg);
@@ -403,6 +484,20 @@ export class SelectiveContextEngine implements ContextEngine {
     }
     this.turnSummaryCache.set(sessionId, map);
     return map;
+  }
+
+  private restoreMessage(message: MessageRecord): AgentMessage {
+    if (message.rawMessage) {
+      try {
+        const raw = JSON.parse(message.rawMessage);
+        if (raw && typeof raw === "object" && !Array.isArray(raw) && typeof raw.role === "string") {
+          return raw as AgentMessage;
+        }
+      } catch {
+        // Older archives may contain incomplete raw payloads.
+      }
+    }
+    return { role: message.role, content: message.content };
   }
 
   private extractContent(message: AgentMessage): string {

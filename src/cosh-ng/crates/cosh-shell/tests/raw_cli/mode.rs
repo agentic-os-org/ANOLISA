@@ -595,3 +595,6 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
 
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
 }
+
+#[path = "mode/routing_recovery.rs"]
+mod routing_recovery;

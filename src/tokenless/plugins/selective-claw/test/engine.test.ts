@@ -3,10 +3,37 @@ import { SelectiveContextEngine } from "../src/engine.js";
 import { createConnection, closeConnection } from "../src/db/connection.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentMessage } from "../src/openclaw-bridge.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("SelectiveContextEngine", () => {
   let db: DatabaseSync;
   let engine: SelectiveContextEngine;
+
+  it.each(["stored", "cached", "mixed"])("expands repeated IDs once from %s turns", async (source) => {
+    const messages: AgentMessage[] = [
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "second question" },
+      { role: "assistant", content: "second answer" },
+    ];
+    if (source === "cached") {
+      await engine.assemble({ sessionId: "s1", messages });
+    } else if (source === "mixed") {
+      await engine.assemble({ sessionId: "s1", messages: messages.slice(0, 2) });
+      for (const message of messages.slice(2)) await engine.ingest({ sessionId: "s1", message });
+    } else {
+      for (const message of messages) await engine.ingest({ sessionId: "s1", message });
+    }
+    const turnIds = [2, 1, 2, 999, 1];
+    const result = engine.expandTurns("s1", turnIds);
+    expect(result.found).toBe(2);
+    expect(result.turns.map((turn) => turn.turnSeq)).toEqual([2, 1]);
+    expect(result.turns[0].messages.map((message) => message.content)).toEqual(["second question", "second answer"]);
+    expect(result.turns[1].messages.map((message) => message.content)).toEqual(["first question", "first answer"]);
+    expect(turnIds).toEqual([2, 1, 2, 999, 1]);
+  });
 
   beforeEach(() => {
     db = createConnection(":memory:");
@@ -114,6 +141,53 @@ describe("SelectiveContextEngine", () => {
   });
 
   describe("assemble", () => {
+    it.each(["bootstrap", "ingest", "gateway"] as const)("restores structured %s messages after reopening the archive", async (source) => {
+      const directory = mkdtempSync(join(tmpdir(), "selective-claw-restore-"));
+      const dbPath = join(directory, "archive.db");
+      let archive = createConnection(dbPath);
+      try {
+        const config = { freshTailTurns: 3, dbPath, enabled: true };
+        const writer = new SelectiveContextEngine(archive, config);
+        const messages: AgentMessage[] = [
+          { role: "user", content: [{ type: "text", text: "inspect project" }], timestamp: 100 },
+          { role: "assistant", content: [{ type: "toolCall", id: "call-7", name: "read", arguments: { path: "README.md" } }], timestamp: 101 },
+          { role: "toolResult", toolCallId: "call-7", toolUseId: "use-7", toolName: "read", isError: true, content: [{ type: "text", text: "file unavailable" }], timestamp: 102 },
+          { role: "assistant", content: [{ type: "text", text: "Please check the path." }], timestamp: 103 },
+        ];
+        if (source === "bootstrap") {
+          await writer.bootstrap({ sessionId: "s1", messages });
+        } else if (source === "ingest") {
+          for (const message of messages) await writer.ingest({ sessionId: "s1", message });
+        } else {
+          const live = await writer.assemble({ sessionId: "s1", messages, tokenBudget: 100000 });
+          expect(live.messages[2]).toBe(messages[2]);
+        }
+        closeConnection(archive);
+        archive = createConnection(dbPath);
+
+        const reader = new SelectiveContextEngine(archive, config);
+        const result = await reader.assemble({ sessionId: "s1", messages: [], tokenBudget: 100000 });
+        expect(result.messages).toEqual(messages);
+        expect(reader.getStore().getMessages("s1").map((message) => JSON.parse(message.rawMessage!))).toEqual(messages);
+        await reader.afterTurn({ sessionId: "s1", messages: [] });
+        expect(reader.expandTurns("s1", [1]).turns[0].messages[2].role).toBe("toolResult");
+      } finally {
+        closeConnection(archive);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each([undefined, "{broken", "null", "[]", '{"content":"no role"}'])("uses legacy text for unavailable or invalid raw payload %s", async (rawMessage) => {
+      engine.getStore().createMessage({
+        sessionId: "legacy", seq: 1, turnSeq: 1, role: "tool", content: "archived output", tokenCount: 2, rawMessage,
+      });
+
+      const result = await engine.assemble({ sessionId: "legacy", messages: [], tokenBudget: 100000 });
+      expect(result.messages).toEqual([{ role: "tool", content: "archived output" }]);
+      await engine.afterTurn({ sessionId: "legacy", messages: [] });
+      expect(engine.expandTurns("legacy", [1]).turns[0].messages).toEqual([{ role: "tool", content: "archived output" }]);
+    });
+
     it("returns ingested messages", async () => {
       await engine.bootstrap({ sessionId: "s1" });
       await engine.ingest({ sessionId: "s1", message: { role: "user", content: "hello" } });
@@ -216,6 +290,96 @@ describe("SelectiveContextEngine", () => {
   });
 
   describe("reconcile via assemble", () => {
+    it.each([
+      { toolCallId: "call-b" },
+      { toolUseId: "use-b" },
+      { toolName: "write" },
+      { isError: true },
+    ])("archives changed tool-result identity %j only once", async (change) => {
+      const first: AgentMessage = { role: "toolResult", toolCallId: "call-a", toolUseId: "use-a", toolName: "read", isError: false, content: [{ type: "text", text: "same output" }] };
+      const second = { ...first, ...change };
+      await engine.assemble({ sessionId: "s1", messages: [first] });
+      await engine.assemble({ sessionId: "s1", messages: [second] });
+      await engine.afterTurn({ sessionId: "s1", messages: [second] });
+      const restored = new SelectiveContextEngine(db, { freshTailTurns: 3, dbPath: ":memory:", enabled: true });
+      await restored.assemble({ sessionId: "s1", messages: [{ ...second, timestamp: 999 }] });
+      expect(engine.getStore().getMessages("s1").map((m) => JSON.parse(m.rawMessage!))).toEqual([first, second]);
+      expect((await restored.assemble({ sessionId: "s1", messages: [] })).messages).toEqual([first, second]);
+    });
+
+    it("preserves tool IDs through overlapping repeated outputs and file reopen", async () => {
+      const directory = mkdtempSync(join(tmpdir(), "selective-identity-"));
+      const path = join(directory, "archive.db");
+      let fileDb = createConnection(path);
+      try {
+        const config = { freshTailTurns: 3, dbPath: path, enabled: true };
+        const writer = new SelectiveContextEngine(fileDb, config);
+        const results: AgentMessage[] = ["a", "b", "c", "d"].map((id) => ({ role: "toolResult", toolCallId: id, content: "same output" }));
+        await writer.assemble({ sessionId: "s1", messages: results.slice(0, 3) });
+        await writer.afterTurn({ sessionId: "s1", messages: results.slice(1) });
+        await writer.afterTurn({ sessionId: "s1", messages: results.slice(1) });
+        closeConnection(fileDb);
+        fileDb = createConnection(path);
+        const reader = new SelectiveContextEngine(fileDb, config);
+        expect((await reader.assemble({ sessionId: "s1", messages: [] })).messages).toEqual(results);
+      } finally {
+        closeConnection(fileDb);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps identity-free legacy tool records incremental", async () => {
+      engine.getStore().createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "tool", content: "legacy", tokenCount: 2 });
+      await engine.afterTurn({ sessionId: "s1", messages: [{ role: "toolResult", content: "legacy" }] });
+      expect(engine.getStore().getMessageCount("s1")).toBe(1);
+    });
+
+    it("does not reimport a replacement across lifecycle calls or engine restart", async () => {
+      const original: AgentMessage[] = [
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "thinking" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "q3" },
+        { role: "assistant", content: "a3" },
+      ];
+      const replaced = original.map((message, index) => index === 1 ? { role: "assistant", content: "final answer" } : message);
+      engine.setSummarizeFn(async () => "saved summary");
+      await engine.assemble({ sessionId: "s1", messages: original });
+      await engine.assemble({ sessionId: "s1", messages: replaced });
+      const store = engine.getStore();
+      const archived = store.getMessages("s1");
+      expect(archived).toHaveLength(11);
+      await engine.afterTurn({ sessionId: "s1", messages: replaced });
+      const summaries = store.getTurnSummaries("s1");
+      await engine.assemble({ sessionId: "s1", messages: replaced });
+      expect(store.getMessages("s1")).toEqual(archived);
+      expect(store.getTurnSummaries("s1")).toEqual(summaries);
+
+      const restored = new SelectiveContextEngine(db, { freshTailTurns: 3, dbPath: ":memory:", enabled: true });
+      await restored.afterTurn({ sessionId: "s1", messages: replaced });
+      const newMessage: AgentMessage = { role: "user", content: "q4" };
+      const result = await restored.assemble({ sessionId: "s1", messages: [...replaced, newMessage] });
+      expect(store.getMessageCount("s1")).toBe(12);
+      expect(store.getMessages("s1").slice(0, 11)).toEqual(archived);
+      expect(store.getLastMessage("s1")!.content).toBe("q4");
+      expect(result.messages.at(-1)).toBe(newMessage);
+    });
+
+    it("recognizes overlapping repeated message patterns without duplicating an extended tail", async () => {
+      const user: AgentMessage = { role: "user", content: "q" };
+      await engine.assemble({ sessionId: "s1", messages: [user, { role: "assistant", content: "old" }] });
+      const replaced = [user, ...["x", "y", "x", "y", "x", "z"].map((content) => ({ role: "assistant", content }))];
+      await engine.assemble({ sessionId: "s1", messages: replaced });
+      expect(engine.getStore().getMessageCount("s1")).toBe(8);
+
+      await engine.afterTurn({ sessionId: "s1", messages: replaced });
+      await engine.assemble({ sessionId: "s1", messages: [...replaced, { role: "assistant", content: "y" }] });
+      expect(engine.getStore().getMessages("s1").map((message) => message.content)).toEqual([
+        "q", "old", "x", "y", "x", "y", "x", "z", "y",
+      ]);
+    });
+
     it("imports params.messages into store when store is empty", async () => {
       await engine.bootstrap({ sessionId: "s1" });
       const result = await engine.assemble({
@@ -328,5 +492,52 @@ describe("SelectiveContextEngine", () => {
       await engine.bootstrap({ sessionId: "s1" });
       expect(engine.getActiveSessionId()).toBe("s1");
     });
+  });
+
+  describe("expandTurns", () => {
+    it("merges cached turns and turns ingested after assembly in requested order", async () => {
+      await engine.assemble({
+        sessionId: "s1",
+        messages: [{ role: "user", content: "cached question" }, { role: "assistant", content: "cached answer" }],
+      });
+      await engine.ingest({ sessionId: "s1", message: { role: "user", content: "new question" } });
+      await engine.ingest({ sessionId: "s1", message: { role: "assistant", content: "new answer" } });
+
+      const result = engine.expandTurns("s1", [2, 999, 1]);
+      expect(result.found).toBe(2);
+      expect(result.turns.map((turn) => turn.turnSeq)).toEqual([2, 1]);
+      expect(result.turns[0].messages.map((message) => message.content)).toEqual(["new question", "new answer"]);
+      expect(result.turns[1].messages.map((message) => message.content)).toEqual(["cached question", "cached answer"]);
+    });
+
+    it("keeps the live cached content when an archived turn has the same number", async () => {
+      await engine.assemble({ sessionId: "s1", messages: [{ role: "user", content: "first version" }] });
+      await engine.assemble({ sessionId: "s1", messages: [{ role: "user", content: "current version" }] });
+
+      expect(engine.expandTurns("s1", [1]).turns[0].messages[0].content).toBe("current version");
+      expect(engine.expandTurns("s1", [])).toEqual({ found: 0, turns: [] });
+    });
+
+    it("returns stored turns when no live cache exists", async () => {
+      await engine.ingest({ sessionId: "s1", message: { role: "user", content: "stored question" } });
+      expect(engine.expandTurns("s1", [1]).turns[0].messages[0].content).toBe("stored question");
+      expect(engine.expandTurns("s1", [999])).toEqual({ found: 0, turns: [] });
+    });
+  });
+
+  it.each(["assistant", "toolResult"])("keeps cached turn IDs consistent after a leading %s", async (role) => {
+    const messages: AgentMessage[] = [
+      { role, content: "leading context" },
+      { role: "user", content: "new question" },
+      { role: "assistant", content: "new answer" },
+    ];
+    await engine.bootstrap({ sessionId: "s1", messages });
+    await engine.assemble({ sessionId: "s1", messages });
+
+    expect(engine.getStore().getDistinctTurnSeqs("s1")).toEqual([1, 2]);
+    const recalled = engine.expandTurns("s1", [1, 2]);
+    expect(recalled.turns.map((turn) => turn.turnSeq)).toEqual([1, 2]);
+    expect(recalled.turns[0].messages).toEqual([{ role, content: "leading context" }]);
+    expect(recalled.turns[1].messages.map((message) => message.content)).toEqual(["new question", "new answer"]);
   });
 });

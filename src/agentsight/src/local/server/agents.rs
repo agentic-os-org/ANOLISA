@@ -171,6 +171,21 @@ const AGENT_SIGNATURES: &[AgentSignature] = &[
 
 // ── Data structures ───────────────────────────────────────────────────────
 
+/// Per-PID path data for one discovered agent process.
+///
+/// One agent id can be served by several processes (e.g. two Cursor windows),
+/// and each of those has its own working directory and executable. Health rows
+/// are emitted per PID, so the paths must travel per PID: an aggregate taken
+/// from the first-seen process would label every row with one instance's
+/// workspace, with the winner decided by hash-map iteration order.
+#[derive(Serialize)]
+pub(crate) struct AgentProcess {
+    pub(crate) pid: u32,
+    pub(crate) cwd: String,
+    pub(crate) exe_path: String,
+    pub(crate) cmdline_preview: String,
+}
+
 #[derive(Serialize)]
 pub(crate) struct AgentInfo {
     pub(crate) id: String,
@@ -185,6 +200,9 @@ pub(crate) struct AgentInfo {
     pub(crate) uptime_secs: u64,
     pub(crate) cmdline_preview: String,
     pub(crate) cwd: String,
+    pub(crate) exe_path: String,
+    /// One entry per PID in `pids`, carrying that PID's own paths.
+    pub(crate) processes: Vec<AgentProcess>,
 }
 
 #[derive(Serialize)]
@@ -205,6 +223,7 @@ struct ProcessInfo {
     mem_mb: f64,
     uptime_secs: u64,
     cwd: String,
+    exe_path: String,
 }
 
 /// Check if `haystack` contains `needle` as a whole word.
@@ -311,6 +330,11 @@ fn scan_processes() -> Vec<ProcessInfo> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        let exe_path = process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let cpu_percent = process.cpu_usage() as f64;
         let mem_mb = process.memory() as f64 / (1024.0 * 1024.0);
 
@@ -329,10 +353,20 @@ fn scan_processes() -> Vec<ProcessInfo> {
             mem_mb,
             uptime_secs,
             cwd,
+            exe_path,
         });
     }
 
     processes
+}
+
+/// Clip a command line to the length the process list displays.
+fn preview_cmdline(cmdline: &str) -> String {
+    if cmdline.chars().count() > 120 {
+        format!("{}...", cmdline.chars().take(120).collect::<String>())
+    } else {
+        cmdline.to_string()
+    }
 }
 
 fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
@@ -382,18 +416,28 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
             let cpu: f64 = procs.iter().map(|p| p.cpu_percent).sum();
             let mem_mb: f64 = procs.iter().map(|p| p.mem_mb).sum();
             let max_uptime = procs.iter().map(|p| p.uptime_secs).max().unwrap_or(0);
+            // Path data stays per process: the per-PID health rows each need
+            // their own workspace/exe, so nothing here may collapse to
+            // `first()`. The aggregate fields below only describe the agent
+            // row on `/api/agents` and are ordered by `pids`.
+            let processes: Vec<AgentProcess> = procs
+                .iter()
+                .map(|p| AgentProcess {
+                    pid: p.pid,
+                    cwd: p.cwd.clone(),
+                    exe_path: p.exe_path.clone(),
+                    cmdline_preview: preview_cmdline(&p.cmdline),
+                })
+                .collect();
             let cmdline_preview = procs
                 .first()
-                .map(|p| {
-                    let s = &p.cmdline;
-                    if s.chars().count() > 120 {
-                        format!("{}...", s.chars().take(120).collect::<String>())
-                    } else {
-                        s.clone()
-                    }
-                })
+                .map(|p| preview_cmdline(&p.cmdline))
                 .unwrap_or_default();
             let cwd = procs.first().map(|p| p.cwd.clone()).unwrap_or_default();
+            let exe_path = procs
+                .first()
+                .map(|p| p.exe_path.clone())
+                .unwrap_or_default();
 
             Some(AgentInfo {
                 id: sig.id.to_string(),
@@ -408,11 +452,21 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
                 uptime_secs: max_uptime,
                 cmdline_preview,
                 cwd,
+                exe_path,
+                processes,
             })
         })
         .collect();
 
-    agents.sort_by_key(|agent| std::cmp::Reverse(agent.process_count));
+    // The agents were collected from a HashMap, so a count-only sort left
+    // equally loaded agents in the map's randomized iteration order and the
+    // list order changed between requests. Ties break by agent id, the way
+    // 947a9bde2 broke them for the audit and token aggregates.
+    agents.sort_by(|a, b| {
+        b.process_count
+            .cmp(&a.process_count)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     agents
 }
 
@@ -462,6 +516,7 @@ mod tests {
             mem_mb: 100.0,
             uptime_secs: 60,
             cwd: String::new(),
+            exe_path: String::new(),
         }
     }
 
@@ -566,6 +621,34 @@ mod tests {
     }
 
     #[test]
+    fn match_agents_keeps_paths_per_pid() {
+        // Same agent, two instances with different workspaces: the per-PID
+        // rows downstream must be able to tell them apart.
+        let mut first = make_proc(10, "claude", "node claude.js");
+        first.cwd = "/work/a".to_string();
+        first.exe_path = "/usr/local/bin/claude".to_string();
+        let mut second = make_proc(11, "claude", "node claude.js");
+        second.cwd = "/work/b".to_string();
+        second.exe_path = "/usr/local/bin/claude-helper".to_string();
+
+        let agents = match_agents(&[first, second]);
+        assert_eq!(agents.len(), 1);
+        let paths: Vec<(u32, &str, &str)> = agents[0]
+            .processes
+            .iter()
+            .map(|p| (p.pid, p.cwd.as_str(), p.exe_path.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                (10, "/work/a", "/usr/local/bin/claude"),
+                (11, "/work/b", "/usr/local/bin/claude-helper"),
+            ],
+            "each process entry must keep its own cwd and executable"
+        );
+    }
+
+    #[test]
     fn match_agents_no_false_positive_qoder() {
         // "qoder-server" should not match "qoder" signature
         let procs = vec![make_proc(400, "node", "node /opt/qoder-server/main.js")];
@@ -589,5 +672,39 @@ mod tests {
         assert!(summary.total_running <= summary.agents.len() || summary.agents.is_empty());
         assert!(summary.scanned_at > 0);
         assert!(!summary.hostname.is_empty());
+    }
+
+    #[test]
+    fn match_agents_count_ties_are_stable() {
+        // Four agents with one process each: the counts tie, and the order
+        // used to follow the HashMap iteration order, changing between
+        // requests over the same system.
+        let procs = vec![
+            make_proc(1, "claude", "claude"),
+            make_proc(2, "codex", "codex"),
+            make_proc(3, "gemini", "gemini"),
+            make_proc(4, "aider", "aider"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let ids: Vec<String> = match_agents(&procs).into_iter().map(|a| a.id).collect();
+            seen.insert(ids);
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the order of equally loaded agents must not change between calls"
+        );
+        let order = seen.into_iter().next().unwrap();
+        assert_eq!(
+            order,
+            vec![
+                "aider".to_string(),
+                "claude-code".to_string(),
+                "codex".to_string(),
+                "gemini-cli".to_string()
+            ],
+            "count ties break by agent id"
+        );
     }
 }

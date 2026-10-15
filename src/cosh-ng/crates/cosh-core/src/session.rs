@@ -15,6 +15,7 @@ mod scoped;
 mod store;
 mod summary;
 
+pub(crate) use io::SessionLock;
 pub use store::SessionStore;
 pub(crate) use summary::bounded_summary_text;
 
@@ -113,6 +114,8 @@ pub struct PersistedSession {
     /// a revision an earlier commit already published.
     #[serde(default)]
     pub compaction_revision: u64,
+    #[serde(skip)]
+    pub(crate) was_loaded: bool,
 }
 
 impl PersistedSession {
@@ -135,6 +138,7 @@ impl PersistedSession {
             messages,
             compaction: None,
             compaction_revision: 0,
+            was_loaded: false,
         }
     }
 }
@@ -227,6 +231,13 @@ pub enum SessionError {
         /// Protected provider ID.
         session_id: String,
     },
+    /// The per-user task budget is full and nothing may be evicted for it.
+    BudgetExhausted {
+        /// Projected bytes after replacing the incoming envelope.
+        projected_bytes: u64,
+        /// Per-user budget in bytes.
+        budget_bytes: u64,
+    },
 }
 
 impl SessionError {
@@ -243,6 +254,7 @@ impl SessionError {
             Self::ScopeMismatch { .. } => "scope_mismatch",
             Self::Conflict { .. } => "conflict",
             Self::ActiveSession { .. } => "active_session",
+            Self::BudgetExhausted { .. } => "budget_exhausted",
         }
     }
 
@@ -270,6 +282,9 @@ impl SessionError {
                 Some("Select another session before clearing this protected session.")
             }
             Self::Io { .. } => Some("Check the session directory permissions and retry."),
+            Self::BudgetExhausted { .. } => {
+                Some("Free space by clearing old sessions; the per-user task budget is fixed.")
+            }
         }
     }
 }
@@ -319,6 +334,14 @@ impl fmt::Display for SessionError {
             Self::ActiveSession { session_id } => {
                 write!(formatter, "session {session_id} is protected")
             }
+            Self::BudgetExhausted {
+                projected_bytes,
+                budget_bytes,
+            } => write!(
+                formatter,
+                "per-user task budget of {budget_bytes} bytes is full ({projected_bytes} bytes \
+                 projected after commit) and nothing may be evicted for it"
+            ),
         }
     }
 }

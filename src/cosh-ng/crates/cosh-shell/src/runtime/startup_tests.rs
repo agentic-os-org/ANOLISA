@@ -1,19 +1,20 @@
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
 use nix::pty::Winsize;
 
+use super::probe_outcome::{record_probe_outcome, ProbeStartOutcome};
 use super::{
-    append_startup_auth_hint, bootstrap_path_probe_plan, extract_bootstrap_path,
-    merge_bootstrap_paths, merge_path_additions_at_anchors, merge_path_lists,
-    plan_startup_for_render, record_visible_personal_impressions,
-    render_pending_recommendation_notice, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
-};
-#[cfg(target_os = "linux")]
-use super::{
-    bootstrap_path_command, run_bootstrap_path_probe, BootstrapPathProbeError,
+    append_startup_auth_hint, bootstrap_path_command, bootstrap_path_probe_plan,
+    bootstrap_process_path_from_shell, extract_bootstrap_path, merge_bootstrap_paths,
+    merge_path_additions_at_anchors, merge_path_lists, plan_startup_for_render,
+    record_visible_personal_impressions, render_pending_recommendation_notice,
+    render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
+    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
+    BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
     BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
@@ -31,16 +32,41 @@ use crate::recommendation::personal_runtime::PersonalRuntime;
 use crate::runtime::state::{
     AnalysisMode, InlineState, PendingInputGhostBinding, StartupAuthState,
 };
+use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
 use crate::ui::RatatuiInlineRenderer;
 use crate::I18n;
 
-#[cfg(target_os = "linux")]
 const BOOTSTRAP_PATH_TEST_WINSIZE: Winsize = Winsize {
     ws_row: 40,
     ws_col: 100,
     ws_xpixel: 0,
     ws_ypixel: 0,
 };
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: Option<&OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 #[test]
 fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
@@ -733,6 +759,200 @@ fn bootstrap_path_probe_plan_honors_disabled_switch() {
 }
 
 #[test]
+fn probe_outcome_records_only_when_target_may_have_started() {
+    use ProbeStartOutcome::{MayHaveStarted, ProvenNotStarted};
+
+    let cases = [
+        (Ok(()), MayHaveStarted),
+        (
+            Err(BootstrapPathProbeError::Containment(std::io::Error::other(
+                "containment",
+            ))),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::Supervisor(std::io::Error::other(
+                "supervisor",
+            ))),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::Spawn(std::io::Error::other(
+                "spawn",
+            ))),
+            ProvenNotStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::Wait(std::io::Error::other("wait"))),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::Read(std::io::Error::other("read"))),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::Failed(
+                std::process::ExitStatus::from_raw(23 << 8),
+            )),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::TimedOut(Duration::from_millis(1))),
+            MayHaveStarted,
+        ),
+        (
+            Err(BootstrapPathProbeError::OutputDidNotClose(
+                Duration::from_millis(1),
+            )),
+            MayHaveStarted,
+        ),
+        (Err(BootstrapPathProbeError::OutputTooLarge), MayHaveStarted),
+        (Err(BootstrapPathProbeError::MissingMarker), MayHaveStarted),
+    ];
+
+    for (result, expected) in cases {
+        let effects = LoginEffectGuard::new();
+        assert_eq!(
+            record_probe_outcome(&effects, LoginEffectSource::PathBootstrapProbe, &result),
+            expected
+        );
+        assert_eq!(
+            effects.has(LoginEffectSource::PathBootstrapProbe),
+            expected == MayHaveStarted
+        );
+    }
+}
+
+#[test]
+fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Unsupported("fish".into()),
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(!effects.may_have_started());
+}
+
+#[test]
+fn disabled_bootstrap_path_keeps_login_effects_armed() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", Some(OsStr::new("0")));
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(!effects.may_have_started());
+}
+
+#[test]
+fn missing_selected_shell_reports_spawn_and_keeps_login_effects_armed() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create empty PATH directory");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+
+    let result = run_bootstrap_path_probe(
+        bootstrap_path_command("zsh", "-lic"),
+        BOOTSTRAP_PATH_PROBE_TIMEOUT,
+        BootstrapPathProbeIo::Pipes,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+    );
+    assert!(matches!(result, Err(BootstrapPathProbeError::Spawn(_))));
+
+    let effects = LoginEffectGuard::new();
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Zsh,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+    assert!(!effects.may_have_started());
+}
+
+#[test]
+fn selected_bootstrap_path_plan_marks_successful_probe() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create PATH wrapper directory");
+    let wrapper = dir.path().join("bash");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '\\n__COSH_PATH_BEGIN__/guard-success__COSH_PATH_END__\\n'\n",
+    )
+    .expect("write successful PATH wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH wrapper executable");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
+}
+
+#[test]
+fn selected_bootstrap_path_plan_marks_failed_probe() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create PATH wrapper directory");
+    let wrapper = dir.path().join("bash");
+    std::fs::write(&wrapper, "#!/bin/sh\nexit 23\n").expect("write failing PATH wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH wrapper executable");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
+}
+
+#[test]
+fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create PATH wrapper directory");
+    let wrapper = dir.path().join("zsh");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '\\n__COSH_PATH_BEGIN__/zsh-guard__COSH_PATH_END__\\n'\n",
+    )
+    .expect("write zsh PATH wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make zsh PATH wrapper executable");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Zsh,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
+}
+
+#[test]
 fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
     let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
     assert_eq!(bash_login.len(), 1);
@@ -830,6 +1050,70 @@ fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
     let mut quiet = Vec::new();
     append_startup_auth_hint(&mut disabled, &mut quiet);
     assert!(quiet.is_empty());
+}
+
+#[test]
+fn cached_upgrade_notice_is_excluded_from_banner_and_rendered_as_a_panel() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.startup_upgrade.resolved = Some(Some(crate::upgrade::check::UpgradeNotice {
+        package: "cosh-ng".to_string(),
+        current: "1.0.0".to_string(),
+        latest: "1.1.0".to_string(),
+        command: "anolisa update cosh-ng".to_string(),
+    }));
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    event.cwd = Some("/tmp".to_string());
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+
+    let mut banner = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut banner).unwrap();
+    let banner = String::from_utf8(banner).unwrap();
+    assert!(state.rendered_startup_banner);
+    assert!(!banner.contains("1.0.0 → 1.1.0"), "{banner}");
+    assert!(!banner.contains("anolisa update cosh-ng"), "{banner}");
+    assert!(!state.startup_upgrade.rendered);
+
+    let mut panel = Vec::new();
+    render_pending_upgrade_notice(&mut state, &mut panel).unwrap();
+    let panel = String::from_utf8(panel).unwrap();
+    assert!(panel.starts_with("\r\u{1b}[2K"), "{panel}");
+    assert!(panel.contains("cosh-ng update available"), "{panel}");
+    assert!(panel.contains("1.0.0 → 1.1.0"), "{panel}");
+    assert!(state.startup_upgrade.rendered);
+}
+
+#[test]
+fn late_upgrade_probe_renders_a_deferred_notice() {
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    state.startup_upgrade.pending = Some(receiver);
+
+    let mut output = Vec::new();
+    render_pending_upgrade_notice(&mut state, &mut output).unwrap();
+    assert!(output.is_empty());
+    assert!(!state.startup_upgrade.rendered);
+
+    sender
+        .send(Some(crate::upgrade::check::UpgradeNotice {
+            package: "cosh-ng".to_string(),
+            current: "1.0.0".to_string(),
+            latest: "1.1.0".to_string(),
+            command: "anolisa update cosh-ng".to_string(),
+        }))
+        .unwrap();
+    render_pending_upgrade_notice(&mut state, &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.starts_with("\r\u{1b}[2K"), "{output}");
+    assert!(output.contains("cosh-ng update available"), "{output}");
+    assert!(output.contains("anolisa update cosh-ng"), "{output}");
+    assert!(state.startup_upgrade.rendered);
 }
 
 #[test]

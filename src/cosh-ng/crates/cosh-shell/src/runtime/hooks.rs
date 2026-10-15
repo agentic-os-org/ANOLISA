@@ -635,6 +635,11 @@ pub(crate) fn start_agent_for_hook_consultation<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    // COSH_SHELL_AI=off: the consultation card "approve" and `/hint <id> analyze`
+    // both land here, so this is the one gate that keeps them provider-free.
+    if state.personalization.ai_disabled {
+        return Ok(());
+    }
     let findings = findings_from_blocks(blocks);
     let Some(mut request) =
         agent_request_after_confirmation(&block.session_id, block, &findings, true)

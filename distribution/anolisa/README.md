@@ -42,6 +42,10 @@ anolisa update all
 `status` and `doctor` allow content edits to raw-installed `type = "config"`
 files while continuing to check their presence, permissions, and path safety.
 
+`logs --since <RFC3339>` applies an inclusive timestamp filter, accounting for
+offsets and fractional seconds. Records with unparseable timestamps are excluded
+only when `--since` is set.
+
 ### Tier 2 — Management
 
 | Command | Description |
@@ -55,14 +59,21 @@ files while continuing to check their presence, permissions, and path safety.
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report (`--component cosh-ng` also summarizes the cosh-shell diagnostic bundle; `COSH_SHELL_BIN` overrides the binary) |
 
-Running `anolisa adapter enable <component> openclaw` accepts the plugin's
-declared capabilities when the host supports capability consent. This does
-not authorize an unsafe-install bypass.
+By default, `anolisa adapter enable <component> openclaw` accepts the plugin's
+declared capabilities when each host command supports capability consent.
+Add `--no-accept-capabilities` to withhold automatic consent during both
+installation and activation. This does not revoke existing host authorization
+or authorize an unsafe-install bypass.
 
 Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
 ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.
 See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
 for custom configuration directories and existing-installation ownership.
+
+Enable Tokenless in QwenWorkCN macOS local mode with
+`anolisa adapter enable tokenless qwenwork`. Restart the desktop application and
+check activation there; CLI status verifies files but reports activation as
+`unknown`. Existing script installations must be uninstalled before CLI enable.
 
 ## Install Modes
 
@@ -122,8 +133,8 @@ but the current raw backend ignores their values.
 - Linux (x86_64 / aarch64) or macOS 11+ (arm64 / x86_64, limited)
 
 Intel macOS prebuilt and npm support requires a release containing the
-`darwin-x64` platform package. The website installer remains ARM-only until
-that release is published and the installer is enabled separately.
+`darwin-x64` platform package. The website installer accepts both ARM and
+Intel Macs running macOS 11 or later.
 - Rust ≥ 1.93 (for source build)
 
 ## License

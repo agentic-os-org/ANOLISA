@@ -248,6 +248,15 @@
         },
         "argv": {
           "$ref": "#/$defs/argv"
+        },
+        "qoder": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sequential": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -255,15 +264,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "protocol",
         "transport",
         "timeout_ms",
-        "max_output_bytes",
-        "config"
+        "max_output_bytes"
       ],
       "properties": {
         "protocol": {
-          "const": "aw-provider/v1alpha1"
+          "enum": [
+            "aw-provider/v1alpha1",
+            "native-hook/v1alpha1",
+            "aw-hook/v1alpha1"
+          ],
+          "default": "aw-hook/v1alpha1"
         },
         "transport": {
           "$ref": "#/$defs/transport"
@@ -277,7 +289,29 @@
         "config": {
           "type": "object"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "protocol"
+            ],
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "aw-provider/v1alpha1",
+                  "native-hook/v1alpha1"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "config"
+            ]
+          }
+        }
+      ]
     },
     "transport": {
       "type": "object",
@@ -432,8 +466,6 @@
       "required": [
         "id",
         "provider",
-        "operation",
-        "effects",
         "on_error"
       ],
       "properties": {
@@ -448,7 +480,8 @@
           "$ref": "#/$defs/name"
         },
         "operation": {
-          "$ref": "#/$defs/name"
+          "$ref": "#/$defs/name",
+          "default": "invoke"
         },
         "effects": {
           "type": "array",
@@ -471,8 +504,52 @@
             "block",
             "withhold_result"
           ]
+        },
+        "native": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "reason_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "not": {
+            "pattern": "[^A-Za-z0-9_.-]"
+          }
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "effects"
+          ],
+          "not": {
+            "required": [
+              "native"
+            ]
+          }
+        },
+        {
+          "required": [
+            "native"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "operation"
+                ]
+              },
+              {
+                "required": [
+                  "effects"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }
   }
 }

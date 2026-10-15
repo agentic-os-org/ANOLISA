@@ -5,6 +5,8 @@
 ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。只需安装一次 CLI，再按需
 启用能带来第一个目标结果的能力。
 
+实验性 AW + sec-core 完整包见 [AW Preview 指南](user-guide/zh/user-entrypoint/aw-preview.md)。
+
 ## 安装 CLI
 
 ```bash

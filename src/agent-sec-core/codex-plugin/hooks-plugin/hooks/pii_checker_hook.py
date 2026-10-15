@@ -272,6 +272,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # Valid JSON that is not an object (array/scalar/null) has no hook fields
+    # to read: exit silently so Codex treats it as allow, same as undecodable
+    # input above - mirroring the observability hook's payload guard.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Determine which hook event we're handling
     hook_event = input_data.get("hook_event_name", "")
     if hook_event not in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
@@ -316,6 +322,11 @@ def main() -> None:
         scan_result = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         return  # fail-open on parse error
+    if not isinstance(scan_result, dict):
+        # A non-object scan result (null, array, string, number) carries no
+        # verdict or findings; the qwen/qoder/cosh siblings and the hermes
+        # in-process capability all degrade this shape to fail-open.
+        return  # fail-open on non-object scan result
 
     # 6. Mode-based output
     verdict = _safe_text(scan_result.get("verdict")) or "pass"

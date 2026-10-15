@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::*;
 use asc_foundation_types::ResourceId;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::binding::{BindingView, PreparedBinding};
 use asc_policy_types::target::{
     AdapterFault, TargetBindingPlan, TranslationOutcome, TranslationRejection,
@@ -83,7 +83,7 @@ struct Script {
 }
 
 struct Harness {
-    repository: ProcessLocalPapRepository,
+    repository: SqlitePolicyRepository,
     script: Mutex<Script>,
     now: AtomicU64,
     id: ResourceId,
@@ -97,7 +97,7 @@ impl Harness {
             for desired in admission.desired {
                 let before = self.repository.read(&self.id)?.unwrap();
                 assert!(self.repository.compare_exchange_reconcile_intent(
-                    &ExpectedBinding::from_binding(&before.binding),
+                    &ExpectedBinding::from_snapshot(&before),
                     &desired,
                 )?);
                 script.trace.push("admit".into());
@@ -271,7 +271,7 @@ fn complete_serialized_core_cases() {
             schedule.next_attempt_at = progress.next_attempt_at;
         }
         let harness = Arc::new(Harness {
-            repository: ProcessLocalPapRepository::with_binding_states(
+            repository: SqlitePolicyRepository::with_binding_states(
                 case.initial.into_iter().collect(),
             )
             .unwrap(),
@@ -368,10 +368,8 @@ fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
     step.calls[0].output = json!({"kind": "translated", "plan": plan});
     step.calls[1].input = json!(plan);
     let harness = Arc::new(Harness {
-        repository: ProcessLocalPapRepository::with_binding_states(
-            case.initial.into_iter().collect(),
-        )
-        .unwrap(),
+        repository: SqlitePolicyRepository::with_binding_states(case.initial.into_iter().collect())
+            .unwrap(),
         script: Mutex::new(Script {
             calls: step.calls.into(),
             ..Script::default()

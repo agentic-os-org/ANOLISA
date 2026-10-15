@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::llm::{ChatMessage, LlmClient};
 use crate::trace::TraceInventory;
 
+use super::detector::JudgmentLog;
+
 const SYSTEM_PROMPT: &str = include_str!("../../prompts/shared_extract.md");
 
 /// A completion claim extracted from the final answer.
@@ -63,7 +65,13 @@ pub struct SharedExtraction {
 
 /// Run the shared extraction call. Never fails: on error returns an empty
 /// extraction so strategies with pure-Rust oracles can still produce issues.
-pub async fn shared_extract(client: &LlmClient, inv: &TraceInventory) -> SharedExtraction {
+/// The attempt is recorded in `judgments`, so a run whose only judgment failed
+/// is not mistaken for a clean one.
+pub async fn shared_extract(
+    client: &LlmClient,
+    inv: &TraceInventory,
+    judgments: &JudgmentLog,
+) -> SharedExtraction {
     if inv.final_answer.is_empty() && inv.user_turns.is_empty() {
         tracing::debug!("[accuracy] No final answer or user turns, skipping shared extraction");
         return SharedExtraction::default();
@@ -93,6 +101,7 @@ pub async fn shared_extract(client: &LlmClient, inv: &TraceInventory) -> SharedE
         .await
     {
         Ok(out) => {
+            judgments.record_ok();
             tracing::info!(
                 "[accuracy] Shared extraction: {} claims, {} assertions, {} checklist items, ambiguous={}",
                 out.claims.len(),
@@ -103,6 +112,7 @@ pub async fn shared_extract(client: &LlmClient, inv: &TraceInventory) -> SharedE
             out
         }
         Err(e) => {
+            judgments.record_failure(&e);
             tracing::warn!("[accuracy] Shared extraction failed, degrading to empty: {e}");
             SharedExtraction::default()
         }

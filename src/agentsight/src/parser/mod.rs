@@ -32,6 +32,7 @@
 
 pub mod http;
 pub mod http2;
+pub mod llm;
 pub mod proctrace;
 mod result;
 pub mod sse;

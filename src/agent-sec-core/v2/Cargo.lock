@@ -90,7 +90,7 @@ checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "asc-action-runtime"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-types",
  "asc-observability",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "asc-action-types"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "asc-agentsight-client"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-policy-target-contracts",
  "asc-policy-types",
@@ -119,6 +119,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tracing",
  "ureq",
  "url",
  "uuid",
@@ -126,20 +127,22 @@ dependencies = [
 
 [[package]]
 name = "asc-capability-code-scan"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
+ "asc-model-client",
  "fancy-regex",
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
  "yaml-rust2",
 ]
 
 [[package]]
 name = "asc-capability-pii-scan"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -159,8 +162,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-capability-prompt-scan"
+version = "1.0.0"
+dependencies = [
+ "asc-action-runtime",
+ "asc-action-types",
+ "asc-model-client",
+ "base64",
+ "log",
+ "percent-encoding",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "unicode-normalization",
+ "unicode-properties",
+]
+
+[[package]]
 name = "asc-capability-skill-sec"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
@@ -168,6 +190,7 @@ dependencies = [
  "base64",
  "chrono",
  "fancy-regex",
+ "nix",
  "ring",
  "rustix",
  "serde",
@@ -180,11 +203,12 @@ dependencies = [
 
 [[package]]
 name = "asc-cli"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-pii-scan",
+ "asc-capability-prompt-scan",
  "asc-capability-skill-sec",
  "asc-daemon",
  "asc-daemon-client",
@@ -193,33 +217,40 @@ dependencies = [
  "asc-daemon-protocol",
  "asc-daemon-service",
  "asc-foundation-types",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
- "asc-pap-repository-memory",
- "asc-policy-engine",
+ "asc-persistence-sqlite",
+ "asc-policy-repository-sqlite",
  "asc-policy-types",
  "asc-security-events",
+ "asc-telemetry",
+ "chrono",
  "clap",
+ "crossterm",
  "dirs",
  "rustix",
  "serde",
  "serde_json",
+ "signal-hook",
  "thiserror",
  "tokio",
  "tracing",
  "unicode-properties",
+ "unicode-width",
  "uuid",
 ]
 
 [[package]]
 name = "asc-daemon"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-agentsight-client",
  "asc-capability-code-scan",
  "asc-capability-pii-scan",
+ "asc-capability-prompt-scan",
  "asc-capability-skill-sec",
  "asc-daemon-core",
  "asc-daemon-handler",
@@ -227,21 +258,24 @@ dependencies = [
  "asc-daemon-service",
  "asc-event-sink",
  "asc-foundation-types",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
- "asc-pap-repository-memory",
  "asc-pcp",
+ "asc-persistence-sqlite",
  "asc-policy-adapter-agentsight",
- "asc-policy-engine",
  "asc-policy-repository",
+ "asc-policy-repository-sqlite",
  "asc-policy-runtime",
  "asc-policy-types",
  "asc-security-events",
  "asc-telemetry",
  "base64",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "ring",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -257,12 +291,13 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-client"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-daemon-protocol",
  "asc-observability",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rustix",
  "serde_json",
  "socket2",
  "thiserror",
@@ -274,33 +309,39 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-core"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-foundation-types",
+ "asc-observability",
  "asc-pap",
  "asc-policy-types",
+ "asc-security-events",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
 [[package]]
 name = "asc-daemon-handler"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-code-scan",
  "asc-capability-pii-scan",
+ "asc-capability-prompt-scan",
  "asc-capability-skill-sec",
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
- "asc-pap-repository-memory",
- "asc-policy-engine",
+ "asc-persistence-sqlite",
+ "asc-policy-repository-sqlite",
  "asc-security-events",
  "serde",
  "serde_json",
@@ -311,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-protocol"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-foundation-types",
  "asc-policy-types",
@@ -321,15 +362,17 @@ dependencies = [
 
 [[package]]
 name = "asc-daemon-service"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
 
 [[package]]
 name = "asc-event-log"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-observability",
  "asc-security-events",
@@ -344,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "asc-event-sink"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-event-log",
  "asc-observability",
@@ -365,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "asc-foundation-types"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -373,8 +416,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-model-client"
+version = "1.0.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "asc-observability"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-security-events",
  "chrono",
@@ -392,11 +447,11 @@ dependencies = [
 
 [[package]]
 name = "asc-pap"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-foundation-types",
- "asc-pap-repository-memory",
  "asc-policy-repository",
+ "asc-policy-repository-sqlite",
  "asc-policy-types",
  "serde",
  "serde_json",
@@ -406,26 +461,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "asc-pap-repository-memory"
-version = "0.13.2"
-dependencies = [
- "asc-foundation-types",
- "asc-pap",
- "asc-policy-engine",
- "asc-policy-repository",
- "asc-policy-types",
-]
-
-[[package]]
 name = "asc-pcp"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-agentsight-client",
  "asc-foundation-types",
  "asc-pap",
- "asc-pap-repository-memory",
  "asc-policy-adapter-agentsight",
  "asc-policy-repository",
+ "asc-policy-repository-sqlite",
  "asc-policy-target-contracts",
  "asc-policy-types",
  "serde",
@@ -435,13 +479,15 @@ dependencies = [
 
 [[package]]
 name = "asc-persistence-sqlite"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
+ "asc-daemon-core",
  "asc-observability",
  "asc-security-events",
  "asc-sqlite-kernel",
  "chrono",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -450,45 +496,56 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-adapter-agentsight"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-policy-types",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "asc-policy-engine"
-version = "0.13.2"
-dependencies = [
- "asc-foundation-types",
- "asc-pap",
- "asc-policy-types",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
 name = "asc-policy-repository"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-foundation-types",
  "asc-policy-types",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "uuid",
 ]
 
 [[package]]
+name = "asc-policy-repository-sqlite"
+version = "1.0.0"
+dependencies = [
+ "asc-agentsight-client",
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-pcp",
+ "asc-policy-repository",
+ "asc-policy-types",
+ "asc-sqlite-kernel",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "asc-policy-runtime"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-foundation-types",
  "asc-pap",
- "asc-pap-repository-memory",
  "asc-pcp",
- "asc-policy-engine",
  "asc-policy-repository",
+ "asc-policy-repository-sqlite",
  "asc-policy-types",
  "serde_json",
  "tracing",
@@ -496,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-target-contracts"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-policy-types",
  "serde_json",
@@ -504,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "asc-policy-types"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-foundation-types",
  "serde",
@@ -514,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "asc-security-events"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "rustix",
@@ -527,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "asc-security-summary"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-security-events",
  "chrono",
@@ -536,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "asc-sqlite-kernel"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "rustix",
@@ -547,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "asc-telemetry"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "nix",
  "serde",
@@ -709,6 +766,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
+dependencies = [
+ "bitflags",
+ "document-features",
+ "mio",
+ "parking_lot",
+ "rustix",
+ "signal-hook",
+ "signal-hook-mio",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -761,6 +833,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -774,6 +855,12 @@ dependencies = [
  "scopeguard",
  "simdutf8",
 ]
+
+[[package]]
+name = "equivalent"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "errno"
@@ -961,6 +1048,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
 name = "hashlink"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,6 +1206,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap"
+version = "2.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1180,6 +1283,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "litrs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "lock_api"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1207,6 +1325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -1317,6 +1436,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1418,6 +1560,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "redox_users"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,6 +1577,18 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -1528,6 +1691,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,11 +1738,25 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -1607,6 +1790,27 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-mio"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
+dependencies = [
+ "libc",
+ "mio",
+ "signal-hook",
+]
 
 [[package]]
 name = "signal-hook-registry"
@@ -1750,6 +1954,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1877,10 +2087,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -1899,6 +2130,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

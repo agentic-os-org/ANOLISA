@@ -199,7 +199,7 @@ QwenPaw 插件包会从 GitHub Release 资产安装原生 Python SDK，该资产
 
 ```text
 [tokenless] The Tokenless 0.8.2 Python SDK wheel asset is unavailable (HTTP 404):
-[tokenless]   https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+[tokenless]   https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 [tokenless] This package was built from a source tree already at 0.8.2, but that asset
 [tokenless] cannot be downloaded. A maintainer must check whether the GitHub Release
 [tokenless] `tokenless/v0.8.2` exists:
@@ -424,7 +424,7 @@ rm -rf -- ~/.local/share/anolisa/adapters/tokenless
 升级就是重新执行安装脚本。它会覆盖记录在案的路径并重写 receipt，因此记录始终准确：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
 在同一台机器上切换安装方式——例如 npm 安装之后再用 `TOKENLESS_FORCE_BUILD=1` 重跑——会回收上一种方式创建的内容，因此不会残留新 receipt 不再记录的 `rtk` 启动器、npm 全局包或 Adapter 目录。回收只在新安装验证通过之后发生：脚本先把原安装挪到一边，新安装失败时再原样放回，因此 tag 缺失、构建失败或目录不可写都不会破坏原本可用的 CLI，receipt 也仍然与现实一致。若某个记录路径的身份已不再匹配，说明它已被另一种安装接管，脚本会保留它。
@@ -446,7 +446,7 @@ npm 到 npm 的升级同样在事务内。升级会就地替换软件包载荷�
 卸载使用配套脚本，它只删除 receipt 中记录的内容：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/uninstall.sh | bash
 ```
 
 可以先预览计划，或同时清除已收集的统计数据：

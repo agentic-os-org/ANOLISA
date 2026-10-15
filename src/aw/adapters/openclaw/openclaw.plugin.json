@@ -1,0 +1,52 @@
+{
+  "id": "aw-native-hooks",
+  "name": "AW native tool hooks",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["binary", "binding", "ready", "hooks"],
+    "properties": {
+      "binary": { "type": "string", "minLength": 1 },
+      "binding": { "type": "string", "minLength": 1 },
+      "ready": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "token"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "token": { "type": "string", "minLength": 1 }
+        }
+      },
+      "hooks": {
+        "type": "object", "additionalProperties": false,
+        "required": ["before", "after"],
+        "properties": {
+          "before": {
+            "type": "array",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["step", "onError", "budgetMs"],
+              "properties": {
+                "step": { "type": "string", "minLength": 1 },
+                "onError": { "type": "string", "enum": ["report", "block"] },
+                "budgetMs": { "type": "integer", "minimum": 1, "maximum": 12000 }
+              }
+            }
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["step", "onError", "budgetMs"],
+              "properties": {
+                "step": { "type": "string", "minLength": 1 },
+                "onError": { "type": "string", "enum": ["report"] },
+                "budgetMs": { "type": "integer", "minimum": 1, "maximum": 12000 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

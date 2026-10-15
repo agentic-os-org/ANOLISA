@@ -120,10 +120,10 @@ def test_dproc_013_systemd_lifecycle(request):
             assert runtime.stat().st_mode & 0o777 == 0o755
             assert endpoint.stat().st_mode & 0o777 == 0o666
             lock_inode = (runtime / "daemon.lock").stat().st_ino
-            journal = command("journalctl", "-u", unit, "--no-pager").stdout
-            assert "PAP state is process-local" in journal
+            with (audit / "policy-state.db").open("rb") as database:
+                assert database.read(16) == b"SQLite format 3\x00"
             print(
-                "PASS foreground PID, runtime identity/modes, RPC and journal",
+                "PASS foreground PID, runtime identity/modes, RPC and SQLite database",
                 flush=True,
             )
 

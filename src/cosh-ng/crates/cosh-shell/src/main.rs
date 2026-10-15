@@ -41,6 +41,8 @@ mod types;
 #[allow(dead_code, unused_imports)]
 #[path = "ui/public.rs"]
 mod ui;
+#[allow(dead_code, unused_imports)]
+mod upgrade;
 
 use runtime::cli_args::configured_raw_invocation;
 use runtime::invocation::{

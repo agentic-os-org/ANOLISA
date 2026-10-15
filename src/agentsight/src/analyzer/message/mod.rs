@@ -45,6 +45,7 @@ pub mod types;
 
 pub use anthropic::AnthropicParser;
 pub use openai::OpenAIParser;
+pub(crate) use openai::ResponsesToolCalls;
 pub use sysom::SysomParser;
 pub use types::*;
 
@@ -205,6 +206,7 @@ impl MessageParser {
     /// # Returns
     /// * `Some("anthropic")` for Anthropic paths
     /// * `Some("openai")` for OpenAI paths
+    /// * `Some("gemini")` for Gemini generation paths
     /// * `None` for unknown paths
     pub fn detect_provider(path: &str) -> Option<&'static str> {
         if AnthropicParser::matches_path(path) {
@@ -213,9 +215,38 @@ impl MessageParser {
             Some("openai")
         } else if SysomParser::matches_path(path) {
             Some("sysom")
+        } else if Self::gemini_model_from_path(path).is_some() {
+            Some("gemini")
         } else {
             None
         }
+    }
+
+    /// Extract the requested model name from a Gemini generation path.
+    ///
+    /// Google's generative-language API embeds the model in the URL instead
+    /// of the request body: `POST /v1beta/models/{model}:streamGenerateContent`
+    /// (streaming, `?alt=sse`), or `:generateContent` (non-streaming). The
+    /// Vertex AI publisher spelling carries the same tail:
+    /// `/v1/projects/{p}/locations/{l}/publishers/google/models/{model}:...`.
+    ///
+    /// Returns the `{model}` segment for inference actions only — token
+    /// counting (`:countTokens`) is not an inference call — or `None` for
+    /// any other path shape.
+    pub fn gemini_model_from_path(path: &str) -> Option<&str> {
+        // The request target carries the query string (`?alt=sse`); it is
+        // never part of the model name.
+        let path = path.split('?').next().unwrap_or(path);
+        let action = [":streamGenerateContent", ":generateContent"]
+            .iter()
+            .find(|a| path.ends_with(*a))?;
+        let rest = path.strip_suffix(action)?;
+        let idx = rest.rfind("/models/")?;
+        let model = &rest[idx + "/models/".len()..];
+        if model.is_empty() {
+            return None;
+        }
+        Some(model)
     }
 
     /// Check if a path matches any known LLM API endpoint
@@ -390,12 +421,81 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_provider_gemini_generation_paths() {
+        // Google's generative-language endpoints embed the model in the path
+        // (`POST /v1beta/models/{model}:streamGenerateContent?alt=sse`), and
+        // the Vertex AI publisher spelling carries the same `models/{model}:`
+        // tail. Both must classify as gemini.
+        assert_eq!(
+            MessageParser::detect_provider(
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            Some("gemini")
+        );
+        assert_eq!(
+            MessageParser::detect_provider("/v1/models/gemini-2.0-flash:generateContent"),
+            Some("gemini")
+        );
+        assert_eq!(
+            MessageParser::detect_provider(
+                "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+            ),
+            Some("gemini")
+        );
+        // Token counting is not an inference call and must stay unclassified.
+        assert_eq!(
+            MessageParser::detect_provider("/v1beta/models/gemini-2.5-pro:countTokens"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_gemini_model_from_path_extracts_the_requested_model() {
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1/models/gemini-2.0-flash-001:generateContent"
+            ),
+            Some("gemini-2.0-flash-001")
+        );
+        // The Vertex AI publisher spelling shares the `models/{model}:` tail.
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+            ),
+            Some("gemini-2.5-pro")
+        );
+        // Non-Gemini paths and a missing model segment stay None.
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1/chat/completions"),
+            None
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1beta/models/:generateContent"),
+            None
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1beta/models/gemini-2.5-pro:countTokens"),
+            None
+        );
+    }
+
+    #[test]
     fn test_is_llm_api_path() {
         assert!(MessageParser::is_llm_api_path("/v1/messages"));
         assert!(MessageParser::is_llm_api_path("/v1/chat/completions"));
         assert!(MessageParser::is_llm_api_path("/v1/completions"));
         assert!(!MessageParser::is_llm_api_path("/v1/embeddings"));
         assert!(!MessageParser::is_llm_api_path("/health"));
+        // Anthropic's count-tokens / Batch sub-endpoints are not inference
+        // calls; they must not pass the gate (phantom llm_call rows).
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/count_tokens"));
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/batches"));
     }
 
     #[test]

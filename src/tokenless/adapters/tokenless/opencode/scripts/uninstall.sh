@@ -25,5 +25,12 @@ if ! is_managed_link; then
     exit 0
 fi
 
+# Preview before the removal, mirroring the installer's
+# ANOLISA_DRY_RUN handling: a dry run must leave the live link in place.
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    echo "DRY-RUN: rm ${PLUGIN_LINK}"
+    exit 0
+fi
+
 rm "$PLUGIN_LINK"
 echo "[${COMPONENT}] ${AGENT} plugin removed."

@@ -58,9 +58,11 @@ pub use adapter::{
     expand_layout_placeholders_content,
 };
 pub use backup::{BackupEntry, BackupSet};
+#[cfg(any(test, feature = "test-util"))]
+pub use capability::FakeCapabilityManager;
 pub use capability::{
     CapabilityError, CapabilityManager, CapabilityOutcome, CapabilityRequest, CapabilityRunOutcome,
-    FakeCapabilityManager, NotSupportedCapabilityManager, SetcapManager, apply_capabilities,
+    NotSupportedCapabilityManager, SetcapManager, apply_capabilities,
     for_install_mode as capability_for_install_mode,
 };
 pub use central_log::{
@@ -119,10 +121,12 @@ pub use resolver::{
 pub use self_update::{
     ReleaseArtifact, ReleaseManifest, SelfUpdateError, check_update, update_url,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use service::FakeServiceManager;
 pub use service::{
-    DeactivationOutcome, FakeServiceManager, NotSupportedServiceManager, ServiceActivation,
-    ServiceError, ServiceManager, ServiceOp, ServiceOutcome, ServiceRequest, ServiceRunOutcome,
-    ServiceState, SystemdServiceManager, apply_services, deactivate_services,
+    DeactivationOutcome, NotSupportedServiceManager, ServiceActivation, ServiceError,
+    ServiceManager, ServiceOp, ServiceOutcome, ServiceRequest, ServiceRunOutcome, ServiceState,
+    SystemdServiceManager, apply_services, deactivate_services,
     for_install_mode as service_for_install_mode, user_service_for_install_mode,
 };
 pub use state::{

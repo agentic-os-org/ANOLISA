@@ -126,14 +126,18 @@ const inputCls =
 
 //  Component 
 
+/** Save trigger exposed to the settings page's unified save button. */
+export interface LlmConfigFormHandle {
+  /** Persists the current form values; resolves to false on failure. */
+  save: () => Promise<boolean>;
+}
+
 /** LLM configuration form for the optimization analysis feature (rendered in the settings page). */
-export const LlmConfigForm: React.FC = () => {
+export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   const { t } = useI18n();
   const [config, setConfig] = useState<OptimizeLlmConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ key: MessageKey; msg?: string } | null>(null);
 
   // Form fields
   const [apiKey, setApiKey] = useState('');
@@ -147,11 +151,14 @@ export const LlmConfigForm: React.FC = () => {
 
   const activeProvider = PROVIDERS.find((p) => p.id === provider) ?? PROVIDERS[PROVIDERS.length - 1];
   const availableModels = activeProvider.models;
+  const effectiveModel = provider === 'custom' || isKnownModel ? model : customModel;
 
   useEffect(() => {
+    let active = true;
     (async () => {
       try {
         const data = await fetchOptimizeConfig();
+        if (!active) return;
         setConfig(data);
         setBaseUrl(data.base_url);
         setModel(data.model);
@@ -167,16 +174,20 @@ export const LlmConfigForm: React.FC = () => {
         }
         setError(null);
       } catch (e) {
+        if (!active) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setError(t('opt.llm.loadFailed', { msg }));
+        setError({ key: 'opt.llm.loadFailed', msg });
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     })();
-  }, [t]);
+    return () => { active = false; };
+  }, []);
 
   // When provider changes, update base URL
   function handleProviderChange(id: string) {
+    // Carry the visible edit into the next provider's model control.
+    setModel(effectiveModel);
     setProvider(id);
     const p = PROVIDERS.find((x) => x.id === id);
     if (p && p.id !== 'custom') {
@@ -199,18 +210,13 @@ export const LlmConfigForm: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, availableModels]);
 
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setSaved(false);
+  async function save(): Promise<boolean> {
     setError(null);
 
-    const effectiveModel = isKnownModel ? model : customModel;
     const timeoutSecs = Number(semanticSearchTimeoutSecs);
     if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
-      setError(t('opt.llm.semanticSearchTimeout.invalid'));
-      setSaving(false);
-      return;
+      setError({ key: 'opt.llm.semanticSearchTimeout.invalid' });
+      return false;
     }
 
     try {
@@ -231,15 +237,15 @@ export const LlmConfigForm: React.FC = () => {
       const updated = await saveOptimizeConfig(body);
       setConfig(updated);
       setApiKey('');
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      return true;
     } catch (e2) {
       const msg = e2 instanceof Error ? e2.message : String(e2);
-      setError(t('opt.llm.saveFailed', { msg }));
-    } finally {
-      setSaving(false);
+      setError({ key: 'opt.llm.saveFailed', msg });
+      return false;
     }
   }
+
+  React.useImperativeHandle(ref, () => ({ save }));
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
@@ -259,7 +265,7 @@ export const LlmConfigForm: React.FC = () => {
           {t('opt.llm.loading')}
         </div>
       ) : (
-        <form onSubmit={handleSave} className="px-6 py-5 space-y-4">
+        <div className="px-6 py-5 space-y-4">
           {/* Provider */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -393,26 +399,15 @@ export const LlmConfigForm: React.FC = () => {
 
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">
-              {error}
+              {t(error.key, error.msg === undefined ? undefined : { msg: error.msg })}
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 pt-1">
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-            >
-              {saving ? t('opt.llm.saving') : t('opt.llm.save')}
-            </button>
-            {saved && (
-              <span className="text-sm text-green-600">{t('opt.llm.saved')}</span>
-            )}
-          </div>
-        </form>
+        </div>
       )}
     </div>
   );
-};
+});
+
+LlmConfigForm.displayName = 'LlmConfigForm';
 

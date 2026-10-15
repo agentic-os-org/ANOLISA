@@ -94,8 +94,9 @@ agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
   异常均记录诊断并 fail-open。
 - 不提供启动预检、后台扫描、缓存或配置自动修复。
 
-缺少 Skill Ledger 密钥时，hook 会 best-effort 执行
-`agent-sec-cli skill-ledger init --no-baseline`。`ask` 在 Qwen Code headless 或后台
+每次命中 Skill 时，hook 先执行幂等的
+`agent-sec-cli skill-ledger init --no-baseline`，由 V2 daemon 判断系统密钥是否就绪，
+不读取用户 HOME 密钥、不扫描、不换钥。初始化失败时记录诊断并结束本次检查；成功后才执行 `show`。`ask` 在 Qwen Code headless 或后台
 subagent 等无法交互的场景会按 Qwen Code 规则退化为拒绝。
 
 ## Code Scanner 配置

@@ -245,6 +245,9 @@ def main() -> int:
         except json.JSONDecodeError as exc:
             _emit({"ok": False, "error": f"bad request json: {exc}"})
             continue
+        if not isinstance(request, dict):
+            _emit({"ok": False, "error": "bad request: not a JSON object"})
+            continue
 
         messages = request.get("messages")
         if not isinstance(messages, list):

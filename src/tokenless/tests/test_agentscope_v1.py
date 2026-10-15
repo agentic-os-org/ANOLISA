@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 import types
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "python" / "tokenless" / "python"))
@@ -58,6 +62,103 @@ class _Toolkit:
         self.tools[schema["function"]["name"]] = _Registered(
             func, schema, kwargs.get("postprocess_func")
         )
+
+
+def _store_native_registration(
+    toolkit: _Toolkit,
+    tool_func: Any,
+    json_schema: dict | None,
+    postprocess_func: Any,
+    **options: Any,
+) -> None:
+    schema = json_schema or {
+        "type": "function",
+        "function": {"name": options.get("func_name") or tool_func.__name__, "parameters": {}},
+    }
+    toolkit.tools[schema["function"]["name"]] = _Registered(tool_func, schema, postprocess_func)
+    toolkit.native_options = options
+
+
+def _register_v1011(
+    self: _Toolkit,
+    tool_func: Any,
+    group_name: str = "basic",
+    preset_kwargs: dict | None = None,
+    func_description: str | None = None,
+    json_schema: dict | None = None,
+    include_long_description: bool = True,
+    include_var_positional: bool = False,
+    include_var_keyword: bool = False,
+    postprocess_func: Any = None,
+    namesake_strategy: str = "raise",
+) -> None:
+    """Expose AgentScope 1.0.11's public ABI without its framework dependencies."""
+    _store_native_registration(
+        self,
+        tool_func,
+        json_schema,
+        postprocess_func,
+        group_name=group_name,
+        preset_kwargs=preset_kwargs,
+        func_description=func_description,
+        include_long_description=include_long_description,
+        include_var_positional=include_var_positional,
+        include_var_keyword=include_var_keyword,
+        namesake_strategy=namesake_strategy,
+    )
+
+
+def _register_v1021(
+    self: _Toolkit,
+    tool_func: Any,
+    group_name: str = "basic",
+    preset_kwargs: dict | None = None,
+    func_name: str | None = None,
+    func_description: str | None = None,
+    json_schema: dict | None = None,
+    include_long_description: bool = True,
+    include_var_positional: bool = False,
+    include_var_keyword: bool = False,
+    postprocess_func: Any = None,
+    namesake_strategy: str = "raise",
+    async_execution: bool = False,
+) -> None:
+    """Expose AgentScope 1.0.21's public ABI without its framework dependencies."""
+    _store_native_registration(
+        self,
+        tool_func,
+        json_schema,
+        postprocess_func,
+        group_name=group_name,
+        preset_kwargs=preset_kwargs,
+        func_name=func_name,
+        func_description=func_description,
+        include_long_description=include_long_description,
+        include_var_positional=include_var_positional,
+        include_var_keyword=include_var_keyword,
+        namesake_strategy=namesake_strategy,
+        async_execution=async_execution,
+    )
+
+
+def _positional_registration(
+    registrar: Any,
+    tool_func: Any,
+    schema: dict,
+    postprocess_func: Any,
+) -> list[Any]:
+    arguments = []
+    for name, parameter in list(inspect.signature(registrar).parameters.items())[1:]:
+        if name == "tool_func":
+            arguments.append(tool_func)
+        elif name == "json_schema":
+            arguments.append(schema)
+        elif name == "postprocess_func":
+            arguments.append(postprocess_func)
+            break
+        else:
+            arguments.append(parameter.default)
+    return arguments
 
 
 def _install_stubs() -> None:
@@ -142,6 +243,100 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         self.agent = _Agent(self.toolkit)
         self.integration.install(self.agent, session_id="session-1")
 
+    async def _assert_postprocessor_chain(
+        self,
+        registrar: Any,
+        positional: bool,
+        callback_kind: str,
+    ) -> None:
+        order = []
+
+        async def dynamic() -> _Response:
+            return _Response([])
+
+        def sync_postprocess(tool_call: dict, response: _Response) -> _Response:
+            self.assertEqual(tool_call["name"], "dynamic")
+            order.append("application")
+            return replace(response, content=[{"type": "text", "text": "application-result"}])
+
+        async def async_postprocess(tool_call: dict, response: _Response) -> _Response:
+            return sync_postprocess(tool_call, response)
+
+        def unchanged_postprocess(tool_call: dict, response: _Response) -> None:
+            sync_postprocess(tool_call, response)
+
+        previous = {
+            "sync": sync_postprocess,
+            "async": async_postprocess,
+            "unchanged": unchanged_postprocess,
+            "none": None,
+        }[callback_kind]
+        schema = {"type": "function", "function": {"name": "dynamic", "parameters": {}}}
+        patch = (
+            mock.patch.object(_Toolkit, "register_tool_function", registrar)
+            if registrar is not None
+            else nullcontext()
+        )
+        with patch:
+            if positional:
+                self.toolkit.register_tool_function(
+                    *_positional_registration(registrar, dynamic, schema, previous),
+                    namesake_strategy="override",
+                )
+                self.assertEqual(self.toolkit.native_options["namesake_strategy"], "override")
+            else:
+                self.toolkit.register_tool_function(
+                    dynamic, json_schema=schema, postprocess_func=previous
+                )
+        registered = self.toolkit.tools["dynamic"]
+        self.assertIs(registered.original_func, dynamic)
+        self.assertIs(registered.json_schema, schema)
+
+        async def post_tool(request: Any) -> Any:
+            order.append("tokenless")
+            self.assertEqual(
+                request.content,
+                "original" if callback_kind in ("none", "unchanged") else "application-result",
+            )
+            self.assertEqual(request.attribution.agent_id, "agent-1")
+            self.assertEqual(request.attribution.session_id, "session-1")
+            return _post_response("optimized")
+
+        self.integration.sdk.post_tool = post_tool
+        response = await registered.postprocess_func(
+            {"name": "dynamic", "id": "call-positional", "input": {}},
+            _Response([{"type": "text", "text": "original"}]),
+        )
+        self.assertEqual(response.content[0]["text"], "optimized")
+        self.assertEqual(order, ["tokenless"] if previous is None else ["application", "tokenless"])
+
+    async def test_positional_postprocessors_follow_native_signatures(self) -> None:
+        for registrar in (_register_v1011, _register_v1021):
+            for callback_kind in ("sync", "async", "unchanged", "none"):
+                with self.subTest(version=registrar.__name__, callback=callback_kind):
+                    await self._assert_postprocessor_chain(registrar, True, callback_kind)
+
+    async def test_keyword_postprocessors_keep_native_and_generic_compatibility(self) -> None:
+        for registrar in (_register_v1011, _register_v1021, None):
+            for callback_kind in ("sync", "async", "unchanged", "none"):
+                with self.subTest(registrar=registrar, callback=callback_kind):
+                    await self._assert_postprocessor_chain(registrar, False, callback_kind)
+
+    def test_duplicate_postprocessor_arguments_are_rejected(self) -> None:
+        async def dynamic() -> _Response:
+            return _Response([])
+
+        schema = {"type": "function", "function": {"name": "dynamic", "parameters": {}}}
+        for registrar in (_register_v1011, _register_v1021):
+            with self.subTest(version=registrar.__name__):
+                with mock.patch.object(_Toolkit, "register_tool_function", registrar):
+                    with self.assertRaisesRegex(TypeError, "multiple values"):
+                        self.toolkit.register_tool_function(
+                            *_positional_registration(registrar, dynamic, schema, None),
+                            postprocess_func=None,
+                        )
+                self.assertNotIn("dynamic", self.toolkit.tools)
+
     async def test_dynamic_registration_is_wrapped_and_attributed(self) -> None:
         async def dynamic():
             return _Response([])
@@ -154,6 +349,7 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.attribution.session_id, "session-1")
             self.assertEqual(request.attribution.tool_use_id, "call-1")
             self.assertEqual(request.content_origin, core.ContentOrigin.API_RESPONSE)
+            self.assertIsNone(request.command)
             return _post_response("short")
 
         self.integration.sdk.post_tool = post_tool
@@ -264,6 +460,7 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
             final,
         )
         self.assertEqual(observed[0].output_optimization, core.OutputOptimization.RTK)
+        self.assertEqual(observed[0].command, "rtk grep needle file.txt")
         self.assertNotIn("call-rtk", self.toolkit.output_optimizations)
 
     def test_unknown_custom_tool_requires_contract(self) -> None:

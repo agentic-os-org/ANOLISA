@@ -13,10 +13,20 @@ readonly _COSH_MARKER_TOKEN="$COSH_MARKER_TOKEN"
 unset COSH_MARKER_TOKEN 2>/dev/null || true
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
+# Login replay order: the system profile runs before the baseline handler
+# capture, the user's own login files after it. A real-login-identity session
+# starts Bash in posix mode, where the shell itself reads no startup files, so
+# the system pass here is the only one. Without this split, a handler that the
+# system profile provides (for example a distribution's command-not-found
+# integration reached through /etc/profile) would be adopted as a user handler
+# below, and natural-language input would be executed as a missing command
+# instead of being intercepted for the Agent.
+if [[ -z "${COSH_SHELL_ISOLATED:-}" && "${COSH_LOGIN_SHELL:-}" == "1" && -f /etc/profile ]]; then
+  source /etc/profile
+fi
 _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE="$(declare -f command_not_found_handle 2>/dev/null || true)"
 if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
   if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
-    [[ -f /etc/profile ]] && source /etc/profile
     if [[ -f ~/.bash_profile ]]; then source ~/.bash_profile
     elif [[ -f ~/.bash_login ]]; then source ~/.bash_login
     elif [[ -f ~/.profile ]]; then source ~/.profile
@@ -456,7 +466,7 @@ _cosh_should_intercept_unknown() {
 _cosh_is_slash_control_candidate() {
   local command="$1"
   case "$command" in
-    /about|/agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mcp|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/stats|/status|/task)
+    /about|/agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/bug|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mcp|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/stats|/status|/task)
       return 0
       ;;
   esac
@@ -493,7 +503,9 @@ _cosh_guard_slash_submission() {
     fi
   fi
   local first_word="${classification_input%%[[:space:]]*}"
-  if ! _cosh_assistance_enabled || ! _cosh_is_slash_control_candidate "$first_word"; then
+  if ! _cosh_is_slash_control_candidate "$first_word" ||
+     { ! _cosh_assistance_enabled &&
+       [[ ! "$classification_input" =~ ^/mode[[:space:]]+routing($|[[:space:]]) ]]; }; then
     (( restore_xtrace == 1 )) && set -x
     return 0
   fi

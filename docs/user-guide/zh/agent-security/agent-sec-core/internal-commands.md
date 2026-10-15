@@ -15,6 +15,22 @@
 
 两个隐藏集成点都可显式查看 `--help`。
 
+## `agent-sec-daemon-health`
+
+V2 raw 和 RPM 包安装此独立 Rust 探针，供容器健康检查调用。它直接连接 daemon，
+发送任何请求前先读取 Linux `SO_PEERCRED`，要求服务端 UID 为 0。
+`AGENT_SEC_DAEMON_SOCKET` 默认 `/run/agent-sec-core/daemon.sock`；
+`AGENT_SEC_HEALTH_TIMEOUT_SECONDS` 为正数秒，默认 `1`，覆盖整个请求。
+
+```sh
+AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock agent-sec-daemon-health
+```
+
+健康的 `daemon.health` 响应使探针静默退出 `0`。身份、连接、超时、协议或不健康状态
+检查失败时，在 stderr 输出诊断并退出 `1`。`--help` 输出用法，
+`--require-model` 和 `--require-same-cgroup` 不受支持。此探针检查 daemon 响应，
+模型、Job 和 enforcement 就绪状态需要各自的检查。
+
 ## `log-sandbox`
 
 把一次沙箱前置决策记录为一条 Security Event。它是 Copilot Shell 沙箱防护的审计侧：

@@ -26,6 +26,15 @@ cargo test --package cosh-shell --lib -- --test-threads=1
 cargo clippy --package cosh-shell --all-targets -- -D warnings
 ```
 
+On Linux, the real-Core approval tests require the `cosh-core` executable in the
+same Cargo target directory and profile. Building or testing `cosh-shell` alone
+does not build this sibling package. Build the real Core before targeted tests:
+
+```bash
+cargo build --locked --package cosh-core --bin cosh-core
+cargo test --locked --package cosh-shell --test raw_cli ui_approval_slice -- --test-threads=1
+```
+
 ## Raw Shell
 
 ```bash

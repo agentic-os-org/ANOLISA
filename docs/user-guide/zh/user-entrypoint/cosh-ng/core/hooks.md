@@ -8,11 +8,11 @@ Hooks 在 Agent 事件前后运行命令，可用于策略检查、通知或补�
 
 对于 `cosh-core`，声明 Hook 即默认启用，`hooks.enabled = true` 可省略。
 显式设置 `hooks.enabled = false` 会禁用配置 Hook；存在 Hook 定义时会输出警告。
-系统或用户配置中的禁用还会阻止 Extension Hook 自动启用。项目配置中的禁用仅影响
-配置 Hook，已安装的 Extension 不会重新启用这些已禁用的配置 Hook。
+系统或用户配置中的禁用还会阻止 Extension Hook 自动启用。Core 会忽略项目
+`.copilot-shell/config.toml` 中的整个 `[hooks]` 段，包括 `hooks.enabled`。
 `--bare` 仍会禁用所有 Hook。
 
-在 `~/.copilot-shell/config.toml` 或受信任的项目配置中定义：
+在 `~/.copilot-shell/config.toml` 中定义：
 
 ```toml
 [[hooks.PreToolUse]]
@@ -32,7 +32,7 @@ timeout = 60000
 /hooks disable <id>
 ```
 
-项目根目录受信任前，项目 Hooks 不会执行。使用 `/hooks untrust-project` 可以撤销信任。Shell Hook 状态只在当前会话有效；Agent Hook 状态由 registry 持久化。
+项目根目录受信任前，`.cosh/hooks` 下的项目 Shell Hooks 不会执行。使用 `/hooks untrust-project` 可以撤销信任。Shell Hook 状态只在当前会话有效；Agent Hook 状态由 registry 持久化。
 
 ## 事件名称
 

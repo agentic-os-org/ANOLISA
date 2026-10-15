@@ -18,6 +18,9 @@ mod animation;
 mod approval;
 #[path = "raw_cli/audit.rs"]
 mod audit;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "support/audit_system_config.rs"]
+mod audit_system_config;
 #[path = "raw_cli/auth.rs"]
 mod auth;
 #[path = "raw_cli/auth_ecs.rs"]
@@ -45,12 +48,17 @@ mod evidence_request;
 mod external_hook;
 #[path = "raw_cli/failed_command.rs"]
 mod failed_command;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/failopen.rs"]
+mod failopen;
 #[path = "raw_cli/heavy.rs"]
 mod heavy;
 #[path = "raw_cli/host_executed.rs"]
 mod host_executed;
 #[path = "raw_cli/i18n.rs"]
 mod i18n;
+#[path = "raw_cli/log_budget.rs"]
+mod log_budget;
 #[path = "raw_cli/memory_hook.rs"]
 mod memory_hook;
 #[path = "raw_cli/mode.rs"]
@@ -92,6 +100,18 @@ mod terminal_resize;
 #[cfg(target_os = "linux")]
 #[path = "raw_cli/terminal_unicode.rs"]
 mod terminal_unicode;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/ui_approval_slice.rs"]
+mod ui_approval_slice;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/ui_approval_slice_reflow.rs"]
+mod ui_approval_slice_reflow;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/ui_worker_isolation.rs"]
+mod ui_worker_isolation;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/ui_worker_logging.rs"]
+mod ui_worker_logging;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;
@@ -151,3 +171,7 @@ pub(crate) fn ls_ccc_failure_analysis(output: &str) -> Option<&'static str> {
     .into_iter()
     .find(|message| output.contains(message))
 }
+
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/ui_output_fault.rs"]
+mod ui_output_fault;

@@ -12,12 +12,13 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use agentsight_atif::{
-    Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
-    ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
+    same_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
+    Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
 };
 
 /// Event types to skip entirely.
-const SKIP_TYPES: &[&str] = &["runtime-config", "session_meta", "progress", "last-prompt"];
+pub(crate) const SKIP_TYPES: &[&str] =
+    &["runtime-config", "session_meta", "progress", "last-prompt"];
 
 /// Convert raw Qoder JSONL events into an ATIF v1.7 trajectory.
 pub fn convert_qoder_events(
@@ -60,46 +61,19 @@ pub fn convert_qoder_events(
                 .unwrap_or(serde_json::Value::Null);
 
             let tool_results = extract_tool_results(&content);
+            // A mixed event (tool_result + genuine text) is a user turn,
+            // but the structured observation it carries must survive too.
+            let mixed_event = !tool_results.is_empty() && has_text_block(&content);
+            let result_ts = e.get("timestamp").and_then(|v| v.as_str());
 
-            // If this user event only has tool_results, attach to previous step
-            if !tool_results.is_empty() && !has_text_block(&content) {
-                if let Some(prev) = steps.last_mut() {
-                    let result_ts = e.get("timestamp").and_then(|v| v.as_str());
-                    let mut obs_results = Vec::new();
-                    for tr in &tool_results {
-                        let extra = if tr.is_error {
-                            let mut m = HashMap::new();
-                            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                            Some(m)
-                        } else {
-                            None
-                        };
-                        obs_results.push(ObservationResult {
-                            source_call_id: Some(tr.tool_use_id.clone()),
-                            content: Some(serde_json::Value::String(tr.content.clone())),
-                            subagent_trajectory_ref: None,
-                            extra,
-                        });
-                        // Write result_timestamp into matching ToolCall.extra
-                        if let (Some(ts), Some(tcs)) = (result_ts, prev.tool_calls.as_mut()) {
-                            for tc in tcs.iter_mut() {
-                                if tc.tool_call_id == tr.tool_use_id {
-                                    let mut extra = tc.extra.take().unwrap_or_default();
-                                    extra.insert(
-                                        "result_timestamp".into(),
-                                        serde_json::Value::String(ts.to_string()),
-                                    );
-                                    tc.extra = Some(extra);
-                                }
-                            }
-                        }
-                    }
-                    if !obs_results.is_empty() {
-                        prev.observation = Some(Observation {
-                            results: obs_results,
-                        });
-                    }
-                }
+            // A user event that only carries tool_results is not a user turn:
+            // the results answer an earlier agent step's tool calls and must
+            // merge into that step's observation. Attaching them to "the
+            // previous step" used to put them on an intervening user step
+            // (overwriting each other when several events arrived), hiding
+            // them from analyzers that pair a step's results with its calls.
+            if !tool_results.is_empty() && !mixed_event {
+                let _ = merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
                 i += 1;
                 continue;
             }
@@ -107,6 +81,16 @@ pub fn convert_qoder_events(
             // Regular user message
             step_id += 1;
             let text = extract_text_from_content(&content);
+            // Mixed replies answer their issuing calls too. Keep unmatched
+            // replayed results on the user step, without replacing earlier
+            // observations or attaching known results to intervening text.
+            let observation = if mixed_event {
+                let unmatched =
+                    merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+                observation_from_tool_results(&unmatched)
+            } else {
+                None
+            };
             steps.push(Step {
                 step_id,
                 timestamp: e
@@ -119,7 +103,7 @@ pub fn convert_qoder_events(
                 reasoning_effort: None,
                 reasoning_content: None,
                 tool_calls: None,
-                observation: None,
+                observation,
                 metrics: None,
                 extra: None,
                 llm_call_count: None,
@@ -159,6 +143,32 @@ pub fn convert_qoder_events(
             let mut step_model: Option<String> = None;
             let mut step_metrics: Option<Metrics> = None;
 
+            // Claude Code splits one message into blocks with cumulative
+            // usage. Other collectors retain per-event partial accounting.
+            let mut last_usage_by_id = HashMap::new();
+            for te in turn_events.iter().filter(|_| agent_name == "claude-code") {
+                let Some(msg) = te.get("message") else {
+                    continue;
+                };
+                if let (Some(id), Some(usage)) = (
+                    msg.get("id")
+                        .and_then(|value| value.as_str())
+                        .filter(|id| !id.is_empty()),
+                    msg.get("usage").filter(|usage| {
+                        usage
+                            .get("input_tokens")
+                            .and_then(|value| value.as_u64())
+                            .is_some()
+                            || usage
+                                .get("output_tokens")
+                                .and_then(|value| value.as_u64())
+                                .is_some()
+                    }),
+                ) {
+                    last_usage_by_id.insert(id, usage);
+                }
+            }
+
             for te in &turn_events {
                 let msg = match te.get("message") {
                     Some(m) => m,
@@ -168,10 +178,17 @@ pub fn convert_qoder_events(
                     step_model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
                 }
 
-                // Extract usage/metrics — accumulate across multiple usage
-                // events within the same LLM turn (some providers emit partial
-                // usage per chunk); only keeping the last would under-count.
-                if let Some(usage) = msg.get("usage") {
+                // Count each Claude Code message once; unidentified records
+                // and other sources keep their existing partial accounting.
+                let message_id = msg
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .filter(|id| agent_name == "claude-code" && !id.is_empty());
+                let usage = match message_id {
+                    Some(id) => last_usage_by_id.remove(id),
+                    None => msg.get("usage"),
+                };
+                if let Some(usage) = usage {
                     let pt = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let ct = usage.get("output_tokens").and_then(|v| v.as_u64());
                     let cache_read = usage
@@ -302,8 +319,6 @@ pub fn convert_qoder_events(
 
             // Collect tool_results that follow
             let mut k = j;
-            let mut obs_results: Vec<ObservationResult> = Vec::new();
-            let mut result_timestamps: HashMap<String, String> = HashMap::new();
             while k < events.len() {
                 let ne = &events[k];
                 let nt = ne.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -318,57 +333,18 @@ pub fn convert_qoder_events(
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
                     let trs = extract_tool_results(&nc);
-                    if !trs.is_empty() {
+                    // A mixed event (tool_result + genuine text) is a user
+                    // turn, exactly as the main loop classifies it above.
+                    // Consuming it here would drop the user's text entirely;
+                    // break instead so the main loop emits the user step.
+                    if !trs.is_empty() && !has_text_block(&nc) {
                         let result_ts = ne.get("timestamp").and_then(|v| v.as_str());
-                        for tr in &trs {
-                            let extra = if tr.is_error {
-                                let mut m = HashMap::new();
-                                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                                Some(m)
-                            } else {
-                                None
-                            };
-                            obs_results.push(ObservationResult {
-                                source_call_id: Some(tr.tool_use_id.clone()),
-                                content: Some(serde_json::Value::String(tr.content.clone())),
-                                subagent_trajectory_ref: None,
-                                extra,
-                            });
-                            if let Some(ts) = result_ts {
-                                result_timestamps.insert(tr.tool_use_id.clone(), ts.to_string());
-                            }
-                        }
+                        let _ = merge_tool_results_into_agent_steps(&mut steps, &trs, result_ts);
                         k += 1;
                         continue;
                     }
                 }
                 break;
-            }
-
-            // Write result_timestamp into ToolCall.extra
-            if !result_timestamps.is_empty() {
-                if let Some(last_step) = steps.last_mut() {
-                    if let Some(tcs) = last_step.tool_calls.as_mut() {
-                        for tc in tcs.iter_mut() {
-                            if let Some(ts) = result_timestamps.get(&tc.tool_call_id) {
-                                let mut extra = tc.extra.take().unwrap_or_default();
-                                extra.insert(
-                                    "result_timestamp".into(),
-                                    serde_json::Value::String(ts.clone()),
-                                );
-                                tc.extra = Some(extra);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !obs_results.is_empty() {
-                if let Some(last_step) = steps.last_mut() {
-                    last_step.observation = Some(Observation {
-                        results: obs_results,
-                    });
-                }
             }
 
             i = k;
@@ -458,6 +434,12 @@ fn extract_agent_info(
 ///   - `String` → returned as-is
 ///   - `Array` of content blocks → concatenates `text`-type blocks
 ///   - Anything else → `""` or stringified form
+///
+/// `tool_result` blocks are deliberately skipped: the tool output belongs to
+/// the owning agent step's observation (`extract_tool_results`), and folding
+/// it into a user step's message would leak tool output into the
+/// `first/last_user_message` previews, preference rules and LLM prompts that
+/// read the message as the human's own words.
 fn extract_text_from_content(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
@@ -465,35 +447,10 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
             let mut parts: Vec<&str> = Vec::new();
             for block in blocks {
                 if let Some(obj) = block.as_object() {
-                    match obj.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
-                                parts.push(t);
-                            }
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
+                            parts.push(t);
                         }
-                        Some("tool_result") => {
-                            let rc = obj.get("content").unwrap_or(&serde_json::Value::Null);
-                            match rc {
-                                serde_json::Value::String(s) => parts.push(s.as_str()),
-                                serde_json::Value::Array(subs) => {
-                                    for sub in subs {
-                                        if let Some(sub_obj) = sub.as_object() {
-                                            if sub_obj.get("type").and_then(|t| t.as_str())
-                                                == Some("text")
-                                            {
-                                                if let Some(t) =
-                                                    sub_obj.get("text").and_then(|v| v.as_str())
-                                                {
-                                                    parts.push(t);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -502,6 +459,32 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// Build an `Observation` from extracted `tool_result` blocks.
+fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option<Observation> {
+    if tool_results.is_empty() {
+        return None;
+    }
+    let results = tool_results
+        .iter()
+        .map(|tr| {
+            let extra = if tr.is_error {
+                let mut m = HashMap::new();
+                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
+                Some(m)
+            } else {
+                None
+            };
+            ObservationResult {
+                source_call_id: Some(tr.tool_use_id.clone()),
+                content: Some(serde_json::Value::String(tr.content.clone())),
+                subagent_trajectory_ref: None,
+                extra,
+            }
+        })
+        .collect();
+    Some(Observation { results })
 }
 
 /// A tool_result block extracted from a user-message `content` array.
@@ -582,6 +565,81 @@ fn has_text_block(content: &serde_json::Value) -> bool {
     }
 }
 
+/// Merge tool results into the observation of the agent step owning the calls.
+///
+/// The post-assistant scan consumes contiguous result-only user events, but a
+/// mixed `tool_result`+text event or a plain user turn stops it; those results
+/// then reach the main loop. They still answer the earlier agent step's calls,
+/// and downstream analyzers pair a step's observations with that same step's
+/// calls (`agentsight-opt::trace`), so results are merged into the owning
+/// agent step instead of replacing its observation or landing on a user step.
+/// Results the scan already collected are extended, never overwritten.
+/// Returns unowned results for a mixed user event to retain as replayed context.
+fn merge_tool_results_into_agent_steps(
+    steps: &mut [Step],
+    tool_results: &[ExtractedToolResult],
+    timestamp: Option<&str>,
+) -> Vec<ExtractedToolResult> {
+    let mut unmatched = Vec::new();
+    for tr in tool_results {
+        // Most recent owner wins: each call is issued by exactly one step, and
+        // searching backwards also covers results arriving after an
+        // intervening user turn.
+        let Some(idx) = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step.tool_calls.as_ref().is_some_and(|tcs| {
+                    tcs.iter()
+                        .any(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
+                })
+        }) else {
+            // The mixed-event caller can retain replayed context on its user
+            // step; result-only carriers keep the existing discard policy.
+            unmatched.push(tr.clone());
+            continue;
+        };
+
+        let step = &mut steps[idx];
+        if let Some(ts) = timestamp {
+            if let Some(tcs) = step.tool_calls.as_mut() {
+                for tc in tcs
+                    .iter_mut()
+                    .filter(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
+                {
+                    let mut extra = tc.extra.take().unwrap_or_default();
+                    extra.insert(
+                        "result_timestamp".into(),
+                        serde_json::Value::String(ts.to_string()),
+                    );
+                    tc.extra = Some(extra);
+                }
+            }
+        }
+
+        let extra = if tr.is_error {
+            let mut m = HashMap::new();
+            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
+            Some(m)
+        } else {
+            None
+        };
+        let result = ObservationResult {
+            source_call_id: Some(tr.tool_use_id.clone()),
+            content: Some(serde_json::Value::String(tr.content.clone())),
+            subagent_trajectory_ref: None,
+            extra,
+        };
+        match step.observation.as_mut() {
+            Some(obs) => obs.results.push(result),
+            None => {
+                step.observation = Some(Observation {
+                    results: vec![result],
+                })
+            }
+        }
+    }
+    unmatched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,6 +718,226 @@ mod tests {
         assert_eq!(m.prompt_tokens, Some(3 + 7000 + 19000));
         assert_eq!(m.completion_tokens, Some(452));
         assert_eq!(m.cached_tokens, Some(19000));
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_and_text_keeps_user_turn() {
+        // Claude-style transcripts can pack a tool_result and genuine user
+        // text into one user event (the user sends a message while a tool
+        // result is being replayed). The main loop classifies such an event as
+        // a user turn, but the post-assistant result scan consumed it as a
+        // pure result carrier, so the user's text never appeared in the
+        // trajectory at all. Both orders must produce the same user step.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        let user_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .expect("mixed tool_result + text event must still yield a user step");
+        assert!(
+            user_step.message.contains("also update the docs"),
+            "user text must be preserved, got {:?}",
+            user_step.message
+        );
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_after_assistant_keeps_observation_and_text() {
+        // A user event carrying both a tool_result and genuine text is a
+        // user turn (its text must survive), but the structured observation
+        // of the matching tool call must not be lost either: attach it to
+        // the previous assistant step exactly like a pure result carrier,
+        // including the result_timestamp enrichment.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        assert_eq!(traj.steps.len(), 2);
+        let tool_step = &traj.steps[0];
+        assert_eq!(tool_step.source, StepSource::Agent);
+        let obs = tool_step
+            .observation
+            .as_ref()
+            .expect("mixed event without a previous step keeps its observation");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String("a.txt".to_string()))
+        );
+        // result_timestamp enrichment reaches the matching tool call
+        let tc = tool_step.tool_calls.as_ref().unwrap()[0].clone();
+        assert_eq!(
+            tc.extra.as_ref().unwrap().get("result_timestamp"),
+            Some(&serde_json::Value::String(
+                "2026-07-25T10:00:03Z".to_string()
+            ))
+        );
+
+        let user_step = &traj.steps[1];
+        assert_eq!(user_step.source, StepSource::User);
+        assert!(user_step.message.contains("also update the docs"));
+    }
+
+    #[test]
+    fn test_convert_results_after_mixed_event_merge_into_agent_step() {
+        // The mixed event stops the post-assistant result scan, so both its
+        // tool_result and the following result-only event reach the main loop.
+        // They must land on the agent step that issued the calls (where
+        // analyzers pair calls with results), merge with each other instead of
+        // replacing, and never be attached to the user step.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[",
+            "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}},",
+            "{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"read\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[",
+            "{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},",
+            "{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:04Z\",\"message\":{\"role\":\"user\",\"content\":[",
+            "{\"type\":\"tool_result\",\"tool_use_id\":\"t2\",\"content\":\"b.txt\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        // agent step + the user step yielded by the mixed event
+        assert_eq!(traj.steps.len(), 2, "steps: {:#?}", traj.steps);
+
+        let agent = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::Agent)
+            .unwrap();
+        let obs = agent
+            .observation
+            .as_ref()
+            .expect("agent step must carry the tool results");
+        let ids: Vec<&str> = obs
+            .results
+            .iter()
+            .filter_map(|r| r.source_call_id.as_deref())
+            .collect();
+        assert!(
+            ids.contains(&"t1"),
+            "result from the mixed event must reach the agent step, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"t2"),
+            "result-only event must merge, not vanish, got {ids:?}"
+        );
+        assert_eq!(obs.results.len(), 2);
+
+        let user = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .unwrap();
+        assert!(
+            user.observation.is_none(),
+            "tool results must not be attached to the user step, got {:?}",
+            user.observation
+        );
+        assert!(user.message.contains("also update the docs"));
+    }
+
+    #[test]
+    fn test_convert_late_tool_result_merges_into_its_calling_step() {
+        // A result can arrive after a user interjection and a later assistant
+        // reply. It still belongs to the earlier step that issued the call.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"actually, hold on\"}]}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"sure, standing by\"}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:04Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"done\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        let calling_step = &traj.steps[0];
+        assert_eq!(calling_step.source, StepSource::Agent);
+        let observation = calling_step
+            .observation
+            .as_ref()
+            .expect("late result must merge into the step that issued the call");
+        assert_eq!(observation.results.len(), 1);
+        assert_eq!(observation.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            observation.results[0].content.as_ref(),
+            Some(&serde_json::Value::String("done".to_string()))
+        );
+        let tool_call = &calling_step.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(
+            tool_call.extra.as_ref().unwrap().get("result_timestamp"),
+            Some(&serde_json::Value::String(
+                "2026-07-25T10:00:04Z".to_string()
+            ))
+        );
+
+        assert_eq!(traj.steps[1].source, StepSource::User);
+        assert_eq!(traj.steps[1].message, "actually, hold on");
+        assert_eq!(traj.steps[2].source, StepSource::Agent);
+        assert_eq!(traj.steps[2].message, "sure, standing by");
+        assert!(traj.steps[2].observation.is_none());
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_without_assistant_keeps_observation_and_text() {
+        // The same mixed event as the session's first event (replayed
+        // context) has no previous step to attach to, so the observation
+        // rides on the emitted user step itself.
+        let content =
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n";
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        assert_eq!(traj.steps.len(), 1);
+        let user_step = &traj.steps[0];
+        assert_eq!(user_step.source, StepSource::User);
+        assert!(user_step.message.contains("also update the docs"));
+        let obs = user_step
+            .observation
+            .as_ref()
+            .expect("first-event mixed user step carries its observation");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn mixed_event_user_message_carries_no_tool_output() {
+        // A mixed user event packs a tool_result and genuine user text. The
+        // tool output belongs to the agent's observation, not to the user's
+        // message: downstream consumers (first/last_user_message previews,
+        // preference rules, LLM prompts) read the message as the human's own
+        // words, so it must equal the text block exactly.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+
+        let user_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .expect("mixed event must still yield a user step");
+        assert_eq!(
+            user_step.message, "also update the docs",
+            "tool output must not leak into the user message"
+        );
     }
 
     #[test]

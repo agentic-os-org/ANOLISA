@@ -578,15 +578,15 @@ fn raw_cli_send_to_shell_command_triggers_trusted_project_hook() {
         &hooks_dir.join("project-guard.sh"),
         "#!/bin/sh\n# cosh-hook: project-guard\n# match-commands: git\nprintf '{\"hook_id\":\"project-guard\",\"severity\":\"warning\",\"title\":\"PROJECT GUARD SEND TO SHELL\",\"description\":\"project hook fired\",\"suggestion\":\"review against project policy\"}'\n",
     );
+    // Consent goes through the real `/hooks trust-project` flow rather than a
+    // hand-written store line: trust is bound to a fingerprint of the hook
+    // content, so a bare path is deliberately not accepted any more. Leaving the
+    // store unwritten also proves the slash command is what creates it.
     let trust_store = fixture.join("trusted-project-hooks");
-    fs::write(
-        &trust_store,
-        format!(
-            "# cosh-shell trusted project hook roots\n{}\n",
-            project.display()
-        ),
-    )
-    .unwrap();
+    assert!(
+        !trust_store.exists(),
+        "fixture must start with no consent recorded"
+    );
 
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
         "fake",
@@ -602,15 +602,36 @@ fn raw_cli_send_to_shell_command_triggers_trusted_project_hook() {
                 Duration::ZERO,
             ),
             (
-                b"/send-to-shell handoff-1\n".to_vec(),
+                b"/hooks trust-project\n".to_vec(),
                 Duration::from_millis(2_500),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(4_000)),
+            (
+                b"/send-to-shell handoff-1\n".to_vec(),
+                Duration::from_millis(4_500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(6_500)),
         ],
     );
-    let _ = fs::remove_dir_all(&fixture);
 
     assert!(output.contains("Sending to shell"), "{output}");
     assert!(output.contains("$ git status"), "{output}");
     assert!(output.contains("PROJECT GUARD SEND TO SHELL"), "{output}");
+
+    // The real consent flow must have persisted a fingerprint, not a bare path:
+    // that is what makes the next session's trust decision content-bound.
+    let stored = fs::read_to_string(&trust_store).expect("consent must be persisted");
+    assert!(
+        stored.lines().any(|line| {
+            line.strip_prefix("# cosh-project-hook-v2 ")
+                .and_then(|record| serde_json::from_str::<(String, String)>(record).ok())
+                .is_some_and(|(root, digest)| {
+                    std::path::Path::new(&root) == project
+                        && digest.strip_prefix("sha256:").is_some_and(|hex| {
+                            hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+        }),
+        "consent must be a versioned content record, got {stored:?}"
+    );
+    let _ = fs::remove_dir_all(&fixture);
 }

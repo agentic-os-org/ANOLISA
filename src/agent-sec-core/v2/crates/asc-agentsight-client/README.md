@@ -129,13 +129,13 @@ core. The shared ports are in `asc-policy-target-contracts`; data types are in
 `asc-pcp` or its repository.
 
 The Reconciler crate owns the subsequent `agentsight_integration` suite, which
-connects Adapter, Reconciler, Client, Ureq and memory repository to an HTTP mock
+connects Adapter, Reconciler, Client, Ureq and the SQLite repository to an HTTP mock
 and checks exact requests and registration before modification.
 
 This establishes real Client/transport wiring, not live AgentSight or kernel
 enforcement. PAP notifications and worker timers live in `asc-policy-runtime`; the daemon
 composes them when target credentials are configured. SQL recovery and full
-real-process E2E remain separate work.
+real-process E2E require their own acceptance evidence.
 
 `tests/factory.rs` verifies deferred credential loading, retryable credential failures,
 and actual HTTP authorization using separate Client instances before and after

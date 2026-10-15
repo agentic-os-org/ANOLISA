@@ -53,7 +53,7 @@ RPM 安装到系统级 FHS 路径：
 ### 源码构建（开发者）
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/agent-memory
 
 make build         # cargo build --release --locked

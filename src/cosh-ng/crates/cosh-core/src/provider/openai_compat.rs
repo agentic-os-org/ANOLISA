@@ -19,6 +19,11 @@ pub struct OpenAICompatProvider {
     explicit_cache: bool,
 }
 
+/// Request fields `build_request_body` constructs below. `extra_params` may
+/// extend a request but must not replace these. Module scope so the drift test
+/// can name the list instead of restating it.
+const OWNED_REQUEST_FIELDS: [&str; 5] = ["model", "messages", "stream", "stream_options", "tools"];
+
 impl OpenAICompatProvider {
     pub fn new(
         base_url: &str,
@@ -101,7 +106,9 @@ impl OpenAICompatProvider {
         messages: &[Message],
         tools: &[ToolDeclaration],
         config: &GenerateConfig,
-    ) -> Value {
+    ) -> Result<Value, String> {
+        super::reject_owned_field_overrides(&OWNED_REQUEST_FIELDS, config.extra_params.as_ref())?;
+
         let max_tokens_field = self.profile.max_tokens_field();
         let max_tokens = config.max_tokens;
         let mut body = serde_json::json!({
@@ -141,10 +148,11 @@ impl OpenAICompatProvider {
         }
 
         // extra_params is merged before cache markers are injected so that
-        // user-supplied fields (e.g. custom `messages` or `tools`) are in
-        // place when markers are applied. If extra_params contains a
-        // `messages` key it would replace the constructed messages entirely
-        // — that is existing behavior and not changed by cache support.
+        // user-supplied extensions are in place when markers are applied. Every
+        // key this builder owns was already rejected by
+        // `super::reject_owned_field_overrides`, so an insert here can only add
+        // a key the program did not construct — it can no longer replace
+        // `messages` or `tools`.
         if let Some(extra) = &config.extra_params {
             if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 for (k, v) in extra_obj {
@@ -163,7 +171,7 @@ impl OpenAICompatProvider {
         // the compaction budget priced this request against (#2240).
         super::clamp_output_cap_fields(&mut body, config.max_tokens);
 
-        body
+        Ok(body)
     }
 }
 
@@ -176,7 +184,7 @@ impl ContentGenerator for OpenAICompatProvider {
         config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
         self.cancelled.store(false, Ordering::SeqCst);
-        let body = self.build_request_body(messages, tools, config);
+        let body = self.build_request_body(messages, tools, config)?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let client = reqwest::Client::new();
@@ -1038,6 +1046,7 @@ fn parse_sse_chunk_with_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn parse_text_delta_chunk() {
@@ -1493,7 +1502,9 @@ mod tests {
             max_tokens: 8192,
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert!(body.get("max_completion_tokens").is_some());
         assert!(body.get("max_tokens").is_none());
     }
@@ -1509,7 +1520,9 @@ mod tests {
             max_tokens: 2_048,
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert_eq!(body["max_tokens"], 2_048);
     }
 
@@ -1521,7 +1534,9 @@ mod tests {
             max_tokens: 4096,
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert_eq!(body["max_tokens"], 4096);
     }
 
@@ -1537,9 +1552,119 @@ mod tests {
             })),
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert_eq!(body["enable_thinking"], true);
         assert_eq!(body["thinking_budget"], 4096);
+    }
+
+    /// D02: `extra_params` may extend a request with model-specific parameters,
+    /// but it must not replace the request structure or control fields this
+    /// builder constructs. Each rejected field is named in the error so a
+    /// misconfiguration is diagnosable instead of silently exfiltrating.
+    #[test]
+    fn extra_params_cannot_override_program_owned_request_fields() {
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        for field in ["messages", "tools", "model", "stream", "stream_options"] {
+            let config = GenerateConfig {
+                model: "test".to_string(),
+                extra_params: Some(serde_json::json!({ field: "attacker-controlled" })),
+                ..Default::default()
+            };
+            let error = provider
+                .build_request_body(&[], &[], &config)
+                .expect_err("program-owned field must be rejected, not merged");
+            assert!(error.contains(field), "{field}: {error}");
+            assert!(error.contains("extra_params"), "{field}: {error}");
+        }
+    }
+
+    /// `OWNED_REQUEST_FIELDS` is hand-written, so pin it against what the builder
+    /// actually constructs. The fixture writes every conditional field, which
+    /// makes the two sets exactly equal; a new `body["x"] = ...` line that is not
+    /// added to the list, or a listed field the builder stops writing, both turn
+    /// this red. Without it, forgetting to own a newly written field silently
+    /// reopens the override the guard exists to close.
+    #[test]
+    fn owned_request_fields_match_exactly_what_the_builder_writes() {
+        let provider = OpenAICompatProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            Box::new(super::super::profile::OpenAIProfile),
+            false,
+        );
+        let tools = vec![ToolDeclaration {
+            name: "read_file".to_string(),
+            description: "read a file".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let config = GenerateConfig {
+            model: "o3".to_string(),
+            max_tokens: 8192,
+            temperature: Some(0.25),
+            include_usage: true,
+            ..Default::default()
+        };
+
+        let body = provider
+            .build_request_body(&[Message::user("hi")], &tools, &config)
+            .expect("build request body");
+        let written: BTreeSet<String> = body
+            .as_object()
+            .expect("body is an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            written.len() >= OWNED_REQUEST_FIELDS.len() + 2,
+            "the fixture must exercise every conditional field, got {written:?}"
+        );
+
+        let owned: BTreeSet<String> = OWNED_REQUEST_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect();
+        // Deliberately not owned: the output cap is re-clamped afterwards so the
+        // #2240 reserve still holds, and sampling knobs are legitimate
+        // model-specific extensions a caller may set.
+        let mergeable: BTreeSet<String> = [provider.profile.max_tokens_field(), "temperature"]
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect();
+
+        let mut expected = owned.clone();
+        expected.extend(mergeable.iter().cloned());
+        assert_eq!(
+            written, expected,
+            "owned-field list drifted from the constructed request body"
+        );
+    }
+
+    /// The output-cap aliases stay merged and clamped rather than rejected, so
+    /// the #2240 reserve behaviour is unchanged by the D02 guard.
+    #[test]
+    fn extra_params_keeps_legitimate_model_parameters() {
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "test".to_string(),
+            max_tokens: 4096,
+            extra_params: Some(serde_json::json!({
+                "top_p": 0.5,
+                "presence_penalty": 0.2,
+                "response_format": {"type": "text"},
+            })),
+            ..Default::default()
+        };
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
+        assert_eq!(body["top_p"], 0.5);
+        assert_eq!(body["presence_penalty"], 0.2);
+        assert_eq!(body["response_format"]["type"], "text");
+        // Program-owned structure survives untouched.
+        assert_eq!(body["model"], "test");
+        assert_eq!(body["stream"], true);
     }
 
     #[test]
@@ -1559,7 +1684,9 @@ mod tests {
             ..Default::default()
         };
 
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
 
         assert_eq!(body["max_tokens"], 16_384);
         assert_eq!(body["max_completion_tokens"], 16_384);
@@ -1585,7 +1712,9 @@ mod tests {
             ..Default::default()
         };
 
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
 
         assert_eq!(body["max_completion_tokens"], 8_192);
         assert_eq!(body["max_tokens"], 8_192);
@@ -1602,7 +1731,9 @@ mod tests {
             ..Default::default()
         };
 
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
 
         assert_eq!(body["max_tokens"], 512);
         // The alias is not invented for a backend that never received it.
@@ -1621,7 +1752,9 @@ mod tests {
             ..Default::default()
         };
 
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
 
         assert_eq!(body["max_tokens"], 4_096);
     }
@@ -1641,7 +1774,9 @@ mod tests {
             include_usage: true,
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -1658,7 +1793,9 @@ mod tests {
             include_usage: true,
             ..Default::default()
         };
-        let body = provider.build_request_body(&[], &[], &config);
+        let body = provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body");
         assert!(
             body.get("stream_options").is_none(),
             "generic endpoints must not receive stream_options: {body}"
@@ -1671,7 +1808,9 @@ mod tests {
         let secret = "short-provider-secret";
         let messages = vec![Message::user(&format!("api_key={secret}"))];
 
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
         let payload = body.to_string();
 
         assert!(payload.contains(secret), "{payload}");
@@ -1794,7 +1933,9 @@ mod tests {
             Message::assistant("Hi there"),
             Message::user("How are you?"),
         ];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
 
         let msgs = body["messages"].as_array().unwrap();
         // System message content should be array with cache_control on last part.
@@ -1814,7 +1955,9 @@ mod tests {
             Message::system("You are a helpful assistant."),
             Message::user("Hello"),
         ];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
         assert!(
             !body.to_string().contains("cache_control"),
             "body should not contain cache_control when disabled"
@@ -1825,7 +1968,9 @@ mod tests {
     fn cache_control_string_content_converted_to_array() {
         let provider = dashscope_provider(true);
         let messages = vec![Message::system("System prompt text")];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
         let system_content = &body["messages"][0]["content"];
         assert!(
             system_content.is_array(),
@@ -1847,7 +1992,9 @@ mod tests {
             false,
         );
         let messages = vec![Message::system("System"), Message::user("Hello")];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
         assert!(
             !body.to_string().contains("cache_control"),
             "generic profile should not inject cache_control"
@@ -1865,7 +2012,9 @@ mod tests {
             true,
         );
         let messages = vec![Message::system("System"), Message::user("Hello")];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
         assert!(
             !body.to_string().contains("cache_control"),
             "generic profile should not inject cache_control even with explicit_cache = true"
@@ -1880,7 +2029,9 @@ mod tests {
             Message::assistant("Hi there"),
             Message::user("How are you?"),
         ];
-        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let body = provider
+            .build_request_body(&messages, &[], &GenerateConfig::default())
+            .expect("build request body");
 
         let msgs = body["messages"].as_array().unwrap();
         // No system message, so only the last message should have cache_control.

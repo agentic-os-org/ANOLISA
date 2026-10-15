@@ -234,12 +234,30 @@ pub async fn checkpoint(
     // 2. Acquire write lock after the mutation mutex.
     let mut ws = arc.write().await;
 
-    // 2a. Check write-lock quiescence (inotify-based)
-    if !state.check_workspace_quiescent(&ws.ws_id).await {
-        return Ok(Response::Error {
-            code: ErrorCode::WriteLockConflict,
-            message: "Workspace has active write operations. Please wait and retry.".to_string(),
-        });
+    // 2a. Check write-lock quiescence (inotify-based). The workspace write
+    // lock is held here, so the registration path is handed to the check
+    // directly instead of its opportunistic (never-runnable) heal path.
+    match state
+        .check_workspace_quiescent(&ws.ws_id, Some(&ws.path))
+        .await
+    {
+        crate::state::Quiescence::Safe => {}
+        crate::state::Quiescence::Writing => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message: "Workspace has active write operations. Please wait and retry."
+                    .to_string(),
+            })
+        }
+        crate::state::Quiescence::MonitoringUnavailable => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message:
+                    "Write monitoring is unavailable (the write watcher is stale and re-arming \
+                     failed). Please retry after the watcher recovers."
+                        .to_string(),
+            })
+        }
     }
 
     // 3. Check snapshot ID uniqueness within this workspace
@@ -276,17 +294,24 @@ pub async fn checkpoint(
     // make sure index directory exists
     tokio::fs::create_dir_all(&snap_dir).await?;
 
-    // 7. Create readonly snapshot via backend
+    // 7. Parse metadata BEFORE the backend creates the subvolume. A parse
+    //    failure after `create_snapshot` would strand an on-disk snapshot the
+    //    index never records: `list` cannot see it, `delete` answers
+    //    SnapshotNotFound, a same-ID retry fails with a raw btrfs EEXIST, and
+    //    only a daemon restart adopts it as a pinned recovered orphan. The
+    //    guarded V2 path validates metadata first for the same reason.
+    let parsed_metadata = match metadata {
+        Some(ref s) => Some(serde_json::from_str(s).context("invalid metadata JSON")?),
+        None => None,
+    };
+
+    // 8. Create readonly snapshot via backend
     state
         .backend
         .create_snapshot(&ws.ws_id, &snapshot_id)
         .await?;
 
-    // 8. Build metadata
-    let parsed_metadata = match metadata {
-        Some(ref s) => Some(serde_json::from_str(s)?),
-        None => None,
-    };
+    // 9. Build metadata
     let meta = SnapshotMeta {
         message,
         metadata: parsed_metadata,
@@ -297,7 +322,7 @@ pub async fn checkpoint(
         child_ids: vec![ws_ckpt_common::LIVE_CHILD.to_string()],
     };
 
-    // 9. Update index (maintain DAG bidirectional pointers)
+    // 10. Update index (maintain DAG bidirectional pointers)
     if let Some(old_head) = ws.index.head.clone() {
         if let Some(hm) = ws.index.snapshots.get_mut(&old_head) {
             hm.child_ids.retain(|c| c != ws_ckpt_common::LIVE_CHILD);
@@ -307,19 +332,19 @@ pub async fn checkpoint(
     ws.index.snapshots.insert(snapshot_id.clone(), meta);
     ws.index.head = Some(snapshot_id.clone());
 
-    // 10. Persist index
+    // 11. Persist index
     index_store::save(&snap_dir, &ws.index).await?;
 
-    // 10a. Release write lock before save_manifest (try_read inside
+    // 11a. Release write lock before save_manifest (try_read inside
     //      collect_workspace_entries would fail while write lock is held)
     drop(ws);
 
-    // 10b. Save manifest
+    // 11b. Save manifest
     if let Err(e) = state.save_manifest().await {
         tracing::warn!("save_manifest failed after checkpoint: {:#}", e);
     }
 
-    // 11. Return success
+    // 12. Return success
     Ok(Response::CheckpointOk { snapshot_id })
 }
 
@@ -370,6 +395,11 @@ pub async fn rollback(
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
     state.backend.rollback(&ws.ws_id, &resolved_id).await?;
+
+    // 5a. The backend swapped the live subvolume (rename aside + snapshot
+    // recreate + delete). The inotify watch still names the retired inode,
+    // so re-arm it or every later checkpoint's quiescence check is a no-op.
+    state.rearm_watcher(&ws.ws_id, &ws.path);
 
     // 6. Update head + migrate LIVE_CHILD
     if let Some(old_head) = ws.index.head.clone() {
@@ -1757,6 +1787,89 @@ mod tests {
         }
     }
 
+    // ── Checkpoint metadata validation ordering ──
+
+    #[tokio::test]
+    async fn checkpoint_invalid_metadata_creates_no_backend_snapshot() {
+        // `metadata` must be parsed BEFORE the backend snapshot is created.
+        // Parsing after the create strands an on-disk snapshot the index never
+        // records: `list` cannot see it, `delete` answers SnapshotNotFound,
+        // a same-ID retry fails with a raw btrfs EEXIST, and only the next
+        // daemon restart adopts it as a pinned recovered orphan.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_root = tmp.path().join("meta-order-data");
+        let backend = Arc::new(PartialFailBackend::new(
+            data_root.clone(),
+            std::iter::empty(),
+        ));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tmp.path().join("state"),
+        ));
+
+        let ws_id = "ws-meta-order";
+        let subvol = data_root.join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("content"), b"non-empty").unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                SnapshotIndex::new(ws_path),
+            )
+            .unwrap();
+
+        let err = checkpoint(
+            &state,
+            ws_id,
+            "snap-1",
+            None,
+            Some("{not json".into()),
+            false,
+        )
+        .await
+        .expect_err("invalid metadata JSON must fail the checkpoint");
+
+        assert_eq!(
+            backend
+                .create_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "backend create_snapshot must not run for invalid metadata"
+        );
+        assert!(
+            format!("{err:#}").contains("invalid metadata JSON"),
+            "error should explain the metadata failure, got: {err:#}"
+        );
+
+        // The failed attempt left the ID unrecorded, so a corrected retry
+        // proceeds to the backend instead of tripping over a leftover
+        // subvolume from the rejected request.
+        assert!(matches!(
+            checkpoint(
+                &state,
+                ws_id,
+                "snap-1",
+                None,
+                Some(r#"{"k":1}"#.into()),
+                false
+            )
+            .await
+            .unwrap(),
+            Response::CheckpointOk { .. }
+        ));
+        assert_eq!(
+            backend
+                .create_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the corrected retry must reach the backend exactly once"
+        );
+    }
+
     // ── SnapshotMeta pinned logic test ──
 
     #[test]
@@ -2169,7 +2282,7 @@ mod tests {
             async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
                 unimplemented!()
             }
-            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
                 unimplemented!()
             }
             async fn cleanup_snapshots(
@@ -2400,7 +2513,7 @@ mod tests {
         async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
             unimplemented!()
         }
         async fn diff(

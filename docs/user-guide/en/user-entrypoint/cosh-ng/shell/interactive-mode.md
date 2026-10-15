@@ -56,6 +56,7 @@ to use its existing isolation handling.
 | `/help` | Show the installed command set. |
 | `/agent` | Compose a one-shot cosh-core request with optional Skill and workspace references. |
 | `/health` | Run local health checks. |
+| `/bug <description>` | Build a reviewable, pre-filled bug-report URL. |
 | `/status` (`/about`) | Show runtime, provider, and session status. |
 | `/stats [model\|tools]` | Show model identity or tool activity. |
 | `/auth` | Choose or update provider authentication. |
@@ -70,6 +71,14 @@ to use its existing isolation handling.
 | `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | Manage MCP servers. |
 
 Commands such as `/details`, `/audit`, and `/send-to-shell` appear only when the current card or run provides their required context. `/mcp login` requires the shell-based OAuth flow described by the MCP guide.
+
+`/bug` adds allowlisted runtime facts to the issue URL, prints the URL for review,
+and best-effort opens it on graphical Linux or macOS. It does not read logs,
+write files, or submit the issue; opening or clicking the link sends the
+pre-filled title and diagnostics to GitHub when the form loads, and the issue
+is only created when you submit the form. If `~/.copilot-shell/logs/` exists,
+the panel reminds you to inspect the latest files and remove tokens, keys, and
+private addresses before pasting relevant excerpts yourself.
 
 ## Compose a one-shot Agent request
 

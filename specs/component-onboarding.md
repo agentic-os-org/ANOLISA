@@ -27,7 +27,7 @@ Before code enters `src/`, the following decisions MUST be finalized:
 | Decision | Example | Used in |
 |----------|---------|---------|
 | **Positioning statement** — one sentence + 2–4 expanding sentences | "Per-host sandbox daemon that manages sandbox instance lifecycles via HTTP API." | README §4.4 opening, root README table, AGENTS.md §1 |
-| **Scope name** — short identifier for commits, branches, and CI | `blaze`, `ktuner` | commitlint, prelint, ci.yaml, AGENTS.md §6 |
+| **Scope name** — short identifier for commits, branches, and CI | `skillfs`, `ktuner` | commitlint, prelint, ci.yaml, AGENTS.md §6 |
 | **Tech stack** | Rust / Python / TypeScript / Shell | AGENTS.md §1 platform column |
 | **Target platform** | Linux only / Linux + macOS / All | AGENTS.md §1, CI runner selection |
 | **Component form** | daemon / CLI tool / library / skill | Determines conditional deliverables (§3) |

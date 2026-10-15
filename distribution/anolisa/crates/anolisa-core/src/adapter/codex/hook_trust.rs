@@ -76,6 +76,104 @@ pub(super) fn write_session(
     rpc_session(program, timeout, request.to_string())
 }
 
+/// Build a session that reads every config layer with its content version.
+pub(super) fn read_session(program: String, timeout: std::time::Duration) -> FrameworkRpcSession {
+    rpc_session(
+        program,
+        timeout,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{ID_OPERATION},"method":"config/read","params":{{"includeLayers":true}}}}"#
+        ),
+    )
+}
+
+/// Build a replacement of the user layer's `hooks.state`, guarded by the
+/// version it was read at so a concurrent edit is rejected, not overwritten.
+pub(super) fn revoke_session(
+    program: String,
+    timeout: std::time::Duration,
+    revocation: Revocation,
+) -> FrameworkRpcSession {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": ID_OPERATION,
+        "method": "config/batchWrite",
+        "params": {
+            "edits": [{
+                "keyPath": "hooks.state",
+                "value": revocation.remaining,
+                "mergeStrategy": "replace"
+            }],
+            "expectedVersion": revocation.version,
+            "reloadUserConfig": true
+        }
+    });
+    rpc_session(program, timeout, request.to_string())
+}
+
+/// User-layer `hooks.state` without this plugin's entries.
+#[derive(Debug)]
+pub(super) struct Revocation {
+    remaining: serde_json::Value,
+    version: String,
+}
+
+/// Find the trust entries enable wrote for `plugin_ref` in the user layer.
+///
+/// Codex keys plugin hooks as `<plugin_ref>:<hooks file>:<event>:...` and
+/// keeps them after the plugin is removed, so disable must drop them itself.
+/// Returns `None` when the user layer holds none; other layers and other
+/// plugins' entries are never touched.
+pub(super) fn plugin_revocation(
+    program: &str,
+    output: &CliOutput,
+    plugin_ref: &str,
+) -> Result<Option<Revocation>, AdapterError> {
+    let result = operation_result(program, "config/read", output)?;
+    let unexpected = |reason: &str| {
+        framework_error(
+            program,
+            "config/read",
+            format!("unexpected reply: {reason}"),
+        )
+    };
+    let layers = result
+        .get("layers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| unexpected("missing layers"))?;
+    let Some(user) = layers.iter().find(|layer| {
+        layer
+            .pointer("/name/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("user")
+    }) else {
+        return Ok(None);
+    };
+    let Some(state) = user
+        .pointer("/config/hooks/state")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let prefix = format!("{plugin_ref}:");
+    let remaining: serde_json::Map<_, _> = state
+        .iter()
+        .filter(|(key, _)| !key.starts_with(&prefix))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if remaining.len() == state.len() {
+        return Ok(None);
+    }
+    let version = user
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| unexpected("user layer has no version"))?;
+    Ok(Some(Revocation {
+        remaining: serde_json::Value::Object(remaining),
+        version: version.to_string(),
+    }))
+}
+
 fn rpc_session(
     program: String,
     timeout: std::time::Duration,
@@ -375,6 +473,85 @@ mod tests {
             serde_json::from_str(&session.requests[1]).expect("valid request");
         assert_eq!(request["params"]["edits"][0]["keyPath"], "hooks.state");
         assert_eq!(request["params"]["edits"][0]["mergeStrategy"], "upsert");
+    }
+
+    fn layers_reply(user_state: serde_json::Value) -> CliOutput {
+        let reply = serde_json::json!({
+            "id": 1,
+            "result": {
+                "config": {},
+                "layers": [
+                    {
+                        "name": { "type": "user", "file": "/home/u/.codex/config.toml" },
+                        "version": "sha256:user",
+                        "config": { "hooks": { "state": user_state } }
+                    },
+                    {
+                        "name": { "type": "system", "file": "/etc/codex/config.toml" },
+                        "version": "sha256:system",
+                        "config": { "hooks": { "state": {
+                            "p@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:sys" }
+                        }}}
+                    }
+                ]
+            }
+        });
+        output(&format!("{{\"id\":0,\"result\":{{}}}}\n{reply}\n"))
+    }
+
+    #[test]
+    fn revocation_drops_only_the_plugins_user_layer_entries() {
+        let revocation = plugin_revocation(
+            "codex",
+            &layers_reply(serde_json::json!({
+                "p@m:hooks/hooks.json:pre_tool_use:0:0": { "trusted_hash": "sha256:a" },
+                "p@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:b" },
+                "p@m-other:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:c" },
+                "q@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:d" }
+            })),
+            "p@m",
+        )
+        .expect("valid reply")
+        .expect("plugin entries present");
+        assert_eq!(
+            revocation.remaining,
+            serde_json::json!({
+                "p@m-other:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:c" },
+                "q@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:d" }
+            })
+        );
+        assert_eq!(revocation.version, "sha256:user");
+
+        let session = revoke_session(
+            "codex".to_string(),
+            std::time::Duration::from_secs(60),
+            revocation,
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(&session.requests[1]).expect("valid request");
+        assert_eq!(request["params"]["edits"][0]["keyPath"], "hooks.state");
+        assert_eq!(request["params"]["edits"][0]["mergeStrategy"], "replace");
+        assert_eq!(request["params"]["expectedVersion"], "sha256:user");
+    }
+
+    #[test]
+    fn revocation_skips_the_write_when_nothing_is_trusted() {
+        let none = plugin_revocation(
+            "codex",
+            &layers_reply(serde_json::json!({
+                "q@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:d" }
+            })),
+            "p@m",
+        )
+        .expect("valid reply");
+        assert!(none.is_none(), "system-layer entries are not ours to drop");
+        let error = plugin_revocation(
+            "codex",
+            &output("{\"id\":1,\"error\":{\"message\":\"boom\"}}\n"),
+            "p@m",
+        )
+        .expect_err("read failure must surface");
+        assert!(error.to_string().contains("config/read"), "{error}");
     }
 
     #[test]

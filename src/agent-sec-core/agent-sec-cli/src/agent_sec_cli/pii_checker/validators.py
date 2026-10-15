@@ -10,6 +10,74 @@ _EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9._%+-]+")
 _EMAIL_DOMAIN_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _EMAIL_TLD_RE = re.compile(r"[A-Za-z]{2,63}")
 
+# Prefixes and lengths: braintree/credit-card-type at c50db7708ce3945a1cf00aca4220ee2356d2a580.
+_CARD_NETWORKS = (
+    ("visa", ((4, 4),), (16, 18, 19)),
+    ("mastercard", ((51, 55), (2221, 2720)), (16,)),
+    ("amex", ((34, 34), (37, 37)), (15,)),
+    ("diners", ((300, 305), (36, 36), (38, 39)), (14, 16, 19)),
+    ("discover", ((6011, 6011), (644, 649), (65, 65)), (16, 19)),
+    ("jcb", ((2131, 2131), (1800, 1800), (3528, 3589)), (16, 17, 18, 19)),
+    (
+        "unionpay",
+        (
+            (620, 620),
+            (62100, 62182),
+            (62184, 62187),
+            (62185, 62197),
+            (62200, 62205),
+            (622010, 622999),
+            (622018, 622018),
+            (62207, 62209),
+            (623, 626),
+            (6270, 6270),
+            (6272, 6272),
+            (6276, 6276),
+            (627700, 627779),
+            (627781, 627799),
+            (6282, 6289),
+            (6291, 6291),
+            (6292, 6292),
+            (810, 810),
+            (8110, 8131),
+            (8132, 8151),
+            (8152, 8163),
+            (8164, 8171),
+        ),
+        (14, 15, 16, 17, 18, 19),
+    ),
+)
+
+
+def validate_credit_card(value: str) -> bool:
+    """Require a complete supported card format, network structure and checksum."""
+    # The longest supported grouping has 19 digits and four separators.
+    if len(value) > 23:
+        return False
+    separator = next((ch for ch in value if ch in " -"), None)
+    groups = value.split(separator) if separator else [value]
+    if not all(group.isdecimal() for group in groups):
+        return False
+    digits = "".join(groups)
+    for network, prefixes, lengths in _CARD_NETWORKS:
+        if len(digits) not in lengths or not any(
+            low <= int(digits[: len(str(low))]) <= high for low, high in prefixes
+        ):
+            continue
+        if separator:
+            if network == "amex":
+                expected = (4, 6, 5)
+            elif network == "diners" and len(digits) == 14:
+                expected = (4, 6, 4)
+            else:
+                expected = tuple(
+                    len(digits[i : i + 4]) for i in range(0, len(digits), 4)
+                )
+            if tuple(map(len, groups)) != expected:
+                continue
+        return luhn_check(digits)
+    return False
+
 
 def luhn_check(value: str) -> bool:
     """Validate a payment card number with the Luhn checksum."""

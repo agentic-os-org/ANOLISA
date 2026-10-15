@@ -9,7 +9,9 @@
 //!   ownership, permissions, and logrotate policy. SkillFS only appends to
 //!   the pre-created file.
 //! * Every write opens the file, appends one JSONL line, and closes the
-//!   handle, so rename-based rotation never strands writes in a stale fd.
+//!   handle, so rename-based rotation never strands writes in a stale fd. The
+//!   open refuses a symlink (`O_NOFOLLOW`), matching the ops and
+//!   runtime-metric writers that append to the same deployment path.
 //! * No background thread, no bounded channel. The summary is written
 //!   synchronously at mount exit — typically once per session.
 //! * Write failures are logged via `tracing::warn` but never propagate as
@@ -105,6 +107,10 @@ impl SessionStatsWriter {
     /// [`SummaryWriteOutcome::SkippedDisabled`] when the telemetry sentinel
     /// suppressed the write. On IO failure, logs a warning and returns the
     /// underlying error. Callers must treat failure as non-fatal.
+    ///
+    /// The target is opened without following symlinks, so an entry planted
+    /// at the metrics path cannot redirect the append elsewhere; such an open
+    /// fails with `ELOOP` and is reported like any other IO failure.
     pub fn write_summary_with_outcome(
         &self,
         summary: &SkillfsSessionSummary,
@@ -123,8 +129,19 @@ impl SessionStatsWriter {
         // Deployment owns file creation, ownership, permissions, and
         // logrotate policy. Do not create the file here; a missing path should
         // surface as a non-fatal configuration error.
-        let result = std::fs::OpenOptions::new()
-            .append(true)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A legit SLS file is never a symlink; O_NOFOLLOW blocks a
+            // swap-to-symlink between the sentinel check and the open, the
+            // same guard the ops and runtime-metric writers apply to this
+            // shared deployment path.
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+
+        let result = opts
             .open(&self.path)
             .and_then(|mut file| file.write_all(line.as_bytes()));
 
@@ -279,6 +296,38 @@ mod tests {
         assert_eq!(
             writer.path().to_str().unwrap(),
             "/var/log/anolisa/sls/ops/skillfs.jsonl"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_log_path_is_not_followed() {
+        // The deployment-owned metrics file is never a symlink (see the
+        // sibling SLS writers). Following one would append the summary --
+        // written as root at mount exit -- to whatever the link points at,
+        // and the collector would silently never see the line.
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let log_path = dir.path().join("skillfs.jsonl");
+        std::os::unix::fs::symlink(&victim, &log_path).unwrap();
+
+        let writer = writer_enabled(&log_path, dir.path());
+        let stats = SkillfsSessionStats::new();
+        let summary = stats.build_summary("symlink-test", "agent");
+
+        let err = writer
+            .write_summary(&summary)
+            .expect_err("a symlink at the log path must be refused, not followed");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ELOOP),
+            "expected ELOOP from the no-follow open, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "untouched",
+            "the symlink target must not receive the summary line"
         );
     }
 }

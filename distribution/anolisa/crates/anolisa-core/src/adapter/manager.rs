@@ -102,6 +102,10 @@ pub struct EnableOptions {
     /// adapter. Even when set, the driver adds the framework's unsafe flag
     /// only if the host's install help exposes it.
     pub allow_unsafe_plugin_install: bool,
+    /// Withhold automatic capability consent (`--no-accept-capabilities`).
+    /// Only valid for OpenClaw plugin adapters; the default preserves the
+    /// existing help-gated consent grants without reading ambient policy.
+    pub no_accept_capabilities: bool,
     /// Explicit profiles for profile-scoped framework adapters such as dsh.
     /// An empty list means no profiles were selected; profile-scoped drivers
     /// reject that input rather than silently mutating an implicit profile.
@@ -901,6 +905,17 @@ impl AdapterManager {
             });
         }
 
+        if options.no_accept_capabilities
+            && (framework != "openclaw" || adapter_type.as_deref() == Some("skill_bundle"))
+        {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: "--no-accept-capabilities is only valid for an OpenClaw plugin adapter"
+                    .to_string(),
+            });
+        }
+
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
         let config = declared_config(&manifest, &framework);
@@ -1008,6 +1023,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -1050,6 +1066,7 @@ impl AdapterManager {
             declared_bundle_entry: bundle_entry,
             framework_version_req,
             allow_unsafe_plugin_install: options.allow_unsafe_plugin_install,
+            no_accept_capabilities: options.no_accept_capabilities,
             dry_run,
             ops: &ops,
         };
@@ -1395,6 +1412,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -1427,6 +1445,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &ops,
         };
@@ -1572,6 +1591,7 @@ impl AdapterManager {
                 declared_bundle_entry: None,
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
+                no_accept_capabilities: false,
                 dry_run: false,
                 ops: &probe_ops,
             };
@@ -1603,6 +1623,7 @@ impl AdapterManager {
                 declared_bundle_entry: None,
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
+                no_accept_capabilities: false,
                 dry_run: false,
                 ops: &ops,
             };
@@ -3750,7 +3771,7 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "opencode" => Some(&["plugin"]),
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
-        "qoder" => Some(&["plugin"]),
+        "qoder" | "qwenwork" => Some(&["plugin"]),
         // dsh bundles are native plugins registered per explicit profile.
         "dsh" => Some(&["plugin"]),
         // QwenPaw installs a directory-named plugin through its own CLI.
@@ -4112,6 +4133,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
     // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
     let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
+        DriverPayload::QwenWork(_) => {
+            messages.push("would remove unchanged receipt-owned QwenWork plugin files and empty plugin directories; preserve unrelated or modified files".to_string());
+            None
+        }
         DriverPayload::OpenCode(_) => {
             cleanup_ids.extend(claim.resources.iter().map(|resource| resource.id.as_str()));
             None
@@ -5600,6 +5625,8 @@ mod tests {
         assert!(ok("qwencode", Some("extension")));
         assert!(ok("qwenpaw", Some("plugin")));
         assert!(ok("qwenpaw", None), "qwenpaw defaults to plugin");
+        assert!(ok("qwenwork", Some("plugin")));
+        assert!(ok("qwenwork", None), "qwenwork defaults to plugin");
     }
 
     #[test]
@@ -5612,6 +5639,7 @@ mod tests {
             "claude-code",
             "qoder",
             "qwenpaw",
+            "qwenwork",
         ] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("extension"))
                 .expect_err(&format!("{fw} + extension must be rejected"));
@@ -5640,7 +5668,7 @@ mod tests {
 
     #[test]
     fn framework_type_matrix_rejects_skill_bundle_on_plugin_only_frameworks() {
-        for fw in ["codex", "claude-code", "opencode"] {
+        for fw in ["codex", "claude-code", "opencode", "qwenwork"] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("skill_bundle"))
                 .expect_err(&format!("{fw} + skill_bundle must be rejected"));
             assert!(matches!(err, AdapterError::InvalidAdapterInput { .. }));
@@ -5980,6 +6008,8 @@ source = "adapters/openclaw"
                 plugin_resource: "openclaw_plugin".to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         }
     }
@@ -9357,6 +9387,8 @@ dest = "{datadir}/skills"
                 plugin_resource: "plugin".to_string(),
                 skill_resources: payload_skill_ids,
                 config_resources: payload_config_ids,
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         }
     }

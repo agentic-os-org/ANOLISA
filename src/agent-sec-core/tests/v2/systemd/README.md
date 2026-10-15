@@ -32,7 +32,8 @@ sudo env PATH="$PWD/v2/target/debug:$PATH" "$PWD/agent-sec-cli/.venv/bin/python"
 | Unit 语法 | staging 后 `systemd-analyze verify` | PASS |
 | DPROC-V2-HARDENING-1 默认加固指令 | `packaging/test_systemd.py` | PASS；Alinux 4 systemd 255 下核心业务 45 项通过 |
 | DPROC-013 system restart、journal、stop timeout、start limit | `systemd/test_lifecycle.py` | PASS；真实 PID 1 systemd 255，含 75s timeout 与启动限流 |
-| PAP 持久化、readiness/持续健康检查 | 后续单独任务 | DEFERRED |
+| PAP 持久化与恢复 | [SQLite 验收](../../../docs/design/POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)第 9 节 | 独立验收，不由本 gate 证明 |
+| readiness/持续健康检查 | 后续单独任务 | DEFERRED |
 
 SkillSec 与新主线对齐后，在 Alibaba Cloud Linux 4 x86_64 通过 812 项 Rust 测试、
 Clippy、fmt 和 rustdoc。源码安装套件 914 项通过、38 项跳过（其中 1 项无 systemd PID 1）；
@@ -52,25 +53,32 @@ RPM 安装套件 914 项通过、37 项跳过，再单独通过修正后的 syst
 V2 RPM 安装 `/usr/lib/systemd/system/agent-sec-core.service`，以 `root:root` 运行，
 不创建专用账户或安装 sysusers 文件。
 也可用 `make install-systemd-system DESTDIR=<staging>` 审阅生成物；该 target 仅 staging。
-RPM 宏负责 system service 的 preset/卸载/升级生命周期，不自动启用用户 session 服务。
+RPM 宏负责 system service 的 preset/卸载/升级生命周期。V2 spec 会在首次安装或检测到
+V1 user unit 的升级时自动启用并启动 system service；无 system manager 的容器或镜像安装不启动它。
 V2 核心 CLI 子包不再依赖 Python Ledger；Hook 子包依赖及 wheel 专用 RPM 设置保持原样。
 源包只收录对应代际的 unit 模板。
 V2 RPM CI 同时检查 system unit 的 root 身份配置，并断言 user unit 不存在；
 `test-e2e-rpm-v2` 收集整个 `tests/v2/`，包含打包和 systemd 生命周期测试。容器中的 unit 检查仍不等于 system manager 验收。
 默认启用 `SystemCallFilter=@system-service`、`SystemCallArchitectures=native` 和
-`MemoryDenyWriteExecute=true`，保留空 AmbientCapabilities；SkillSec 仅授予
-`CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER` 以访问和恢复受管目录（issue #2861）。上述 pytest 生命周期
+`MemoryDenyWriteExecute=true`，保留空 AmbientCapabilities；CapabilityBoundingSet 包含
+`CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_PTRACE`。前三项用于访问和恢复受管目录（issue #2861），
+`CAP_SYS_PTRACE` 用于 scope discovery 读取跨 UID、不可 dump 或权限较高进程的 procfs 链接。上述 pytest 生命周期
 测试直接使用该模板，覆盖加固下的启动、RPC 和退出；目标发行版还须验证当前业务路径，
 检查 journal 中的 SIGSYS、权限错误或内存执行限制错误。后续引入 JIT 或新增 syscall
-依赖时必须重新验收。上述当前核心路径已完成真实 systemd 验收；不代表新增 JIT/syscall 路径或整个 issue 的验收。
+依赖时必须重新验收。既有核心路径的真实 systemd 验收记录不覆盖新增 `CAP_SYS_PTRACE` 后的
+scope discovery；该路径仍需在目标环境中验证进程匹配和 Binding 自动创建。
 
-运维切换前停止、禁用原 V1 user service，安装 V2 包，然后按部署策略执行：
+运维切换前停止、禁用原 V1 user service，安装 V2 包。运行中的 system manager 会自动启动
+V2 service；随后验证：
 
 ```bash
-sudo systemctl enable --now agent-sec-core.service
+sudo systemctl status agent-sec-core.service
 sudo agent-sec-cli --socket /run/agent-sec-core/daemon.sock policy list
 sudo journalctl -u agent-sec-core.service
 ```
+
+在无 system manager 的镜像或容器安装后，或服务被手动停止或禁用时，执行
+`sudo systemctl enable --now agent-sec-core.service` 恢复服务。
 
 运行目录 0755、socket 0666，普通用户无需加入服务组即可连接；目录仅服务账户可写，
 锁保持 0600。需要非 root 管理员时，通过 unit drop-in 的 `--policy-admin-uid <UID>`
@@ -82,7 +90,8 @@ SkillSec 需要访问用户 HOME、临时目录、系统 Skill 和共享卷，�
 正常停止上限预算为 2s UDS drain、30s SkillFS worker join、30s reconciliation join、
 1s Tokio shutdown；systemd
 在 75s 强制终止整个 control group。锁文件刻意保留，避免不同 inode 各持一个 flock。
-异常退出后仅在确认 socket 已失效时回收它。不会恢复已经丢失的内存 PAP 状态。
+异常退出后仅在确认 socket 已失效时回收它。PAP 状态保存在 SQLite，启动时恢复
+Scope discovery 及待执行或中断的 reconciliation；持久化恢复按 SQLite 设计独立验收。
 
 回滚：停止并禁用 V2 system service，恢复原 V1 包和 user service 配置；不要同时运行两代
 服务。本次未变更 V1 raw 发布路径，也未实施状态迁移。直接消费者为 daemon binary、

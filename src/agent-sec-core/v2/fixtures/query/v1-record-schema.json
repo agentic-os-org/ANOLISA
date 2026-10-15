@@ -1,0 +1,556 @@
+{
+  "$defs": {
+    "AfterAgentRunMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "response": {
+          "default": null,
+          "title": "Response"
+        },
+        "output_kind": {
+          "default": null,
+          "title": "Output Kind"
+        },
+        "stop_reason": {
+          "default": null,
+          "title": "Stop Reason"
+        },
+        "assistant_texts_count": {
+          "default": null,
+          "title": "Assistant Texts Count"
+        },
+        "tool_calls_count": {
+          "default": null,
+          "title": "Tool Calls Count"
+        },
+        "tool_calls": {
+          "default": null,
+          "title": "Tool Calls"
+        },
+        "success": {
+          "default": null,
+          "title": "Success"
+        },
+        "error": {
+          "default": null,
+          "title": "Error"
+        },
+        "duration_ms": {
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "total_api_calls": {
+          "default": null,
+          "title": "Total Api Calls"
+        },
+        "total_tool_calls": {
+          "default": null,
+          "title": "Total Tool Calls"
+        },
+        "final_model_id": {
+          "default": null,
+          "title": "Final Model Id"
+        },
+        "final_model_provider": {
+          "default": null,
+          "title": "Final Model Provider"
+        }
+      },
+      "title": "AfterAgentRunMetrics",
+      "type": "object"
+    },
+    "AfterAgentRunRecord": {
+      "properties": {
+        "hook": {
+          "const": "after_agent_run",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ObservabilityMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/AfterAgentRunMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "AfterAgentRunRecord",
+      "type": "object"
+    },
+    "AfterLlmCallMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "latency_ms": {
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "outcome": {
+          "default": null,
+          "title": "Outcome"
+        },
+        "error_category": {
+          "default": null,
+          "title": "Error Category"
+        },
+        "failure_kind": {
+          "default": null,
+          "title": "Failure Kind"
+        },
+        "response": {
+          "default": null,
+          "title": "Response"
+        },
+        "output_kind": {
+          "default": null,
+          "title": "Output Kind"
+        },
+        "stop_reason": {
+          "default": null,
+          "title": "Stop Reason"
+        },
+        "assistant_texts_count": {
+          "default": null,
+          "title": "Assistant Texts Count"
+        },
+        "tool_calls_count": {
+          "default": null,
+          "title": "Tool Calls Count"
+        },
+        "tool_calls": {
+          "default": null,
+          "title": "Tool Calls"
+        },
+        "request_payload_bytes": {
+          "default": null,
+          "title": "Request Payload Bytes"
+        },
+        "response_stream_bytes": {
+          "default": null,
+          "title": "Response Stream Bytes"
+        },
+        "time_to_first_byte_ms": {
+          "default": null,
+          "title": "Time To First Byte Ms"
+        },
+        "upstream_request_id_hash": {
+          "default": null,
+          "title": "Upstream Request Id Hash"
+        }
+      },
+      "title": "AfterLlmCallMetrics",
+      "type": "object"
+    },
+    "AfterLlmCallRecord": {
+      "properties": {
+        "hook": {
+          "const": "after_llm_call",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ModelCallMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/AfterLlmCallMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "AfterLlmCallRecord",
+      "type": "object"
+    },
+    "AfterToolCallMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "result": {
+          "default": null,
+          "title": "Result"
+        },
+        "error": {
+          "default": null,
+          "title": "Error"
+        },
+        "pii_scan_input_sha256": {
+          "default": null,
+          "title": "Pii Scan Input Sha256"
+        },
+        "duration_ms": {
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "status": {
+          "default": null,
+          "title": "Status"
+        },
+        "exit_code": {
+          "default": null,
+          "title": "Exit Code"
+        },
+        "result_size_bytes": {
+          "default": null,
+          "title": "Result Size Bytes"
+        }
+      },
+      "title": "AfterToolCallMetrics",
+      "type": "object"
+    },
+    "AfterToolCallRecord": {
+      "properties": {
+        "hook": {
+          "const": "after_tool_call",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ToolCallMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/AfterToolCallMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "AfterToolCallRecord",
+      "type": "object"
+    },
+    "BeforeAgentRunMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "prompt": {
+          "default": null,
+          "title": "Prompt"
+        },
+        "system_prompt": {
+          "default": null,
+          "title": "System Prompt"
+        },
+        "user_input": {
+          "default": null,
+          "title": "User Input"
+        },
+        "pii_scan_input_sha256": {
+          "default": null,
+          "title": "Pii Scan Input Sha256"
+        },
+        "history_messages_count": {
+          "default": null,
+          "title": "History Messages Count"
+        },
+        "images_count": {
+          "default": null,
+          "title": "Images Count"
+        },
+        "context_window_utilization": {
+          "default": null,
+          "title": "Context Window Utilization"
+        },
+        "model_id": {
+          "default": null,
+          "title": "Model Id"
+        },
+        "model_provider": {
+          "default": null,
+          "title": "Model Provider"
+        }
+      },
+      "title": "BeforeAgentRunMetrics",
+      "type": "object"
+    },
+    "BeforeAgentRunRecord": {
+      "properties": {
+        "hook": {
+          "const": "before_agent_run",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ObservabilityMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/BeforeAgentRunMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "BeforeAgentRunRecord",
+      "type": "object"
+    },
+    "BeforeLlmCallMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "prompt": {
+          "default": null,
+          "title": "Prompt"
+        },
+        "system_prompt": {
+          "default": null,
+          "title": "System Prompt"
+        },
+        "user_input": {
+          "default": null,
+          "title": "User Input"
+        },
+        "history_messages_count": {
+          "default": null,
+          "title": "History Messages Count"
+        },
+        "images_count": {
+          "default": null,
+          "title": "Images Count"
+        },
+        "context_window_utilization": {
+          "default": null,
+          "title": "Context Window Utilization"
+        },
+        "model_id": {
+          "default": null,
+          "title": "Model Id"
+        },
+        "model_provider": {
+          "default": null,
+          "title": "Model Provider"
+        },
+        "api": {
+          "default": null,
+          "title": "Api"
+        },
+        "transport": {
+          "default": null,
+          "title": "Transport"
+        }
+      },
+      "title": "BeforeLlmCallMetrics",
+      "type": "object"
+    },
+    "BeforeLlmCallRecord": {
+      "properties": {
+        "hook": {
+          "const": "before_llm_call",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ModelCallMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/BeforeLlmCallMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "BeforeLlmCallRecord",
+      "type": "object"
+    },
+    "BeforeToolCallMetrics": {
+      "minProperties": 1,
+      "properties": {
+        "tool_name": {
+          "default": null,
+          "title": "Tool Name"
+        },
+        "parameters": {
+          "default": null,
+          "title": "Parameters"
+        },
+        "pii_scan_input_sha256": {
+          "default": null,
+          "title": "Pii Scan Input Sha256"
+        }
+      },
+      "title": "BeforeToolCallMetrics",
+      "type": "object"
+    },
+    "BeforeToolCallRecord": {
+      "properties": {
+        "hook": {
+          "const": "before_tool_call",
+          "title": "Hook",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ToolCallMetadata"
+        },
+        "metrics": {
+          "$ref": "#/$defs/BeforeToolCallMetrics"
+        }
+      },
+      "required": [
+        "hook",
+        "observedAt",
+        "metadata",
+        "metrics"
+      ],
+      "title": "BeforeToolCallRecord",
+      "type": "object"
+    },
+    "ModelCallMetadata": {
+      "description": "Correlation metadata for model API call records.",
+      "properties": {
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "callId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callid"
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId"
+      ],
+      "title": "ModelCallMetadata",
+      "type": "object"
+    },
+    "ObservabilityMetadata": {
+      "description": "Correlation metadata required on every observability record.",
+      "properties": {
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId"
+      ],
+      "title": "ObservabilityMetadata",
+      "type": "object"
+    },
+    "ToolCallMetadata": {
+      "description": "Correlation metadata required on tool call records.",
+      "properties": {
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "toolCallId": {
+          "title": "Toolcallid",
+          "type": "string"
+        },
+        "callId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callid"
+        }
+      },
+      "required": [
+        "sessionId",
+        "runId",
+        "toolCallId"
+      ],
+      "title": "ToolCallMetadata",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "after_agent_run": "#/$defs/AfterAgentRunRecord",
+      "after_llm_call": "#/$defs/AfterLlmCallRecord",
+      "after_tool_call": "#/$defs/AfterToolCallRecord",
+      "before_agent_run": "#/$defs/BeforeAgentRunRecord",
+      "before_llm_call": "#/$defs/BeforeLlmCallRecord",
+      "before_tool_call": "#/$defs/BeforeToolCallRecord"
+    },
+    "propertyName": "hook"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/BeforeAgentRunRecord"
+    },
+    {
+      "$ref": "#/$defs/BeforeLlmCallRecord"
+    },
+    {
+      "$ref": "#/$defs/AfterLlmCallRecord"
+    },
+    {
+      "$ref": "#/$defs/BeforeToolCallRecord"
+    },
+    {
+      "$ref": "#/$defs/AfterToolCallRecord"
+    },
+    {
+      "$ref": "#/$defs/AfterAgentRunRecord"
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

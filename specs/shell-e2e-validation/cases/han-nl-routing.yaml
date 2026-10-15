@@ -155,7 +155,7 @@ cases:
           required_types: [screenshot]
 
   - id: HAN-NL-003
-    title: Zsh preserves historical draft, slash, and native-path behavior
+    title: Zsh rejects removed draft alias and preserves current draft, slash, and native paths
     tags: [shell, zsh, regression, issue-1721, issue-1811, issue-1919, issue-1932]
     shell: zsh
     skip_if_shell_missing: true
@@ -178,6 +178,23 @@ cases:
         timeout_ms: 10000
       - type: line
         text: /draft
+      - type: wait_for
+        text: "zsh: no such file or directory: /draft"
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          printf '__DRAFT_NATIVE_%s__<%s>\n' RC "$?"
+      - id: removed-draft-native
+        type: wait_for
+        text: "__DRAFT_NATIVE_RC__<127>"
+        timeout_ms: 10000
+      - id: removed-draft-native-settled
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 5000
+      - id: draft-current-entry
+        type: line
+        text: "??"
       - id: zsh-issue-1932-draft
         type: wait_for
         text: "Prompt 草稿"
@@ -230,6 +247,8 @@ cases:
     expect:
       status: 0
       contains:
+        - "zsh: no such file or directory: /draft"
+        - "__DRAFT_NATIVE_RC__<127>"
         - "Prompt 草稿"
         - "failed to run cosh-core: No such file or directory"
         - "审批: auto"
@@ -240,6 +259,10 @@ cases:
         - ";2u"
     evidence:
       points:
+        - id: removed-draft-native
+          trigger_event: removed-draft-native-settled
+          layout_sensitive: true
+          required_types: [screenshot]
         - id: zsh-issue-1932-draft
           trigger_event: zsh-issue-1932-draft
           layout_sensitive: true

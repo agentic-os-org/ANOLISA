@@ -60,15 +60,25 @@ export async function runHookProbe({
     "# Pilot Skill\n\nThis fixture is used by the OpenClaw pilot e2e hook probe.\n",
   );
 
-  const piiInputHook = capture.hooks.some((hook) => hook.hookName === "before_agent_run")
+  // prompt-scan and pii-scan pick their input hook through the same host
+  // version check (supportsModelInputGate), so both register the same gate on
+  // a given host: before_agent_run on stable >=2026.5.12, before_dispatch
+  // otherwise. Derive it from the captured registrations instead of
+  // re-implementing version parsing here, so both matrix lanes stay honest.
+  const inputHook = capture.hooks.some((hook) => hook.hookName === "before_agent_run")
     ? "before_agent_run" : "before_dispatch";
+  probe.inputHook = inputHook;
   const normalCases = [
     // These cases cover every registered capability at least once. They are not
     // policy acceptance by themselves; Gateway matrix cases above own that.
     {
-      name: "prompt-scan-before-dispatch",
-      hookName: "before_dispatch",
+      name: `prompt-scan-${inputHook}`,
+      hookName: inputHook,
+      // Dual-shape event: model-entry fields (prompt/messages) for the
+      // before_agent_run gate, inbound fields (content/body) for legacy hosts.
       event: {
+        prompt: "hello from the OpenClaw latest pilot",
+        messages: [],
         content: "hello from the OpenClaw latest pilot",
         body: "hello from the OpenClaw latest pilot",
         senderId: "pilot-user",
@@ -78,8 +88,8 @@ export async function runHookProbe({
       ctx: beforeDispatchCtx(),
     },
     {
-      name: `pii-scan-${piiInputHook}`,
-      hookName: piiInputHook,
+      name: `pii-scan-${inputHook}`,
+      hookName: inputHook,
       event: {
         prompt: "Contact me at alice@example.com for the pilot.",
         messages: [],
@@ -213,7 +223,8 @@ export async function runHookProbe({
 
   if (!skipFailureProbes) {
     // Negative probes must fail open: missing, broken, invalid, or slow CLI
-    // behavior should be recorded without throwing from plugin hooks.
+    // behavior should be recorded without throwing from plugin hooks. They ride
+    // the input gate hook selected above so both matrix lanes exercise them.
     const missingCliEnv = {
       ...env,
       PATH: await makeEmptyBinDir(workdir, "missing-cli-bin"),
@@ -221,8 +232,10 @@ export async function runHookProbe({
     probe.cases.push(
       await invokeCapturedHookCase(capture, {
         name: "failure-missing-agent-sec-cli",
-        hookName: "before_dispatch",
+        hookName: inputHook,
         event: {
+          prompt: "hello while agent-sec-cli is absent",
+          messages: [],
           content: "hello while agent-sec-cli is absent",
           body: "hello while agent-sec-cli is absent",
           senderId: "pilot-user",
@@ -236,8 +249,10 @@ export async function runHookProbe({
     probe.cases.push(
       await invokeCapturedHookCase(capture, {
         name: "failure-agent-sec-cli-nonzero",
-        hookName: "before_dispatch",
+        hookName: inputHook,
         event: {
+          prompt: "hello with nonzero CLI",
+          messages: [],
           content: "hello with nonzero CLI",
           body: "hello with nonzero CLI",
           senderId: "pilot-user",
@@ -254,8 +269,10 @@ exit 42
     probe.cases.push(
       await invokeCapturedHookCase(capture, {
         name: "failure-agent-sec-cli-invalid-json",
-        hookName: "before_dispatch",
+        hookName: inputHook,
         event: {
+          prompt: "hello with invalid JSON",
+          messages: [],
           content: "hello with invalid JSON",
           body: "hello with invalid JSON",
           senderId: "pilot-user",
@@ -271,8 +288,10 @@ printf '{not-json'
     probe.cases.push(
       await invokeCapturedHookCase(capture, {
         name: "failure-agent-sec-cli-timeout",
-        hookName: "before_dispatch",
+        hookName: inputHook,
         event: {
+          prompt: "hello with timeout CLI",
+          messages: [],
           content: "hello with timeout CLI",
           body: "hello with timeout CLI",
           senderId: "pilot-user",
@@ -338,7 +357,6 @@ async function readPackageName(packageJsonPath) {
 
 export function assertHookProbe(probe) {
   const requiredHookNames = [
-    "before_dispatch",
     "before_tool_call",
     "after_tool_call",
     "llm_input",
@@ -351,6 +369,24 @@ export function assertHookProbe(probe) {
     if (!probe.registeredHooks.some((hook) => hook.hookName === hookName)) {
       throw new Error(`hook probe did not register required hook ${hookName}`);
     }
+  }
+  // Input-gate hook: prompt-scan and pii-scan each register exactly one input
+  // hook via the same host version check — before_agent_run on stable
+  // >=2026.5.12 hosts, before_dispatch on older/prerelease hosts. Exactly one
+  // of the two must appear; both at once means the capabilities disagreed on
+  // the host version, and neither means input scanning is not wired up.
+  const registeredHookNames = new Set(
+    probe.registeredHooks.map((hook) => hook.hookName),
+  );
+  const inputGateHooks = ["before_agent_run", "before_dispatch"].filter((name) =>
+    registeredHookNames.has(name),
+  );
+  if (inputGateHooks.length !== 1) {
+    throw new Error(
+      `hook probe expected exactly one input gate hook (before_agent_run on stable >=2026.5.12, before_dispatch on older hosts), registered: ${
+        inputGateHooks.join(", ") || "none"
+      }`,
+    );
   }
   for (const testCase of probe.cases) {
     if (testCase.matchedHandlers <= 0) {

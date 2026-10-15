@@ -21,7 +21,8 @@ LogsDirectory=agent-sec
 LogsDirectoryMode=0700
 Restart=on-failure
 RestartSec=2
-# 2s UDS drain + 30s each for SkillFS workers and policy reconciliation + Tokio shutdown.
+# 2s UDS drain + 65s shared background drain + 1s Tokio shutdown
+# + 5s final database maintenance + 2s telemetry shutdown.
 TimeoutStopSec=75
 KillSignal=SIGTERM
 KillMode=control-group
@@ -32,7 +33,8 @@ NoNewPrivileges=true
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 MemoryDenyWriteExecute=true
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+# Scope discovery needs ptrace read access to procfs exe and namespace links across UIDs.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_PTRACE
 AmbientCapabilities=
 # Skills may live in users' HOME, /tmp, /usr/share or mounted SkillFS trees.
 # These paths must remain visible and writable for scanning, publication and rollback.

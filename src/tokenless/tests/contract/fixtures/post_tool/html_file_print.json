@@ -1,0 +1,14 @@
+{
+  "session_id": "sess-parity",
+  "tool_use_id": "toolu_parity_html_print",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat page.html"
+  },
+  "tool_response": {
+    "stdout": "<!DOCTYPE html><html><head><title>Guide</title></head><body><nav><a href='/'>Home</a></nav><main><h1>Guide</h1><p>Section 0: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 1: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 2: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 3: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 4: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 5: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 6: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p><p>Section 7: explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose explanatory prose </p></main><footer>footer</footer><script>window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;window.x = 1;</script></body></html>",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  }
+}

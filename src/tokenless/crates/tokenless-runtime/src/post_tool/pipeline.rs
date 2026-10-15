@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
     BuildLogCompressor, BuildLogOperation, HtmlExtractor, JsonCompressionConfig,
-    JsonCompressionContext, JsonCompressor, JsonOperation, SearchResultsCompressor,
+    JsonCompressionContext, JsonCompressor, JsonError, JsonOperation, SearchResultsCompressor,
     TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
@@ -209,9 +209,20 @@ impl PostToolPipeline {
                 min_toon_chars: config.min_toon_chars,
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
             };
-            let outcome = JsonCompressor::new(config.json.clone())
+            let outcome = match JsonCompressor::new(config.json.clone())
                 .compress(&request.content, &context)
-                .map_err(|error| PostToolPipelineError(error.to_string()))?;
+            {
+                Ok(outcome) => outcome,
+                // The bracket sniff that routed this content here inspects
+                // only the first and last non-whitespace bytes, so
+                // concatenated documents (for example stream JSON printed
+                // one object per line) reach the JSON compressor without
+                // parsing. The compressor is the parsing authority; treat
+                // the misroute as passthrough instead of failing the call.
+                Err(JsonError::InvalidJson(_)) => {
+                    return Ok(passthrough(request, before_tokens, content_type));
+                }
+            };
             DomainCandidate {
                 output: outcome.output,
                 operations: json_operations(&outcome.operations),
@@ -596,16 +607,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bracket_sniffed_non_json_passes_through_instead_of_failing() {
+        // Two concatenated JSON documents look like JSON to the bracket
+        // sniff but do not parse. The detector delegates authority to the
+        // JSON compressor, so this misroute must degrade to passthrough
+        // rather than failing the whole PostTool call.
+        let input = "{\"items\": [1, 2, 3]}\n{\"second\": \"document\"}\n";
+        let mut req = request(input);
+        req.tool_name = "WebFetch".into();
+        let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+        assert_eq!(run.response.disposition, Disposition::Passthrough);
+        assert_eq!(run.response.output, input);
+        assert_eq!(run.response.content_type, Some(ContentType::Json));
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+    }
+
     #[derive(Default)]
     struct CountingStore {
         inner: InMemoryStore,
         stash_calls: AtomicUsize,
         delete_calls: AtomicUsize,
+        /// When nonzero, `stash` starts failing after that many calls.
+        fail_stashes_after: usize,
     }
 
     impl StashStore for CountingStore {
         fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
-            self.stash_calls.fetch_add(1, Ordering::Relaxed);
+            let calls = self.stash_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_stashes_after != 0 && calls >= self.fail_stashes_after {
+                return Err(StashError::Backend("simulated mid-run failure".to_owned()));
+            }
             self.inner.stash(payload)
         }
 
@@ -634,6 +667,7 @@ mod tests {
             content: content.into(),
             status: ToolResultStatus::Success,
             content_origin: ContentOrigin::CommandOutput,
+            command: None,
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,
@@ -736,6 +770,36 @@ mod tests {
         assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
         assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 1);
         assert_eq!(concrete.len(), 0);
+    }
+
+    #[test]
+    fn a_marked_json_document_is_compressed_not_bypassed() {
+        // The detector skips one leading byte-order mark, so the marked page
+        // takes the JSON path; the parser must skip it too, or that routing
+        // turns a passthrough into a pipeline error. Recovery keeps the
+        // marked bytes exactly.
+        let plain = serde_json::to_string(&serde_json::json!({
+            "debug": "discarded noise",
+            "items": (0..12)
+                .map(|index| format!("item-{index}-{}", "x".repeat(80)))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let input = format!("\u{feff}{plain}");
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut config = build_log_config();
+        config.json.truncate_arrays_at = 2;
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+
+        assert_eq!(run.response.content_type, Some(ContentType::Json));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert!(run.response.output.chars().count() < input.chars().count());
+        assert!(!run.response.output.contains('\u{feff}'));
+        // The JSON domain stashes the truncated tail for replay recovery;
+        // the uncompressed twin takes exactly this path, mark aside.
+        assert_eq!(run.response.stash_keys.len(), 1);
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -854,6 +918,36 @@ mod tests {
         (0..30)
             .map(|index| format!("ok  \tgithub.com/acme/pkg{index:02}\t0.{index:03}s\n"))
             .collect()
+    }
+
+    fn build_log_with_midway_diagnostic() -> String {
+        // One cargo run split by a diagnostic into two reducible blocks, so
+        // the compressor performs two stash writes.
+        let mut output = "$ cargo build\n".to_owned();
+        for index in 0..30 {
+            if index == 15 {
+                output.push_str("error[E0308]: mismatched types\n  --> src/main.rs:3:4\n");
+            }
+            output.push_str(&format!(
+                "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+            ));
+        }
+        output.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+        output
+    }
+
+    fn build_log_with_duplicate_blocks() -> String {
+        // Two routine blocks whose omitted payloads are identical, so the
+        // compressor creates then refreshes a single stash row.
+        let mut output = "$ cargo build\n".to_owned();
+        for group in 0..2 {
+            for _ in 0..12 {
+                output.push_str("Compiling package v0.1.0 with extended progress output\n");
+            }
+            output.push_str(&format!("phase boundary {group}\n"));
+        }
+        output.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+        output
     }
 
     fn build_log_config() -> PostToolPipelineConfig {
@@ -996,6 +1090,58 @@ mod tests {
             assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
             assert_eq!(concrete.len(), 1);
         }
+    }
+
+    #[test]
+    fn partial_build_log_stash_failure_deletes_orphaned_tentative_writes() {
+        // The compressor's second stash write fails mid-run: it returns the
+        // lossless original plus one tentative write, and the pipeline must
+        // delete that orphaned row instead of leaving an unreachable entry.
+        let concrete = Arc::new(CountingStore {
+            fail_stashes_after: 1,
+            ..CountingStore::default()
+        });
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = build_log_with_midway_diagnostic();
+
+        let run =
+            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store)).unwrap();
+
+        assert_eq!(run.response.disposition, Disposition::NoSavings);
+        assert_eq!(run.response.output, input);
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(run.stash_errors, Some(1));
+        assert_eq!(run.stash_writes, Some(0));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(concrete.len(), 0);
+    }
+
+    #[test]
+    fn applied_build_log_with_duplicate_payloads_commits_one_row() {
+        // Two omission blocks share one payload: the compressor creates then
+        // refreshes one row, both markers carry its key, and commit reports
+        // the key exactly once with a single surviving row.
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = build_log_with_duplicate_blocks();
+
+        let run =
+            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store)).unwrap();
+
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::BuildLogReduction]
+        );
+        assert_eq!(run.response.stash_keys.len(), 1);
+        assert_eq!(run.stash_writes, Some(1));
+        assert_eq!(run.stash_errors, Some(0));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(concrete.len(), 1);
     }
 
     #[test]

@@ -738,3 +738,128 @@ fn unrecoverable_bounded_candidate_can_be_disallowed() {
     assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
     assert_eq!(outcome.recoverability, Recoverability::Lossless);
 }
+
+#[test]
+fn imprecise_json_numbers_pass_through_without_stashing() {
+    for literal in [
+        "18446744073709551617",
+        "-9223372036854775809",
+        "1.234567890123456789",
+        "1e-400",
+    ] {
+        let input = format!(
+            "{{\n{}\"value\": {literal},\n{}\"label\": \"synthetic\"\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
+        );
+        for source in [
+            input.clone(),
+            serde_json::to_string(&input).unwrap(),
+            format!("\u{feff}{input}"),
+            format!("[{input}]"),
+        ] {
+            let store = InMemoryStore::new();
+            let outcome = JsonCompressor::default()
+                .compress(&source, &context(Some(&store)))
+                .unwrap();
+            assert_eq!(outcome.output, source);
+            assert_eq!(outcome.recoverability, Recoverability::Lossless);
+            assert!(outcome.operations.is_empty());
+            assert!(outcome.stash_writes.is_empty());
+            assert_eq!(outcome.metrics, JsonMetrics::default());
+        }
+    }
+}
+
+#[test]
+fn equivalent_decimal_spellings_and_numeric_strings_still_compress() {
+    for literal in [
+        "18446744073709551615",
+        "1e3",
+        "1000.00",
+        "1.2500",
+        "-0",
+        "42",
+    ] {
+        let label = serde_json::to_string(r#"数字 18446744073709551617 \"1e-400\" \\"#).unwrap();
+        let input = format!(
+            "{{\n{}\"value\": {literal},\n{}\"label\": {label}\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
+        );
+        let outcome = JsonCompressor::default()
+            .compress(&input, &context(None))
+            .unwrap();
+        assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
+        assert_eq!(outcome.recoverability, Recoverability::Lossless);
+        assert_eq!(
+            output_value(&outcome),
+            serde_json::from_str::<Value>(&input).unwrap()
+        );
+    }
+}
+
+#[test]
+fn reserved_number_key_remains_an_object() {
+    let input = "{\"value\":{\"$serde_json::private::Number\":\"123\"},\"tail\":null}";
+    let outcome = JsonCompressor::default()
+        .compress(input, &context(None))
+        .unwrap();
+    assert_eq!(
+        output_value(&outcome)["value"],
+        serde_json::json!({"$serde_json::private::Number":"123"})
+    );
+}
+
+#[test]
+fn toon_candidate_preserves_large_integers_and_types() {
+    for literal in [
+        "9007199254740993",
+        "18446744073709551615",
+        "-9223372036854775808",
+    ] {
+        let value: Value = serde_json::from_str(&format!(
+            "{{\"nested\":[{{\"value\":{literal}}}],\"string\":\"{literal}\"}}"
+        ))
+        .unwrap();
+        if let Some(candidate) = toon_candidate(&value, 0) {
+            let decoded: Value = toon_format::decode_default(&candidate).unwrap();
+            assert_eq!(decoded, value);
+        }
+    }
+    let value = serde_json::json!({"rows":[{"id":42,"value":1.25},{"id":43,"value":2.5}]});
+    let candidate = toon_candidate(&value, 0).expect("ordinary numbers remain convertible");
+    assert_eq!(
+        toon_format::decode_default::<Value>(&candidate).unwrap(),
+        value
+    );
+}
+
+#[test]
+fn record_reduction_keeps_retained_numbers_exact() {
+    let literal = "18446744073709551615";
+    let input = format!(
+        "[{}]",
+        (0..40)
+            .map(|index| format!("{{\"id\":{index},\"detail\":{{\"value\":{literal}}}}}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let store = InMemoryStore::new();
+    let outcome = JsonCompressor::default()
+        .compress(&input, &context(Some(&store)))
+        .unwrap();
+    assert!(outcome.metrics.records_omitted > 0);
+    let output = output_value(&outcome);
+    let retained = output
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row.get("detail").is_some())
+        .collect::<Vec<_>>();
+    assert!(!retained.is_empty());
+    for row in retained {
+        assert!(row["detail"]["value"].is_number());
+        assert_eq!(row["detail"]["value"].to_string(), literal);
+    }
+}

@@ -279,8 +279,11 @@ impl Default for AuditSettings {
     fn default() -> Self {
         Self {
             mode: AuditMode::BestEffort,
+            // Per-user execution-audit budget: 30 days and 100 MiB, whichever
+            // comes first. Approved by the user; the decision record is not
+            // committed to this repository, so the values are stated here.
             retention_days: 30,
-            max_disk_bytes: 1024 * 1024 * 1024,
+            max_disk_bytes: 100 * 1024 * 1024,
             mode_source: AuditSettingSource::Default,
             retention_days_source: AuditSettingSource::Default,
             max_disk_bytes_source: AuditSettingSource::Default,
@@ -534,6 +537,8 @@ pub enum KnownAuditEventType {
     AuditDegraded,
     /// Audit persistence recovered.
     AuditRecovered,
+    /// Projection skipped events it could not replay exactly once.
+    AuditTruncated,
     /// Retention removed closed segments.
     RetentionPruned,
     /// Redacted audit export was published.
@@ -568,6 +573,7 @@ impl KnownAuditEventType {
             Self::EvidenceAccessed => "evidence.accessed",
             Self::AuditDegraded => "audit.degraded",
             Self::AuditRecovered => "audit.recovered",
+            Self::AuditTruncated => "audit.truncated",
             Self::RetentionPruned => "retention.pruned",
             Self::ExportCreated => "export.created",
         }
@@ -599,6 +605,7 @@ impl KnownAuditEventType {
             "evidence.accessed" => Self::EvidenceAccessed,
             "audit.degraded" => Self::AuditDegraded,
             "audit.recovered" => Self::AuditRecovered,
+            "audit.truncated" => Self::AuditTruncated,
             "retention.pruned" => Self::RetentionPruned,
             "export.created" => Self::ExportCreated,
             _ => return None,
@@ -830,6 +837,18 @@ pub struct AuditControlData {
     /// Stable reason category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Projection gap left by a shrunken cumulative event snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditTruncationData {
+    /// Stable gap category such as `event_snapshot_shrunk`.
+    pub operation: String,
+    /// Events already projected before the snapshot shrank.
+    pub seen: u64,
+    /// Length of the shrunken snapshot.
+    pub len: u64,
 }
 
 /// Validation failure for a producer or bounded reader event.

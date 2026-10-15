@@ -102,7 +102,9 @@ impl AuditStore {
 
     /// Claims one due action without allowing stale coordinators to duplicate work.
     ///
-    /// Active actions become durably expiring in the same compare-and-swap.
+    /// Active actions become durably expiring in the same compare-and-swap, and
+    /// entering the restore regime resets the attempt counter so attach-phase
+    /// retries cannot pre-consume the bounded audit-restoration budget.
     ///
     /// # Errors
     ///
@@ -119,10 +121,12 @@ impl AuditStore {
         claimed.next_retry_at_ns = Some(claimed_at_ns.saturating_add(RECONCILE_CLAIM_LEASE_NS));
         if claimed.lifecycle_state == ContainmentLifecycle::Active {
             claimed.lifecycle_state = ContainmentLifecycle::Expiring;
+            claimed.attempt_count = 0;
         }
         let changed = self.connection()?.execute(
             "UPDATE containment_actions
-             SET lifecycle_state = ?1, next_retry_at_ns = ?2, updated_at_ns = ?3
+             SET lifecycle_state = ?1, next_retry_at_ns = ?2, updated_at_ns = ?3,
+                 attempt_count = CASE WHEN ?5 = 'active' THEN 0 ELSE attempt_count END
              WHERE action_id = ?4 AND lifecycle_state = ?5 AND updated_at_ns = ?6
                AND ((lifecycle_state = 'pending'
                      AND next_retry_at_ns IS NOT NULL
@@ -188,6 +192,10 @@ impl AuditStore {
 
     /// Moves an exact claim to an exclusive cleanup lease before detachment.
     ///
+    /// Entering the restore regime resets the attempt counter so earlier
+    /// attach-phase retries cannot pre-consume the bounded audit-restoration
+    /// budget that detachment failures draw from.
+    ///
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
@@ -207,10 +215,12 @@ impl AuditStore {
         cleanup.failure_reason = Some(reason);
         cleanup.next_retry_at_ns = Some(cleanup_claim_ns.saturating_add(RECONCILE_CLAIM_LEASE_NS));
         cleanup.updated_at_ns = cleanup_claim_ns;
+        cleanup.attempt_count = 0;
         let changed = self.connection()?.execute(
             "UPDATE containment_actions SET
                  lifecycle_state = 'expiring', failure_stage = 'detach',
-                 failure_reason = ?1, next_retry_at_ns = ?2, updated_at_ns = ?3
+                 failure_reason = ?1, next_retry_at_ns = ?2, updated_at_ns = ?3,
+                 attempt_count = 0
              WHERE action_id = ?4 AND lifecycle_state = ?5 AND updated_at_ns = ?6",
             params![
                 cleanup.failure_reason,

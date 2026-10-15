@@ -20,7 +20,7 @@ permissions:
   packages: write
 
 env:
-  GHCR_IMAGE: ghcr.io/alibaba/anolisa
+  GHCR_IMAGE: ghcr.io/agentic-os-org/anolisa
   RUSTUP_DIST_SERVER: https://static.rust-lang.org
   RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
 

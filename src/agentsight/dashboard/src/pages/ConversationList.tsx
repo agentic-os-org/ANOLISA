@@ -14,6 +14,7 @@ import { SessionResourceChart } from '../components/SessionResourceChart';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { formatNsPadded as nsToDate } from '../utils/datetime';
+import { fillModelBuckets, fillTokenBuckets } from '../utils/timeseriesBuckets';
 import {
   fetchSessions,
   fetchTraces,
@@ -124,15 +125,30 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   const [evaluationLookupFailed, setEvaluationLookupFailed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setPage(0);
+    // A previous failure must not survive a successful reload: the render
+    // branch keys on `error`, so a transient failure would pin the error
+    // panel even after the next fetch returns rows. Guarding the responses
+    // also keeps a slow older request from overwriting a newer one.
+    setError(null);
     setEvaluations(new Map());
     setEvaluationLookupDone(new Set());
     setEvaluationLookupFailed(new Set());
     fetchTraces(sessionId, startNs, endNs)
-      .then(setTraces)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+      .then((rows) => {
+        if (!cancelled) setTraces(rows);
+      })
+      .catch((e: Error) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId, startNs, endNs]);
 
   const totalPages = Math.max(1, Math.ceil(traces.length / PAGE_SIZE));
@@ -464,6 +480,10 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
 // ─── Time-series chart helpers ────────────────────────────────────────────────
 
+// Dense gap-filling for the two charts lives in utils/timeseriesBuckets (see
+// the import above) so its ns-rounding boundary behavior is unit-testable
+// without a browser.
+
 /** Palette for model colors */
 const MODEL_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6',
@@ -478,61 +498,6 @@ function nsToLabel(ns: number, spanMs: number): string {
     return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
   }
   return hm;
-}
-
-/**
- * Fill sparse bucket array to a full dense series.
- * Backend only returns buckets that have events; missing ones become 0-value entries.
- */
-function fillTokenBuckets(
-  data: TimeseriesBucket[],
-  startNs: number,
-  endNs: number,
-  bucketCount: number,
-): TimeseriesBucket[] {
-  const bucketNs = Math.floor((endNs - startNs) / Math.max(bucketCount, 1));
-  if (bucketNs <= 0) return data;
-  const byIdx = new Map<number, TimeseriesBucket>();
-  for (const b of data) {
-    const idx = Math.floor((b.bucket_start_ns - startNs) / bucketNs);
-    byIdx.set(idx, b);
-  }
-  const result: TimeseriesBucket[] = [];
-  for (let i = 0; i < bucketCount; i++) {
-    result.push(byIdx.get(i) ?? {
-      bucket_start_ns: startNs + i * bucketNs,
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-    });
-  }
-  return result;
-}
-
-function fillModelBuckets(
-  data: ModelTimeseriesBucket[],
-  startNs: number,
-  endNs: number,
-  bucketCount: number,
-  models: string[],
-): ModelTimeseriesBucket[] {
-  const bucketNs = Math.floor((endNs - startNs) / Math.max(bucketCount, 1));
-  if (bucketNs <= 0) return data;
-  const byIdxModel = new Map<number, Map<string, number>>();
-  for (const b of data) {
-    const idx = Math.floor((b.bucket_start_ns - startNs) / bucketNs);
-    if (!byIdxModel.has(idx)) byIdxModel.set(idx, new Map());
-    byIdxModel.get(idx)!.set(b.model, b.total_tokens);
-  }
-  const result: ModelTimeseriesBucket[] = [];
-  for (let i = 0; i < bucketCount; i++) {
-    const bucketStartNs = startNs + i * bucketNs;
-    const modelMap = byIdxModel.get(i);
-    for (const model of models) {
-      result.push({ bucket_start_ns: bucketStartNs, model, total_tokens: modelMap?.get(model) ?? 0 });
-    }
-  }
-  return result;
 }
 
 // ─── Token Time-series Chart ──────────────────────────────────────────────────
@@ -638,24 +603,35 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
 }) => {
   const { t } = useI18n();
   const spanMs = (endNs - startNs) / 1_000_000;
-  const models = Array.from(new Set(data.map((d) => d.model))).sort();
-  const filled = fillModelBuckets(data, startNs, endNs, bucketCount, models);
+  // SQLite NOCASE groups ASCII case variants within a bucket; the chosen
+  // spelling can differ across buckets, but the chart must keep one series.
+  const modelKey = (model: string) => model.replace(/[A-Z]/g, (char) => char.toLowerCase());
+  const modelNames = new Map<string, string>();
+  for (const { model } of data) {
+    const key = modelKey(model);
+    const name = modelNames.get(key);
+    if (name === undefined || model < name) modelNames.set(key, model);
+  }
+  const models = Array.from(modelNames.values()).sort();
+  const normalized = data.map((bucket) => ({ ...bucket, model: modelNames.get(modelKey(bucket.model))! }));
+  const filled = fillModelBuckets(normalized, startNs, endNs, bucketCount, models);
 
   const bucketMap = new Map<number, Record<string, number>>();
   for (const d of filled) {
-    if (!bucketMap.has(d.bucket_start_ns)) bucketMap.set(d.bucket_start_ns, {});
+    if (!bucketMap.has(d.bucket_start_ns)) bucketMap.set(d.bucket_start_ns, Object.create(null));
     bucketMap.get(d.bucket_start_ns)![d.model] = d.total_tokens;
   }
   const chartData = Array.from(bucketMap.entries())
     .sort(([a], [b]) => a - b)
-    .map(([ns, tokens]) => ({ label: nsToLabel(ns, spanMs), ...tokens }));
+    .map(([ns, tokens]) => ({ label: nsToLabel(ns, spanMs), tokens }));
 
   // Track which model bars are hidden
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const toggleModel = (key: string) => {
+    const identity = modelKey(key);
     setHidden((prev) => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      next.has(identity) ? next.delete(identity) : next.add(identity);
       return next;
     });
   };
@@ -680,19 +656,21 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
         <Tooltip formatter={(v: number) => v.toLocaleString()} />
         <Legend
           wrapperStyle={{ fontSize: 12, cursor: 'pointer' }}
-          onClick={(e) => toggleModel(e.dataKey as string)}
+          onClick={(e) => toggleModel((e.payload as { name?: string })?.name ?? e.value)}
           formatter={(value, entry) => {
-            const color = hidden.has((entry as any).dataKey) ? '#aaa' : (entry as any).color;
-            return <span style={{ color }}>{value}</span>;
+            const name = (entry as any).payload?.name ?? value;
+            const color = hidden.has(modelKey(name)) ? '#aaa' : (entry as any).color;
+            return <span style={{ color }}>{name}</span>;
           }}
         />
         {models.map((m, i) => (
           <Bar
-            key={m}
-            dataKey={m}
+            key={modelKey(m)}
+            dataKey={(bucket: (typeof chartData)[number]) => bucket.tokens[m] ?? 0}
             name={m}
             stackId="model"
-            fill={hidden.has(m) ? 'transparent' : MODEL_COLORS[i % MODEL_COLORS.length]}
+            hide={hidden.has(modelKey(m))}
+            fill={MODEL_COLORS[i % MODEL_COLORS.length]}
           />
         ))}
       </BarChart>
@@ -848,18 +826,28 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setSearchParams(p, { replace: true });
   }, [setSearchParams]);
 
+  // A newer request must invalidate an older in-flight one: the time range
+  // and agent filter are read from state when the request is issued, so a
+  // late response would otherwise render data for the previous filters.
+  const loadRequestIdRef = useRef(0);
+  const agentNamesRequestIdRef = useRef(0);
+
   // Load agent names whenever time range changes (for dropdown options)
   const loadAgentNames = useCallback(async (sMs: number, eMs: number) => {
+    const requestId = ++agentNamesRequestIdRef.current;
     setAgentNamesLoading(true);
     try {
       const names = await fetchAgentNames(sMs * 1_000_000, eMs * 1_000_000);
+      if (requestId !== agentNamesRequestIdRef.current) return;
       setAgentNames(names);
       // If currently selected agent is no longer in list, reset
       setSelectedAgent((prev) => (names.includes(prev) ? prev : ''));
     } catch {
       // silently ignore — agent name list is best-effort
     } finally {
-      setAgentNamesLoading(false);
+      if (requestId === agentNamesRequestIdRef.current) {
+        setAgentNamesLoading(false);
+      }
     }
   }, []);
 
@@ -869,37 +857,58 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   }, [startMs, endMs, loadAgentNames]);
 
   // Shared data-fetch helper: runs all 7 parallel queries and updates state.
-  const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
-    const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
+  // Returns the request id so callers can report errors only for the newest
+  // request; a superseded response never writes state.
+  const runQuery = useCallback(async (
+    startNs: number,
+    endNs: number,
+    agent?: string,
+  ): Promise<{ ok: boolean; error?: unknown; requestId: number }> => {
+    const requestId = ++loadRequestIdRef.current;
+    setLoading(true);
+    setTimeseriesLoading(true);
+    try {
+      const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
-        agent ? data.filter((s) => s.agent_name === agent) : data
+        agent
+          ? data.filter((s) => (s.agent_name ?? '').toLowerCase() === agent.toLowerCase())
+          : data
       ),
       fetchTimeseries(startNs, endNs, agent),
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
-      fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
+      fetchInterruptionStats(startNs, endNs, agent).catch(() => [] as InterruptionTypeStat[]),
       fetchInterruptionSessionCounts(startNs, endNs, agent).catch(() => [] as SessionInterruptionCount[]),
       fetchInterruptionConversationCounts(startNs, endNs, agent).catch(() => [] as ConversationInterruptionCount[]),
       fetchTokenSavings(startNs, endNs, agent).catch(() => null),
     ]);
-    setSessions(sessData);
-    setTokenSeries(tsData.token_series);
-    setModelSeries(tsData.model_series);
-    setInterruptionCount(intData);
-    setInterruptionStats(iStats);
-    setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
-    setConversationInterruptionCounts(new Map(
-      iConvCounts.map((c) => [conversationInterruptionKey(c.session_id, c.conversation_id), c])
-    ));
-    setSavingsMap(new Map(
-      savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved ?? s.saved_tokens]) ?? []
-    ));
+      if (requestId !== loadRequestIdRef.current) return { ok: true, requestId };
+      setSessions(sessData);
+      setTokenSeries(tsData.token_series);
+      setModelSeries(tsData.model_series);
+      setInterruptionCount(intData);
+      setInterruptionStats(iStats);
+      setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
+      setConversationInterruptionCounts(new Map(
+        iConvCounts.map((c) => [conversationInterruptionKey(c.session_id, c.conversation_id), c])
+      ));
+      setSavingsMap(new Map(
+        savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved ?? s.saved_tokens]) ?? []
+      ));
+      return { ok: true, requestId };
+    } catch (error) {
+      return { ok: false, error, requestId };
+    } finally {
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+        setTimeseriesLoading(false);
+      }
+    }
   }, []);
 
   const handleQuery = useCallback(async () => {
-    const effectiveEnd = Date.now();
-    setEndMs(effectiveEnd);
-    setLoading(true);
-    setTimeseriesLoading(true);
+    // Query the end time the user picked. `endMs` is initialized to "now" when
+    // no end was chosen, so it is only ever re-defaulted at mount, never here.
+    const effectiveEnd = endMs;
     setError(null);
     setHasQueried(true);
     setSessionPage(0); // reset to first page on new query
@@ -910,15 +919,11 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setQueryRangeNs([startNs, endNs]);
     syncParams(startMs, effectiveEnd, selectedAgent);
 
-    try {
-      await runQuery(startNs, endNs, agent);
-    } catch (e: any) {
-      setError(e.message ?? t('cl.queryFailed'));
-    } finally {
-      setLoading(false);
-      setTimeseriesLoading(false);
+    const { ok, error, requestId } = await runQuery(startNs, endNs, agent);
+    if (!ok && requestId === loadRequestIdRef.current) {
+      setError((error as Error)?.message ?? t('cl.queryFailed'));
     }
-  }, [startMs, selectedAgent, syncParams, runQuery, t]);
+  }, [startMs, endMs, selectedAgent, syncParams, runQuery, t]);
 
   // Auto-load on mount: show all records for the default time range immediately
   const hasRestoredRef = React.useRef(false);
@@ -929,14 +934,11 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       const endNs = initEnd * 1_000_000;
       const agent = initAgent || undefined;
       setHasQueried(true);
-      setLoading(true);
-      setTimeseriesLoading(true);
       setQueryRangeNs([startNs, endNs]);
-      runQuery(startNs, endNs, agent).catch((e: any) => {
-        setError(e.message ?? t('cl.queryFailed'));
-      }).finally(() => {
-        setLoading(false);
-        setTimeseriesLoading(false);
+      void runQuery(startNs, endNs, agent).then(({ ok, error, requestId }) => {
+        if (!ok && requestId === loadRequestIdRef.current) {
+          setError((error as Error)?.message ?? t('cl.queryFailed'));
+        }
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

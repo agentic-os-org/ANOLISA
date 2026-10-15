@@ -205,8 +205,7 @@ fn resolve_remote(
     )?;
     socket.peer_addr()?;
     let stream = UnixStream::from(OwnedFd::from(socket));
-    let peer = rustix::net::sockopt::socket_peercred(&stream)?;
-    if peer.uid.as_raw() != mount.peer_uid {
+    if peer_uid(&stream)? != mount.peer_uid {
         return Err(SkillFsError::Authentication);
     }
     let mut reader = BufReader::new(stream);
@@ -250,6 +249,18 @@ fn resolve_remote(
         ));
     }
     Ok(response["result"].clone())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> Result<u32, SkillFsError> {
+    Ok(rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(_stream: &UnixStream) -> Result<u32, SkillFsError> {
+    Err(SkillFsError::Unavailable(
+        "SkillFS integration requires Linux",
+    ))
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, SkillFsError> {

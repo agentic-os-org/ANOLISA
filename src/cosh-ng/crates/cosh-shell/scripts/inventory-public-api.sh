@@ -20,7 +20,7 @@ classification_for_symbol() {
     adapter|adapter_for_kind|AdapterInstance|AdapterKind|AgentAdapter|AuthFieldInfo|AuthProviderInfo|AuthResponse)
       echo "support-api-review-before-freeze"
       ;;
-    agent|types|tools|parser|journal|ledger|raw_input|shell_host|evidence|hooks|ui|render_transcript|default_builtin_hooks|govern_agent_events|govern_agent_events_with_language|GovernanceOutput|HookInput|HookMatcher|HookTrigger|FindingSeverity|HookFinding|classify_executed_command_outcome|classify_exit|classify_shell_handoff_command_outcome|first_program_token|CommandOutcome|ExitCodeCategory|active_slash_commands|active_slash_hint_commands|exact_slash_control_commands|slash_command_registry|visible_slash_commands|SlashCommandSpec|SlashCommandState)
+    agent|types|tools|parser|journal|ledger|raw_input|shell_host|evidence|hooks|ui|render_transcript|default_builtin_hooks|govern_agent_events|govern_agent_events_with_language|GovernanceOutput|HookInput|HookMatcher|HookTrigger|FindingSeverity|HookFinding|classify_executed_command_outcome|classify_exit|classify_shell_handoff_command_outcome|first_program_token|CommandOutcome|ExitCodeCategory|active_slash_commands|active_slash_hint_commands|exact_slash_control_commands|slash_command_registry|visible_slash_commands|SlashCommandSpec|SlashCommandState|__ui_worker)
       echo "internal-migration-surface"
       ;;
     agent_render|builtin_hooks|context_window|exit_classify|governance|hook_engine|hook_types|interactive|renderer|slash_registry)

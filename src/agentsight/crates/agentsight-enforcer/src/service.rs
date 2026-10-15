@@ -83,7 +83,8 @@ impl<B: EnforcementBackend> EnforcerService<B> {
     /// # Errors
     ///
     /// Returns an I/O error when accepting a connection fails for a reason
-    /// other than the non-blocking listener having no pending client.
+    /// other than the non-blocking listener having no pending client or a
+    /// transient, peer-driven failure such as descriptor exhaustion.
     pub fn serve_until(self, stop: &AtomicBool) -> Result<(), ServiceError> {
         let required_subscriptions = Arc::new(RequiredSubscriptions::default());
         while !stop.load(Ordering::Acquire) {
@@ -103,12 +104,37 @@ impl<B: EnforcementBackend> EnforcerService<B> {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
+                Err(error) if is_transient_accept_error(&error) => {
+                    log::warn!("agentsight-enforcer accept failed; retrying: {error}");
+                    thread::sleep(Duration::from_millis(100));
+                }
                 Err(error) => return Err(ServiceError::Io(error)),
             }
         }
         self.backend.shutdown()?;
         Ok(())
     }
+}
+
+/// Reports accept failures caused by peer behavior rather than a broken
+/// listener.
+///
+/// Every accepted connection holds a descriptor until its handler thread
+/// finishes, so a peer that keeps enough sockets open drives `accept(2)`
+/// into `EMFILE`/`ENFILE`. Aborting the daemon on those errors would tear
+/// down every active binding, so the service logs and retries instead.
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOMEM
+                | libc::ENOBUFS
+                | libc::ECONNABORTED
+                | libc::EINTR
+        )
+    )
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<(), std::io::Error> {
@@ -377,10 +403,22 @@ fn handle_connection<B: EnforcementBackend>(
         }
         Command::SubscribeSecurityEvents => {
             let receiver = backend.subscribe_security_events();
-            write_frame(
+            if write_frame(
                 &mut stream,
                 &success_response(request.request_id, ResponseBody::Subscribed),
-            )?;
+            )
+            .is_err()
+            {
+                // A peer that disappears before its acknowledgement can be
+                // written already received queued frames (for example the
+                // evidence-loss recovery frame); count them as lost like the
+                // per-event write failure below does.
+                let queued_events = receiver
+                    .try_iter()
+                    .fold(0_u64, |count, _| count.saturating_add(1));
+                backend.record_security_delivery_loss(queued_events);
+                return Ok(());
+            }
             while let Ok(event) = receiver.recv() {
                 if write_frame(
                     &mut stream,
@@ -725,6 +763,29 @@ mod tests {
     use super::*;
     use crate::MockBackend;
 
+    #[test]
+    fn peer_driven_accept_errors_are_transient() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::ENOBUFS,
+            libc::ECONNABORTED,
+            libc::EINTR,
+        ] {
+            assert!(
+                is_transient_accept_error(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} must be retried"
+            );
+        }
+        assert!(!is_transient_accept_error(
+            &std::io::Error::from_raw_os_error(libc::EACCES)
+        ));
+        assert!(!is_transient_accept_error(&std::io::Error::other(
+            "synthetic error carries no errno"
+        )));
+    }
+
     struct DetachRaceBackend {
         active: Arc<AtomicBool>,
     }
@@ -1049,5 +1110,49 @@ mod tests {
             .expect("source policy should be restored");
         assert_eq!(restored.request.root_pid, 77);
         assert_eq!(restored.request.process_start_time, 123);
+    }
+
+    #[test]
+    fn security_subscription_counts_events_lost_behind_a_failed_ack() {
+        let backend = Arc::new(MockBackend::new());
+        let request = credential_policy();
+        let binding = backend
+            .apply_credential_policy(request)
+            .expect("fixture credential policy should apply");
+        // Emit the normalized chain while no subscriber is connected: the hub
+        // records four lost events and queues one recovery frame for the next
+        // subscriber.
+        backend
+            .emit_credential_exfiltration(
+                binding.request.binding_id,
+                "/tmp/fixture-credential",
+                "8.8.8.8",
+            )
+            .expect("fixture chain should emit");
+
+        let (service_stream, client_stream) =
+            UnixStream::pair().expect("fixture socket pair should open");
+        write_frame(
+            &mut &client_stream,
+            &Request::new(Command::SubscribeSecurityEvents),
+        )
+        .expect("fixture request should encode");
+        drop(client_stream);
+
+        let subscriptions = Arc::new(RequiredSubscriptions::default());
+        let result = handle_connection(service_stream, Arc::clone(&backend), subscriptions, None);
+
+        // A peer that disappears before its acknowledgement can be written is
+        // a normal subscription termination, and the queued recovery frame it
+        // never received must still count as delivery loss.
+        assert!(result.is_ok());
+        let health = backend.health().expect("mock health should load");
+        assert!(!health.ready);
+        assert_eq!(
+            health.message.as_deref(),
+            Some(
+                "mock backend does not enforce kernel operations; security event delivery loss: dropped_events=5"
+            )
+        );
     }
 }

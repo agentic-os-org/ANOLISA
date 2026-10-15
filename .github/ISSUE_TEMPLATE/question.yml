@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Ask a focused question and tell us what you have already tried.
-        Questions remain available here until GitHub Discussions is enabled.
+        You can continue to use this form for focused usage questions.
 
   - type: dropdown
     id: component

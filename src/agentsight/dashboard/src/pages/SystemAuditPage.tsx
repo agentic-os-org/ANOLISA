@@ -5,6 +5,7 @@ import type { MessageKey } from '../i18n';
 import { ContainmentDialog } from '../components/ContainmentDialog';
 import { ContainmentLifecycleCard } from '../components/ContainmentLifecycleCard';
 import { Pagination as PaginationNew } from '../components/Pagination';
+import { effectiveBindingMode } from '../utils/enforcementMode';
 import {
   fetchSecurityCase,
   fetchSecurityCases,
@@ -22,6 +23,7 @@ import {
   type SecuritySessionSummary,
   type SecuritySummary,
 } from '../utils/apiClient';
+import { translateRuleReason } from '../utils/ruleReason';
 
 type AuditTab = 'overview' | 'sessions' | 'cases' | 'events';
 const CASE_PAGE_SIZE = 20;
@@ -65,22 +67,6 @@ const eventLabel: Record<string, MessageKey> = {
   policy_decision: 'audit.event.policyDecision',
   enforcement_state: 'audit.event.enforcementState',
 };
-
-// Risk conclusions come from the policy DSL `because` clause, which is authored
-// in English on the backend. Translate the known rule reasons to Chinese for
-// display; unknown reasons fall back to the original text unchanged.
-const ruleReasonZh: Record<string, string> = {
-  'credential-derived data reached an untrusted network target': '凭据衍生数据访问了不可信网络目标',
-  'credential reached an untrusted target': '凭据数据访问了不可信目标',
-  'credential taint reached unknown public endpoint': '凭据污点数据到达未知公网目标',
-  'agentsight sensitive file policy': 'AgentSight 敏感文件策略',
-};
-
-function translateRuleReason(reason: string): string {
-  if (!reason) return reason;
-  const key = reason.trim().toLowerCase();
-  return ruleReasonZh[key] ?? reason;
-}
 
 interface ProcessTreeNode {
   pid: number;
@@ -226,6 +212,16 @@ function containmentEligible(riskCase: SecurityRiskCase): boolean {
     && riskCase.status !== 'resolved';
 }
 
+// Every list on this page renders its pager only while `total > pageSize`, so
+// an offset a refresh or a narrower filter has left out of range hides its own
+// way back: the server answers the stale offset with an empty page while the
+// control that could return to the first page is gone with it. Clamp an offset
+// to the last page of the list it now points into.
+function clampToLastPage(offset: number, total: number, pageSize: number): number {
+  const lastPage = Math.max(0, Math.floor(Math.max(0, total - 1) / pageSize) * pageSize);
+  return Math.min(offset, lastPage);
+}
+
 const StatCard: React.FC<{
   labelKey: MessageKey;
   value: React.ReactNode;
@@ -296,7 +292,7 @@ const Pagination: React.FC<{
 export const SystemAuditPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const localeTag = useLocaleTag();
   const [activeTab, setActiveTab] = useState<AuditTab>('overview');
   const [summary, setSummary] = useState<SecuritySummary | null>(null);
@@ -438,6 +434,11 @@ export const SystemAuditPage: React.FC = () => {
   const totalCases = summary?.risk_cases_total ?? caseTotal;
   const openCases = summary?.risk_cases_open ?? 0;
   const blockedCases = summary?.risk_cases_blocked ?? 0;
+  // The risk sort runs on the loaded page only, while paging follows the
+  // server's updated_at order; sorting by risk would therefore hide the
+  // highest-risk case on an unseen page. Lock the control to the honest
+  // server order whenever the result spans more than one page.
+  const caseSortLocked = caseTotal > CASE_PAGE_SIZE;
   const sortedEvidence = useMemo(() => (
     selectedCase ? [...selectedCase.evidence].sort((left, right) => (
       left.occurred_at_ns - right.occurred_at_ns
@@ -453,7 +454,9 @@ export const SystemAuditPage: React.FC = () => {
       && (binding.state === 'enforced' || binding.state === 'pending' || binding.state === 'degraded')
     ));
     if (active.length === 0) return 'none';
-    if (active.some((binding) => binding.request.policy_mode === 'enforce')) return 'enforce';
+    // A binding stored before `policy_mode` existed carries its mode in the
+    // DSL; reading the field alone reported an enforcing binding as audit-only.
+    if (active.some((binding) => effectiveBindingMode(binding.request) === 'enforce')) return 'enforce';
     return 'audit';
   }, [bindings, selectedCase]);
   const displayedCases = useMemo(() => {
@@ -462,10 +465,13 @@ export const SystemAuditPage: React.FC = () => {
     if (caseStatusFilter !== 'all') list = list.filter((item) => item.status === caseStatusFilter);
     if (caseBlockedOnly) list = list.filter((item) => item.blocked);
     const sorted = [...list];
-    if (caseSort === 'risk') sorted.sort((left, right) => right.risk_score - left.risk_score);
-    else sorted.sort((left, right) => right.updated_at_ns - left.updated_at_ns);
+    if (caseSort === 'risk' && !caseSortLocked) {
+      sorted.sort((left, right) => right.risk_score - left.risk_score);
+    } else {
+      sorted.sort((left, right) => right.updated_at_ns - left.updated_at_ns);
+    }
     return sorted;
-  }, [cases, caseAgentFilter, caseStatusFilter, caseBlockedOnly, caseSort]);
+  }, [cases, caseAgentFilter, caseStatusFilter, caseBlockedOnly, caseSort, caseSortLocked]);
   const flatProcessTree = useMemo(() => {
     const out: Array<{ node: ProcessTreeNode; depth: number }> = [];
     flattenProcessTree(processTree.roots, 0, out);
@@ -482,16 +488,43 @@ export const SystemAuditPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep the disabled control showing the order that is actually applied.
+  useEffect(() => {
+    if (caseSortLocked && caseSort === 'risk') setCaseSort('time');
+  }, [caseSortLocked, caseSort]);
+
+  // A list can shrink under the current offset (a refresh prunes the expired
+  // cases and their bindings, a filter narrows the rows), and each table above
+  // renders its pager only while its total exceeds one page. Pull the offset
+  // back into the list that is left instead of stranding the table on a page
+  // the user cannot leave.
+  useEffect(() => {
+    setCaseOffset((current) => clampToLastPage(current, caseTotal, CASE_PAGE_SIZE));
+  }, [caseTotal]);
+
+  useEffect(() => {
+    setSessionOffset((current) => clampToLastPage(current, sessionTotal, SESSION_PAGE_SIZE));
+  }, [sessionTotal]);
+
+  useEffect(() => {
+    setEventOffset((current) => clampToLastPage(current, eventTotal, EVENT_PAGE_SIZE));
+  }, [eventTotal]);
+
   const loadMoreEvents = async () => {
     if (eventNextOffset === null || loadingMore) return;
+    const version = loadRequestVersion.current;
     setLoadingMore(true);
     try {
       const result = await fetchAuditEvents({ limit: EVENT_PAGE_SIZE, offset: eventNextOffset, include_details: true });
+      // The list may have been reloaded while this page was in flight (another
+      // page selected, a filter changed). Appending then would splice an old
+      // page into the new list and duplicate rows.
+      if (loadRequestVersion.current !== version) return;
       setEvents((prev) => [...prev, ...result.data.items]);
       setEventTotal(result.data.total);
       setEventNextOffset(result.data.next_offset ?? null);
     } catch (e) {
-      setError(errorText(e, t));
+      if (loadRequestVersion.current === version) setError(errorText(e, t));
     } finally {
       setLoadingMore(false);
     }
@@ -545,7 +578,7 @@ export const SystemAuditPage: React.FC = () => {
 
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard labelKey="audit.stats.totalEvents.label" value={summary?.total ?? 0} hintKey="audit.stats.totalEvents.hint" />
-        <StatCard labelKey="audit.stats.sessions.label" value={summary?.affected_sessions ?? sessions.length} hintKey="audit.stats.sessions.hint" />
+        <StatCard labelKey="audit.stats.sessions.label" value={summary?.affected_sessions ?? sessionTotal} hintKey="audit.stats.sessions.hint" />
         <StatCard labelKey="audit.stats.cases.label" value={totalCases} hintKey="audit.stats.cases.hint" />
         <StatCard
           labelKey="audit.stats.open.label"
@@ -600,7 +633,9 @@ export const SystemAuditPage: React.FC = () => {
                 <select
                   value={caseSort}
                   onChange={(event) => setCaseSort(event.target.value as 'time' | 'risk')}
-                  className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-700"
+                  disabled={caseSortLocked}
+                  title={caseSortLocked ? `案件超过 ${CASE_PAGE_SIZE} 条时，排序只覆盖当前页，已禁用"按风险分"` : undefined}
+                  className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-700 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400"
                 >
                   <option value="time">按时间</option>
                   <option value="risk">按风险分</option>
@@ -642,7 +677,7 @@ export const SystemAuditPage: React.FC = () => {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium text-gray-900">{translateRuleReason(item.summary)}</p>
+                      <p className="font-medium text-gray-900">{translateRuleReason(item.summary, locale)}</p>
                       <p className="mt-1 text-xs text-gray-500">
                         {item.agent_id} · {item.session_id || t('audit.case.noSession')} · {formatTime(item.updated_at_ns, localeTag)}
                       </p>
@@ -682,7 +717,7 @@ export const SystemAuditPage: React.FC = () => {
                     <div>
                       <p className="text-xs font-medium text-gray-500">{t('audit.case.summaryTitle')}</p>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <h2 className="text-xl font-semibold text-gray-900">{translateRuleReason(selectedCase.summary)}</h2>
+                        <h2 className="text-xl font-semibold text-gray-900">{translateRuleReason(selectedCase.summary, locale)}</h2>
                         {caseProtection === 'enforce' ? (
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">拦截保护中</span>
                         ) : caseProtection === 'audit' ? (

@@ -37,20 +37,58 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
     // Process-based heuristics
     let has_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd; the same OLTP workload as MySQL.
+        || info.has_process("mariadbd")
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the engine already detects (KNOWN_SERVICES); the
+        // io-latency profile is defined as "OLTP databases, KV stores".
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
         || info.has_process("mongod")
-        || info.has_process("clickhouse");
+        || info.has_process("clickhouse")
+        // oracle is the one OLTP database the canonical predicate already
+        // counts (is_database_present); the THP rule counted it in 64bd828e0.
+        // An Oracle-only host is an io-latency workload, not mixed.
+        || info.has_process("oracle");
     let has_cache = info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the cache class must count it too.
+        || info.has_process("valkey-server")
         || info.has_process("memcached")
-        || info.has_process("etcd");
+        || info.has_process("etcd")
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd; the runtime marker table already resolves
+        // org.apache.zookeeper to the "zookeeper" service.
+        || info.has_process("zookeeper")
+        || info.has_process("consul");
     let has_web = info.has_process("nginx")
         || info.has_process("httpd")
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; RHEL and
+        // the httpd name cover the same server. Without this branch every
+        // Debian Apache host classified as mixed, not network-intensive.
+        || info.has_process("apache2")
         || info.has_process("envoy")
         || info.has_process("haproxy")
         || info.has_process("caddy");
     let has_java = info.has_process("java");
     let has_search = info.has_process("elasticsearch") || info.has_process("opensearch");
-    let has_streaming =
-        info.has_process("kafka") || info.has_process("flink") || info.has_process("spark");
+    let has_streaming = info.has_process("kafka")
+        || info.has_process("flink")
+        || info.has_process("spark")
+        // HDFS stores and serves data in large sequential blocks, and the
+        // read-ahead rule already counts a Hadoop host among its streaming
+        // workloads (the list that resizes an HDD's read-ahead window for
+        // sequential readers): the classifier is the other list of the same
+        // class, so a Hadoop-only host belongs on io-throughput, not mixed.
+        || info.has_process("hadoop")
+        // Pulsar is the same event-streaming class as Kafka; the runtime
+        // detector already resolves org.apache.pulsar broker cmdlines to
+        // the "pulsar" service.
+        || info.has_process("pulsar")
+        // Pulsar keeps its ledgers on BookKeeper bookies, which append and
+        // replay them sequentially.
+        || info.has_process("bookkeeper");
 
     if has_db {
         return WorkloadType::IoLatency;
@@ -90,8 +128,10 @@ mod tests {
             os_distro: String::new(),
             cpu_model: String::new(),
             cpu_cores: 8,
+            cpu_cores_host: 8,
             numa_nodes: 1,
             memory_total_gb: 64,
+            memory_gb_host: 64,
             disks: vec![],
             network: vec![],
             sysctl: SysctlValues {
@@ -99,7 +139,6 @@ mod tests {
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
                 somaxconn: 128,
-                tcp_fastopen: 1,
                 thp_enabled: "always".to_string(),
             },
             processes: processes
@@ -133,6 +172,12 @@ mod tests {
             classify(&make_info(vec!["redis-server"])),
             WorkloadType::MemoryIntensive
         );
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // valkey-server binary with the same event-loop cache workload.
+        assert_eq!(
+            classify(&make_info(vec!["valkey-server"])),
+            WorkloadType::MemoryIntensive
+        );
         assert_eq!(
             classify(&make_info(vec!["memcached"])),
             WorkloadType::MemoryIntensive
@@ -152,9 +197,77 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_apache_under_its_debian_name() {
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; the RHEL
+        // name `httpd` is the same server. A pure Apache host is a web
+        // workload under either name — not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["apache2"])),
+            WorkloadType::NetworkIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["httpd"])),
+            WorkloadType::NetworkIntensive
+        );
+        // apache2 wins over nothing: a db still classifies first.
+        assert_eq!(
+            classify(&make_info(vec!["apache2", "postgres"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_mariadb() {
+        // MariaDB's daemon comm is `mariadbd`; a MariaDB-only host is an
+        // OLTP database workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd"])),
+            WorkloadType::IoLatency
+        );
+        // Role-suffixed worker comms classify the same.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd: writer"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_tidb() {
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the detector already knows (KNOWN_SERVICES). classify
+        // must route a TiDB host to the io-latency profile, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server"])),
+            WorkloadType::IoLatency
+        );
+        assert_eq!(
+            classify(&make_info(vec!["tikv-server"])),
+            WorkloadType::IoLatency
+        );
+        // A database still outranks the web tier on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server", "nginx"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
     fn test_classify_clickhouse() {
         assert_eq!(
             classify(&make_info(vec!["clickhouse"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn oracle_gates_the_profile_classifier() {
+        // oracle is the one OLTP database the canonical predicate already
+        // counts (is_database_present gates the IPC rules on it) and the THP
+        // latency list counts since 64bd828e0; the classifier's has_db list
+        // still skipped it, so an Oracle-only host classified mixed and every
+        // has_db consumer stayed quiet.
+        assert_eq!(
+            classify(&make_info(vec!["oracle"])),
             WorkloadType::IoLatency
         );
     }
@@ -164,6 +277,28 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["elasticsearch"])),
             WorkloadType::MemoryIntensive
+        );
+    }
+
+    #[test]
+    fn test_classify_coordination_kv() {
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd - which classify already routes to memory-intensive - and
+        // both are services the engine detects (the runtime marker table
+        // resolves org.apache.zookeeper to "zookeeper"). A ZooKeeper-only
+        // host must not classify as mixed.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper"])),
+            WorkloadType::MemoryIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["consul"])),
+            WorkloadType::MemoryIntensive
+        );
+        // A database still outranks coordination on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 
@@ -199,6 +334,63 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["flink"])),
             WorkloadType::IoThroughput
+        );
+    }
+
+    #[test]
+    fn test_classify_hadoop() {
+        // HDFS stores and serves data in large sequential blocks, and the
+        // read-ahead rule already counts a Hadoop host among its streaming
+        // workloads (the list that resizes an HDD's read-ahead window for
+        // sequential readers). The classifier is the other list of the same
+        // class, so a Hadoop-only host must report io-throughput instead of
+        // mixed.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop"])),
+            WorkloadType::IoThroughput
+        );
+        // A database still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop", "postgres"])),
+            WorkloadType::IoLatency
+        );
+        // A metrics collector of that family is not the family's workload.
+        assert_eq!(
+            classify(&make_info(vec!["hadoop_exporter"])),
+            WorkloadType::Mixed
+        );
+    }
+
+    #[test]
+    fn test_classify_pulsar() {
+        // Pulsar is the same event-streaming platform class as Kafka (the
+        // runtime detector even resolves org.apache.pulsar broker cmdlines
+        // to the "pulsar" service), so a Pulsar-only host is an
+        // io-throughput workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar"])),
+            WorkloadType::IoThroughput
+        );
+        // A database on the same host still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar", "postgres"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_bookkeeper() {
+        // A BookKeeper bookie is the storage tier of a Pulsar cluster: it
+        // appends and replays ledger entries sequentially, so a bookie-only
+        // host is an io-throughput workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["bookkeeper"])),
+            WorkloadType::IoThroughput
+        );
+        // A database on the same host still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["bookkeeper", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 

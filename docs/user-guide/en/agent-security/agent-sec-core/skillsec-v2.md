@@ -6,9 +6,9 @@ SkillSec scans Skill content, signs its results, retains recoverable versions an
 selected version to SkillFS. Built-in scanning runs locally without model calls. The Rust CLI keeps
 the `agent-sec-cli skill-ledger` entry point and sends operations to one root daemon.
 
-This page describes the V2 core. The [Skill Ledger guide](skill-ledger.md) describes V1 and its
-Agent integrations. V2 Agent Hook migration is separate: existing Hook initialization checks,
-defaults and enablement are not updated by this core migration.
+This page covers the V2 core and its Hook adapters. The [Skill Ledger guide](skill-ledger.md)
+retains the V1 reference and host-specific matching and policy controls. The adapters retain their
+existing languages, defaults and enablement; their CLI calls use the Rust daemon.
 
 ## Installation boundary
 
@@ -27,7 +27,8 @@ sudo yum install ./scripts/rpmbuild/RPMS/x86_64/agent-sec-cli-*.rpm
 ```
 
 Use the matching architecture directory on aarch64. Install the core CLI package for this phase;
-the metapackage also pulls Agent integrations that have not been migrated here. V1 and V2 CLI
+the metapackage also pulls Agent integrations. Use plugin packages from the same revision
+as this Hook migration; updating the CLI alone does not update already loaded plugins. V1 and V2 CLI
 packages use the same package name and executable paths, so installing V2 replaces V1. Stop V1
 writers and retain a matching backup first, as described under deployment rollback below.
 
@@ -44,19 +45,30 @@ The core binaries require no Python Ledger runtime. `install-core-v2` installs b
 `/etc/agent-sec/skillsec.json`. Reinstallation preserves an existing configuration; RPM uses
 `%config(noreplace)`. Installation does not initialize a signing key or enable Agent Hooks.
 
-RPM follows the distribution's systemd preset and may enable this service at boot. Review its
-configuration, then explicitly start the root system service:
+The V2 systemd unit is `agent-sec-core.service`; `agent-sec-daemon` is the executable/process name.
+V1 used the same unit name as a user service; V2 runs it as a system service.
+
+On a host with a running systemd manager, RPM enables and starts the root system service during
+initial installation and V1-to-V2 upgrades. Review its configuration before installing, then verify
+that the daemon is available:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-sec-core.service
 sudo systemctl status agent-sec-core.service
 agent-sec-cli skill-ledger status
 ```
 
+If the RPM was installed into an image or container without a systemd manager, or the service was
+later stopped or disabled, start it explicitly:
+
+```sh
+sudo systemctl enable --now agent-sec-core.service
+```
+
 Use system `systemctl`, without `--user`. The unit creates runtime/state/log directories, keeps
-the key and logs private, and grants only `CAP_DAC_OVERRIDE`, `CAP_CHOWN` and `CAP_FOWNER` to the
-daemon. It retains `NoNewPrivileges`, `SystemCallFilter=@system-service`, native syscall
+the key and logs private, and grants `CAP_DAC_OVERRIDE`, `CAP_CHOWN`, `CAP_FOWNER` and
+`CAP_SYS_PTRACE` to the daemon. The first three support SkillSec directory access and recovery;
+`CAP_SYS_PTRACE` supports process discovery reads of protected procfs executable and namespace links.
+It retains `NoNewPrivileges`, `SystemCallFilter=@system-service`, native syscall
 architecture, `MemoryDenyWriteExecute` and kernel protections, while keeping HOME, `/tmp`, system Skill
 directories and shared mounts accessible for scanning, metadata publication and rollback. It does
 not grant `CAP_SYS_ADMIN` to the daemon. Custom SkillFS mounts must be visible to the service. In-place SkillFS backing setup requires kernel support for `open_tree` and `move_mount`,
@@ -82,6 +94,46 @@ and an empty root-owned state directory with mode 0700. Supply the absolute sock
 `agent-sec-daemon serve --socket /run/agent-sec-core/daemon.sock` and optionally supply
 `--skillsec-config /etc/agent-sec/skillsec.json`. The process must run as root. Its runtime
 directory must already exist; it creates the private state directory if absent.
+
+## Agent Hook integration
+
+Restart the Agent after installing the matching plugin or changing its trusted launch environment.
+Keep `AGENT_SEC_DAEMON_SOCKET` consistent with the daemon when using a non-default socket. Before
+loading a Skill, run `agent-sec-cli skill-ledger status` and explicitly scan that Skill to establish
+V2 trust; a V1 key or manifest does not establish V2 trust.
+
+| Host | Query | Initialization on a matched Skill call | Default policy |
+| --- | --- | --- | --- |
+| Codex | `check` | Idempotent `init --no-baseline` | `ask`, delivered as a warning at UserPromptSubmit |
+| Qoder | `check` | None | `ask` |
+| Qwen Code | `show` | Idempotent `init --no-baseline` | `ask` |
+| Cosh-NG | `show` | Idempotent `init --no-baseline` | `ask` |
+| OpenClaw | `show` | Idempotent `init --no-baseline` | `ask` |
+| Hermes | `show` | None | `observe` |
+
+The four initializing adapters ask the daemon on each matched invocation. They do not inspect
+HOME key files, scan Skills, reset an unsafe key, or rotate keys. OpenClaw does not initialize at
+plugin registration or retain a process-wide readiness result. Disabled and unmatched Hooks do
+not invoke the CLI. Qoder and Hermes retain their read-only behavior; initialize trust explicitly
+for these hosts. Host approval applies to the current invocation and does not write a Ledger decision.
+
+`check` consumers accept a valid risk result with exit code 1; they do not mistake it for a transport
+failure. `show` consumers require exit code 0 and a valid exposure summary, then use `message` to
+apply their existing policy. An active `warn` version, or an explicit manual decision, can have a
+null message. `hidden` is enforced by SkillFS exposure; the Hook does not independently deny direct
+filesystem access based on that field. An unmanaged Skill is outside this managed exposure path.
+
+A missing CLI, unavailable daemon, timeout or invalid response produces a diagnostic. Codex,
+Cosh-NG, Qwen Code, OpenClaw and Hermes retain fail-open execution-error behavior; Qoder applies its
+configured policy to an error as before. Failure to initialize stops that invocation before
+`check`/`show`; it does not fall back to Python. The diagnostic does not copy raw CLI stderr.
+
+Cosh-NG allows 10 seconds for the complete SkillSec Hook: up to 3 seconds for initialization,
+5 seconds for `show`, and 2 seconds of startup/processing margin. The `capabilities` environment
+view continues to report the 5-second query budget, not the host manifest deadline.
+
+Adapter-to-daemon tests and native Agent acceptance are separate. Current evidence and remaining
+host limitations are recorded in the [migration document](../../../../../src/agent-sec-core/docs/design/SKILL_SEC_PHASE_ONE.md#hook-follow-up).
 
 ## System configuration and trust
 

@@ -18,14 +18,14 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, Timelike};
+use chrono::{DateTime, Datelike as _, FixedOffset, NaiveDateTime, SecondsFormat, Timelike};
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::correlation::truncate_correlation_id;
 use crate::error::ObservabilityError;
-use crate::hook::{MetadataShape, ObservabilityHook, sorted_hook_names};
+use crate::hook::{ObservabilityHook, sorted_hook_names};
 
 /// Correlation metadata carried by every observability record.
 ///
@@ -86,21 +86,20 @@ impl ObservabilityMetadata {
 
     /// Drops fields the hook does not model, mirroring v1 `extra="ignore"`.
     fn conform_to(&mut self, hook: ObservabilityHook) -> Result<(), ObservabilityError> {
-        match hook.metadata_shape() {
-            MetadataShape::Common => {
-                self.tool_call_id = None;
-                self.call_id = None;
-            }
-            MetadataShape::ModelCall => {
-                self.tool_call_id = None;
-            }
-            MetadataShape::ToolCall => {
-                if self.tool_call_id.is_none() {
+        let fields = hook.metadata_shape().record_fields();
+        for (name, value) in [
+            ("toolCallId", &mut self.tool_call_id),
+            ("callId", &mut self.call_id),
+        ] {
+            match fields.iter().find(|(field, _)| *field == name) {
+                None => *value = None,
+                Some((_, false)) if value.is_none() => {
                     return Err(ObservabilityError::MissingMetadata {
-                        field: "toolCallId",
+                        field: name,
                         hook: hook.as_str().to_owned(),
                     });
                 }
+                _ => {}
             }
         }
         Ok(())
@@ -371,6 +370,14 @@ fn truncate_to_micros(value: DateTime<FixedOffset>) -> DateTime<FixedOffset> {
 }
 
 fn parse_observed_at(value: Option<&Value>) -> Result<DateTime<FixedOffset>, ObservabilityError> {
+    if let Some(Value::Number(number)) = value {
+        return number
+            .as_f64()
+            .and_then(|number| parse_epoch(number, false))
+            .ok_or_else(|| ObservabilityError::InvalidTimestamp {
+                value: number.to_string(),
+            });
+    }
     let raw = match value {
         Some(Value::String(text)) => text.as_str(),
         Some(other) => {
@@ -389,6 +396,28 @@ fn parse_observed_at(value: Option<&Value>) -> Result<DateTime<FixedOffset>, Obs
         return Ok(parsed);
     }
 
+    // Pydantic also accepts decimal epoch strings and ISO strings with a compact
+    // offset, an underscore separator, comma fractions, or omitted seconds.
+    let decimal = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    if !decimal.is_empty()
+        && decimal.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && let Ok(number) = raw.parse::<f64>()
+        && let Some(parsed) = parse_epoch(number, true)
+    {
+        return Ok(parsed);
+    }
+    let normalized = raw.replace('_', "T").replace(',', ".");
+    for pattern in [
+        "%Y-%m-%dT%H:%M:%S%.f%#z",
+        "%Y-%m-%d %H:%M:%S%.f%#z",
+        "%Y-%m-%dT%H:%M%#z",
+        "%Y-%m-%d %H:%M%#z",
+    ] {
+        if let Ok(parsed) = DateTime::parse_from_str(&normalized, pattern) {
+            return Ok(parsed);
+        }
+    }
+
     // Distinguish "parses but has no offset" from "not a timestamp at all" so
     // the v1 wording `observedAt must be timezone-aware` stays reachable.
     for pattern in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
@@ -400,6 +429,37 @@ fn parse_observed_at(value: Option<&Value>) -> Result<DateTime<FixedOffset>, Obs
     Err(ObservabilityError::InvalidTimestamp {
         value: raw.to_owned(),
     })
+}
+
+/// Frozen Pydantic epoch conversion, including its distinct negative-float path.
+#[allow(clippy::cast_possible_truncation)] // Finite, bounded timestamp inputs are checked first.
+fn parse_epoch(number: f64, from_string: bool) -> Option<DateTime<FixedOffset>> {
+    if !number.is_finite() || !(-62_135_596_800_000.0..253_402_300_800_000.0).contains(&number) {
+        return None;
+    }
+    let milliseconds = number.abs() > 20_000_000_000.0;
+    let micros = if from_string {
+        // Split before scaling to retain fractional precision at modern epochs.
+        let unit = if milliseconds { 1_000 } else { 1_000_000 };
+        (number.trunc() as i64).checked_mul(unit)?
+            + (number.fract() * if milliseconds { 1_000.0 } else { 1_000_000.0 }).round() as i64
+    } else {
+        // V1 float input floors the whole value, but adds the absolute fraction.
+        // Integer input has a zero fraction. Keep this observable oracle behavior.
+        let whole = number.floor() as i64;
+        let unit = if whole.abs() > 20_000_000_000 {
+            1_000
+        } else {
+            1_000_000
+        };
+        whole.checked_mul(unit)?
+            + (number.fract().abs() * if milliseconds { 1_000.0 } else { 1_000_000.0 }).round()
+                as i64
+    };
+    let parsed = DateTime::from_timestamp_micros(micros)?;
+    (1..=9999)
+        .contains(&parsed.year())
+        .then(|| parsed.fixed_offset())
 }
 
 fn parse_metadata(
@@ -436,6 +496,25 @@ fn parse_metadata(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn timestamp_coercions_match_v1_oracle() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../fixtures/observability/v1-timestamps.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let actual = parse_observed_at(Some(&case["input"]))
+                .map(format_observed_at)
+                .ok();
+            assert_eq!(
+                actual.as_deref(),
+                case["expected"].as_str(),
+                "input: {}",
+                case["input"]
+            );
+        }
+    }
 
     fn record_from(value: &Value) -> ObservabilityRecord {
         ObservabilityRecord::from_json_value(value).expect("payload must validate")

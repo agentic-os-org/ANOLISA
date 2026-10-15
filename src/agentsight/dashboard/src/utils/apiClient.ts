@@ -426,11 +426,24 @@ export const createCredentialBinding = (input: CredentialBindingInput) =>
     body: JSON.stringify(input),
   });
 
-export const fetchAgentProtectionPreview = (pid: number, directory?: string) => {
+export const fetchAgentProtectionPreview = async (
+  pid: number,
+  directory?: string,
+): Promise<AgentProtectionPreview> => {
   const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
-  return enforcementRequest<AgentProtectionPreview>(
+  const preview = await enforcementRequest<AgentProtectionPreview>(
     `/api/enforcement/agent-protection/${pid}${query}`,
   );
+  // The response is typed as an object, but a server that does not implement
+  // this route can answer `200` with a body of another shape — the macOS local
+  // viewer's `/api/*` catch-all returns `[]` — and the caller then stores
+  // `preview.source_paths` (undefined) as its source list, which the protection
+  // dialog renders with `.join`/`.length`. Rejecting here routes that into the
+  // callers' existing catch paths instead of a render-time crash.
+  if (!Array.isArray(preview?.source_paths)) {
+    throw new Error('protection preview is unavailable');
+  }
+  return preview;
 };
 
 export const detachEnforcementBinding = (bindingId: string) =>
@@ -998,14 +1011,22 @@ export interface InterruptionTypeStat {
 
 /**
  * Fetch per-type interruption stats within a time range.
+ *
+ * `agentName` must be forwarded by callers that also filter the severity
+ * badge by agent, otherwise the tooltip breakdown counts every agent while
+ * the badge shows one.
  */
 export async function fetchInterruptionStats(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<InterruptionTypeStat[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) {
+    params.set('agent_name', agentName);
+  }
   return apiFetch<InterruptionTypeStat[]>(
     `${API_BASE}/api/interruptions/stats?${params.toString()}`
   );
@@ -2040,7 +2061,9 @@ export async function login(token: string): Promise<boolean> {
     credentials: 'same-origin',
     body: JSON.stringify({ token }),
   });
-  return res.ok;
+  if (res.status === 401) return false;
+  if (!res.ok) throw new Error(`POST /api/auth/login -> ${res.status}`);
+  return true;
 }
 
 // ─── Storage status API ─────────────────────────────────────────────────────
@@ -2107,14 +2130,32 @@ export interface StorageStoreStatus {
 }
 
 export interface StorageStatusResponse {
-  schema_version: 2;
+  schema_version: 3;
   observed_at_unix_ms: number;
+  /** Combined size limit in MiB; 0 disables, otherwise the minimum is 9. */
+  max_total_size_mb: number;
+  /** Combined physical bytes of every measured store. */
+  total_physical_bytes: number;
   stores: StorageStoreStatus[];
 }
 
 /** Read effective SQLite policies and current disk allocation. */
 export async function fetchStorageStatus(): Promise<StorageStatusResponse> {
   return apiFetch<StorageStatusResponse>(`${API_BASE}/api/storage/status`);
+}
+
+/** Persist the combined SQLite storage limit into the runtime config file. */
+export async function saveStorageLimit(maxTotalSizeMb: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/storage/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ max_total_size_mb: maxTotalSizeMb }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(detail || `POST /api/storage/config -> ${res.status}`);
+  }
 }
 
 // ─── Optimization analysis API ───────────────────────────────────────────────

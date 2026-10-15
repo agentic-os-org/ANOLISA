@@ -13,6 +13,8 @@ on:
       - ".github/scripts/validate-repository-metadata.py"
       - ".github/scripts/test_validate_repository_metadata.py"
       - ".github/scripts/test_package_source_paths.py"
+      - ".github/scripts/test_release_notes.py"
+      - ".github/scripts/generate_release_notes.py"
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
@@ -38,6 +40,8 @@ on:
       - ".github/scripts/validate-repository-metadata.py"
       - ".github/scripts/test_validate_repository_metadata.py"
       - ".github/scripts/test_package_source_paths.py"
+      - ".github/scripts/test_release_notes.py"
+      - ".github/scripts/generate_release_notes.py"
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
@@ -76,6 +80,9 @@ jobs:
 
       - name: Test source archive paths and identity
         run: python3 .github/scripts/test_package_source_paths.py
+
+      - name: Test automatic release notes
+        run: python3 -B .github/scripts/test_release_notes.py
 
   community-automation:
     name: Test community automation

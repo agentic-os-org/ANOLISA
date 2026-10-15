@@ -49,8 +49,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
-      - name: Install cargo-sbom
-        run: cargo install cargo-sbom --version 0.10.0 --locked
+      - name: Verify preinstalled cargo-sbom
+        run: |
+          if [[ "$(cargo sbom --version)" != 'cargo-sbom 0.10.0' ]]; then
+            echo '::error::Runner image must provide cargo-sbom 0.10.0'
+            exit 1
+          fi
 
       - name: Run prebuilt action regression tests
         run: .github/actions/build-tokenless-prebuilt/test.sh

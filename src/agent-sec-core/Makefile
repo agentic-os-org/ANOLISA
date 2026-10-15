@@ -5,7 +5,7 @@
 .PHONY: python-code-pretty
 python-code-pretty: ## Format Python code using black and isort
 	@echo "🎨 Formatting code with black and isort..."
-	@uv run --project agent-sec-cli isort --profile black --line-length 80 --skip-glob "*/backend-skill/templates/*" .
+	@uv run --project agent-sec-cli isort --settings-path ../.. --profile black --line-length 80 --skip-glob "*/backend-skill/templates/*" .
 	@uv run --project agent-sec-cli black --force-exclude "backend-skill/templates/" .
 
 .PHONY: python-lint
@@ -99,6 +99,9 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 # Delete a line as soon as its capability lands in the V2 CLI/daemon; do not
 # collapse the list into a directory-level ignore, or migrated coverage will
 # stay silently disabled.
+PII_HOOK_LAYOUT = installed
+SKILLSEC_HOOK_LAYOUT = installed
+
 .PHONY: test-e2e-rpm-v2
 test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@echo "🧪 Running V2 E2E tests on installed RPM..."
@@ -108,15 +111,13 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@# The shared code-scanner E2E imports rule metadata before it can decide
 	@# whether source-only inventory assertions apply to this installed V2 RPM.
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
-	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=installed python3 -m pytest tests/e2e/ tests/v2/ \
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 OBS_E2E_RUNTIME=v2 SEC_EVENTS_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=$(PII_HOOK_LAYOUT) SKILLSEC_HOOK_LAYOUT=$(SKILLSEC_HOOK_LAYOUT) python3 -m pytest tests/e2e/ tests/v2/ \
 		--import-mode=importlib -ra \
-		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
-		--ignore=tests/e2e/cli/test_session_report_e2e.py \
+		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
-		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
 		--ignore=tests/e2e/qoder-hooks/test_qoder_skill_ledger_hook_e2e.py \
 		--ignore=tests/e2e/qwen-code-extension/test_qwen_direct_hook_execution.py \
 		--ignore=tests/e2e/skill-ledger/e2e_test.py \
@@ -124,14 +125,16 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/linux-sandbox \
 		-v --tb=short
 	@# Pending V2 capabilities behind the ignores above:
-	@#   cli/test_events_e2e.py                   -> security event query
-	@#   cli/test_observability_record_*_e2e.py   -> observability record sinks
-	@#   cli/test_session_report_e2e.py           -> session report
-	@#   codex|qoder|qwen hook tests              -> hooks calling the V2 CLI
+	@#   codex|qwen hook tests                    -> mixed V1 prompt/observability fixtures
+	@#   qoder skill hook tests                  -> V1 caller-local audit storage/schema
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
-	@#   prompt-scanner/test_prompt_scanner_e2e.py -> prompt scanning
 	@#   skill-ledger, skill-signing              -> retired V1 per-user keys and Agent hooks
-	@# Rust core lifecycle is covered by tests/v2/e2e/test_skillsec_cli_e2e.py.
+	@# Rust core lifecycle: tests/v2/e2e/test_skillsec_cli_e2e.py.
+	@# Observability ingestion and queries: tests/v2/e2e/test_observability_*_e2e.py.
+	@# V1 event/report tests use isolated V2 daemons from tests/conftest.py.
+	@# V1 record file-absence assertions differ from V2 daemon storage initialization;
+	@# their V2 contracts are covered by test_observability_record_e2e.py.
+	@# Installed SkillSec adapters: tests/v2/e2e/test_skillsec_hook_contracts.py.
 	@#   linux-sandbox                            -> privileged container (same as V1)
 
 VENV_PYTHON ?= $(HOME)/.local/lib/anolisa/sec-core/venv/bin/python
@@ -163,14 +166,19 @@ test-python-coverage: ## Run Python tests with coverage report
 test-rust: ## Run Rust tests (agent-sec-cli + V2; linux-sandbox on Linux only)
 	@echo "🧪 Running agent-sec-cli workspace Rust tests..."
 	cd agent-sec-cli && { $(PYO3_PIN); cargo test --workspace; }
-	@echo "🧪 Running AgentSecCore V2 workspace Rust tests..."
-	cd v2 && cargo test --workspace --locked
+	@$(MAKE) test-rust-v2
 	@echo "🧪 Running linux-sandbox Rust tests (Linux only)..."
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		cd linux-sandbox && cargo test -- --skip bwrap_seccomp; \
 	else \
 		echo "  (linux-sandbox tests skipped: requires Linux)"; \
 	fi
+
+.PHONY: test-rust-v2
+test-rust-v2: ## Run V2 Rust tests and verify daemon server identity separately
+	@echo "🧪 Running AgentSecCore V2 workspace Rust tests..."
+	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo test --workspace --locked --features asc-daemon-client/testing -- --skip untrusted_server_is_rejected_before_request_bytes_are_sent
+	cd v2 && cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
@@ -213,6 +221,7 @@ test: test-python test-rust test-openclaw-plugin ## Run all tests
 BUILD_DIR ?= target
 CLI_WHEEL_BUILD_DIR ?= agent-sec-cli/target/wheels
 CLI_WHEEL_PATTERN := agent_sec_cli-*.whl
+COMPONENT_CONTRACT ?= .anolisa/component.toml
 
 # The normal targets retain their network-enabled developer workflow. RPM builds
 # select OFFLINE_BUILD through build-all-v2-offline after Source1 supplies every
@@ -271,6 +280,7 @@ build-cli-v2: ## Build V2 Rust CLI and daemon binaries
 	install -d -m 0755 $(V2_BIN_BUILD_DIR)
 	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-cli" \
 		"$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-daemon" \
+		"$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-daemon-health" \
 		$(V2_BIN_BUILD_DIR)/
 
 .PHONY: setup
@@ -327,9 +337,9 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 	cp -p tools/sign-skill.sh $(BUILD_DIR)/tools/
 
 .PHONY: stage-component-manifest
-stage-component-manifest: ## Stage component.toml into BUILD_DIR
+stage-component-manifest: ## Stage the selected component contract into BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
-	install -p -m 0644 .anolisa/component.toml \
+	install -p -m 0644 $(COMPONENT_CONTRACT) \
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
@@ -374,37 +384,16 @@ OUTPUT_DIR ?= $(BUILD_DIR)/raw
 TARGET_OS ?= linux
 TARGET_ARCH ?= $(shell uname -m)
 RAW_CONTRACT ?= .anolisa/component.toml
-RAW_PYTHON_VERSION := 3.11.6
-RAW_PYTHON_ENV ?= $(BUILD_DIR)/raw-python-env
 RAW_PYTHON_RUNTIME ?= $(BUILD_DIR)/python-runtime
 RAW_PYTHON_ARCHIVE ?= $(BUILD_DIR)/downloads/cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz
 
 .PHONY: prepare-raw-python
-prepare-raw-python: build-all ## Stage pinned Python and locked production dependencies for raw packaging
-	rm -rf $(CLI_STAGED_SITE) $(RAW_PYTHON_ENV)
+prepare-raw-python: build-all-v2 ## Stage the adapter-only bundled Python runtime
 	./packaging/raw/prepare_python_runtime.sh \
 		"$(abspath $(RAW_PYTHON_RUNTIME))" "$(abspath $(RAW_PYTHON_ARCHIVE))"
-	cd agent-sec-cli && UV_PROJECT_ENVIRONMENT="$(abspath $(RAW_PYTHON_ENV))" \
-		uv sync --python "$(abspath $(RAW_PYTHON_RUNTIME))/bin/python3.11" \
-			--no-managed-python --frozen --no-dev --no-install-project --link-mode copy
-	@set -eu; \
-		python="$(abspath $(RAW_PYTHON_ENV))/bin/python3.11"; \
-		version="$$("$$python" -c 'import platform; print(platform.python_version())')"; \
-		[ "$$version" = "$(RAW_PYTHON_VERSION)" ] || { \
-			echo "ERROR: raw package requires Python $(RAW_PYTHON_VERSION), found $$version" >&2; \
-			exit 1; \
-		}
-	install -d -m 0755 $(CLI_STAGED_SITE)
-	cp -a $(RAW_PYTHON_ENV)/lib/python3.11/site-packages/. $(CLI_STAGED_SITE)/
-	@$(call require_single_cli_wheel,$(BUILD_DIR)/wheels) \
-		uv pip install --python $(RAW_PYTHON_ENV)/bin/python3.11 \
-			--target $(CLI_STAGED_SITE) --no-deps --no-cache --link-mode copy "$$1"
-	rm -rf $(CLI_STAGED_SITE)/bin
-	rm -f $(CLI_STAGED_SITE)/.lock
-	rm -rf $(RAW_PYTHON_ENV)
 
 .PHONY: stage-raw
-stage-raw: ## Stage built raw payload under DESTDIR (build outputs must already exist)
+stage-raw: ## Stage the V2 raw payload under DESTDIR
 	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
 		DESTDIR="$(DESTDIR)" \
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
@@ -413,7 +402,7 @@ stage-raw: ## Stage built raw payload under DESTDIR (build outputs must already 
 		./packaging/raw/package.sh stage
 
 .PHONY: package-raw
-package-raw: prepare-raw-python ## Build deterministic raw tar archive in OUTPUT_DIR
+package-raw: prepare-raw-python ## Build the deterministic V2 raw archive
 	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
 		OUTPUT_DIR="$(abspath $(OUTPUT_DIR))" \
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
@@ -511,6 +500,8 @@ install-cli-v2: ## RPM: Install V2 Rust CLI and daemon binaries
 		$(DESTDIR)/usr/bin/agent-sec-cli
 	install -p -m 0755 $(V2_BIN_BUILD_DIR)/agent-sec-daemon \
 		$(DESTDIR)/usr/bin/agent-sec-daemon
+	install -p -m 0755 $(V2_BIN_BUILD_DIR)/agent-sec-daemon-health \
+		$(DESTDIR)/usr/bin/agent-sec-daemon-health
 
 .PHONY: install-cli-venv
 install-cli-venv: ## Create venv, install deps from uv.lock, install wheel, symlink
@@ -587,9 +578,9 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
 
 .PHONY: install-component-manifest
-install-component-manifest: ## Install component.toml to DESTDIR
+install-component-manifest: ## Install the selected component contract to DESTDIR
 	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
-	install -m 0644 .anolisa/component.toml \
+	install -m 0644 $(COMPONENT_CONTRACT) \
 		$(DESTDIR)$(COMPONENT_DIR)/component.toml
 
 .PHONY: install-systemd-user

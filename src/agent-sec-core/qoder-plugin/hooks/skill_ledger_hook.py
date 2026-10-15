@@ -307,6 +307,8 @@ def _run_check(input_data: dict[str, Any], resolved: ResolvedSkill) -> CheckOutc
     status = status_value.strip().lower() if isinstance(status_value, str) else ""
     if status not in _VALID_STATUSES:
         return CheckOutcome("unknown", {}, "unknown_status")
+    if proc.returncode not in (0, 1) or (proc.returncode != 0 and status == "pass"):
+        return CheckOutcome("error", {}, "check_error")
     return CheckOutcome(status, data, "check_error" if status == "error" else None)
 
 

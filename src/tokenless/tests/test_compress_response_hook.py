@@ -474,62 +474,6 @@ class TestRetrieveCommandClassifier(unittest.TestCase):
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
-class TestFileReadCommandClassifier(unittest.TestCase):
-    @staticmethod
-    def _classify(tool_name: str, command: object) -> bool:
-        hook_utils = TestBinaryFallbackPaths._hook_utils()
-        return hook_utils.is_file_read_command(tool_name, {"command": command})
-
-    def test_accepts_plain_file_prints(self):
-        commands = (
-            "cat page.html",
-            "cat a.html b.html",
-            "head -n 50 page.html",
-            "tail -n +5 page.html",
-            "nl -ba page.html",
-            "bat --style=plain page.html",
-            "cd src && cat page.html",
-            "cd a && cd b && cat page.html",
-            "sed -n '1,80p' page.html",
-            "sed -n -e 5p page.html",
-            "cat page.html\n",
-            "\n  cat page.html\r\n\n",
-        )
-        for command in commands:
-            with self.subTest(command=command):
-                self.assertTrue(self._classify("Bash", command))
-
-    def test_rejects_other_tools_and_anything_beyond_a_plain_print(self):
-        cases = (
-            ("Read", "cat page.html"),
-            ("Bash", "cat"),
-            ("Bash", "cat -"),
-            ("Bash", "/bin/cat page.html"),
-            ("Bash", "LC_ALL=C cat page.html"),
-            ("Bash", "cat page.html | head -c 100"),
-            ("Bash", "cat page.html > copy.html"),
-            ("Bash", "cat < page.html"),
-            ("Bash", "cat <<EOF\n<p>x</p>\nEOF"),
-            ("Bash", "cat page.html; ls"),
-            ("Bash", "cat page.html\nnpm test"),
-            ("Bash", "cat page.html\r\nls"),
-            ("Bash", "cat page.html && ls"),
-            ("Bash", "ls && cat page.html"),
-            ("Bash", "cat $(ls *.html)"),
-            ("Bash", "cat `ls`"),
-            ("Bash", "curl -s https://example.com/"),
-            ("Bash", "sed -i 's/a/b/' page.html"),
-            ("Bash", "sed -n 's/a/b/p' page.html"),
-            ("Bash", "sed -n '1,5p'"),
-            ("Bash", "cat 'unterminated"),
-            ("Bash", 42),
-        )
-        for tool_name, command in cases:
-            with self.subTest(tool_name=tool_name, command=command):
-                self.assertFalse(self._classify(tool_name, command))
-
-
-@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestReplacementProtocol(unittest.TestCase):
     """Verify updatedToolOutput replacement semantics."""
 
@@ -603,6 +547,64 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertFalse(compressed_data["interrupted"])
         self.assertNotIn("additionalContext", hso,
                          "Qoder compressed content must not be additive")
+
+    def test_qwenwork_replaces_shell_and_mcp_outputs(self):
+        large_payload = _make_large_json_payload()
+        for tool in ("Bash", "mcp__office__list_rows"):
+            for response in (large_payload, json.dumps(large_payload)):
+                with self.subTest(tool=tool, response_type=type(response).__name__):
+                    result = _run_hook(
+                        {
+                            "tool_name": tool,
+                            "tool_response": response,
+                            "session_id": "test-session",
+                            "tool_use_id": "toolu_test",
+                        },
+                        agent_id="qwenwork",
+                        mock_tokenless_path=self.mock_bin,
+                        isolated_home=self.isolated_home,
+                    )
+                    hso = result["hookSpecificOutput"]
+                    self.assertEqual(hso["hookEventName"], "PostToolUse")
+                    replacement = hso["updatedToolOutput"]
+                    self.assertIsInstance(replacement, type(response))
+                    if isinstance(replacement, str):
+                        replacement = json.loads(replacement)
+                    self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
+                    self.assertNotIn("additionalContext", hso)
+
+    def test_qwenwork_mcp_telemetry_cannot_replace_real_output(self):
+        telemetry = {
+            "mcp_operation": "call",
+            "mcp_invocation_path": "lazy",
+            "mcp_operation_outcome": "success",
+            "mcp_tool_name": "synthetic_tool_" * 40,
+        }
+        for tool in ("mcp_list", "mcp_get", "mcp_call"):
+            with self.subTest(tool=tool):
+                result = _run_hook(
+                    {"tool_name": tool, "tool_response": telemetry},
+                    agent_id="qwenwork",
+                    mock_tokenless_path=self.mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), [])
+
+        for agent, tool, response in (
+            ("claude-code", "mcp_call", telemetry),
+            ("qwenwork", "mcp__office__list_rows", telemetry),
+            ("qwenwork", "mcp_call", {"records": "x" * 500}),
+            ("qwenwork", "mcp_call", json.dumps({"records": "x" * 500})),
+        ):
+            with self.subTest(agent=agent, tool=tool):
+                result = _run_hook(
+                    {"tool_name": tool, "tool_response": response},
+                    agent_id=agent,
+                    mock_tokenless_path=self.mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertIn("updatedToolOutput", result["hookSpecificOutput"])
 
     def test_opencode_uses_string_replacement(self):
         """OpenCode should receive a replacement that its plugin can apply."""
@@ -1057,6 +1059,22 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                               "Qoder requires a string updatedToolOutput")
         self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
 
+    def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
+        log = "npm verbose progress line\n" * 150
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, "warning"),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope(log[:40], "warning"))
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestGrepEnvelopeUnwrap(unittest.TestCase):
@@ -1263,17 +1281,18 @@ class TestSkipTools(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
-    def test_plain_shell_file_reads_are_file_read(self):
-        """`cat page.html` prints the file itself; Core keeps pages verbatim."""
-        for command, origin in (
-            ("cat page.html", "file_read"),
-            ("cat page.html | head -c 100", "command_output"),
+    def test_shell_commands_reach_core_for_file_read_classification(self):
+        """Core decides whether `cat page.html` is a file read; the hook passes the line."""
+        for tool_name, tool_input, expected in (
+            ("Bash", {"command": "cat page.html"}, "cat page.html"),
+            ("Bash", {"command": 7}, None),
+            ("Read", {"file_path": "page.html"}, None),
         ):
-            with self.subTest(command=command):
+            with self.subTest(tool_name=tool_name, tool_input=tool_input):
                 _run_hook(
                     {
-                        "tool_name": "Bash",
-                        "tool_input": {"command": command},
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
                         "tool_response": _make_large_json_payload(),
                         "session_id": "s",
                         "tool_use_id": "t",
@@ -1284,7 +1303,7 @@ class TestSkipTools(unittest.TestCase):
                 )
                 with open(os.path.join(self.tmpdir, "request.json")) as captured:
                     request = json.load(captured)
-                self.assertEqual(request["content_origin"], origin)
+                self.assertEqual(request.get("command"), expected)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

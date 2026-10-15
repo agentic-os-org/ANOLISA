@@ -3,13 +3,13 @@
 [English](BUILDING.md)
 
 本指南面向从源码参与 ANOLISA 开发的贡献者，说明仓库级构建入口、聚合测试脚本
-的覆盖范围，以及 12 个组件各自的构建和测试命令。组件特有的依赖和运行方式仍以
+的覆盖范围，以及下列组件各自的构建和测试命令。组件特有的依赖和运行方式仍以
 组件 README 为准。
 
 ## 1. 准备源码目录
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa
 ```
 
@@ -20,7 +20,7 @@ cd anolisa
 
 ## 2. 仓库结构
 
-当前 `src/` 下包含 12 个组件。
+下表列出组件在仓库中的位置。
 
 | 组件 | 目录 | 平台和职责 |
 |------|------|------------|
@@ -35,7 +35,6 @@ cd anolisa
 | SkillFS（`skillfs`） | [`src/skillfs`](../src/skillfs/README_zh.md) | Rust FUSE Skill 文件系统，Linux |
 | ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README_zh.md) | Rust workspace checkpoint daemon 和 TypeScript adapter，作为 Linux system service 运行 |
 | ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel tuning engine，Linux |
-| blaze | [`src/blaze`](../src/blaze/README_zh.md) | Rust 单机 sandbox 编排 daemon，Linux |
 
 仓库级规则位于 [`AGENTS.md`](../AGENTS.md)。修改组件前先阅读对应的 `AGENTS.md`，
 架构和运行细节请查看组件 README。
@@ -49,7 +48,7 @@ Linux-only 组件。
 |------|------|
 | Node.js | `deprecated/copilot-shell/package.json` 要求 Node.js `>=20.0.0`。agent-memory、agentsight、agent-sec-core、tokenless 和 ws-ckpt 的插件构建也会使用 npm。 |
 | Python 和 uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` 要求 Python `==3.11.6`，该项目使用 `uv`。不要把它扩展成仓库级 Python 最低版本。 |
-| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`distribution/anolisa/rust-toolchain.toml` 固定 `1.93.1`；`src/blaze/rust-toolchain.toml` 固定 `1.88.0`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`distribution/anolisa/rust-toolchain.toml` 固定 `1.93.1`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
 | cosh-ng | Linux 源码构建需要 `pkg-config` 和 OpenSSL 开发文件。 |
 | agent-sec-core | Linux sandbox 运行和集成检查可能需要 bubblewrap、GnuPG 以及 `jq`。 |
 | agentsight | Linux eBPF 构建需要 clang、LLVM、libbpf 和 ELF 开发头文件、内核头文件，以及启用 BTF 的内核。`make build-mac` 构建不含 eBPF 的 macOS local viewer。 |
@@ -78,8 +77,7 @@ export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standa
   `memory`。
 - 可选 2 个组件包括 `cosh-ng` 和 `sight`。可以用 `--all` 或 `--component` 显式加入。
 
-脚本之外的 4 个组件是 `anolisa`、`skillfs`、`ktuner` 和 `blaze`，请按第 5 节的
-组件命令单独构建。
+`anolisa`、`skillfs` 和 `ktuner` 不由该脚本构建，请按第 5 节的组件命令单独构建。
 
 默认安装模式是 user mode，组件文件安装到 `~/.local` 和 Copilot Shell 的用户目录
 时无需 `sudo`，首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
@@ -136,6 +134,7 @@ daemon，默认 user profile 不会创建 user service。
 
 | 组件 | 构建 | 测试和质量门禁 |
 |------|------|----------------|
+| [AW](developer-guide/zh/aw/integration.md) | `cd src/aw && cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
 | [copilot-shell](../deprecated/copilot-shell/README_zh.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README_zh.md) | `cd src/os-skills && make build` | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
 | [agent-sec-core](../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |
@@ -147,13 +146,12 @@ daemon，默认 user profile 不会创建 user service。
 | [anolisa](../distribution/anolisa/README_zh.md) | `cd distribution/anolisa && cargo build --release --locked` | `cd distribution/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
 | [SkillFS](../src/skillfs/README_zh.md) | `cd src/skillfs && cargo build --workspace --release` | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`；Linux 上再运行 `cd src/skillfs && scripts/test.sh` 执行 FUSE smoke test。 |
 | [ktuner](../src/ktuner/README.md) | `cd src/ktuner && cargo build --release` | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
-| [blaze](../src/blaze/README_zh.md) | `cd src/blaze && cargo build --workspace --release` | `cd src/blaze && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
 
 修改公共 API 或 rustdoc 时，在受影响的 Rust 组件门禁中追加
-`cargo doc --workspace --no-deps`。`ktuner tune`、Blaze Firecracker 路径、FUSE 挂载、
+`cargo doc --workspace --no-deps`。`ktuner tune`、FUSE 挂载、
 eBPF tracing 和系统 daemon 需要普通单元测试之外的主机权限或内核能力。
 
-[CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) 还会为部分组件执行 coverage、打包、前端、
+[CI workflow](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml) 还会为部分组件执行 coverage、打包、前端、
 adapter 和集成检查。这些任务比矩阵中的最小本地命令更严格，涉及生成制品或框架
 adapter 时应再查看 workflow。
 
@@ -161,7 +159,7 @@ adapter 时应再查看 workflow。
 
 `tests/run-all-tests.sh` 只是部分组件的便捷测试脚本。不带过滤条件时，它只会调用
 copilot-shell、agent-sec-core、agentsight、tokenless 和 agent-memory 这 5 个组件，
-不会测试 cosh-ng、os-skills、ws-ckpt、anolisa、SkillFS、ktuner 或 blaze。
+不会测试 cosh-ng、os-skills、ws-ckpt、anolisa、SkillFS 或 ktuner。
 
 ```bash
 ./tests/run-all-tests.sh

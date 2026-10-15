@@ -206,7 +206,7 @@ published — the installer stops before handing anything to QwenPaw:
 
 ```text
 [tokenless] The Tokenless 0.8.2 Python SDK wheel asset is unavailable (HTTP 404):
-[tokenless]   https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+[tokenless]   https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.2/anolisa_tokenless-0.8.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 [tokenless] This package was built from a source tree already at 0.8.2, but that asset
 [tokenless] cannot be downloaded. A maintainer must check whether the GitHub Release
 [tokenless] `tokenless/v0.8.2` exists:
@@ -441,7 +441,7 @@ The standalone installer records every path it created in a receipt at `~/.local
 Upgrade by re-running the installer. It overwrites the recorded paths and rewrites the receipt, so the record stays accurate:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
 Switching method on the same machine — for example re-running with `TOKENLESS_FORCE_BUILD=1` after an npm install — retires what the previous method created, so no `rtk` launcher, npm global package or adapter tree survives that the new receipt no longer mentions. Nothing is retired until the replacement has been verified: the previous install is moved aside first and put back if the new one fails, so a missing tag, a failing build or an unwritable directory leaves the working CLI and its receipt exactly as they were. A recorded path whose recorded identity no longer matches was taken over by another installer and is left alone.
@@ -463,7 +463,7 @@ Restart the agent afterwards. When the run took the npm path, the plugin registe
 Uninstall with the matching script, which removes only what the receipt records:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/uninstall.sh | bash
 ```
 
 Preview the plan first, or also drop the collected statistics:

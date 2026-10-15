@@ -141,12 +141,11 @@ pub fn create_export(
         }
         write_private_file(&staging.join("events.jsonl"), &event_lines)?;
 
-        let (gaps, _) = analyze_lifecycles(&events);
         let summary = ExportSummary {
             event_count: events.len(),
             event_types,
             failure_classes: failures,
-            gap_count: gaps.len(),
+            gap_count: export_gap_count(&events),
             identity_aliases: aliases.len(),
         };
         let summary_bytes = serde_json::to_vec_pretty(&summary)
@@ -300,6 +299,17 @@ fn collect_events(
     Ok((events, diagnostics, truncated))
 }
 
+fn export_gap_count(events: &[AuditStoredEvent]) -> usize {
+    let lifecycle_gaps = analyze_lifecycles(events).0.len();
+    let projection_gaps = events
+        .iter()
+        .filter(|stored| {
+            stored.event.event_type == AuditEventType::Known(KnownAuditEventType::AuditTruncated)
+        })
+        .count();
+    lifecycle_gaps + projection_gaps
+}
+
 fn apply_export_allowlist(event: &mut Value, event_type: &AuditEventType) {
     const DATA_FIELDS: &[&str] = &[
         "duration_ms",
@@ -351,7 +361,13 @@ fn apply_export_allowlist(event: &mut Value, event_type: &AuditEventType) {
         outcome.remove("code");
     }
     if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
-        data.retain(|key, _| DATA_FIELDS.contains(&key.as_str()));
+        // Gap counters are validated only for truncation markers, so unknown
+        // events must not reuse these generic names as an export channel.
+        let truncation = *event_type == AuditEventType::Known(KnownAuditEventType::AuditTruncated);
+        data.retain(|key, value| {
+            DATA_FIELDS.contains(&key.as_str())
+                || (truncation && matches!(key.as_str(), "seen" | "len") && value.is_u64())
+        });
     }
     if let Some(redaction) = event.get_mut("redaction").and_then(Value::as_object_mut) {
         redaction.insert(
@@ -675,5 +691,132 @@ mod tests {
         }
         std::fs::write(root.path().join("events.jsonl"), b"Bearer synthetic-secret").unwrap();
         assert!(scan_bundle(root.path()).is_err());
+    }
+
+    #[test]
+    fn export_allowlist_keeps_the_truncation_marker_a_valid_event() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../cosh-types/tests/fixtures/audit-v1-shell-truncated.json"
+        ))
+        .unwrap();
+        let event: AuditEventV1 = serde_json::from_value(value.clone()).unwrap();
+        apply_export_allowlist(&mut value, &event.event_type);
+        let exported: AuditEventV1 = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            exported.data(),
+            event.data(),
+            "the gap counters must survive export"
+        );
+        exported
+            .validate()
+            .expect("an exported truncation marker must stay a valid v1 event");
+    }
+
+    #[test]
+    fn export_summary_counts_explicit_truncation_gaps() {
+        let event: AuditEventV1 = serde_json::from_str(include_str!(
+            "../../../cosh-types/tests/fixtures/audit-v1-shell-truncated.json"
+        ))
+        .unwrap();
+        let stored = AuditStoredEvent {
+            event,
+            generation: super::super::reader::AuditSchemaGeneration::V1,
+            segment_id: "fixture-segment".to_string(),
+        };
+
+        assert_eq!(export_gap_count(&[]), 0);
+        assert_eq!(export_gap_count(std::slice::from_ref(&stored)), 1);
+        assert_eq!(export_gap_count(&[stored.clone(), stored]), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_keeps_gap_counters_only_on_read_truncation_markers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker: Value = serde_json::from_str(include_str!(
+            "../../../cosh-types/tests/fixtures/audit-v1-shell-truncated.json"
+        ))
+        .unwrap();
+        let mut future = marker.clone();
+        future["event_id"] = Value::String("future-event-1".to_string());
+        future["event_type"] = Value::String("future.event".to_string());
+        future["data"] = serde_json::json!({
+            "operation": "future_operation",
+            "seen": "not-a-counter",
+            "len": {"nested": "not-a-counter"},
+        });
+        let root = crate::audit::AuditTestDir::create();
+        let date = root.path().join("v1/segments/2026-10-12");
+        super::super::store::ensure_private_dir(&root.path().join("v1")).unwrap();
+        super::super::store::ensure_private_dir(&root.path().join("v1/segments")).unwrap();
+        super::super::store::ensure_private_dir(&date).unwrap();
+        let path = date.join("cosh-shell-1-1-00000000-0000-0000-0000-000000000000.jsonl");
+        let mut bytes = serde_json::to_vec(&marker).unwrap();
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&future).unwrap());
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let read = super::super::reader::read_all(root.path(), false).unwrap();
+        assert!(read.diagnostics.is_empty(), "{:?}", read.diagnostics);
+        let exported = read
+            .events
+            .iter()
+            .map(|stored| {
+                let mut value = serde_json::to_value(&stored.event).unwrap();
+                apply_export_allowlist(&mut value, &stored.event.event_type);
+                value
+            })
+            .collect::<Vec<_>>();
+        let truncated = exported
+            .iter()
+            .find(|event| event["event_type"] == "audit.truncated")
+            .expect("exported truncation marker");
+        assert_eq!(truncated["data"]["seen"], 2);
+        assert_eq!(truncated["data"]["len"], 1);
+        serde_json::from_value::<AuditEventV1>(truncated.clone())
+            .unwrap()
+            .validate()
+            .expect("the exported marker stays a valid v1 event");
+        let unknown = exported
+            .iter()
+            .find(|event| event["event_type"] == "unknown")
+            .expect("exported unknown event");
+        assert!(
+            unknown["data"].get("seen").is_none() && unknown["data"].get("len").is_none(),
+            "unknown events must not export unvalidated gap counters: {}",
+            unknown["data"]
+        );
+    }
+
+    #[test]
+    fn export_strips_gap_counters_outside_numeric_truncation_markers() {
+        let mut degraded = serde_json::json!({
+            "event_type": "audit.degraded",
+            "data": {"operation": "write_gap_observed", "seen": 1, "len": 0},
+        });
+        apply_export_allowlist(
+            &mut degraded,
+            &AuditEventType::from(KnownAuditEventType::AuditDegraded),
+        );
+        assert_eq!(
+            degraded["data"],
+            serde_json::json!({"operation": "write_gap_observed"})
+        );
+
+        let mut malformed = serde_json::json!({
+            "event_type": "audit.truncated",
+            "data": {"operation": "event_snapshot_shrunk", "seen": "2", "len": {"n": 1}},
+        });
+        apply_export_allowlist(
+            &mut malformed,
+            &AuditEventType::from(KnownAuditEventType::AuditTruncated),
+        );
+        assert_eq!(
+            malformed["data"],
+            serde_json::json!({"operation": "event_snapshot_shrunk"})
+        );
     }
 }

@@ -211,10 +211,13 @@ fn sensitive_flag_pattern() -> &'static Regex {
             r#"(?ix)
             (?P<prefix>
                 (?:^|\s)
-                --(?:password|passwd|passphrase|token|access[_-]?token|refresh[_-]?token|
-                     id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
-                     access[_-]?key[_-]?(?:id|secret)|security[_-]?token|authorization|
-                     cookie|set[_-]?cookie)
+                --(?:password|passwd|passphrase|access[_-]?token|refresh[_-]?token|
+                     id[_-]?token|session[_-]?token|auth[_-]?token|
+                     secret[_-]?access[_-]?key|secret[_-]?key|client[_-]?secret|
+                     api[_-]?key|apikey|
+                     access[_-]?key[_-]?(?:id|secret)|access[_-]?key|
+                     private[_-]?key|security[_-]?token|authorization|credentials?|bearer|
+                     cookie|set[_-]?cookie|token|secret)
                 (?:=|\s+)
             )
             (?:
@@ -240,6 +243,9 @@ fn sensitive_assignment_pattern() -> &'static Regex {
                 (?:alibaba[_-]?cloud[_-]?access[_-]?key[_-]?id|
                    aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|
                    aws[_-]?secret[_-]?access[_-]?key|access[_-]?key[_-]?secret|
+                   access[_-]?key|
+                   secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|
+                   session[_-]?token|auth[_-]?token|credentials?|bearer|
                    dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
                    client[_-]?secret|security[_-]?token|refresh[_-]?token|
                    access[_-]?token|github[_-]?token|id[_-]?token|

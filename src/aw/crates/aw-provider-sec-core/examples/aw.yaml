@@ -1,0 +1,56 @@
+# Linux source example. Replace absolute paths before invoking the Host.
+# The public Rust V2 scan-code CLI requires an existing sec-core daemon.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: local-code-policy
+spec:
+  daemon: {startup: on_demand, endpoint: auto, state_dir: auto}
+  execution: {guarantee: native_hook, default_event_budget_ms: 5000}
+  audit: {enabled: true, payload: metadata_only}
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-sec-core
+          - --cli
+          - /absolute/path/to/agent-sec-cli
+          - --socket
+          - /run/agent-sec-core/daemon.sock
+      timeout_ms: 2000
+      max_output_bytes: 4096
+      config:
+        version: 1
+        mode: observe
+        # Match normalized tool names supplied by the Agent adapter exactly.
+        tools:
+          shell: {language: bash, input_pointer: /command}
+          python: {language: python, input_pointer: /code}
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      match: {tools: ["*"]}
+      steps:
+        - id: scan-code
+          provider: security
+          operation: scan_code
+          effects: [observe, block]
+          on_error: report
+    tool.after:
+      enabled: true
+      required: true
+      match: {tools: ["*"]}
+      steps:
+        - id: observe-completion
+          provider: security
+          operation: observe_tool
+          effects: [observe]
+          on_error: report

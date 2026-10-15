@@ -10,6 +10,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
+use crate::admission::{ConnectionAdmission, ConnectionPermit};
 use crate::config::{ConfigError, ServiceConfig};
 use crate::dispatcher::{
     DispatchControl, DispatchRequest, PeerCredentials, RejectedRequest, RejectionEncoder,
@@ -17,6 +18,14 @@ use crate::dispatcher::{
 };
 use crate::frame::{BoundedResponseBuffer, FrameReadError, ResponseFrameError, read_request_frame};
 use crate::shutdown::ShutdownToken;
+
+/// Byte budget for one frame exchanged inside an authenticated session.
+///
+/// Both directions of the connection-local exchange (incoming request
+/// frames and outgoing session responses) are bounded by this single
+/// budget, so session adapters must keep every [`SessionStep`] response
+/// inside it.
+pub const SESSION_FRAME_BYTES: usize = 64 * 1024;
 
 /// A bound listener plus filesystem identity proving socket-path ownership.
 pub struct BoundUnixSocket {
@@ -157,7 +166,7 @@ impl UnixService {
     /// # Errors
     /// Returns only for listener ownership or socket cleanup failures.
     pub async fn serve(mut self, shutdown: ShutdownToken) -> Result<ServeReport, ServeError> {
-        let normal_admission = Arc::new(Semaphore::new(self.config.max_connections));
+        let normal_admission = ConnectionAdmission::new(&self.config);
         let rejection_admission = Arc::new(Semaphore::new(self.config.max_rejection_connections));
         let runtime = ConnectionRuntime {
             config: self.config.clone(),
@@ -217,7 +226,7 @@ struct ConnectionRuntime {
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
     shutdown: ShutdownToken,
-    normal_admission: Arc<Semaphore>,
+    normal_admission: ConnectionAdmission,
     rejection_admission: Arc<Semaphore>,
 }
 
@@ -275,12 +284,12 @@ fn admit_connection(
         return;
     }
 
-    // TODO: isolate host-wide admission across peer UIDs and reserve administrator
-    // capacity. Public UDS access currently lets one UID exhaust the global budget;
-    // method authorization does not prevent this availability failure. Add a
-    // cross-UID saturation regression with the separate ingress-control work.
-    match Arc::clone(&runtime.normal_admission).try_acquire_owned() {
-        Ok(permit) => {
+    let administrator = runtime.dispatcher.is_administrator(peer);
+    match runtime
+        .normal_admission
+        .try_acquire(peer.uid(), administrator)
+    {
+        Some(permit) => {
             let config = runtime.config.clone();
             let dispatcher = Arc::clone(&runtime.dispatcher);
             let rejection_encoder = Arc::clone(&runtime.rejection_encoder);
@@ -289,7 +298,7 @@ fn admit_connection(
                     .await
             });
         }
-        Err(_) => spawn_rejection(stream, peer, RejectionReason::Busy, runtime, tasks, report),
+        None => spawn_rejection(stream, peer, RejectionReason::Busy, runtime, tasks, report),
     }
 }
 
@@ -318,7 +327,7 @@ async fn process_connection(
     config: &ServiceConfig,
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
-    permit: OwnedSemaphorePermit,
+    permit: ConnectionPermit,
 ) -> ConnectionOutcome {
     let outcome =
         process_admitted_connection(stream, peer, config, dispatcher, rejection_encoder).await;
@@ -387,7 +396,7 @@ async fn process_admitted_connection(
             .map_or(config.dispatch_timeout, |budget| {
                 budget.clamp(
                     std::time::Duration::from_millis(1),
-                    std::time::Duration::from_secs(120),
+                    config.max_dispatch_timeout,
                 )
             });
     let control = DispatchControl::new(std::time::Instant::now() + dispatch_timeout);
@@ -427,7 +436,7 @@ async fn process_session(
                 return Err(());
             }
             for response in step.responses {
-                let mut buffer = BoundedResponseBuffer::new(64 * 1024);
+                let mut buffer = BoundedResponseBuffer::new(SESSION_FRAME_BYTES);
                 std::io::Write::write_all(&mut buffer, &response).map_err(|_| ())?;
                 reader
                     .get_mut()
@@ -439,7 +448,7 @@ async fn process_session(
                 reader.get_mut().shutdown().await.map_err(|_| ())?;
                 return Ok(());
             }
-            let payload = read_request_frame(&mut reader, 64 * 1024)
+            let payload = read_request_frame(&mut reader, SESSION_FRAME_BYTES)
                 .await
                 .map_err(|_| ())?;
             step = session.advance(&payload).map_err(|_| ())?;

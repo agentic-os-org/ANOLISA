@@ -24,8 +24,8 @@ AgentSight 采集到的一切都以 SQLite 数据库形式留在本机。Dashboa
 | `optimization_config.json` | 在 Dashboard 设置页填写的 LLM 配置（API Key 存于此） |
 | `*.db-wal`、`*.db-shm` | SQLite 预写日志与共享内存；属正常文件，干净退出时会做 checkpoint |
 
-`serve`、`dashboard`、`skill-metrics` 支持用 `--db` 指向别的数据库文件，这也是浏览副本或归档的方式。
-tracer 自身始终写入默认目录。
+`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption` 支持用 `--db`
+指向别的数据库文件，这也是浏览副本或归档的方式。tracer 自身始终写入默认目录。
 
 > `serve --db <path>` 会让所有兄弟库都从 `--db` 所在目录解析——GenAI 事件、中断库、轨迹库以及
 > health checker 都跟着它走。私有的安全、拦截、复用与因果库从其 `.agentsight-private/` 子目录解析。
@@ -54,6 +54,9 @@ schema v4 为每个 AgentSight 自有数据库统一配置 `retention_days`、`m
 Tokenless 的 `stats.db` 会在状态 API 中列为外部存储。AgentSight 只读打开它，不执行生命周期治理；该文件
 仍由 Tokenless 管理。
 
+`storage.max_total_size_mb` 为 9 个 AgentSight 自有数据库设置总物理占用上限，默认值为 `2200` MiB。设为
+`0` 可关闭总量限制；启用时必须至少为 `9` MiB，确保每个数据库至少保留可执行治理的 1 MiB 配额。
+
 每项值为 `0` 时分别关闭按时间清理、按容量清理或定时检查。因而检查间隔为零时，即使保留天数和容量上限
 非零，也不会自动治理该存储。旧 `check_interval_inserts` 字段已不支持；v4 之前的配置会按既有 schema
 升级机制先备份再替换。
@@ -70,6 +73,9 @@ Tokenless 的 `stats.db` 会在状态 API 中列为外部存储。AgentSight 只
 3. 仅在物理占用（database、WAL 与 SHM）超过上限时触发容量淘汰。
 4. 按最旧且允许淘汰的记录清理，每轮 checkpoint，直到逻辑占用降至上限的 90%。
 
+总量分配排序同样计入 WAL 与 SHM，因此 WAL 较大的数据库可能在一轮中优先治理。该数据库会在淘汰前执行
+checkpoint，后续轮次再按新的物理占用重新分配。
+
 自动维护永远不执行 `VACUUM`。释放页保留在 freelist 中供后续写入复用，因此物理文件较大但逻辑占用在
 目标内时仍属正常。如需向文件系统归还空间，请先停止服务，再在维护窗口手动执行
 `sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`。
@@ -81,8 +87,10 @@ Tokenless 的 `stats.db` 会在状态 API 中列为外部存储。AgentSight 只
 > 容器部署请注意：这些保留语义只在数据目录持久化时才有意义。不挂卷时容器每次重启都会清空全部数据，
 > 详见 [容器与 Sidecar](deployment.md#容器与-sidecar) 的持久化一节。
 
-修改限制时，编辑 `/etc/agentsight/config.json` 的 `storage` 配置节，再 reload 服务。Settings 页面会展示
-每个数据库当前生效的策略、物理/逻辑占用、清理覆盖范围与维护 worker 状态。
+Settings 页面通过 `POST /api/storage/config` 修改总量上限。使用配置文件启动的长期运行 `trace`、
+`serve`、本地 trace 和本地 serve 进程都会在维护前重读有效配置，无需重启；本地进程未指定 `--config`
+时不能持久化修改。配置文件缺失、未写完或无效时继续使用最近一次有效上限。页面还会展示物理/逻辑占用、
+清理覆盖范围与维护 worker 状态。
 
 通过 API 查看当前占用：
 
@@ -92,7 +100,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/stat
   | python3 -m json.tool
 ```
 
-响应使用 schema version `2`。每个存储都返回 availability、size、policy、coverage、`size_state`，以及包含
+响应使用 schema version `3`。每个存储都返回 availability、size、policy、coverage、`size_state`，以及包含
 `scheduled`、`worker_running`、`worker_heartbeat_unix_ms`、`last_attempt_unix_ms`、
 `last_success_unix_ms`、`last_result`、`consecutive_failures`、`next_run_unix_ms` 的 `maintenance` 对象。
 轨迹、安全审计、复用、因果与拦截库会因受保护数据而报告 `partial`。运行态字段只描述提供当前响应的进程，
@@ -147,7 +155,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |
-| 存储 | `GET /api/storage/status` | schema v2 的 SQLite 策略、容量、覆盖范围与维护 worker 状态，不返回文件路径 |
+| 存储 | `GET /api/storage/status`、`POST /api/storage/config` | schema v3 的总量上限、容量、覆盖范围与维护 worker 状态；存在配置文件时可通过 POST 持久化总量上限 |
 | Skill 指标 | `GET /api/skill-metrics`、`/downloads`、`/loads`、`/usage-ratio`、`/distribution`、`/hotness` | Skill 采纳情况 |
 | 优化分析 | `POST /api/optimize/sessions/{id}/{dimension}`、`GET /api/optimize/results`、`GET` 与 `POST /api/optimize/config` | LLM 辅助分析 |
 | 质量与归因 | `POST /api/grader/evaluate`、`GET /api/grader/latest`、`POST /api/causal-attribution` | 会话质量评分、根因归因 |
@@ -173,6 +181,12 @@ Agent，Dashboard 会汇总该 Session 关联的所有 PID。这些数据表示 
 Session 资源归因：同一个共享 Agent 进程可能同时服务多个 Session。LLM 区间使用采集到的请求和响应时间；
 Tool Call 区间从产生工具请求的 LLM 响应结束开始，到携带对应工具结果的下一次 LLM 请求开始为止。未被
 LLM 调用或已匹配 Tool Call 覆盖的间隙会返回为 `idle`；无法匹配结果的 Tool Call 不会虚构结束时间。
+
+## Chrome Trace 中的进程输出
+
+对于聚合的进程生命周期，Chrome Trace 只保留 stdout 和 stderr 的开头内容，每条流最多 64 KiB。
+任一流达到上限后，其后续输出不再保留；另一条流仍可继续保留到自己的上限。若上限截断 UTF-8 字符，
+则舍弃不完整的尾部。其他无效字节沿用有损文本解码。
 
 ## Prometheus 指标
 

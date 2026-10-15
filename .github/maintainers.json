@@ -120,14 +120,6 @@
             ]
         },
         {
-            "label": "component:blaze",
-            "maintainers": [
-                {
-                    "github": "casparant"
-                }
-            ]
-        },
-        {
             "label": "component:ktuner",
             "maintainers": [
                 {

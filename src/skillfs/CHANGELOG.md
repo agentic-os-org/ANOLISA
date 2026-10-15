@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-15
+
+### Fixed
+
+- Managed stop, supervisor shutdown and orphan replacement now retain the
+  live Ledger backing alias and its directory when the FUSE mount remains busy.
+  If the mount becomes idle within the shared 10-second shutdown deadline,
+  cleanup releases both mounts and removes the SkillFS-created backing directory
+  while preserving source contents
+  ([#7297](https://github.com/agentic-os-org/ANOLISA/pull/7297)).
+- Large authenticated change notifications now request a whole-skill rescan
+  instead of exceeding the daemon's 64 KiB frame limit. Requests at the limit
+  retain their path hints, and the original event log remains unchanged
+  ([#7189](https://github.com/agentic-os-org/ANOLISA/pull/7189)).
+
+## [0.5.1] - 2026-10-10
+
+This patch release consolidates filesystem boundary fixes and usability
+improvements merged since 0.5.0.
+
+### Changed
+
+- Authenticated notifications and live-source resolution now work with the
+  Rust sec-core SkillSec daemon. With a compatible daemon, startup and skill
+  mutations drive scanning and activation updates; notifications remain
+  best-effort, not an exactly-once delivery guarantee
+  ([#3295](https://github.com/agentic-os-org/ANOLISA/pull/3295)).
+
+### Fixed
+
+- Hidden skills now reject writes through already-open handles as well as
+  nested file creation, links, metadata and xattr changes. Snapshot reads of
+  symlink targets and xattrs follow the active view, while source metadata
+  changes no longer follow symlinks
+  ([#5382](https://github.com/agentic-os-org/ANOLISA/pull/5382)).
+- Flat and Hermes directory operations now keep skill listings and inode
+  identities consistent after moves, replacement and unlink. Reserved paths,
+  staging directories and hidden dot-directories stay out of ordinary listings;
+  Hermes top-level files remain readable.
+- Watchers now retain mutation events when reads happen nearby and track
+  categorized manifests, directory moves and removals. Pending-install checks
+  and activation decision waits are bounded
+  ([#4530](https://github.com/agentic-os-org/ANOLISA/pull/4530)).
+- Mounting preserves existing views, including unparseable configuration;
+  generated views and managed state use distinct staging files. Views and
+  discovery no longer duplicate skills, and classification/listing report
+  skipped skills, name collisions and load failures
+  ([#6202](https://github.com/agentic-os-org/ANOLISA/pull/6202)).
+- Managed mounts reject source changes during reuse, retain backing roots when
+  unmount fails, and handle escaped or non-UTF-8 paths correctly. Control socket
+  parent directories and activation log paths are checked before use;
+  reconciliation retries temporarily unavailable daemon endpoints.
+- Skill parsing now handles UTF-8 BOMs, CRLF, fenced sections, empty frontmatter,
+  duplicate sections and parameter names without losing content. Oversized
+  skill and category metadata reads are bounded, and unbalanced directives
+  preserve their original text.
+- OS command adaptation targets invoked commands without rewriting incidental
+  text or Python pip module calls, including commands behind `timeout`, `nice`
+  and run labels. CLI status names match their documented values, control
+  characters are escaped in listings, and raw filesystem paths are preserved.
+
 ## [0.5.0] - 2026-09-20
 
 ### Added

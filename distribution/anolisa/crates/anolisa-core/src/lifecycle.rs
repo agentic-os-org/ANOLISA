@@ -7,6 +7,7 @@
 //! Only ANOLISA-owned files are removable; external modifications are refused.
 //! [`prepare_backup`] is shared with the owned executor's port implementations.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -591,7 +592,7 @@ pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact
             })?;
             if let Some(parent) = backup.parent()
                 && !parent.as_os_str().is_empty()
-                && let Err(source) = fs::create_dir_all(parent)
+                && let Err(source) = create_install_dir_all(parent)
             {
                 return Err(LifecycleError::Filesystem {
                     path: parent.to_path_buf(),
@@ -636,7 +637,7 @@ pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact
 
     if let Some(parent) = backup.parent()
         && !parent.as_os_str().is_empty()
-        && let Err(source) = fs::create_dir_all(parent)
+        && let Err(source) = create_install_dir_all(parent)
     {
         return Err(LifecycleError::Filesystem {
             path: parent.to_path_buf(),

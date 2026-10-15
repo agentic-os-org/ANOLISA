@@ -12,11 +12,13 @@
 //! to move into `spawn_blocking` when the daemon is wired up.
 
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rusqlite::Connection;
+use rustix::fs::{Dev, FileType, lstat};
+use rustix::io::Errno;
 
 use crate::connection::open_connection;
 use crate::error::{KernelError, is_corruption};
@@ -29,11 +31,13 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Mode applied to the database file itself.
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
+type DbIdentity = (Dev, u64);
+
 #[derive(Debug, Default)]
 struct Inner {
     connection: Option<Connection>,
-    /// `(st_dev, st_ino)` of the file behind the cached read-only connection.
-    db_identity: Option<(u64, u64)>,
+    /// Native `(st_dev, st_ino)` of the cached read-only database.
+    db_identity: Option<DbIdentity>,
     disabled: bool,
     force_schema_convergence: bool,
 }
@@ -198,9 +202,20 @@ impl SqliteStore {
         if self.read_only {
             // A replaced file (new inode) must not be served from a stale
             // handle, so the identity is compared on every access.
-            let Some(current) = self.current_db_identity() else {
-                dispose_inner(inner);
-                return Ok(None);
+            let current = match self.current_db_identity() {
+                Ok(Some(current)) => current,
+                Ok(None) => {
+                    dispose_inner(inner);
+                    return Ok(None);
+                }
+                Err(err) => {
+                    dispose_inner(inner);
+                    if raise_on_error {
+                        return Err(err);
+                    }
+                    tracing::warn!(target: "asc_process_diagnostic", "{} read-only database path rejected: {err}", self.log_prefix);
+                    return Ok(None);
+                }
             };
             identity = Some(current);
             if inner.connection.is_some() && inner.db_identity == identity {
@@ -242,7 +257,7 @@ impl SqliteStore {
     fn open_and_prepare(
         &self,
         inner: &mut Inner,
-        identity: Option<(u64, u64)>,
+        identity: Option<DbIdentity>,
     ) -> Result<(), KernelError> {
         let force = inner.force_schema_convergence;
         if !self.read_only {
@@ -361,9 +376,18 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn current_db_identity(&self) -> Option<(u64, u64)> {
-        let metadata = fs::metadata(&self.path).ok()?;
-        Some((metadata.dev(), metadata.ino()))
+    fn current_db_identity(&self) -> Result<Option<DbIdentity>, KernelError> {
+        // lstat avoids opening the path: opening a second database descriptor
+        // can interfere with SQLite's POSIX advisory locks.
+        let metadata = match lstat(&self.path) {
+            Ok(metadata) => metadata,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(err) => return Err(KernelError::io("inspect", &self.path, err.into())),
+        };
+        if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+            return Err(KernelError::UnsafePath(self.path.clone()));
+        }
+        Ok(Some((metadata.st_dev as Dev, metadata.st_ino as u64)))
     }
 }
 
@@ -376,10 +400,13 @@ fn dispose_inner(inner: &mut Inner) {
 mod tests {
     use super::*;
     use crate::schema::{ColumnSpec, IndexSpec};
+    use std::os::unix::fs::MetadataExt;
     use tempfile::TempDir;
 
     const WIDGETS: &[TableSpec] = &[TableSpec {
         name: "widgets",
+        strict: false,
+        constraints: &[],
         columns: &[
             ColumnSpec {
                 name: "id",

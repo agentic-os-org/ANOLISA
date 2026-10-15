@@ -123,6 +123,26 @@ else
     fail "unmanaged plugin file was modified"
 fi
 
+# A dry-run uninstall must preview the removal and leave the live link
+# in place, mirroring the installer's ANOLISA_DRY_RUN handling.
+rm -f "$PLUGIN_LINK"
+bash "$INSTALL_SH" >/dev/null
+dry_run_output="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)"
+if [ $? -eq 0 ] && [ -L "$PLUGIN_LINK" ] && [ "$(readlink "$PLUGIN_LINK")" = "$PLUGIN_SOURCE" ]; then
+    pass "dry-run uninstall preserves the managed plugin link"
+else
+    fail "dry-run uninstall removed or damaged the managed plugin link"
+fi
+case "$dry_run_output" in
+    *DRY-RUN:*) pass "dry-run uninstall previews the removal" ;;
+    *) fail "dry-run uninstall did not print a DRY-RUN preview" ;;
+esac
+if bash "$UNINSTALL_SH" >/dev/null; then
+    pass "real uninstall still removes the managed plugin link"
+else
+    fail "real uninstall stopped working"
+fi
+
 echo ""
 echo "OpenCode adapter tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

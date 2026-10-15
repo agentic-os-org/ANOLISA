@@ -2,7 +2,6 @@ import type { SecurityCapability } from "../types.js";
 import {
   afterToolCallPiiScanText,
   inboundPiiScanText,
-  modelInputPiiScanText,
   valueToText,
 } from "../helpers/pii-text.js";
 import {
@@ -12,22 +11,12 @@ import {
   envHookPolicy,
   isHookPolicyValue,
   normalizeHookPolicy,
+  supportsModelInputGate,
   type HookPolicy,
 } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
 const INPUT_SCAN_PRIORITY = 200;
-
-function supportsModelInputGate(version: unknown): boolean {
-  if (typeof version !== "string") return false;
-  // Prereleases and unknown builds retain the supported legacy hook.
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
-  if (!match) return false;
-  const [year, month, day] = match.slice(1, 4).map(Number);
-  return (
-    year > 2026 || (year === 2026 && (month > 5 || (month === 5 && day >= 12)))
-  );
-}
 
 type PiiScanConfig = {
   scanUserInput: boolean;
@@ -279,7 +268,7 @@ export const piiScan: SecurityCapability = {
     ): Promise<string | undefined> => {
       try {
         const text = modelInput
-          ? modelInputPiiScanText(event)
+          ? safeString(event?.prompt)
           : inboundPiiScanText(event);
         if (!text.trim()) {
           return undefined;

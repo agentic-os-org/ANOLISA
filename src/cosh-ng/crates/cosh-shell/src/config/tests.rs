@@ -13,13 +13,13 @@ use super::load::{
 };
 use super::parse::{parse_simple_config, parse_toml_config};
 use super::trust::{
-    add_trusted_project_root_to_store_path, load_project_trust_store,
-    project_trust_store_path_in_dir, read_trusted_project_roots_from_store_path,
-    remove_trusted_project_root_from_store_path, write_trusted_project_roots_to_store_path,
+    add_consented_project_hook_to_store_path, load_project_trust_store,
+    project_trust_store_path_in_dir, read_consented_project_hooks_from_store_path,
+    remove_consented_project_hook_from_store_path, write_consented_project_hooks_to_store_path,
 };
 use super::{
-    parse_language_setting, CoshConfig, HealthServiceExpectedState, HookFeedbackPreference,
-    LanguageSetting,
+    parse_language_setting, ConsentedProjectHook, CoshConfig, HealthServiceExpectedState,
+    HookFeedbackPreference, LanguageSetting,
 };
 
 fn temp_config_path(label: &str) -> PathBuf {
@@ -587,17 +587,19 @@ fn project_trust_store_adds_dedupes_and_removes_canonical_roots() {
     std::fs::create_dir_all(&nested).expect("create nested");
     std::fs::create_dir_all(&other).expect("create other");
 
-    add_trusted_project_root_to_store_path(&store, &root).expect("trust root");
-    add_trusted_project_root_to_store_path(&store, &nested.join("..")).expect("dedupe root");
-    add_trusted_project_root_to_store_path(&store, &other).expect("trust other");
+    add_consented_project_hook_to_store_path(&store, &root, None).expect("trust root");
+    add_consented_project_hook_to_store_path(&store, &nested.join(".."), None)
+        .expect("dedupe root");
+    add_consented_project_hook_to_store_path(&store, &other, None).expect("trust other");
 
-    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
+    let roots = store_roots(&store);
     assert_eq!(roots.len(), 2, "{roots:?}");
     assert!(roots.contains(&root.canonicalize().expect("canonical root")));
     assert!(roots.contains(&other.canonicalize().expect("canonical other")));
 
-    remove_trusted_project_root_from_store_path(&store, &nested.join("..")).expect("untrust root");
-    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
+    remove_consented_project_hook_from_store_path(&store, &nested.join(".."))
+        .expect("untrust root");
+    let roots = store_roots(&store);
     assert_eq!(roots, vec![other.canonicalize().expect("canonical other")]);
 
     let _ = std::fs::remove_dir_all(&root);
@@ -610,7 +612,7 @@ fn project_trust_store_adds_dedupes_and_removes_canonical_roots() {
 }
 
 #[test]
-fn load_project_trust_store_extends_config_roots() {
+fn load_project_trust_store_records_consented_hooks_not_policy_roots() {
     let store = std::env::temp_dir().join(format!(
         "cosh-shell-trust-store-load-{}.txt",
         std::process::id()
@@ -621,11 +623,29 @@ fn load_project_trust_store_extends_config_roots() {
     let mut cfg = CoshConfig::default();
     load_project_trust_store(&mut cfg, &store).expect("load store");
 
-    assert_eq!(cfg.trusted_project_roots.len(), 2);
-    assert_eq!(cfg.trusted_project_roots[0], PathBuf::from("/work/app"));
-    assert_eq!(cfg.trusted_project_roots[1], PathBuf::from("/work/lib"));
+    assert_eq!(cfg.consented_project_hooks.len(), 2);
+    assert_eq!(
+        cfg.consented_project_hooks[0].root,
+        PathBuf::from("/work/app")
+    );
+    assert_eq!(
+        cfg.consented_project_hooks[1].root,
+        PathBuf::from("/work/lib")
+    );
+    assert_eq!(cfg.consented_project_hooks[0].digest, None);
+    // Legacy path-only entries must not silently become trusted content.
+    assert!(cfg.trusted_project_roots.is_empty());
 
     let _ = std::fs::remove_file(&store);
+}
+
+/// Reads the store and projects it to roots for path-level assertions.
+fn store_roots(store: &std::path::Path) -> Vec<PathBuf> {
+    read_consented_project_hooks_from_store_path(store)
+        .expect("read store")
+        .into_iter()
+        .map(|entry| entry.root)
+        .collect()
 }
 
 #[test]
@@ -637,9 +657,9 @@ fn clear_project_trust_store_path_keeps_empty_store_file() {
     let _ = std::fs::remove_file(&store);
     std::fs::write(&store, "/work/app\n/work/lib\n").expect("write store");
 
-    write_trusted_project_roots_to_store_path(&store, &[]).expect("clear store");
+    write_consented_project_hooks_to_store_path(&store, &[]).expect("clear store");
 
-    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
+    let roots = store_roots(&store);
     assert!(roots.is_empty(), "{roots:?}");
     let content = std::fs::read_to_string(&store).expect("read store");
     assert!(content.contains("cosh-shell trusted project hook roots"));
@@ -655,12 +675,12 @@ fn assert_corrupted_project_trust_store_is_reported() {
     let _ = std::fs::remove_file(&store);
     std::fs::write(&store, b"/work/app\n\xff\n").expect("write corrupt store");
 
-    let error = read_trusted_project_roots_from_store_path(&store)
+    let error = read_consented_project_hooks_from_store_path(&store)
         .expect_err("invalid UTF-8 must not become an empty trust set");
     assert!(error.contains("not valid UTF-8"), "{error}");
     let mut cfg = CoshConfig::default();
     assert!(load_project_trust_store(&mut cfg, &store).is_err());
-    assert!(cfg.trusted_project_roots.is_empty());
+    assert!(cfg.consented_project_hooks.is_empty());
 
     let _ = std::fs::remove_file(&store);
 }
@@ -680,8 +700,15 @@ fn assert_trust_store_atomic_write_preserves_permissions() {
     std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o640))
         .expect("set store mode");
 
-    write_trusted_project_roots_to_store_path(&store, &[PathBuf::from("/work/new")])
-        .expect("atomic update");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    write_consented_project_hooks_to_store_path(
+        &store,
+        &[ConsentedProjectHook {
+            root: PathBuf::from("/work/new"),
+            digest: Some(digest.clone()),
+        }],
+    )
+    .expect("atomic update");
 
     let mode = std::fs::metadata(&store)
         .expect("stat store")
@@ -689,18 +716,17 @@ fn assert_trust_store_atomic_write_preserves_permissions() {
         .mode()
         & 0o7777;
     assert_eq!(mode, 0o640);
-    assert_eq!(
-        read_trusted_project_roots_from_store_path(&store).expect("read updated store"),
-        vec![PathBuf::from("/work/new")]
-    );
-    assert!(!std::fs::read_dir(&dir)
-        .expect("list store directory")
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".tmp-")));
+    let entries = read_consented_project_hooks_from_store_path(&store).expect("read updated store");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].root, PathBuf::from("/work/new"));
+    assert_eq!(entries[0].digest.as_deref(), Some(digest.as_str()));
+    let content = std::fs::read_to_string(&store).expect("read store content");
+    assert!(content.contains("# cosh-project-hook-v2 ["), "{content:?}");
+    assert!(content.lines().all(|line| line.starts_with('#')));
 
     let link = dir.join("trusted-project-hooks-link");
     symlink(&store, &link).expect("create symlink");
-    let error = write_trusted_project_roots_to_store_path(&link, &[])
+    let error = write_consented_project_hooks_to_store_path(&link, &[])
         .expect_err("symlink target must not be replaced");
     assert!(error.contains("symbolic link"), "{error}");
     let _ = std::fs::remove_dir_all(&dir);

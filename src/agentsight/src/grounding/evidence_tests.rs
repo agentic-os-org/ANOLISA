@@ -328,6 +328,42 @@ fn scenario_echoed_command_line_is_not_evidence() {
 }
 
 #[test]
+fn scenario_echoed_command_line_is_stripped_when_the_result_lives_on_a_later_step() {
+    // `classify_calls` correlates a result with its call across steps (each
+    // invocation owns the window up to the next call reusing its id), so the
+    // echo guard must find the call there too. With a step-local lookup the
+    // invocation line stayed in the pool, and the agent's own command line
+    // grounded the very path it invented.
+    let mut calling = agent(2, "");
+    calling.tool_calls = Some(vec![call(
+        "c1",
+        "Bash",
+        serde_json::json!({"command": "cat /fabricated/report.txt"}),
+    )]);
+    let mut carrying = agent(3, "");
+    carrying.observation = Some(Observation {
+        results: vec![ok_result(
+            "c1",
+            "$ cat /fabricated/report.txt\nquarterly summary",
+        )],
+    });
+
+    let doc = traj(vec![
+        user(1, "看一下报告"),
+        calling,
+        carrying,
+        agent(4, "报告位于 /fabricated/report.txt 。内容是季度总结。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert_eq!(
+        grounding_for(&index, "/fabricated/report.txt"),
+        Grounding::Unresolved,
+        "the echoed command of a later-step result must not ground the claim"
+    );
+}
+
+#[test]
 fn scenario_system_prompt_is_not_evidence() {
     let doc = traj(vec![
         system(1, "示例接口：https://example.test/api/v1"),
@@ -446,10 +482,42 @@ fn scenario_probe_result_still_counts_as_evidence() {
     );
 }
 
+#[test]
+fn scenario_successful_listing_of_the_path_is_evidence() {
+    // A successful listing answers its own argument, so the first result line
+    // is a real observation, not a command echo. The guard used to drop any
+    // leading line the command *contains*, which deleted this one: the claim
+    // about the inspected path then read as Unresolved and could turn into an
+    // ungrounded-onset finding.
+    let doc = traj(vec![
+        user(1, "日志在吗"),
+        acting_agent(
+            2,
+            "检查",
+            vec![call(
+                "c1",
+                "Bash",
+                serde_json::json!({"command": "ls /var/log/app.log"}),
+            )],
+            vec![ok_result("c1", "/var/log/app.log")],
+        ),
+        agent(3, "/var/log/app.log 存在。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(
+            grounding_for(&index, "/var/log/app.log"),
+            Grounding::Grounded { .. }
+        ),
+        "a successful listing is its own observation: {:?}",
+        index.claims
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 13..14 — abstention input and blame scoping
 // ---------------------------------------------------------------------------
-
 #[test]
 fn scenario_unlinked_calls_drive_the_unknown_ratio() {
     let doc = traj(vec![
@@ -540,6 +608,33 @@ fn scenario_markdown_formatted_path_still_matches_the_user_request() {
             Grounding::Grounded { .. }
         ),
         "the user supplied this path; formatting must not hide it: {:?}",
+        index.claims
+    );
+    assert!(
+        !has_onset(&index),
+        "a path the user themselves named cannot be an ungrounded claim: {:?}",
+        index.findings
+    );
+}
+
+#[test]
+fn scenario_cjk_punctuation_still_delimits_a_supplied_path() {
+    // Chinese prose puts no spaces around punctuation, so a path the user
+    // supplies sits against fullwidth marks -- the separators the claim
+    // extractor already splits on. Read as anything else, the same
+    // "decoration must not hide the value" failure returns in CJK.
+    let doc = traj(vec![
+        user(1, "日志默认写在（/var/log/app.log）里，帮我确认一下"),
+        agent(2, "确认了，写入 /var/log/app.log。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(
+            grounding_for(&index, "/var/log/app.log"),
+            Grounding::Grounded { .. }
+        ),
+        "the user supplied this path; CJK punctuation must not hide it: {:?}",
         index.claims
     );
     assert!(
@@ -645,6 +740,38 @@ fn evidence_digest_carries_what_the_rules_used() {
     assert!(
         index.evidence_digest.contains("读一下配置"),
         "including the user's own words"
+    );
+}
+
+/// The digest budget is a byte budget — that is what the prompt costs and what
+/// the constant documents — but the per-entry cut was taken in
+/// `chars().take(remaining)`, spending up to three bytes per character. A round
+/// whose observations are Chinese therefore handed the review roughly three
+/// times the documented bound, on a call paid for by the byte.
+#[test]
+fn the_evidence_digest_stays_inside_its_byte_budget() {
+    let entry = |step_id: usize, text: String| EvidenceEntry {
+        step_id,
+        source_call_id: None,
+        haystack: text,
+        numbers: Vec::new(),
+        literal_text: String::new(),
+        urls: Vec::new(),
+    };
+    let pool: Vec<EvidenceEntry> = (1..=6)
+        .map(|step| entry(step, "读取配置文件的缓冲区大小".repeat(400)))
+        .collect();
+
+    let digest = digest_pool(&pool);
+
+    assert!(
+        digest.len() <= EVIDENCE_DIGEST_LIMIT,
+        "digest is {} bytes, over the {EVIDENCE_DIGEST_LIMIT}-byte budget",
+        digest.len()
+    );
+    assert!(
+        digest.contains("读取配置文件的缓冲区大小"),
+        "the newest entry must still be carried"
     );
 }
 
@@ -1001,4 +1128,235 @@ fn unknown_ratio_only_covers_the_selected_round() {
         0.0,
         "an unknown call from an earlier round must not trigger abstention"
     );
+}
+
+#[test]
+fn derived_ratio_is_recognised_in_either_operand_order() {
+    // Error rate / share / per-token cost are quotients whose operands appear
+    // in the other order in the tool output; a single-direction `a / b` check
+    // reported the correct computation as invented.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.4167。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.4167"))
+        .expect("the ratio claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Derived,
+        "5000 / 12000 is an arithmetic consequence of two pooled values"
+    );
+}
+
+#[test]
+fn a_value_no_pair_derives_stays_unresolved() {
+    // The negative half of the ratio check: a figure that matches none of the
+    // sums, differences, products or quotients of the pooled pair is still
+    // reported instead of being waved through as a derivation.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.7311。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.7311"))
+        .expect("the numeric claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Unresolved,
+        "0.7311 derives from no pair of 12000 and 5000"
+    );
+}
+
+#[test]
+fn strong_literals_require_complete_observed_values() {
+    for (class, literal, extension) in [
+        (ClaimClass::Version, "1.2.3", "1.2.30"),
+        (ClaimClass::Path, "/tmp/report.txt", "/tmp/report.txt.bak"),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/apiv2",
+        ),
+    ] {
+        let claim = Claim {
+            text: literal.into(),
+            class,
+            value: None,
+        };
+        for observed in [
+            format!("Found {literal}."),
+            format!(r#"{{"value":"{literal}"}}"#),
+            format!("`{literal}`"),
+            format!("({literal})"),
+            format!(r#"{{"value":"{literal}\n"}}"#),
+        ] {
+            let mut pool = Vec::new();
+            push_entry(&mut pool, 3, Some("source".into()), &observed);
+            assert!(
+                matches!(ground_one(&claim, &pool), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+                "{observed}"
+            );
+        }
+        for observed in [
+            extension.to_string(),
+            format!(r#"{{"value":"{extension}"}}"#),
+        ] {
+            let mut pool = Vec::new();
+            push_entry(&mut pool, 3, Some("source".into()), &observed);
+            assert!(
+                matches!(ground_one(&claim, &pool), Grounding::Unresolved),
+                "{observed}"
+            );
+        }
+    }
+    let mut pool = Vec::new();
+    push_entry(&mut pool, 3, None, "version=v1.2.3");
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "1.2.3".into(),
+                class: ClaimClass::Version,
+                value: None
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+    for (class, literal, observed) in [
+        (ClaimClass::Version, "1.2.3", "11.2.3"),
+        (ClaimClass::Version, "1.2.3", "1.2.3-rc1"),
+        (ClaimClass::Path, "/tmp/report.txt", "/other/tmp/report.txt"),
+        (
+            ClaimClass::Path,
+            "/tmp/report.txt",
+            "/tmp/report.txt,backup",
+        ),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/api?limit=120",
+        ),
+        (
+            ClaimClass::Url,
+            "https://example.test/api",
+            "https://example.test/api,backup",
+        ),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(&mut pool, 3, None, observed);
+        assert!(
+            matches!(
+                ground_one(
+                    &Claim {
+                        text: literal.into(),
+                        class,
+                        value: None
+                    },
+                    &pool
+                ),
+                Grounding::Unresolved
+            ),
+            "{observed}"
+        );
+    }
+}
+
+#[test]
+fn a_pipe_delimited_column_still_grounds_its_literal() {
+    // The shape the extractor already reads for numbers: sqlite3 delimits
+    // columns with `|` by default, and a count was once invisible as evidence
+    // for exactly that reason. A text column (`SELECT id, path …`) is the same
+    // payload, so the literal matcher must read its columns too — the agent
+    // restating a value the query returned was reported as sourceless.
+    for (class, literal) in [
+        (ClaimClass::Path, "/tmp/report.txt"),
+        (ClaimClass::Version, "v1.2.3"),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(&mut pool, 3, Some("source".into()), &format!("1|{literal}"));
+        assert!(
+            matches!(ground_one(
+                &Claim {
+                    text: literal.into(),
+                    class,
+                    value: None,
+                },
+                &pool
+            ), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+            "a column delimiter must not hide {literal} from the pool"
+        );
+    }
+}
+
+#[test]
+fn weak_containment_and_numeric_rounding_remain_supported() {
+    let mut pool = Vec::new();
+    push_entry(&mut pool, 1, None, "qualified_name_suffix: 242391");
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "qualified_name".into(),
+                class: ClaimClass::Identifier,
+                value: None
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "240k".into(),
+                class: ClaimClass::Number,
+                value: Some(240000.0)
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+}
+
+#[test]
+fn scenario_json_object_key_is_evidence_for_a_restatement() {
+    // A status-code histogram keys its counts by the code itself. The payload
+    // does carry the 404, so restating it is not invention.
+    let doc = traj(vec![
+        user(1, "统计一下这次运行的状态码"),
+        acting_agent(
+            2,
+            "统计中",
+            vec![call(
+                "c1",
+                "Bash",
+                serde_json::json!({"command": "jq '.status_counts' /tmp/run.json"}),
+            )],
+            vec![ok_result("c1", r#"{"404":119}"#)],
+        ),
+        agent(3, "其中 404 出现了 119 次。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(grounding_for(&index, "404"), Grounding::Grounded { .. }),
+        "a number the payload keyed on is still a payload fact: {:?}",
+        index.claims
+    );
+    assert!(!has_onset(&index), "findings={:?}", index.findings);
 }

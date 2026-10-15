@@ -411,6 +411,10 @@ fn render_project_hook_trust<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let project_roots = registered_project_hook_roots(state);
+    // Consent is recorded over the hooks this session already pinned, not over a
+    // second copy read by path, so the persisted digest describes exactly the
+    // bytes that are being trusted below.
+    let pinned_digest = state.hooks.engine.project_hooks_pinned_digest();
     let updated = state.hooks.engine.set_project_hooks_trusted(trusted);
     let i18n = state.i18n();
     let count = updated.to_string();
@@ -442,7 +446,7 @@ fn render_project_hook_trust<W: Write>(
         i18n.t(MessageId::SlashHooksProjectTrustNoChangeFooter)
             .to_string()
     } else {
-        persist_project_hook_trust(trusted, &project_roots, &i18n)
+        persist_project_hook_trust(trusted, &project_roots, pinned_digest.as_deref(), &i18n)
     };
     render_notice_panel(output, title, body, Some(&footer))
 }
@@ -493,11 +497,16 @@ fn registered_project_hook_roots(state: &InlineState) -> Vec<std::path::PathBuf>
     roots
 }
 
-fn persist_project_hook_trust(trusted: bool, roots: &[std::path::PathBuf], i18n: &I18n) -> String {
+fn persist_project_hook_trust(
+    trusted: bool,
+    roots: &[std::path::PathBuf],
+    pinned_digest: Option<&str>,
+    i18n: &I18n,
+) -> String {
     let mut failures = Vec::new();
     for root in roots {
         let result = if trusted {
-            trust_project_root(root)
+            trust_project_root(root, pinned_digest)
         } else {
             untrust_project_root(root)
         };

@@ -17,7 +17,7 @@ rather than audit sources of truth.
 Version 1 persists only bounded structured metadata, outcome categories, summary hashes, and
 opaque evidence references. It does not persist raw prompts, provider content, tool arguments or
 results, terminal output, or environment variables. Audit events are retained for 30 days with a
-1 GiB cap. Existing Shell evidence remains temporary and gains no new persistent directory.
+100 MiB cap. Existing Shell evidence remains temporary and gains no new persistent directory.
 Exports apply a stricter redaction pass and include a verifiable manifest.
 
 Existing SLS metrics are a frozen compatibility contract. The path, 32 fields, field types and
@@ -214,7 +214,7 @@ Each line is one complete UTF-8 JSON object:
 | Tool | `tool.requested`, `tool.execution.started`, `tool.completed`, `tool.failed`, `tool.cancelled` |
 | Approval | `approval.requested`, `approval.resolved` |
 | Shell/evidence | `shell.command.started`, `shell.command.completed`, `shell.command.failed`, `evidence.accessed` |
-| Audit control | `audit.degraded`, `audit.recovered`, `retention.pruned`, `export.created` |
+| Audit control | `audit.degraded`, `audit.recovered`, `audit.truncated`, `retention.pruned`, `export.created` |
 
 A provider stream, control permission, and foreground handoff for one tool share
 `run_id + tool_use_id`; they are lifecycle events, not three executions. A Shell handoff adds
@@ -270,7 +270,7 @@ Only three optional settings are added; built-in defaults apply when they are ab
 [audit]
 mode = "best_effort" # best_effort | required
 retention_days = 30
-max_disk_bytes = 1073741824
+max_disk_bytes = 104857600
 ```
 
 Audit is always enabled and has no ordinary disable setting. The 16 MiB segment size is an
@@ -291,7 +291,7 @@ path override.
 
 ## Retention and Cleanup
 
-Audit defaults to 30 days with a 1 GiB cap. Managed configuration may override these values, and
+Audit defaults to 30 days with a 100 MiB cap. Managed configuration may override these values, and
 `audit status` reports the effective values and their source. Version 1 adds no persistent evidence
 directory. Existing Shell `events.jsonl` and `output-refs` lifecycles remain unchanged; audit stores
 only opaque references, hashes, types, and sizes.
@@ -406,7 +406,7 @@ No phase may claim a complete production timeline before the corresponding produ
 - Any stable ID yields an ordered `audit trace` with explicit gaps.
 - v0 and v1 fixtures query, filter, and export together; unknown v1 events do not poison a file.
 - Interior corruption and crash-tail partial records are reported rather than silently disappearing.
-- The 30-day/1 GiB retention policy executes deterministically without changing existing Shell
+- The 30-day/100 MiB retention policy executes deterministically without changing existing Shell
   evidence lifecycles.
 - Secret corpora and randomized nested inputs do not appear in segments, bundles, manifests, CLI
   errors, or test snapshots.

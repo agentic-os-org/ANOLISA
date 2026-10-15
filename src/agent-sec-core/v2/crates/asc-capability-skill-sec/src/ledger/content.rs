@@ -18,7 +18,7 @@ const MAX_FILES: usize = 2000;
 #[derive(PartialEq, Eq)]
 struct ContentFile {
     bytes: Vec<u8>,
-    mode: u32,
+    mode: rustix::fs::RawMode,
 }
 
 pub(crate) struct Content {
@@ -139,7 +139,8 @@ impl Content {
                 .map_err(|e| io_error(root.path.join(name), e))?,
         );
         let before = file.metadata().map_err(|e| io_error(&path, e))?;
-        if !before.is_file() || before.dev() != stat.st_dev || before.ino() != stat.st_ino {
+        let identity = rustix::fs::fstat(&file).map_err(|e| io_error(&path, e))?;
+        if !before.is_file() || identity.st_dev != stat.st_dev || identity.st_ino != stat.st_ino {
             return Err(SkillSecError::Integrity(
                 "content changed during capture".into(),
             ));
@@ -181,7 +182,7 @@ impl Content {
             path,
             ContentFile {
                 bytes,
-                mode: 0o644 | (before.mode() & 0o111),
+                mode: 0o644 | (identity.st_mode & 0o111),
             },
         );
         Ok(())

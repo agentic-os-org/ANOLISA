@@ -1,14 +1,20 @@
 # 首版 Binding Reconciler 验收标准
 
+对象以 [生命周期契约](../../../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md)为准：Scope
+无 revision，保存完整 Policy 快照；Binding 由系统管理。fixtures 已改为单策略 Binding +
+Scope 来源/实例身份，保留底层 changed-spec revision/CAS 回归；该兼容路径不是公开 API。
+PAP/Runtime 测试补充 Scope 所有权、模板快照独立、发现/删除竞争、失败重试及最终回收；
+真实 procfs + scripted Client 组合见 daemon `reconciliation.rs` 测试。
+
 文档类型：`[TARGET V2]` 验收标准。核心与 Adapter/Client 组合使用 mock target 验证，
-不替代真实 AgentSight 或 kernel 验收。具体版本及运行结果见[执行报告](RESULTS.md)；
+不替代真实 AgentSight 或 kernel 验收。具体版本及运行结果由对应 PR、CI 与验收报告记录；
 Runtime 集成、完整 E2E 和持久化恢复按各自工作包验收。
 
 设计依据：[详细方案](../../../docs/design/BINDING_RECONCILER_DESIGN_AND_IMPLEMENTATION_zh.md)
 及[讨论记录](../../../docs/design/BINDING_RECONCILER_DECISIONS_zh.md)。
 本文是首版 **Reconciler 核心**的必过范围；详细方案的跨组件矩阵是全链路索引，
-不能将其中的延期能力重新作为核心验收前置条件。这里的“保存/提交”指内存
-repository 的原子操作，不代表 SQL 或磁盘耐久性。
+不能将其中的延期能力重新作为核心验收前置条件。当前生产与契约测试均使用 SQLite；
+核心测试使用隔离临时落盘库验证原子操作，磁盘耐久性和进程崩溃恢复仍需独立验收。
 
 Runtime 集成采用[调度、存储与恢复设计](../../../docs/design/BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
 的 CR-010～CR-021 和 RRT-001～RRT-018 分阶段门禁。核心 fixtures 按局部写和每次重算契约维护：
@@ -18,20 +24,20 @@ dirty 仅负责再次排队。deployment 清理责任及重试控制继续保留
 
 Runtime 验收按新设计第 10 节分配：Runtime 集成 PR 以单元、组件集成、调度竞争及相关既有回归
 为门禁；完整 CLI→daemon→Reconciler→mock AgentSight E2E 单独开 PR；新增系统性
-error injection、进程崩溃和重启恢复测试等待 persistent Repository 就绪。
+error injection、进程崩溃和重启恢复测试按 SQLite 设计独立验收。
 后两者不阻塞 Runtime 集成 PR；本标准已有错误分支/竞争 fixtures 继续维护。
 
 ## 1. 验收对象与边界
 
 验收对象是实际 Reconciler 实现、它的状态/部署记录操作及有界重试逻辑。
 测试直接调用 `reconcile(binding_id)` 或实现中等价的核心入口，不要求 daemon/UDS。
-使用实现中的内存 repository；故障与竞争通过 wrapper 注入，不能另写一份假的
+使用实现中的 SQLite repository；故障与竞争通过 wrapper 注入，不能另写一份假的
 Reconciler 或只测状态枚举替代实际执行。
 
 | 层次 | 本标准如何验证 | 归属 |
 |---|---|---|
-| Reconciler | 完整内存记录、fake Adapter/Client、可控时钟和同步点；执行真实核心逻辑 | 本文全部必过 |
-| 内存 repository | 条件检查和更新在同一临界区；新请求不覆盖部署记录；结果更新保留新意图 | Reconciler 的直接依赖，必须有对应测试 |
+| Reconciler | 完整 SQLite 记录、fake Adapter/Client、可控时钟和同步点；执行真实核心逻辑 | 本文全部必过 |
+| SQLite repository | 条件检查和更新在同一事务；新请求不覆盖部署记录；结果更新保留新意图 | Reconciler 的直接依赖，必须有对应测试 |
 | AgentSight Adapter/Client | 接口实现编译接入，运行各自单测；具体 DSL/HTTP/UUIDv5/进程身份语义归各自测试 | 具体组件接入证据，不混入通用核心断言 |
 | PAP API | 请求增版、准入、幂等、完整返回及 wire fixture | PAP 改动块 |
 | PAP 与 Reconciler 交互 | 请求提交后的通知、实际后台执行、GET 结果、已有 shutdown 接线 | 交互块；不阻碍核心独立验收 |
@@ -39,7 +45,7 @@ Reconciler 或只测状态枚举替代实际执行。
 以下均不作为本标准的前置条件：SQL repository、数据库迁移、进程重启后的状态
 恢复、补扫、job queue 去重/容量/throttle/公平性、informer、通用 scheduler、
 多 PEP 实现、跨服务执行顺序协议、真实 AgentSight 服务及 BPF/kernel enforcement。
-内存进程退出后记录会丢失，PEP 对象可能遗留，此限制不得写成已解决。
+SQLite 中的部署记录不代表远端目标已清理；恢复与目标清理需独立验收。
 
 ## 2. 固定判定规则
 
@@ -82,7 +88,7 @@ AdapterFault 作为内部错误以安全 code 记录并按有界重试处理；C
 | 内容 | 要求 |
 |---|---|
 | `caseId` / variant | 对应第 4 节 ID；同一行要求的分支均有单独变体，不能只跑其中一个 |
-| initial records | 完整 BindingView/spec/IR/digest、部署记录、重试和错误；空集合显式给出 |
+| initial records | 完整 BindingView/spec、部署记录、重试和错误；空集合显式给出 |
 | trigger sequence | 核心调用、已接受意图的注入、时钟推进、竞争同步点及故障注入 |
 | dependency results | Adapter 完整输出、Client prepared/目标身份/逐目标结果、repository 故障 |
 | expected records | 完整最终 Binding 与运行记录；不能仅检查 status 或记录数量 |
@@ -107,7 +113,7 @@ PEP 身份都是 UUID。prepared 内容以字节或等价的无损编码比较�
 | `record.skip.ready`、`record.skip.applying` | 专门验证跳过逻辑的既有状态输入，不代表完整执行成功后的输出 |
 
 record 中的 status、attempts、deadline、error、deployment presence 保持显式可见；
-共享稳定 spec 和请求不需要为每种运行状态复制 Policy/IR。expected 独立声明，
+共享稳定 spec 和请求不需要为每种运行状态复制 PolicyTemplate 快照。expected 独立声明，
 不得从运行结果生成或由 Reconciler 的状态转换函数推导。新增 policy 的翻译样例
 归属 Adapter；核心矩阵仅在增加执行/记账语义时扩展，不按 policy 类型复制。
 
@@ -130,8 +136,8 @@ runner 必须在以下情况失败：缺失/重复 case、缺失预期变体、f
 ## 4. 首版核心必过矩阵
 
 以下 22 项及各自要求的变体均为必过；
-清单见 [required-variants.json](required-variants.json)，当前运行证据见 [Binding 队列拒绝验收](../../../docs/design/BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)，
-旧版本结果见 [历史执行报告](RESULTS.md)。
+清单见 [required-variants.json](required-variants.json)，Binding 准入的独立验收入口见
+[Binding 队列拒绝验收](../../../docs/design/BINDING_QUEUE_ADMISSION_ACCEPTANCE_zh.md)。
 
 | ID | 场景与必要变体 | 通过条件 |
 |---|---|---|
@@ -144,7 +150,7 @@ runner 必须在以下情况失败：缺失/重复 case、缺失预期变体、f
 | REC-CORE-007 | 认领后 revision 改变 / 仅 status 改变 | 两种 CAS 均拒绝旧生命周期写入；只合并已登记目标的事实；不写回整份旧 BindingState |
 | REC-CORE-008 | 首次读取失败 / claim 存储失败 / claim 冲突 | 零目标修改调用；未成功 claim 不消耗预算；冲突与存储错误可区分 |
 | REC-CORE-009 | 目标登记保存失败 | create/update 均未调用；旧目标保留；返回存储错误，不虚报 READY |
-| REC-CORE-010 | Client 成功后结果保存失败及随后恢复写入 | 原子结果未部分提交；不报告完成、不丢预登记目标；调用退出后无待补写缓存；恢复未完成状态且保留预算，重新准备并安全重放 |
+| REC-CORE-010 | Client 成功后结果保存失败及随后恢复写入 | 原子结果未部分提交；不报告完成、不丢预登记目标；同进程保留原 write_id/结果和逻辑 slot，先确认或补交原写入，不重复已完成远端调用、不消耗存储等待预算；真正进程崩溃后依持久 UNKNOWN 责任安全恢复 |
 | REC-CORE-011 | Adapter 语义拒绝 | 不调用 prepare 或目标修改接口；APPLY_FAILED 与安全拒绝 code 正确；旧目标保留 |
 | REC-CORE-012 | AdapterFault | 不调用目标修改接口；安全内部 code；按有界预算退避/耗尽，不当成成功或策略拒绝 |
 | REC-CORE-013 | prepare 可重试错误 / 明确拒绝 | 零目标修改调用；对应退避或 APPLY_FAILED；不虚构新目标存在或删除旧记录 |
@@ -165,7 +171,7 @@ Apply。fixture 中的旧观察是最后确认事实，不是远端实时状态�
 
 ### Review 后补充的必过边界
 
-当前 22 项/47 变体；REC-CORE-019/missing 的 trace 为一次 read：核心确认缺失
+当前 22 项/48 变体；REC-CORE-019/missing 的 trace 为一次 read：核心确认缺失
 后跳过，不分配共享槽位。每次调用直接读取当前状态；登记/完成在 CAS 前读取完整
 快照，完成 CAS 冲突会重读并合并。trace 中 claim/register/finish 是 wrapper 按写入
 前后状态标注的 CAS 阶段，不是 repository 方法；matched 表示 CAS 成功，旧任务的
@@ -185,7 +191,7 @@ Apply。fixture 中的旧观察是最后确认事实，不是远端实时状态�
 
 核心矩阵之外，第一版“接入 Adapter 和 AgentSight Client”的交付还必须有至少一条
 本地组合测试：完整 Binding → 实际 AgentSight Adapter → 实际 AgentSight Client
-（可替换 transport/process resolver）→ 内存 repository 最终状态。覆盖 Apply 成功
+（可替换 transport/process resolver）→ SQLite repository 最终状态。覆盖 Apply 成功
 和 Delete 结果不确定后重试两条路径；网络使用 captured/mock wire，无需启动真实服务。
 
 组合测试证明实际接口接通，不替代核心竞争/失败矩阵，也不证明远端实际生效。
@@ -205,7 +211,7 @@ AgentSight Client 自身负责测试 UUIDv5、prepare 无修改请求、固定�
    `git diff --check` 通过。发生失败必须说明影响，不能用文档检查代替运行结果。
 4. 验收记录附完整输出/trace 的位置及差异报告；每次重新准备、目标登记先于请求、
    同 Binding 串行、revision/status CAS 和失败保留记录均有可执行证据。
-5. 报告明确写明：memory-only、跨重启不恢复、mock wire、未验证真实 PEP/kernel；
+5. 报告明确写明：临时 SQLite、mock wire、未验证真实 PEP/kernel；跨重启恢复须有独立证据。
    PAP API/交互块及所有延期项单独标记，不能以核心通过宣称全链路完成。
 
 验收产物清单：
@@ -215,15 +221,15 @@ AgentSight Client 自身负责测试 UUIDv5、prepare 无修改请求、固定�
 | 本验收标准与场景判定 | 与实现契约同步 |
 | 完整 JSON fixtures 及 case/variant 清单 | 列出完整输入、输出和有序 trace，包含串行与竞争场景 |
 | crate-local runner 与 Reconciler | 执行 `asc-pcp` 核心矩阵并捕获结果 |
-| Adapter/Client 实际组合测试 | 实际 Adapter/Client/Ureq + 内存 Repository + mock HTTP，逐项记录边界 |
-| 运行结果及可执行验收报告 | [RESULTS.md](RESULTS.md)；分别记录核心、组件、daemon、SQL 和真实 PEP 的证据，不跨层替代 |
+| Adapter/Client 实际组合测试 | 实际 Adapter/Client/Ureq + SQLite Repository + mock HTTP，逐项记录边界 |
+| 运行结果及可执行验收报告 | 对应 PR、CI 与验收报告分别记录源码版本、命令以及核心、组件、daemon、SQL 和真实 PEP 的证据，不跨层替代 |
 
 本次标准整理不要求为延期功能添加实现或测试；新增需求需明确归属及阶段，不能
 通过扩大验收矩阵隐式增加首阶段范围。
 
 ## 7. 删除生命周期回归范围
 
-- `pap_lifecycle.rs`：真实 PAP + memory + core，覆盖同 spec 失败重试重新
+- `pap_lifecycle.rs`：真实 PAP + SQLite + core，覆盖同 spec 失败重试重新
   prepare、Delete 失败重试/预算/不可撤销、硬删除后的 NotFound/LIST、新 ID 创建、
   spec 更新保留旧清理目标，以及 revision 上限。
 - `repository_contract.rs`：包括删除条件检查、缺失记录删除重放、
@@ -239,7 +245,7 @@ reconcile worker。SQL 物理表、跨进程 CAS、重启恢复与 live AgentSig
 
 ## 8. Runtime 与 daemon 直接消费者
 
-`asc-policy-runtime/src/reconciliation/tests.rs` 使用真实 PAP、内存 Repository 和核心，
+`asc-policy-runtime/src/reconciliation/tests.rs` 使用真实 PAP、SQLite Repository 和核心，
 通过 channel/barrier、虚拟时钟和有界状态等待验证 RRT-001～012、016～018 的首阶段范围。
 覆盖通知提交顺序、队列竞争、容量分页补扫、退避释放 worker、重新准备、Delete 抢占和 shutdown。
 `asc-daemon/tests/reconciliation.rs` 验证 daemon 的真实 Adapter/核心/Runtime 装配及完整目标计划，
@@ -274,7 +280,7 @@ CR-019 / DJOB-030 的回归入口：
   自动重试，低于毫秒精度的仓储等待配置被拒绝，避免截断成零延迟。
 - DJOB-025/028 的既有真实 PAP Delete 测试继续验证新意图抢占等待与同 ID 串行收尾。
 
-以上使用内存 Repository 与 scripted port，不证明 SQLite 故障恢复或跨进程持久性。
+以上使用临时 SQLite Repository 与 scripted port，不替代 SQLite 故障恢复或跨进程持久性的独立验收。
 Exhausted 和队列预算是进程内调度状态，仍计入容量，不表示 Binding 已持久化为 FAILED。
 `asc-agentsight-client/tests/factory.rs` 验证缺失/无效凭据的安全重试码，以及 token 文件更新后
 新旧实例分别发送各自的 Authorization；凭据不跨尝试缓存。
@@ -296,9 +302,8 @@ CR-020 / DJOB-031～032 使用 Runtime 的 `src/reconciliation/panic_tests.rs`�
   Delete，比较完整删除意图/目标记录，panic 收尾后串行删除目标且不覆盖新意图。
 - `committed_success_survives_attempt_panic_without_replay`：Apply 成功和 Delete 已删除之后
   panic，比较完整成功结果/缺失状态与调用顺序，成功操作不重放。
-- `unconfirmed_panic_stops_only_that_binding_until_new_notification`：失败记账不可用，随后
-  查询分别返回 Running、错误、panic；原记录保留、补扫/timer 不复活、B 与其它 PAP 操作继续，
-  新 Delete 通知可解除停止并清理目标。
+- `unconfirmed_panic_retains_result_while_other_bindings_progress`：失败记账不可用时保留原结果，
+  其它 Binding 继续；存储恢复后确认原写入，不重复已完成远端调用，新 Delete 可继续清理目标。
 - `panic_completion_and_new_notification_race_never_loses_work`：终态和未确认结果各 32 次
   barrier 竞争，完整比较 entries 与 ready，保证新通知不丢失且只有一个 Queued 条目。
 - `tests.rs::timer_panic_closes_admission_and_shutdown_observes_failure`：timer 时钟 panic

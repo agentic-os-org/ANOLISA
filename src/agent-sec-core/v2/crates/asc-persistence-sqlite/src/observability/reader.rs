@@ -145,7 +145,7 @@ mod tests {
         .expect("record");
 
         let writer = ObservabilitySqliteWriter::new(path).expect("writer");
-        writer.write(&record);
+        writer.write(&record, 1000);
         writer.close_at(1000.0);
     }
 

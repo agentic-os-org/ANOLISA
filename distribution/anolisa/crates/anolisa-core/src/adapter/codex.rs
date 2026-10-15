@@ -2,9 +2,10 @@
 //!
 //! Codex installs plugins from a *marketplace*: a directory holding a
 //! `.agents/plugins/marketplace.json` manifest plus a symlink to the plugin
-//! source. ANOLISA builds a per-user marketplace under
-//! `${XDG_DATA_HOME:-~/.local/share}/anolisa/codex-marketplace/`, points a
-//! symlink at the component's resource root, then drives the official CLI:
+//! source. ANOLISA builds one per-user marketplace per component under
+//! `${XDG_DATA_HOME:-~/.local/share}/anolisa/codex-marketplaces/<marketplace>/`,
+//! points a symlink at the component's resource root, then drives the
+//! official CLI:
 //!
 //! ```text
 //! codex plugin marketplace add <marketplace_root>
@@ -471,6 +472,17 @@ impl FrameworkDriver for CodexDriver {
             ));
         }
 
+        // Codex keeps hook trust after the plugin is gone; drop what enable
+        // wrote so a later bundle with the same hooks is not pre-trusted.
+        match revoke_hook_trust(ctx, &layout) {
+            Ok(true) => messages.push(format!("revoked codex hook trust for '{plugin_ref}'")),
+            Ok(false) => {}
+            Err(err) => {
+                cleanup_complete = false;
+                messages.push(format!("codex hook trust revocation failed: {err}"));
+            }
+        }
+
         match ctx.ops.remove_tree(&layout.root) {
             Ok(true) => messages.push(format!(
                 "removed codex marketplace directory {}",
@@ -513,14 +525,17 @@ struct MarketplaceLayout {
 impl MarketplaceLayout {
     /// Resolve from a freshly read bundle + context (enable/plan path).
     fn resolve(bundle: &AdapterBundle, ctx: &DriverCtx) -> Result<Self, AdapterError> {
-        let root = marketplace_root(ctx.user_home.as_deref())?;
+        let marketplace = marketplace_name(&ctx.component);
+        // The name becomes a path component of the root below.
+        validate_marketplace_name(&marketplace)?;
+        let root = marketplace_root(ctx.user_home.as_deref(), &marketplace)?;
         let plugin = bundle
             .plugin_id
             .clone()
             .unwrap_or_else(|| ctx.component.clone());
         Ok(Self {
             root,
-            marketplace: marketplace_name(&ctx.component),
+            marketplace,
             plugin,
         })
     }
@@ -620,6 +635,25 @@ fn establish_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<(
     hook_trust::confirm_write(&program, &output)
 }
 
+/// Remove this plugin's user-layer hook trust; `false` when none was recorded.
+fn revoke_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<bool, AdapterError> {
+    let program = codex_bin();
+    let output = ctx
+        .ops
+        .run_framework_rpc(hook_trust::read_session(program.clone(), CLI_TIMEOUT))?;
+    let Some(revocation) = hook_trust::plugin_revocation(&program, &output, &layout.plugin_ref())?
+    else {
+        return Ok(false);
+    };
+    let output = ctx.ops.run_framework_rpc(hook_trust::revoke_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        revocation,
+    ))?;
+    hook_trust::confirm_write(&program, &output)?;
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
@@ -650,11 +684,20 @@ fn marketplace_base(user_home: Option<&Path>) -> Option<PathBuf> {
     user_home.map(|h| h.join(".local").join("share").join("anolisa"))
 }
 
-/// Marketplace root directory, or an error when `$HOME`/`XDG_DATA_HOME`
-/// cannot be resolved.
-fn marketplace_root(user_home: Option<&Path>) -> Result<PathBuf, AdapterError> {
+/// Marketplace root directory for one component's marketplace, or an error
+/// when `$HOME`/`XDG_DATA_HOME` cannot be resolved.
+///
+/// Codex identifies a local marketplace by its directory and reads the name
+/// from that directory's single `.agents/plugins/marketplace.json`, so two
+/// components must never share a root: the second enable would overwrite the
+/// first manifest (Codex then re-associates the directory with the new name
+/// and drops the first plugin), and either disable would delete the other's
+/// manifest and symlink with the directory. Receipts written before this
+/// layout keep their recorded `codex-marketplace/` root; the new parent is a
+/// sibling of it, so removing that legacy root never touches these.
+fn marketplace_root(user_home: Option<&Path>, marketplace: &str) -> Result<PathBuf, AdapterError> {
     marketplace_base(user_home)
-        .map(|base| base.join("codex-marketplace"))
+        .map(|base| base.join("codex-marketplaces").join(marketplace))
         .ok_or_else(|| AdapterError::FrameworkCli {
             program: codex_bin(),
             reason: "cannot resolve codex marketplace dir (no $HOME and no XDG_DATA_HOME)"
@@ -824,6 +867,22 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marketplace_roots_are_per_component_and_outside_the_legacy_root() {
+        let home = Path::new("/home/u");
+        let Some(base) = marketplace_base(Some(home)) else {
+            panic!("base resolves from the home dir");
+        };
+        let tokenless = marketplace_root(Some(home), "anolisa-tokenless").expect("tokenless root");
+        let sec_core = marketplace_root(Some(home), "anolisa-sec-core").expect("sec-core root");
+        assert_ne!(tokenless, sec_core);
+        assert!(!tokenless.starts_with(&sec_core) && !sec_core.starts_with(&tokenless));
+        // Pre-upgrade receipts recorded `<base>/codex-marketplace`; disabling
+        // one of them removes that tree, which must not contain new roots.
+        let legacy = base.join("codex-marketplace");
+        assert!(!tokenless.starts_with(&legacy) && !sec_core.starts_with(&legacy));
+    }
 
     #[test]
     fn marketplace_name_is_component_scoped() {

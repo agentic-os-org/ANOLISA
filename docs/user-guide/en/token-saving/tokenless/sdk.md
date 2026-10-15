@@ -25,7 +25,7 @@ one response or retrieving one Stash entry. Use `TokenlessStats` only for statis
 ### Install from GitHub Release
 
 Official SDK wheels are attached to Tokenless GitHub Releases starting with
-[v0.7.14](https://github.com/alibaba/anolisa/releases/tag/tokenless/v0.7.14). They require
+[v0.7.14](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.7.14). They require
 CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the target system:
 
 | System | Release asset |
@@ -34,14 +34,14 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple silicon | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.4 on Linux x86_64
+The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.6 on Linux x86_64
 into a virtual environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.4/anolisa_tokenless-0.8.4-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.6/anolisa_tokenless-0.8.6-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not
@@ -251,11 +251,15 @@ result = await sdk.post_tool(
         output_optimization=call.output_optimization,
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
+        command=None,  # the executed command line for a shell tool
     )
 )
 ```
 
-Set `content_origin` from the tool's registered contract; do not infer it from result text. Core
+Set `content_origin` from the tool's registered contract; do not infer it from result text. For a
+shell tool, pass the command line that actually ran (the PreTool result when RTK rewrote it) as
+`command`: Core reports a plain print of local files as `file_read`, so a printed HTML page stays
+verbatim while data in that output still compresses. Leave `command` unset for other tools. Core
 routes Retrieve output, errors, interrupted or denied calls, RTK-optimized output, and ordinary
 successful output. It returns the final output plus disposition, operations, recoverability, token
 counts, Stash keys, and optional diagnostic context. Adapters should pass intermediate streaming

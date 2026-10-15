@@ -592,6 +592,7 @@ fn activity_panel_keeps_card_border_aligned_to_renderer_width() {
 #[test]
 fn activity_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -958,6 +959,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
 #[test]
 fn recommendation_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1108,6 +1110,7 @@ fn recommendation_action_panel_keeps_card_border_aligned_to_renderer_width() {
 #[test]
 fn recommendation_action_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1617,6 +1620,7 @@ fn health_banner_recent_oom_scope_label_id_wins_over_raw_constraint() {
 fn health_banner_styled_output_keeps_finding_body_primary() {
     let report = oom_health_report();
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 120,
         plain: false,
         styled: true,
@@ -1647,6 +1651,7 @@ fn health_banner_styled_output_keeps_finding_body_primary() {
 fn health_banner_styled_labels_are_readable_not_dim_only() {
     let report = oom_health_report();
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 120,
         plain: false,
         styled: true,

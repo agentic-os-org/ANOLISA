@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use asc_capability_prompt_scan::{DEFAULT_L2_MODEL, is_supported_l2_model};
+use asc_foundation_types::is_valid_anolisa_data_home;
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 use super::manifest::{self, EnvKind, EnvSpec};
@@ -109,19 +111,7 @@ fn resolve_one(
             resolve_float_timeout(spec.name, raw, default, max, diagnostics),
             EnvValue::text(default),
         ),
-        // Gap G1: V2 has no prompt-scanner engine to query, so the default is
-        // empty and no backend is known. This is the same degraded path V1
-        // takes before its native extension is built: the configured value is
-        // still reported, but an unsupported backend cannot be flagged.
-        EnvKind::Identifier => (
-            raw.map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map_or_else(
-                    || EnvValue::text(""),
-                    |text| EnvValue::Text(safe_value(text)),
-                ),
-            EnvValue::text(""),
-        ),
+        EnvKind::Identifier => resolve_l2_model(spec.name, raw, diagnostics),
         EnvKind::DataHome { default } => (
             resolve_data_home(spec.name, raw, default, diagnostics),
             EnvValue::text(default),
@@ -139,7 +129,7 @@ fn resolve_bool(
     let Some(raw) = raw else {
         return EnvValue::Bool(default);
     };
-    let normalized = raw.trim().to_lowercase();
+    let normalized = v1_strip(raw).to_lowercase();
     let resolved = if strict {
         match normalized.as_str() {
             "true" => Some(true),
@@ -171,7 +161,7 @@ fn resolve_keyword(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let normalized = raw.trim().to_lowercase();
+    let normalized = v1_strip(raw).to_lowercase();
     let normalized = if aliased {
         match normalized.as_str() {
             "debug" => "observe".to_owned(),
@@ -199,7 +189,7 @@ fn resolve_int_timeout(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let Ok(mut value) = raw.trim().parse::<i64>() else {
+    let Ok(mut value) = v1_strip(raw).parse::<i64>() else {
         diagnostics.push(fallback(name, &EnvValue::text(default)));
         return EnvValue::text(default);
     };
@@ -230,7 +220,7 @@ fn resolve_float_timeout(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let parsed = raw.trim().parse::<f64>();
+    let parsed = v1_strip(raw).parse::<f64>();
     let Ok(mut value) = parsed else {
         diagnostics.push(fallback(name, &EnvValue::text(default)));
         return EnvValue::text(default);
@@ -245,6 +235,23 @@ fn resolve_float_timeout(
     EnvValue::Text(format_number(value))
 }
 
+fn resolve_l2_model(
+    name: &str,
+    raw: Option<&str>,
+    diagnostics: &mut Vec<String>,
+) -> (EnvValue, EnvValue) {
+    let default = EnvValue::text(DEFAULT_L2_MODEL);
+    let Some(raw) = raw.map(v1_strip).filter(|value| !value.is_empty()) else {
+        return (default.clone(), default);
+    };
+    if !is_supported_l2_model(raw) {
+        diagnostics.push(format!(
+            "{name} is not a supported L2 backend; prompt scans will fail"
+        ));
+    }
+    (EnvValue::Text(safe_value(raw)), default)
+}
+
 fn resolve_data_home(
     name: &str,
     raw: Option<&str>,
@@ -254,7 +261,7 @@ fn resolve_data_home(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    if valid_data_home(raw) {
+    if is_valid_anolisa_data_home(raw) {
         return EnvValue::text(raw);
     }
     if !raw.is_empty() {
@@ -263,16 +270,13 @@ fn resolve_data_home(
     EnvValue::text(default)
 }
 
-/// Matches ANOLISA's absolute data-root syntax without resolving the filesystem.
+/// Strips surrounding whitespace the way V1's Python `str.strip()` does.
 ///
-/// Gap G4: once skill-ledger migrates, V2 will hold two copies of this check;
-/// fold them into one implementation then.
-fn valid_data_home(value: &str) -> bool {
-    !value.is_empty()
-        && value.starts_with('/')
-        && !value
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
+/// Python also treats U+001C..U+001F (the information separators) as
+/// whitespace, while Rust's `trim` follows only Unicode `White_Space`; without
+/// them a decorated value such as `"\x1cfalse"` resolves differently from V1.
+pub(crate) fn v1_strip(value: &str) -> &str {
+    value.trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch))
 }
 
 fn fallback(name: &str, default: &EnvValue) -> String {
@@ -382,7 +386,7 @@ pub(crate) fn scan_mode(capability: &str, values: &[ResolvedEnv]) -> String {
 /// Returns the effective timeout, falling back to the hook's built-in value.
 pub(crate) fn timeout(agent: &str, capability: &str, values: &[ResolvedEnv]) -> String {
     if let Some(value) = values.iter().find(|value| value.name.ends_with("_TIMEOUT")) {
-        let text = value.effective.as_str().trim();
+        let text = v1_strip(value.effective.as_str());
         return if text.is_empty() {
             "-".to_owned()
         } else {
@@ -640,7 +644,25 @@ mod tests {
     }
 
     #[test]
-    fn l2_backend_is_reported_without_a_default_or_support_check() {
+    fn l2_backend_uses_the_prompt_scanner_catalog() {
+        let (values, diagnostics) = resolve_pair("qoder", "prompt-scan", &[]);
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text(DEFAULT_L2_MODEL));
+        assert_eq!(value.default, EnvValue::text(DEFAULT_L2_MODEL));
+        assert!(diagnostics.is_empty());
+
+        let warden = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF";
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "prompt-scan",
+            &[("PROMPT_SCANNER_L2_MODEL", warden)],
+        );
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text(warden));
+        assert!(diagnostics.is_empty());
+
         let (values, diagnostics) = resolve_pair(
             "qoder",
             "prompt-scan",
@@ -649,14 +671,59 @@ mod tests {
         let value =
             find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
         assert_eq!(value.effective, EnvValue::text("Unknown-Backend"));
-        assert_eq!(value.default, EnvValue::text(""));
-        assert!(diagnostics.is_empty());
+        assert_eq!(value.default, EnvValue::text(DEFAULT_L2_MODEL));
+        assert_eq!(
+            diagnostics,
+            vec!["PROMPT_SCANNER_L2_MODEL is not a supported L2 backend; prompt scans will fail"]
+        );
 
         let (values, _) =
             resolve_pair("qoder", "prompt-scan", &[("PROMPT_SCANNER_L2_MODEL", "  ")]);
         let value =
             find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
-        assert_eq!(value.effective, EnvValue::text(""));
+        assert_eq!(value.effective, EnvValue::text(DEFAULT_L2_MODEL));
+    }
+
+    #[test]
+    fn information_separators_are_stripped_like_v1() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let wrap = |value: &str| format!("{separator}{value}{separator}");
+            let pairs = [
+                ("PII_CHECKER_HOOK_ENABLED", wrap("false")),
+                ("PII_CHECKER_ENABLED", wrap("off")),
+            ];
+            let pairs: Vec<(&str, &str)> = pairs.iter().map(|(n, v)| (*n, v.as_str())).collect();
+            let (values, diagnostics) = resolve_pair("qwen", "pii-check", &pairs);
+            assert!(!enabled(&values), "separator={separator:?}");
+            assert_eq!(values[1].effective, EnvValue::Bool(false));
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+            let pairs = [
+                ("CODE_SCANNER_MODE", wrap("ask")),
+                ("CODE_SCANNER_TIMEOUT", wrap("30")),
+            ];
+            let pairs: Vec<(&str, &str)> = pairs.iter().map(|(n, v)| (*n, v.as_str())).collect();
+            let (values, diagnostics) = resolve_pair("qoder", "code-scan", &pairs);
+            assert_eq!(mode(&values, "observe"), "ask");
+            assert_eq!(timeout("qoder", "code-scan", &values), "30");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+            let raw = wrap("0.05");
+            let (values, diagnostics) =
+                resolve_pair("qoder", "skill-ledger", &[("SKILL_LEDGER_TIMEOUT", &raw)]);
+            assert_eq!(timeout("qoder", "skill-ledger", &values), "0.05");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+            let raw = wrap(DEFAULT_L2_MODEL);
+            let (values, diagnostics) =
+                resolve_pair("qoder", "prompt-scan", &[("PROMPT_SCANNER_L2_MODEL", &raw)]);
+            let value =
+                find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+            assert_eq!(value.effective, EnvValue::text(DEFAULT_L2_MODEL));
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+        // A separator inside the value is kept, exactly as `str.strip()` keeps it.
+        assert_eq!(v1_strip("\u{1c} a\u{1c}b \u{1f}"), "a\u{1c}b");
     }
 
     #[test]

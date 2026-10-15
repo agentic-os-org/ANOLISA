@@ -15,10 +15,29 @@ Before changing documentation, read
 source of truth for file placement, bilingual names, and documentation
 updates.
 
+## Recommended contribution directions
+
+If you are looking for a contribution direction, we recommend starting with the
+component topics in [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap).
+Bug reports, bug fixes, and other Issues and PRs are also welcome.
+
+Roadmap topics are candidate directions, not scheduling commitments or tasks
+available to claim. To implement a roadmap direction, follow the Issue process:
+
+1. Search for an existing Issue covering the direction. If none exists, open an
+   Issue linking to the source Discussion and describe the proposed scope.
+2. Confirm the current version, scope, and acceptance criteria with the component
+   owner before starting implementation.
+3. Once the Issue is ready to claim, follow the existing
+   [community claiming process](.github/TRIAGE.md#claiming-community-work) and
+   comment `/claim` on the Issue.
+4. Implement the agreed scope and submit a PR linking to the Issue. Use
+   `closes #<issue-number>` when the PR completes the Issue.
+
 ## Repository at a glance
 
-ANOLISA is a monorepo. The twelve components and their supported development
-platforms are listed below. Build names are accepted by `build-all.sh`; commit
+ANOLISA is a monorepo. The table below lists component development platforms
+and entry points. Build names are accepted by `build-all.sh`; commit
 scopes are used in commit subjects and PR titles.
 
 | Component | Path | Platform | Build name | Scope | Development entry and minimum local gate |
@@ -34,7 +53,6 @@ scopes are used in commit subjects and PR titles.
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
 | ktuner | `src/ktuner/` | Linux only | n/a | `ktuner` | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
-| blaze | `src/blaze/` | Linux only | n/a | `blaze` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` |
 
 `tokenless` can publish macOS artifacts, but its binaries are cross-compiled
 from Linux. Do not use a macOS checkout as the tokenless build environment.
@@ -59,7 +77,7 @@ local `main` from the official repository and create a working branch.
 ```bash
 git clone https://github.com/<your-account>/anolisa.git
 cd anolisa
-git remote add upstream https://github.com/alibaba/anolisa.git
+git remote add upstream https://github.com/agentic-os-org/ANOLISA.git
 git fetch upstream
 git switch main
 git merge --ff-only upstream/main
@@ -102,8 +120,8 @@ boundaries, explain the contract and test impact in the PR.
 - Optional set: `cosh-ng` and `sight`. Add `--all` or name them with
   `--component`.
 
-It does not build `anolisa`, `skillfs`, `ktuner`, or `blaze`. Use their
-component gates in the matrix above for those four components.
+The script does not build `anolisa`, `skillfs`, or `ktuner`. Use their
+component gates in the matrix above.
 
 With no install-mode flag, component files install to the user profile under
 `$HOME/.local` without elevated installation privileges. Dependency bootstrap
@@ -221,7 +239,6 @@ warning and should be justified or replaced before review.
 | `anolisa` | `distribution/anolisa/` |
 | `skillfs` | `src/skillfs/` |
 | `ktuner` | `src/ktuner/` |
-| `blaze` | `src/blaze/` |
 | `deps` | Dependency changes, including lockfiles. |
 | `ci` | `.github/workflows/` and CI configuration. |
 | `docs` | Documentation-only changes. |

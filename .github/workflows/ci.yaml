@@ -47,11 +47,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_blaze:
-        description: 'Force run blaze tests (ignore change detection)'
-        required: false
-        type: boolean
-        default: false
       run_skillfs:
         description: 'Force run SkillFS tests (ignore change detection)'
         required: false
@@ -62,6 +57,11 @@ on:
         required: false
         type: boolean
         default: false
+
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -88,7 +88,10 @@ jobs:
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
-      blaze: ${{ steps.changes.outputs.blaze }}
+      cache_environment: >-
+        ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
+            (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+            'ci-sccache-writer' || 'ci-sccache-reader' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,7 +122,6 @@ jobs:
           SKILLFS=false
           COSH_NG=false
           KTUNER=false
-          BLAZE=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^deprecated/copilot-shell/"; then
@@ -152,8 +154,11 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
           fi
-          if echo "$CHANGED" | grep -q "^src/blaze/"; then
-            BLAZE=true
+
+          # Exercise cache consumers when the runner image or cache bootstrap changes.
+          if echo "$CHANGED" | grep -Eq '^\.github/actions/setup-sccache/|^\.github/runner-images/ubuntu22-ci/|^\.github/workflows/ci\.yaml$'; then
+            TOKENLESS=true
+            AGENT_MEMORY=true
           fi
 
           # Manual override via workflow_dispatch
@@ -187,9 +192,6 @@ jobs:
           if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
             KTUNER=true
           fi
-          if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
-            BLAZE=true
-          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -201,7 +203,6 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
-          echo "blaze=$BLAZE" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -216,7 +217,6 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
-          echo "| blaze | $BLAZE |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Validate component version metadata
@@ -357,6 +357,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -375,8 +376,15 @@ jobs:
         with:
           python-version: '3.11.6'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/agent-sec-core/linux-sandbox
 
       - name: Install system dependencies
@@ -484,9 +492,9 @@ jobs:
 
       - name: Run AgentSecCore V2 Rust tests
         run: |
-          cd src/agent-sec-core/v2
-          cargo test --workspace --locked
-          cargo doc --workspace --no-deps --locked
+          cd src/agent-sec-core
+          make test-rust-v2
+          cd v2 && cargo doc --workspace --no-deps --locked
 
       - name: Run Rust tests with coverage
         run: |
@@ -676,6 +684,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/agentsight
 
       - name: astral-sh/setup-uv
@@ -700,6 +709,10 @@ jobs:
       - name: Run dashboard navigation regression
         working-directory: src/agentsight/dashboard
         run: npm run test:navigation
+
+      - name: Run dashboard stale-load regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:stale-load
 
       - name: Install eBPF build dependencies
         run: |
@@ -837,6 +850,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.tokenless == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -845,8 +859,15 @@ jobs:
           toolchain: '1.89.0'
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: |
             src/tokenless
             src/tokenless/benchmark/l1-compressor
@@ -919,11 +940,35 @@ jobs:
           make -C src/tokenless test-integration
 
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: |
+            src/tokenless/python/tokenless/pyproject.toml
+            src/tokenless/python/agentscope/pyproject.toml.in
+            src/tokenless/tests/test-agentscope-integration.sh
+            src/tokenless/Makefile
 
       - uses: extractions/setup-just@v2
 
       - name: Install RTK Rust toolchain
         run: rustup toolchain install 1.91.0 --profile minimal
+
+      - name: Identify bundled RTK cache inputs
+        id: rtk-cache-inputs
+        run: |
+          echo "glibc=$(getconf GNU_LIBC_VERSION)" >> "$GITHUB_OUTPUT"
+          echo "rust=$(rustup run 1.91.0 rustc --version)" >> "$GITHUB_OUTPUT"
+
+      # Preserve mtimes for RTK and the shared modules compiled by its stats patch.
+      - name: Cache bundled RTK source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/tokenless/third_party/rtk
+            src/tokenless/crates/tokenless-stats/src/home.rs
+            src/tokenless/crates/tokenless-stats/src/path_policy.rs
+          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs') }}
 
       - name: Test bundled RTK integration
         env:
@@ -937,9 +982,14 @@ jobs:
           make -C src/tokenless \
             test-python-runtime test-agentscope-integration
 
+      - name: Remove local wheels from UV dependency cache
+        run: uv cache clean anolisa-tokenless anolisa-tokenless-agentscope
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: src/tokenless/adapters/tokenless/openclaw/package-lock.json
 
       # Adapter lifecycle tests (install / detect / uninstall for openclaw,
       # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
@@ -986,6 +1036,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.ws_ckpt == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -993,8 +1044,15 @@ jobs:
         with:
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/ws-ckpt/src
 
       - name: Install system dependencies
@@ -1021,6 +1079,15 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Select Python for Raw package tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Raw package tests
+        working-directory: src/ws-ckpt
+        run: make test-package-raw
+
       - name: Run OpenClaw script tests
         working-directory: src/ws-ckpt
         run: make test-openclaw-scripts
@@ -1028,7 +1095,10 @@ jobs:
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
-          cargo install cargo-tarpaulin --version 0.37.2 --locked
+          if [[ "$(cargo tarpaulin --version)" != *' 0.37.2' ]]; then
+            echo '::error::Runner image must provide cargo-tarpaulin 0.37.2'
+            exit 1
+          fi
           cd src/ws-ckpt/src
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
@@ -1059,6 +1129,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_memory == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1076,8 +1147,15 @@ jobs:
           toolchain: '1.89.0'
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/agent-memory
 
       - name: Install system dependencies
@@ -1119,6 +1197,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.anolisa == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1130,8 +1209,15 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: distribution/anolisa
 
       - uses: actions/setup-node@v4
@@ -1156,6 +1242,10 @@ jobs:
             distribution/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
           grep -Fx 'base_url = "https://mirror.example.com/raw/v1/"' \
             "$REPO_CONFIG"
+
+      - name: Validate install promotion permissions
+        run: |
+          bash distribution/anolisa/tests/test-install-chmod-scope.sh
 
       - name: Check formatting
         run: |
@@ -1228,6 +1318,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.skillfs == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1236,8 +1327,15 @@ jobs:
           toolchain: '1.86.0'
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/skillfs
 
       - name: Install system dependencies
@@ -1268,27 +1366,37 @@ jobs:
   # =========================================================================
   # Step 11: Test cosh-ng (Rust workspace)
   # =========================================================================
-  # Split into three parallel jobs so the critical path stays within the
-  # five-minute budget: integration (the longest gate, keeps the historical
-  # "Test cosh-ng" check name), fast checks (fmt/clippy/audits/fast gate,
-  # which repeats the audits run-test-gates.sh already performs), and the
-  # release build (no dependency on the test gates).
-  test-cosh-ng:
-    name: Test cosh-ng
+  # Integration uses three complete target shards and the historical
+  # "Test cosh-ng" aggregate check. Fast checks and release build remain
+  # separate jobs.
+  test-cosh-ng-integration:
+    name: Test cosh-ng integration (${{ matrix.gate }})
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [integration-process, integration-raw-cli, integration-shell-host]
     env:
       # This override takes precedence over the workspace's `stable` channel.
-      RUSTUP_TOOLCHAIN: '1.88.0'
+      RUSTUP_TOOLCHAIN: '1.97.1'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
 
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/cosh-ng
 
       - name: Install system dependencies
@@ -1310,13 +1418,26 @@ jobs:
           zsh --version
           locale
           test "$(locale charmap)" = UTF-8
-          scripts/run-test-gates.sh integration
+          scripts/run-test-gates.sh "${{ matrix.gate }}"
+
+  test-cosh-ng:
+    name: Test cosh-ng
+    needs: [detect-changes, test-cosh-ng-integration]
+    if: ${{ always() && needs.detect-changes.outputs.cosh_ng == 'true' }}
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 15
+    steps:
+      - name: Require every integration shard
+        env:
+          INTEGRATION_RESULT: ${{ needs.test-cosh-ng-integration.result }}
+        run: test "$INTEGRATION_RESULT" = success
 
   test-cosh-ng-fast:
     name: Test cosh-ng fast checks
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     env:
       # Keep lint upgrades explicit; this overrides the workspace's `stable` channel.
       RUSTUP_TOOLCHAIN: '1.97.1'
@@ -1331,8 +1452,15 @@ jobs:
         with:
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/cosh-ng
 
       - name: Install system dependencies
@@ -1368,6 +1496,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     env:
       RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
@@ -1375,8 +1504,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.88.0
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/cosh-ng
 
       - name: Install system dependencies
@@ -1397,6 +1533,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.ktuner == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1405,8 +1542,15 @@ jobs:
           toolchain: '1.89.0'
           components: 'rustfmt, clippy'
 
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           workspaces: src/ktuner
 
       - name: Check formatting
@@ -1423,38 +1567,3 @@ jobs:
         run: |
           cd src/ktuner
           cargo test
-
-  # =========================================================================
-  # Step 13: Test blaze (per-host sandbox daemon)
-  # =========================================================================
-  test-blaze:
-    name: Test blaze
-    needs: detect-changes
-    if: needs.detect-changes.outputs.blaze == 'true'
-    runs-on: anolisa-k8s-general-ci-x64
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.88.0'
-          components: 'rustfmt, clippy'
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src/blaze
-
-      - name: Check formatting
-        run: |
-          cd src/blaze
-          cargo fmt --all --check
-
-      - name: Lint
-        run: |
-          cd src/blaze
-          cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run tests
-        run: |
-          cd src/blaze
-          cargo test --workspace

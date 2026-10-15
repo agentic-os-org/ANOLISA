@@ -64,12 +64,12 @@ Use only the existing files:
 [audit]
 mode = "best_effort" # best_effort | required
 retention_days = 30
-max_disk_bytes = 1073741824
+max_disk_bytes = 104857600
 ```
 
 Rules:
 
-- Built-in defaults are `best_effort`, 30 days, and 1 GiB.
+- Built-in defaults are `best_effort`, 30 days, and 100 MiB.
 - If the system file contains `[audit]`, its table is authoritative for all three settings. Omitted
   values use built-in defaults; user configuration cannot override them.
 - If system `[audit]` is absent, user `[audit]` may override defaults.

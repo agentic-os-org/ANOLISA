@@ -19,6 +19,62 @@
 
 use std::path::{Path, PathBuf};
 
+/// Create missing installation directories under a child-only `022` umask.
+///
+/// `/bin/mkdir -p` leaves existing directories and symlink targets unchanged.
+/// Setting the mask only in its child avoids both process-wide umask races and
+/// a post-creation path-based chmod that could follow a substituted symlink.
+///
+/// # Errors
+///
+/// Returns an I/O error if the native directory-creation command fails.
+pub fn create_install_dir_all(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(());
+    }
+    let mut command = Command::new("/bin/mkdir");
+    command.arg("-p").arg("--").arg(path);
+    // SAFETY: The child hook only invokes the async-signal-safe umask syscall.
+    unsafe {
+        command.pre_exec(|| {
+            nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o022));
+            Ok(())
+        });
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        // Read-only index caches rely on PermissionDenied to select a private cache.
+        let kind = path
+            .ancestors()
+            .skip(1)
+            .find(|parent| parent.is_dir())
+            .and_then(|parent| {
+                nix::unistd::faccessat(
+                    None,
+                    parent,
+                    nix::unistd::AccessFlags::W_OK | nix::unistd::AccessFlags::X_OK,
+                    nix::fcntl::AtFlags::AT_EACCESS,
+                )
+                .err()
+            })
+            .map_or(std::io::ErrorKind::Other, |error| {
+                std::io::Error::from(error).kind()
+            });
+        return Err(std::io::Error::new(
+            kind,
+            format!(
+                "failed to create installation directory {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Application namespace folder appended to most FHS / file-hierarchy roots.
 const NS: &str = "anolisa";
 /// Subdirectory under `datadir` where package-owned component contracts
@@ -410,6 +466,135 @@ fn has_dot_segment(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn install_directory_creation_needs_no_path_chmod() {
+        use nix::libc;
+        use nix::sys::stat::{Mode, umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "ANOLISA_TEST_NO_PATH_CHMOD";
+        if std::env::var_os(CHILD).is_none() {
+            let module = module_path!().split_once("::").unwrap().1;
+            let test = format!("{module}::install_directory_creation_needs_no_path_chmod");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{report}");
+            assert!(
+                report.contains("1 passed"),
+                "child test did not run: {report}"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Denying path-based chmod makes the substitution bug fail deterministically,
+        // without racing an attacker thread against mkdir. Descriptor chmod stays allowed.
+        let statement = |code, k| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let deny = |syscall| libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: syscall as u32,
+        };
+        let reject = statement(
+            (libc::BPF_RET | libc::BPF_K) as u16,
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        );
+        let mut filter = [
+            statement((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+            #[cfg(target_arch = "x86_64")]
+            deny(libc::SYS_chmod),
+            #[cfg(target_arch = "x86_64")]
+            reject,
+            deny(libc::SYS_fchmodat),
+            reject,
+            // fchmodat2 is syscall 452 on both architectures; libc omits it on aarch64.
+            deny(452),
+            reject,
+            statement(
+                (libc::BPF_RET | libc::BPF_K) as u16,
+                libc::SECCOMP_RET_ALLOW,
+            ),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: Only this test runs in the child. The filter and its backing array
+        // remain valid until prctl copies them; the filter only removes permissions.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0
+            );
+        }
+        umask(Mode::from_bits_truncate(0o077));
+        let directory = tmp.path().join("new/nested");
+        create_install_dir_all(&directory).unwrap();
+        for path in [&directory, &tmp.path().join("new")] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        let private = tmp.path().join("private");
+        std::fs::write(&private, b"private").unwrap();
+        assert_eq!(
+            std::fs::metadata(private).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_directory_creation_preserves_existing_modes_and_symlink_targets() {
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("private");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = tmp.path().join("link");
+        symlink(&existing, &link).unwrap();
+        let child = link.join("new/leaf");
+        create_install_dir_all(&child).unwrap();
+        create_install_dir_all(&child).unwrap();
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for path in [&child, &link.join("new")] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        let file = existing.join("file");
+        fs::write(&file, b"keep").unwrap();
+        assert!(create_install_dir_all(&file).is_err());
+        assert!(create_install_dir_all(&file.join("child")).is_err());
+        create_install_dir_all(Path::new("")).unwrap();
+    }
 
     // ---- system-mode --------------------------------------------------
 

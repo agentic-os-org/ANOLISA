@@ -26,6 +26,12 @@ impl GenAISqliteStore {
     /// Initialize database tables
     pub(super) fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // This migration must run before any index that references the added
+        // column: on databases created before conversation_id existed,
+        // creating the index first aborts the batch and the `?` below returns
+        // before the later ALTER runs (same defect as issue #3314 in the
+        // interruption store).
+        let _ = conn.execute_batch("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT;");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS genai_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,11 +186,8 @@ impl GenAISqliteStore {
         // v4: per-call interruption type
         ensure_col!("interruption_type", "TEXT", "idx_genai_interruption_type");
 
-        // Migration: add conversation_id column for existing databases
-        let _ = conn.execute(
-            "ALTER TABLE genai_events ADD COLUMN conversation_id TEXT",
-            [],
-        );
+        // conversation_id is migrated at the top of this function, before the
+        // index batch that references it.
 
         // v5: tool_call_ids JSON array for output tool calls
         ensure_col!("tool_call_ids", "TEXT");
@@ -208,6 +211,9 @@ impl GenAISqliteStore {
 
         // v9: first provider event that carries model output
         ensure_col!("first_output_timestamp_ns", "INTEGER");
+
+        // v10: distinguish semantic input totals from legacy raw provider input
+        ensure_col!("input_tokens_includes_cache", "INTEGER NOT NULL DEFAULT 0");
 
         Ok(())
     }
@@ -236,13 +242,20 @@ impl GenAISqliteStore {
     }
 
     /// Applies age retention followed by capacity enforcement for every table
-    /// in the GenAI physical database.
+    /// in the GenAI physical database, using the configured store limit.
+    #[cfg(test)]
     pub(crate) fn maintain(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.maintain_with_limit_mb(self.storage_policy.max_db_size_mb)
+    }
+
+    /// Same as [`maintain`] with an explicit size limit in MiB, used when the
+    /// global storage budget reduces this store's effective capacity.
+    pub(crate) fn maintain_with_limit_mb(
+        &self,
+        max_db_size_mb: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let deleted_by_age = self.purge_expired()?;
-        let limit_bytes = self
-            .storage_policy
-            .max_db_size_mb
-            .saturating_mul(1024 * 1024);
+        let limit_bytes = max_db_size_mb.saturating_mul(1024 * 1024);
         if (deleted_by_age > 0 || limit_bytes > 0)
             && self.checkpoint_outcome()? == CheckpointOutcome::Busy
         {

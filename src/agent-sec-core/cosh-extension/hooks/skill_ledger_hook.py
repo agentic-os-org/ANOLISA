@@ -327,44 +327,46 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
     return None, traversal_detected
 
 
-def _keys_exist() -> bool:
-    """Return True if both key.pub and key.enc exist."""
-    xdg_data = os.environ.get("XDG_DATA_HOME", "")
-    if not xdg_data:
-        xdg_data = str(Path.home() / ".local" / "share")
-    data_dir = Path(xdg_data) / "agent-sec" / "skill-ledger"
-    return (data_dir / "key.pub").is_file() and (data_dir / "key.enc").is_file()
-
-
-def _ensure_keys(input_data: dict[str, Any]) -> None:
-    """Auto-initialize signing keys if missing (fire-and-forget)."""
-    if _keys_exist():
-        return
+def _ensure_keys(input_data: dict[str, Any]) -> bool:
+    """Ask the daemon to initialize missing trust without scanning Skills."""
     try:
-        cmd = with_trace_context(
-            ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
-            input_data,
-        )
         result = subprocess.run(
-            cmd,
+            with_trace_context(
+                ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
+                input_data,
+            ),
             capture_output=True,
             check=False,
             text=True,
             timeout=_INIT_TIMEOUT,
         )
-        if result.returncode != 0:
-            _debug(
-                "key init failed, exit_code={}, stderr={!r}".format(
-                    result.returncode, result.stderr
-                )
-            )
+        if result.returncode == 0:
+            return True
+        _debug(f"key init failed: exit {result.returncode}")
     except Exception as exc:
-        _debug("key init failed: {}".format(exc))
+        _debug(f"key init failed: {type(exc).__name__}")
+    return False
 
 
 def _format_cosh(summary: dict, skill_name: str, policy: str) -> str:
     """Convert an exposure summary into a cosh HookOutput JSON string."""
-    message = summary.get("message")
+    if not isinstance(summary, dict) or summary.get("status") == "error":
+        _debug("invalid show response")
+        return _allow()
+    if summary.get("managed") is False:
+        return _allow()
+    status = summary.get("latestStatus")
+    if (
+        summary.get("managed") is not None
+        and summary["managed"] is not True
+        or not isinstance(status, str)
+        or status not in {"pass", "none", "drifted", "warn", "deny", "tampered"}
+        or "message" not in summary
+        or (summary["message"] is not None and not isinstance(summary["message"], str))
+    ):
+        _debug("invalid show summary")
+        return _allow()
+    message = summary["message"]
     if not isinstance(message, str) or not message.strip():
         return _allow()
 
@@ -453,7 +455,9 @@ def main() -> None:
         return
 
     # 4. Ensure signing keys exist (auto-init if missing)
-    _ensure_keys(input_data)
+    if not _ensure_keys(input_data):
+        print(_allow())
+        return
 
     # 5. Call agent-sec-cli skill-ledger show <skill_dir>
     try:
@@ -474,13 +478,18 @@ def main() -> None:
         print(_allow())
         return
 
+    if proc.returncode != 0:
+        _debug(f"show failed: exit {proc.returncode}")
+        print(_allow())
+        return
+
     # 6. Parse exposure summary and format output
     try:
         exposure_summary = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         _debug(
-            "skill='{}' invalid CLI JSON, exit_code={}, stderr={!r}".format(
-                skill_name, proc.returncode, proc.stderr
+            "skill='{}' invalid CLI JSON, exit_code={}".format(
+                skill_name, proc.returncode
             )
         )
         print(_allow())

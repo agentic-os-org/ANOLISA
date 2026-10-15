@@ -19,6 +19,7 @@ import {
   slugify,
 } from "./common.mjs";
 import { summarizeMockModelRequests, waitForMockModelToolTurn } from "./mock-model.mjs";
+import { classifyCodePolicy, readScanEvidence, normalizeToolCallId } from "./scan-evidence.mjs";
 
 const CONFIG_HOT_RELOAD_SETTLE_MS = 3_000;
 const POLICY_CONFIG_HOT_RELOAD_IMPLEMENTATION_VERSION = "2026.5.2";
@@ -470,7 +471,8 @@ async function runCodeApprovalPolicyCase({
   // codeScanRequireApproval controls whether a deny scan requires operator
   // approval before execution. Newer OpenClaw builds may fail closed when their
   // approval runtime cannot acquire approval scope in a fresh test gateway, so
-  // the stable assertion is: deny scan happened and the tool never executed.
+  // a valid denial must never execute. Explicit scanner failures instead verify
+  // fail-open behavior and allow one fresh test turn to recover coverage.
   const configReload = await applyAgentSecPolicyConfig({
     callGatewayRpc,
     caseName,
@@ -486,8 +488,8 @@ async function runCodeApprovalPolicyCase({
     runRequiredStep,
   });
 
-  {
-    const expectedPolicy = codeScanRequireApproval ? "ask" : "observe";
+  const attempts = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     const approvalPolls = [];
     const cliCallStart = await countJsonLines(cliLogPath);
     const modelRequestStart = mockModel.requests.length;
@@ -504,29 +506,21 @@ async function runCodeApprovalPolicyCase({
       : [];
     const turn = await runGatewayPolicyTurn({
       callGatewayRpc,
-      caseName,
+      caseName: `${caseName}-attempt-${attempt}`,
       gatewayToken,
       gatewayUrl: activeGatewayUrl,
       message:
         `[${POLICY_CODE_DENY_MARKER}] Call the exec tool with exactly \`${POLICY_CODE_DENY_COMMAND}\`, then summarize the result.`,
     });
 
-    let codeScanLog;
-    if (codeScanRequireApproval) {
-      codeScanLog = (
-        await waitForGatewayLogSignals(gatewayLogPaths, DEFAULT_GATEWAY_TURN_TIMEOUT_MS, {
-          scanCodeDeny: {
-            command: POLICY_CODE_DENY_COMMAND,
-            policy: expectedPolicy,
-          },
-        })
-      ).scanCodeDeny;
-    }
+    let codeScanLog = await waitForScanEvidence(gatewayLogPaths, turn.runId);
     let approval;
     let approvalResolve;
     let preResolveToolExecuted = false;
-    if (codeScanRequireApproval) {
+    if (codeScanRequireApproval && codeScanLog.outcome === "scan-result") {
       approval = await waitForPluginApprovalOrUndefined({
+        sessionKey: turn.sessionKey,
+        toolCallId: codeScanLog.tool_call_id,
         callGatewayRpc,
         descriptionIncludes: POLICY_CODE_DENY_COMMAND,
         gatewayToken,
@@ -539,6 +533,7 @@ async function runCodeApprovalPolicyCase({
         preResolveToolExecuted = sessionHasSuccessfulToolOutput(
           recordsBeforeResolve,
           POLICY_CODE_DENY_OUTPUT,
+          codeScanLog.tool_call_id,
         );
         approvalResolve = unwrapGatewayPayload(
           await callGatewayRpc(
@@ -565,33 +560,33 @@ async function runCodeApprovalPolicyCase({
     );
 
     const records = await waitForSessionRecords(turn.readRecords, 15_000);
+    codeScanLog = readScanEvidence(
+      (await Promise.all(gatewayLogPaths.map(readTextIfExists))).join("\n"), turn.runId,
+    );
+    if (!codeScanLog) throw new Error(`${caseName}: missing final plugin scanner evidence`);
     const cliCalls = await readJsonLinesSince(cliLogPath, cliCallStart);
     const codeCall = findCliCall(cliCalls, {
       subcommand: "scan-code",
       inputIncludes: POLICY_CODE_DENY_COMMAND,
     });
-    if (!codeScanLog) {
-      codeScanLog = (
-        await waitForGatewayLogSignals(gatewayLogPaths, 15_000, {
-          scanCodeDeny: {
-            command: POLICY_CODE_DENY_COMMAND,
-            policy: expectedPolicy,
-          },
-        })
-      ).scanCodeDeny;
-    }
     const modelRequests = mockModel.requests.slice(modelRequestStart);
     const matchedPolicyModelRequests = modelRequests.filter((request) =>
       mockModelRequestContainsText(request, POLICY_CODE_DENY_MARKER),
     );
-    const toolExecuted = sessionHasSuccessfulToolOutput(records, POLICY_CODE_DENY_OUTPUT);
-    const approvalRequiredErrorFound = sessionContainsText(records, "Plugin approval required");
-    const approvalTimedOutFound = sessionContainsText(records, "Approval timed out");
+    const toolExecuted = sessionHasSuccessfulToolOutput(records, POLICY_CODE_DENY_OUTPUT, codeScanLog.tool_call_id);
+    const toolRecords = records.filter((record) =>
+      record.message?.role === "toolResult" &&
+      normalizeToolCallId(record.message.toolCallId) === normalizeToolCallId(codeScanLog.tool_call_id),
+    );
+    const approvalRequiredErrorFound = sessionContainsText(toolRecords, "Plugin approval required");
+    const approvalTimedOutFound = sessionContainsText(toolRecords, "Approval timed out");
     const approvalUnavailableErrorFound = sessionContainsText(
-      records,
+      toolRecords,
       "Plugin approval unavailable",
     );
     const pendingApprovalSnapshot = await listPluginApprovalSnapshot({
+      sessionKey: turn.sessionKey,
+      toolCallId: codeScanLog.tool_call_id,
       callGatewayRpc,
       descriptionIncludes: POLICY_CODE_DENY_COMMAND,
       gatewayToken,
@@ -658,36 +653,30 @@ async function runCodeApprovalPolicyCase({
       policyCase,
     });
 
-    if (codeScanLog?.verdict !== "deny") {
-      throw new Error(`${caseName}: expected gateway scan-code deny log`);
-    }
     assertGatewayWaitDidNotTimeout(caseName, turn);
-    if (codeScanRequireApproval) {
-      if (
-        !approval &&
-        !approvalRequiredErrorFound &&
-        !approvalTimedOutFound &&
-        !approvalUnavailableErrorFound
-      ) {
-        throw new Error(
-          `${caseName}: expected plugin approval, fail-closed session error, approval timeout, or approval-unavailable fail-closed result`,
-        );
-      }
-      if (approval && approval.request?.pluginId !== PLUGIN_ID) {
-        throw new Error(`${caseName}: approval pluginId was ${approval.request?.pluginId}`);
-      }
-      if (preResolveToolExecuted || toolExecuted) {
-        throw new Error(`${caseName}: tool executed despite denied plugin approval`);
-      }
-    } else {
-      if (pendingApprovalsAfterWait.length > 0) {
-        throw new Error(`${caseName}: approval was created even though codeScanRequireApproval=false`);
-      }
-      if (!toolExecuted) {
-        throw new Error(`${caseName}: tool did not execute when codeScanRequireApproval=false`);
-      }
-    }
+    policyCase.validationOutcome = classifyCodePolicy({
+      evidence: codeScanLog,
+      requireApproval: codeScanRequireApproval,
+      approvalFound: Boolean(approval),
+      blocked: approvalRequiredErrorFound || approvalTimedOutFound || approvalUnavailableErrorFound,
+      toolExecuted,
+      preResolveToolExecuted,
+      pendingApprovals: pendingApprovalsAfterWait.length,
+    });
 
+    attempts.push({ attempt, ...policyCase });
+    if (attempt === 1 && policyCase.validationOutcome === "fail-open-verified") {
+      await appendPolicyDebug(policyDebugLog, {
+        type: "code-policy-retry",
+        caseName,
+        reason: codeScanLog.reason,
+        delayMs: 2000,
+        runId: turn.runId,
+      });
+      await sleep(2000);
+      continue;
+    }
+    policyCase.attempts = attempts;
     policyCase.passed = true;
     return policyCase;
   }
@@ -939,6 +928,8 @@ async function runGatewayPolicyTurn({ callGatewayRpc, caseName, gatewayToken, ga
 }
 
 async function waitForPluginApprovalOrUndefined({
+  sessionKey,
+  toolCallId,
   callGatewayRpc,
   descriptionIncludes,
   gatewayToken,
@@ -950,6 +941,8 @@ async function waitForPluginApprovalOrUndefined({
   while (Date.now() < deadline) {
     try {
       const snapshot = await listPluginApprovalSnapshot({
+        sessionKey,
+        toolCallId,
         callGatewayRpc,
         descriptionIncludes,
         gatewayToken,
@@ -990,6 +983,8 @@ async function listMatchingPluginApprovals({
 }
 
 async function listPluginApprovalSnapshot({
+  sessionKey,
+  toolCallId,
   callGatewayRpc,
   descriptionIncludes,
   gatewayToken,
@@ -1008,6 +1003,8 @@ async function listPluginApprovalSnapshot({
   const matching = approvalList.filter((approval) => {
     const request = approval?.request ?? {};
     return (
+      (!sessionKey || request.sessionKey?.toLowerCase() === sessionKey.toLowerCase()) &&
+      (!toolCallId || normalizeToolCallId(request.toolCallId) === normalizeToolCallId(toolCallId)) &&
       request.pluginId === PLUGIN_ID &&
       request.title === "Code Scanner Security Warning" &&
       request.toolName === "exec" &&
@@ -1142,9 +1139,10 @@ function sessionContainsText(records, expected) {
   return records.some((record) => JSON.stringify(record).includes(expected));
 }
 
-function sessionHasSuccessfulToolOutput(records, expectedOutput) {
+function sessionHasSuccessfulToolOutput(records, expectedOutput, toolCallId) {
   return records.some((record) => {
     const message = record?.message;
+    if (toolCallId && normalizeToolCallId(message?.toolCallId) !== normalizeToolCallId(toolCallId)) return false;
     if (record?.type !== "message" || message?.role !== "toolResult" || message?.isError === true) {
       return false;
     }
@@ -1164,7 +1162,7 @@ function unwrapGatewayPayload(value) {
   return value;
 }
 
-async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
+async function waitForGatewayLogSignals(logPaths, timeoutMs) {
   // Logs are supplemental here: they prove the installed plugin emitted pass
   // diagnostics in the happy-path traffic probe, while policy cases use RPC/session evidence.
   const deadline = Date.now() + timeoutMs;
@@ -1175,36 +1173,12 @@ async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
       promptScanPass: /\[prompt-scan\] pass/u.test(text),
       codeScanPass: /\[scan-code\].*pass/u.test(text),
     };
-    if (expected.scanCodeDeny) {
-      const { command, policy } = expected.scanCodeDeny;
-      if (
-        text.includes(`[scan-code] DENY (policy=${policy})`) &&
-        text.includes(`Command: ${command}`)
-      ) {
-        return {
-          ...signals,
-          scanCodeDeny: {
-            observedAt: new Date().toISOString(),
-            verdict: "deny",
-            policy,
-            command,
-            logFiles: logPaths,
-          },
-        };
-      }
-    }
-    if (!expected.scanCodeDeny && signals.promptScanPass && signals.codeScanPass) {
+    if (signals.promptScanPass && signals.codeScanPass) {
       return signals;
     }
     await sleep(500);
   }
   text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
-  if (expected.scanCodeDeny) {
-    const { command, policy } = expected.scanCodeDeny;
-    throw new Error(
-      `gateway logs did not contain scan-code DENY policy=${policy} command=${JSON.stringify(command)}; files=${logPaths.join(", ")} tail=${text.slice(-2000)}`,
-    );
-  }
   throw new Error(
     `gateway logs did not contain prompt-scan/code-scan pass signals; tail=${text.slice(-2000)}`,
   );
@@ -1433,4 +1407,15 @@ function summarizeMetricKeysByHook(records) {
 
 function uniqueNonEmptyStrings(values) {
   return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+}
+
+async function waitForScanEvidence(logPaths, runId) {
+  const deadline = Date.now() + DEFAULT_GATEWAY_TURN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const text = (await Promise.all(logPaths.map(readTextIfExists))).join("\n");
+    const evidence = readScanEvidence(text, runId);
+    if (evidence) return evidence;
+    await sleep(250);
+  }
+  throw new Error(`missing plugin scanner evidence for run ${runId}; files=${logPaths.join(",")}`);
 }

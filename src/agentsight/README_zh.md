@@ -136,6 +136,9 @@ agentsight audit --pid 12345 --type llm
 
 # 汇总统计
 agentsight audit --summary
+
+# 读取从其他主机拷贝来的数据库
+agentsight audit --db /backup/agentsight/agentsight.db
 ```
 
 ### `agentsight serve`
@@ -234,6 +237,18 @@ agentsight serve --db /path/to/genai_events.db
 ```
 
 打开 `http://127.0.0.1:7396` 即可浏览已记录的对话和 Trace。
+
+### Dashboard 开发
+
+如需在不重新构建 Rust 二进制的情况下迭代前端：
+
+```bash
+cd src/agentsight/dashboard
+npm install
+npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
+```
+
+完成后，运行 `make build-frontend && cargo build --release` 将更新后的 UI 嵌入二进制。
 
 
 ## 快速开始
@@ -435,6 +450,13 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 | `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
 | `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时（秒） |
 | `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
+
+### 运行时指标导出
+
+设置 `AGENTSIGHT_METRICS_FILE` 可将 Prometheus 运行时指标写入文件。
+`AGENTSIGHT_METRICS_INTERVAL_SECS` 控制两次更新之间的最短间隔，单位为正整数秒
+（默认 `1` 秒）。退出时会额外写入最终快照，不受此间隔限制。未启用指标文件时，
+间隔设置不会生效。
 
 ### 最小内存配置示例
 

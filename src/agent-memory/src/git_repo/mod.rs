@@ -345,8 +345,8 @@ impl GitHandle {
     /// on ext4 is sub-100 ms for typical mounts, acceptable for the
     /// current stdio (single-client) usage. For multi-client / HTTP
     /// transports the future move is to a dedicated git worker thread
-    /// with a bounded channel (TODO: P6.6); this signature stays as-is
-    /// so the migration is internal.
+    /// with a bounded channel (TODO(memory-git): P6.6); this signature
+    /// stays as-is so the migration is internal.
     pub fn auto_commit_for(&self, entry: &AuditEntry) {
         if !self.config.auto_commit {
             return;

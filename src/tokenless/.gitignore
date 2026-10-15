@@ -9,6 +9,7 @@ adapters/tokenless/openclaw/openclaw.plugin.json
 adapters/tokenless/dsh/package.json
 adapters/tokenless/hermes/plugin.yaml
 adapters/tokenless/qoder/.qoder-plugin/plugin.json
+adapters/tokenless/qwenwork/.qoder-plugin/plugin.json
 adapters/tokenless/claude-code/.claude-plugin/plugin.json
 adapters/tokenless/codex/.codex-plugin/plugin.json
 adapters/tokenless/qwencode/qwen-extension.json

@@ -8,7 +8,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveMcpToolName } from "../../src/mcp-client.js";
 
@@ -25,6 +27,36 @@ function mockApi(pluginConfig: Record<string, unknown> = {}) {
     logger: { info: () => {}, warn: () => {}, debug: () => {} },
   } as any;
 }
+
+describe("binary discovery", () => {
+  it("rejects an explicitly configured searchable directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "memory-binary-directory-"));
+    try {
+      assert.throws(() => resolveConfig(mockApi({ binaryPath: directory })), /not found or not executable at configured path/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a PATH directory named agent-memory and accepts a later executable symlink", () => {
+    const directory = mkdtempSync(join(tmpdir(), "memory-binary-path-"));
+    const shadow = join(directory, "shadow");
+    const binaries = join(directory, "binaries");
+    mkdirSync(join(shadow, "agent-memory"), { recursive: true });
+    mkdirSync(binaries);
+    const binaryPath = join(binaries, "agent-memory");
+    symlinkSync(process.execPath, binaryPath);
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = [shadow, binaries].join(delimiter);
+      assert.equal(resolveConfig(mockApi()).binaryPath, binaryPath);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("validateUserId", () => {
   it("accepts a plain ASCII userId", () => {

@@ -14,6 +14,7 @@
 
 """CLI entry point for swe-runner."""
 
+import json
 from pathlib import Path
 
 import typer
@@ -189,6 +190,12 @@ def analyze_traces(
     start: str | None = typer.Option(None, "--start", help="Trace window start timestamp (ISO-8601 or epoch)"),
     end: str = typer.Option("now", "--end", help="Trace window end timestamp (default: now)"),
     run_metadata: Path | None = typer.Option(None, "--run-metadata", help="Path to run_metadata.json from run command"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview the resolved collection plan, trace root, and planned report paths as JSON"
+        " without setting up logging, collecting traces, or writing reports",
+    ),
 ) -> None:
     """Analyze recorded trace JSON files and export CSV summaries."""
     try:
@@ -200,10 +207,15 @@ def analyze_traces(
             start=start,
             end=end,
             run_metadata=run_metadata,
+            dry_run=dry_run,
         )
     except ExtractionError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(code=1) from None
+
+    if isinstance(result, dict):
+        console.print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2), markup=False, soft_wrap=True)
+        return
 
     if result.recorded_trace_count is not None:
         console.print(f"[green]Recorded traces:[/green] {result.recorded_trace_count}")

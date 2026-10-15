@@ -279,7 +279,7 @@ min_anolisa_version = "0.2.17"
 
 Raw install and update compare it (SemVer) against the running CLI and
 refuse the operation when the CLI is older, pointing the operator at
-`anolisa self-update`. A value that is not valid SemVer is also refused.
+`anolisa update self`. A value that is not valid SemVer is also refused.
 There is no override flag: manifest parsing is tolerant, so an older CLI
 would otherwise silently drop fields such as `render` and install a
 broken result. Set the field to the **first released ANOLISA version
@@ -315,7 +315,7 @@ mis-install and no collateral breakage. From 0.2.17 the index is also
 parsed entry-tolerantly: a row this build cannot represent is skipped
 with a warning, and any request that row may have answered (same
 component and target; any version for "latest", the exact version when
-pinned) is refused with a `self-update` hint rather than answered from
+pinned) is refused with an `update self` hint rather than answered from
 older parsable rows — skipping must never turn into a silent downgrade.
 This split is a one-time measure: future entry shapes will not need an
 `index-v3.toml`.

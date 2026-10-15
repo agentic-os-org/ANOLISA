@@ -2,159 +2,745 @@
 
 [中文版](../../zh/user-entrypoint/aw.md)
 
-AW is being built to let you use one policy configuration across different
-Agents. You keep using the Agent's own interface, while AW connects its tool
-Hooks to the rules and processing programs you choose. The first release targets
-QwenPaw, Qoder CLI, OpenClaw and Hermes.
+AW connects your tool policies and Hook commands to an Agent while preserving
+its normal interface. You describe the programs and events in `aw.yaml`; AW
+starts or reuses a local service, connects the supported native Hooks and keeps
+execution records after the Agent session ends.
 
-The goal is to distribute AW with an `aw.yaml` file, reuse that policy when
-switching Agents, and keep deployment status and audit records in one service.
-The current version lets you prepare and check the configuration. Agent startup
-and policy execution are still being built.
+The current Linux source build supports Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`.
+Other first-release adapters are delivered separately. AW does not install an
+Agent or configure its model account; retain the framework's native configuration.
 
-## Available today
+Start with the [Preview package guide](aw-preview.md) for installation, or the
+[component integration walkthrough](../../../developer-guide/en/aw/integration.md)
+for source builds and a policy you can verify without a model. Then use the
+shared configuration below to verify native tool behavior. Field definitions
+live in the [configuration reference](../../../developer-guide/en/aw/configuration.md).
 
-✅ means available in this version. ❌ means planned and not yet available through
-this configuration. Earlier experiments do not establish support in this version.
+## Current support
 
-| What you want to do | Status | What to expect |
+| Capability | Status |
+| --- | --- |
+| Validate one configuration with all 16 event names | ✅ Recognizing an event does not install a Hook |
+| Start Qoder CLI 1.1.64 through AW | ✅ Interactive and print entrypoints |
+| Run structured Providers before tools | ✅ `observe` and `block` |
+| Run structured Providers after tools | ✅ `observe`; success, error and blocked-attempt coverage depends on the framework |
+| Run native scripts and commands before/after tools | ✅ Unchanged callback input; byte output and exit status forwarded |
+| Preserve existing Qoder Hooks and their scheduling | ✅ Default settings and an explicit extra settings file |
+| Keep a shared service and persistent execution metadata | ✅ On-demand or externally started service |
+| Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
+| Start QwenPaw through AW | ✅ the official App/API entrypoint |
+| Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
+| Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
+| Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
+| Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
+
+For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
+`PostToolUseFailure` is a separate event and is not connected in this adapter.
+Native Hook commands remain subject to Qoder's own response semantics. Passing
+through a native approval response does not establish portable AW approval
+support; interactive approval is not part of this delivery's acceptance.
+
+## Install a Preview
+
+Use the [Preview packages](aw-preview.md) for a prebuilt AW + sec-core demo.
+The source instructions below are for developers.
+
+## Use one configuration for four frameworks
+
+The [shared YAML](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/aw.shared.yaml)
+and [boolean script](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/check-tool.py)
+give all four targets the same before-block and after-observe policy. Follow the
+[walkthrough](../../../developer-guide/en/aw/integration.md) to copy them, replace
+absolute paths and verify the Provider. The commands here use its `AW_BIN`,
+`AW_CONFIG` and `AW_DEMO` variables. Installed-package users can use the same
+files with `AW_BIN` pointing to the installed binary; Python 3 is the sample
+script's dependency.
+
+Prepare each Agent's supported version and native model configuration first.
+Only the selected target must be installed to run it. Use separate native
+profiles, choose their tool working directory explicitly and start from
+`$AW_DEMO/workspace`. The shared YAML changes neither model credentials nor
+native permissions. Test one target at a time initially.
+
+| Target | Native prerequisite | Launch detail |
 | --- | --- | --- |
-| Start from a configuration template | ✅ Available | Starter and full examples are included |
-| Check field names, types and Provider references | ✅ Available | The offline checker reports configuration errors |
-| Declare any of the 16 event names | ✅ Available | Recognizing a name does not connect its native Hook |
-| Start or attach an Agent through AW | ❌ Planned | The daemon and product CLI are not available yet |
-| Run Providers before and after native tools | ❌ Planned | Each framework needs its adapter and effect validation |
-| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires Provider execution and proof that the Agent uses the response |
-| View applied policy and persistent audit records | ❌ Planned | The service will maintain these records |
-| Install AW and generate a default configuration | ❌ Planned | The starter file is copied manually today |
-| Request user approval or enforce policy below native Hooks | ❌ Later work | Active `ask` steps are currently rejected; OS enforcement is not provided |
+| Qoder | CLI 1.1.64, completed login | Interactive or print; optional `--native-settings` |
+| OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
+| QwenPaw | 2.2.2b4 / AgentScope 2.0.8, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
+| Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
 
-All four first-release Agent IDs are accepted in configuration. Runtime
-integration remains ❌ for each in this version. QwenPaw is a separate target
-from Qwen Code. Runtime support will be documented by Agent version and operation
-as adapters are delivered.
+Launch Qoder:
 
-## Start with a small configuration
-
-Copy the [starter file](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.minimal.yaml)
-to your chosen `aw.yaml` location. It declares Qoder and requests tool-before and
-tool-after events. It contains no policy program and enables no security rule.
-
-```yaml
-# Starter configuration for offline validation.
-# No policy program is configured; runtime integration is still being built.
-apiVersion: aw/v1alpha1
-kind: AWConfiguration
-metadata:
-  name: local-agent
-spec:
-  daemon:
-    startup: on_demand
-    endpoint: auto
-    state_dir: auto
-  execution:
-    guarantee: native_hook
-    default_event_budget_ms: 5000
-  audit:
-    enabled: true
-    payload: metadata_only
-  agents:
-    qoder:
-      adapter: qoder
-      argv: [qodercli]
-  providers: {}
-  events:
-    tool.before:
-      enabled: true
-      required: true
-      steps: []
-    tool.after:
-      enabled: true
-      required: true
-      steps: []
+```bash
+cd "$AW_DEMO/workspace"
+"$AW_BIN" run --config "$AW_CONFIG" --agent qoder
 ```
 
-The outer fields should look familiar if you use Kubernetes. `apiVersion` selects
-the file format, `kind` identifies an AW configuration, and `metadata.name` names
-it. `spec` holds what you want AW to use. AW is designed to run independently of
-Kubernetes; no cluster or CRD is needed to check this file.
+Launch OpenClaw with your existing absolute native paths:
 
-Inside `agents`, `qoder` is a name you choose for this target. `adapter` selects
-the framework, and `argv` gives its executable and arguments. Add another named
-Agent to share the same Provider definitions and event routes. The full example
-includes Qoder and OpenClaw; QwenPaw and Hermes launch details will be verified
-with their adapters.
+```bash
+"$AW_BIN" run --config "$AW_CONFIG" --agent openclaw \
+  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
 
-The empty `providers` object leaves policy programs unconfigured. Empty `steps`
-lists make no Provider calls. Both events set `required: true`, declaring that
-future runtime admission must reject a target that cannot provide them.
+Launch QwenPaw with your initialized directory:
 
-The remaining settings choose local service defaults and request metadata-only
-auditing. The event budget is 5,000 milliseconds. These are explicit values in
-the template; the checker does not start a service, write audits or enforce a
-timer. It does not search for a default file or fill missing fields into yours.
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home "$AW_BIN" run \
+  --config "$AW_CONFIG" --agent qwenpaw -- --host 127.0.0.1 --port 8096
+```
 
-## Check the file now
+Install and launch Hermes after reading its [profile requirements](#start-hermes):
 
-The checker currently runs from a source checkout. With rustup installed, enter
-`src/aw` to select the pinned Rust toolchain and check the starter file. Run the
-commands below from the repository root. Replace the final path with your own
-`aw.yaml` when ready; relative paths are resolved from `src/aw`.
+```bash
+"$AW_BIN" install --config "$AW_CONFIG" --agent hermes \
+  --native-profile /absolute/hermes-profile
+"$AW_BIN" run --config "$AW_CONFIG" --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
+
+For OpenClaw and QwenPaw, keep the server terminal open and wait for AW's native
+Hook readiness message before sending requests through that Gateway or App.
+Use OpenClaw's connected client, not `agent --local`; use QwenPaw's App UI/API,
+not another CLI entrypoint. Qoder and Hermes use the launched native chat.
+The framework sections below explain coexistence and supported lifecycle scope.
+
+### Verify native behavior
+
+In another terminal, restore `AW_BIN`, `AW_CONFIG` and `AW_DEMO` from the
+walkthrough. Set `AW_TARGET` to the target being tested. Start with absent marker
+files; for a repeat, use a fresh name. Print the following two prompts and send
+them as separate turns through that target's native interface:
+
+```bash
+export AW_TARGET=qoder
+printf 'Use your shell tool exactly once to run `printf AW_OK > "%s/%s.allowed"`. Report the result; do not retry or use another tool.\n' "$AW_DEMO/workspace" "$AW_TARGET"
+printf 'Use your shell tool exactly once to run `printf AW_DENY_TEST > "%s/%s.blocked"`. Report the result; do not retry or use another tool.\n' "$AW_DEMO/workspace" "$AW_TARGET"
+```
+
+These commands only write demo markers if executed. The second input contains
+the policy's deny marker. After the turns, check:
+
+```bash
+cat "$AW_DEMO/workspace/$AW_TARGET.allowed"
+test ! -e "$AW_DEMO/workspace/$AW_TARGET.blocked"
+"$AW_BIN" status --config "$AW_CONFIG"
+ls "$AW_DEMO/state/journal"
+```
+
+Expect `AW_OK`, an AW policy denial for the second turn, and no blocked marker.
+Read the relevant journal through AW: select a filename from the listed
+directory and use its 64-character name without `.jsonl` as `AW_AUDIT_KEY`.
+
+```bash
+export AW_AUDIT_KEY=REPLACE_WITH_EVENT_KEY
+printf '{"method":"audit","key":"%s"}\n' "$AW_AUDIT_KEY" | \
+  "$AW_BIN" request --socket "$AW_DEMO/state/aw.sock"
+```
+
+Files include preparation and event journals. For an event, inspect
+`result.records[0].record.plan`: `kind` is `event`, and its instance and binding
+must match the `AW instance` reported at launch.
+The before-denial call should have `policy_block: true`; the completed after
+step should name Provider `check-tool` and have `status: ok`. Audit stores
+metadata, not raw inputs/results or effect reason text. A closed event has
+`terminal: true`. The following checks complete the acceptance record:
+
+| Check | Evidence |
+| --- | --- |
+| Allowed tool | Tool ran, allowed marker exists, before and supported after steps succeeded |
+| Policy block | AW returned a denial, blocked marker absent, before audit records a policy block |
+| Provider failure | After stopping the old sessions/service, launch a copied config with an absent before-script path; the invocation fails, `on_error: block` prevents the marker, and audit reports failure rather than a policy hit |
+| Coexistence | Keep one existing native Hook/plugin enabled; confirm its expected behavior still occurs alongside AW |
+| Restart | Exit Agents, stop AW, relaunch with the original config; new tools are checked and old audit keys remain readable |
+
+Record framework version, AW commit, actual commands and audit keys. Synthetic
+Host tests and startup readiness alone do not complete this table. Model
+refusal, missing tool invocation or native permission denial is not an AW block.
+After-event coverage differs by framework: for example, Qoder reports successful
+tools only. Do not require a fabricated after event for every rejected call.
+
+### Stop and clean up
+
+Exit Qoder/Hermes and use Ctrl-C in the owned OpenClaw/QwenPaw server terminals.
+Wait for those processes to exit, then stop the shared AW service:
+
+```bash
+"$AW_BIN" stop --config "$AW_CONFIG"
+```
+
+The stop response acknowledges the request; wait for the recorded daemon PID
+to exit and its `aw.sock` to disappear. QwenPaw removes its owned temporary
+plugin on normal exit. Hermes keeps its installed plugin: ordinary Hermes
+launches without an AW binding do not activate AW callbacks. To undo installation,
+stop Hermes and native config writers, inspect the reported `backup` and
+`displaced` files, move `plugins/aw-native-hooks` outside the profile's `plugins`
+directory and restore the chosen pre-install configuration. Preserve any later
+intentional native changes instead of blindly overwriting them. AW has no
+native-plugin uninstall command.
+
+Retain audit evidence before deleting the demo directory, following the
+[walkthrough's cleanup](../../../developer-guide/en/aw/integration.md#5-verify-native-adoption-and-clean-up).
+Framework profiles remain separate. Package removal is covered by the
+[Preview guide](aw-preview.md#6-stop-upgrade-or-uninstall).
+
+## Build and start Qoder
+
+AW is not yet available through `anolisa install` or an RPM. Developers can
+build it on Linux with rustup and the repository's pinned toolchain. Install
+Qoder CLI 1.1.64 separately and verify its version. From the repository root:
 
 ```bash
 cd src/aw
-cargo run --locked -p aw-config --example validate -- \
-  crates/aw-config/examples/aw.minimal.yaml
+cargo build --locked -p aw-service --bin aw
+qodercli --version
+target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-A successful check prints the following message.
+The [Qoder example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qoder.yaml)
+uses `argv: [qodercli]`. If another version is on `PATH`, replace that entry with
+the absolute path of the supported executable. `--agent qoder` selects the named
+entry under `spec.agents`; the name is yours to choose, while `adapter: qoder`
+selects the framework.
 
-```text
-Configuration is statically valid; runtime admission has not run.
-```
-
-This confirms the field structure and static relationships. The checker does
-not require Qoder to be installed and does not run any configured command.
-Before policies can take effect, the service must also verify the installed
-Agent and the Provider's actual capabilities.
-
-## Add your policy programs
-
-A Provider is a program that checks or processes an event, such as a security
-engine or your team's tool-result handler. In `spec.providers`, give each instance
-a name, specify its command and put its own settings in `config`.
-
-An event step refers to that name through `provider` and selects an `operation`.
-In the [full example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.yaml),
-`business-before` refers to the `business` Provider, while the final tool-before
-check refers to `security`. Steps run in their configured order once the execution
-service is available. Provider invocation remains ❌ in the current version.
-
-The full example shows all 16 event names and a disabled result-redaction step.
-Its business executable and sec-core command are illustrative. Replace them with
-real implementations when the Provider protocol and runtime are delivered.
-Changing `enabled` today changes the configuration being checked, without
-installing a Hook or activating protection.
-
-## Use the configuration with an Agent
-
-The planned workflow starts with AW reading your file and checking that the
-chosen Agent can carry out the requested actions. AW then installs its own native
-Hook or plugin entries and opens the Agent's normal interface. Provider rules run
-at those supported points; the AW service records deployment state and outcomes.
-
-For the Qoder and OpenClaw targets in the full example, the intended commands are
-shown below. They remain ❌ planned commands and cannot be run in this version.
+This example consumes Hook input and returns `{}` before and after tools. It
+adds no restriction and is not a security policy. Ask Qoder to run a harmless
+read-only tool to exercise both callbacks. A reply produced without a tool call
+does not exercise them. Arguments after `--` go to Qoder, for example:
 
 ```bash
-aw run qoder --config ./aw.yaml
-aw run openclaw --config ./aw.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder -- -p 'Read the current directory name with a tool.'
 ```
 
-A required safety action that the Agent cannot enforce must prevent binding.
-Optional observation gaps must be visible. The service is intended to stay
-running after an Agent session ends, so another session can reuse its
-configuration and records.
+AW opens Qoder's native terminal interface, then returns to the original shell
+when Qoder exits. It releases that session's binding and unfinished work. The
+shared daemon remains available to later sessions using the same configuration.
 
-For field limits, omitted-field behavior and the full event vocabulary, use the
-[configuration reference](../../../developer-guide/en/aw/configuration.md).
+```bash
+target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
+```
+
+## Start QwenPaw
+
+Install QwenPaw 2.2.2b4 with AgentScope 2.0.8 and initialize its model configuration
+through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
+`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
+its owned temporary plugin, preserves existing plugins and native configuration,
+and removes its plugin after the App exits.
+
+Native middleware retains onion ordering: before runs forward, after unwinds in
+reverse, and the host controls concurrent tools. After observes terminal
+`ToolResponse` objects, including AW-denied results, without repeating streaming
+chunks. The point covers tools executed inside the App; external execution tools
+and attempts denied before middleware are outside its coverage. Event budgets
+must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
+before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
+Callback failures are reported and follow the step's `on_error`; `report` preserves
+execution and after results, while before `block` denies. Cancellation still propagates.
+
+The native startup hook confirms plugin registration after loading completes.
+It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
+reload and multi-worker launch remain rejected because this integration does not
+verify their plugin lifecycle. Use the App's normal API or interface after the
+native Hooks ready message.
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+The [neutral QwenPaw example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
+A configuration with no Providers or event steps also starts the App; AW verifies
+plugin readiness without registering any tool middleware.
+
+## Start OpenClaw
+
+Install OpenClaw 2026.9.6 separately. The example uses `argv: [openclaw, gateway, run]`;
+set an absolute executable path if needed. Supply the existing native JSON
+configuration and an existing absolute state directory. AW writes a private
+configuration overlay and retains that directory's authentication and sessions.
+It refuses conflicting Gateway ownership and does not attach to a running one.
+AW disables Node compile caching for the owned Gateway to prevent launcher
+respawns from changing its readiness PID; custom wrappers must exec the Gateway.
+
+Each AW step becomes one native plugin handler. OpenClaw runs before handlers
+serially by native priority and after handlers concurrently; other plugins retain
+their priorities. Event budgets must be 1..12,000 ms. Blocked attempts can still
+produce after callbacks with an error, so after does not imply successful execution.
+The supported path is Agent execution inside the new Gateway; operator
+`tools.invoke` is not a complete before/after entrypoint. AW reports native Hooks
+ready after the Gateway startup callback, separately from service availability.
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
+  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
+
+The [neutral OpenClaw example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.openclaw.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
+## Upgrade the service
+
+This build uses local protocol `aw-service/v1alpha2`. A daemon from an older
+build is rejected with `protocol_version` before Agent binding or callbacks.
+Before replacing the executable, exit its Agent sessions and use the **old**
+`aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.
+Then update the CLI and daemon together and launch again. Do not delete a live
+socket or its audit history. The AW configuration and Provider protocol remain
+`aw/v1alpha1` and `aw-provider/v1alpha1`.
+
+## Boolean policy commands
+
+For a simple rule, let a command read one normalized event JSON from stdin and
+write only the JSON boolean `true` or `false` to stdout, then exit 0. `true`
+means the rule matched: AW requests the configured effect. `false` requests no
+effect and does not override native permissions. Diagnostics may go to stderr
+and do not enter the response or audit. Custom hooks default to invoke-only
+execution: omit the Provider `protocol` and step `operation`. AW performs local
+configuration/effect admission without calling `describe` or `validate_config`,
+then invokes your script only for an admitted event. The script receives no
+method, request ID or digest and constructs no response object. Explicit
+`protocol: aw-provider/v1alpha1` retains the full structured Provider handshake.
+
+For example, save this rule as `$AW_DEMO/check.py`; Python is a dependency of
+this chosen script, not AW core:
+
+```python
+import json
+import sys
+
+def contains(value):
+    if isinstance(value, str):
+        return "12345" in value
+    if isinstance(value, list):
+        return any(contains(item) for item in value)
+    if isinstance(value, dict):
+        return any(contains(item) for item in value.values())
+    return False
+
+event = json.load(sys.stdin)
+print(json.dumps(contains(event["tool"]["input"])))
+```
+
+Using the Preview prefix and paths from the [installation guide](aw-preview.md),
+generate the full YAML instead of assembling Provider and step objects by hand.
+Supply only the Agent entrypoints you need; this example declares both:
+
+```bash
+"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+  --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
+  --provider command --check /usr/bin/python3 --effect block \
+  --reason-code parameter_contains_12345 -- "$AW_DEMO/check.py"
+"$AW_PREVIEW_PREFIX/bin/aw" validate --config "$AW_DEMO/aw-command.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw" run --config "$AW_DEMO/aw-command.yaml" --agent qoder
+```
+
+No sec-core package or daemon is needed. Use the same generated configuration
+with `--agent openclaw` and its existing native profile options. The script sees
+the same normalized tool fields for both frameworks, while AW translates a
+block into each native Hook response. The generated transport invokes your
+command directly. Inside `spec`, a custom hook can be declared as follows:
+
+```yaml
+providers:
+  command:
+    transport:
+      type: stdio
+      location: agent
+      argv: [/usr/bin/python3, /absolute/path/check.py]
+    timeout_ms: 1000
+    max_output_bytes: 32
+events:
+  tool.before:
+    enabled: true
+    required: true
+    steps:
+      - id: check-command
+        provider: command
+        effects: [block]
+        reason_code: parameter_contains_12345
+        on_error: block
+```
+
+Omitted `protocol` means `aw-hook/v1alpha1`; omitted `operation` means `invoke`.
+Both may be declared explicitly. Hook `config` is omitted or an empty object;
+pass script options through literal argv. `true` requests all effects in that
+step's `effects` list, optionally carrying its `reason_code`; `false` requests
+none. Effects still require Adapter support. `block` applies only before a tool;
+`observe` can also run after a tool. Full Provider steps use `effects` as an
+admitted upper bound and let the Provider choose its returned effects.
+
+The generator creates one required before-tool step with `on_error: block` and
+a 1,000 ms command timeout. A nonzero exit, timeout, oversized output, incomplete
+stdin delivery or a non-boolean response is an execution error, never a false
+result; the step's failure action applies. Boolean stdout is limited to the
+smaller of `max_output_bytes` and 32 bytes including whitespace. The service
+caps stderr at 65,536 bytes. AW does not insert a shell. Preparation validates
+the configuration and Adapter capabilities without executing the user command.
+`aw validate` checks the desired document offline.
+
+Existing `aw policy` bridge configurations remain supported, including their
+private `config.on_true` effect mapping and full Provider protocol. They need
+no migration. To switch a custom rule to the default form, point transport argv
+at the boolean script, omit `protocol`, `config` and `operation`, and put the
+matched effects and optional reason code on the step. Stop the old service and
+Agent sessions before switching configurations. Older AW binaries do not accept
+the new default form; retain the earlier configuration for rollback.
+
+`configure` creates a new private file and never overwrites an existing one.
+To remove a policy, generate a new base document without `--provider` (or with
+`--provider none`), then exit the old Agents, stop their service and explicitly
+switch to the new configuration. Provider definitions and associated steps are
+removed together; editing a running service's file does not reload it. Generic
+editing of existing YAML is outside this command.
+
+## Start Hermes
+
+Use the official Hermes checkout at revision `952c941e741e922a9be8fc403c8944c6e96318bb`.
+Both installation and launch reject staged or unstaged changes to tracked files;
+commit or stash local changes and restore the pinned revision before retrying.
+Unset `GIT_DIR` and `GIT_COMMON_DIR` in the parent and profile dotenv environments;
+the adapter requires Git to discover this checkout normally. Earlier skipped PATH
+names must be protected against replacement or creation by other users, including
+sticky writable parents. Nonempty GIT_CONFIG_SYSTEM, GIT_CONFIG_GLOBAL and
+XDG_CONFIG_HOME values, and any HOME value, must be absolute in both environments.
+Unset unsupported relative values or replace them with absolute paths. Use UTF-8
+working-directory, profile, venv, editable-checkout, AW executable and launch-state paths.
+Git must resolve to the same canonical executable in cwd and checkout. Both
+directories use their own effective configuration checks, including local and
+conditional includes; external filter commands and fsmonitor helpers are refused.
+The example uses `argv: [hermes, chat]`; select that installation's Python console
+script, such as `/absolute/hermes/venv/bin/hermes`, with an absolute Python
+shebang. Explicit paths and PATH lookup both require executable regular files;
+FIFOs, directories and non-executable files are rejected before native probes.
+Shell wrappers and `python -m` entrypoints are unsupported. AW uses that
+interpreter to enter the same native CLI process, preserving its arguments and
+working directory. Native profile loading determines the effective
+`HERMES_SAFE_MODE`, including profile `.env` overrides; safe mode is rejected,
+and plugin registration is required before chat can dispatch tools.
+Initialize its profile and model account through Hermes first. `aw install` is an
+explicit one-time installation of the native AW plugin in the selected profile.
+It saves the original configuration before enabling that plugin, retains unknown
+configuration fields, and refuses a conflicting non-AW plugin. The native YAML
+writer edits a private candidate before AW atomically exchanges it with the live
+config. The command reports the exact initial `backup` and a permanently retained
+`displaced` file (`<backup>.displaced`) containing the original inode, including
+later writes through an already-open descriptor. Stop native config writers
+during installation and rollback, and review both recovery files before restoring.
+A writer failure or conflict detected before publication leaves the live config
+unchanged; a conflict detected at the exchange boundary reports failure with the
+candidate already published and preserves the displaced content for review.
+Success also requires removing the config staging directory and syncing its parent.
+A cleanup or sync failure reports the already-published configuration and both
+recovery paths, without reporting success or rolling back.
+This exchange does not provide compare-and-swap against writers that ignore AW's
+lock. Installation does not hot-load or restart existing Hermes services.
+The canonical profile directory, configuration and bundled plugin files must
+be owned and not writable by others. If the profile has a `.env`, it must also
+be a caller-owned regular file without group/other write permission (0600 or 0644
+is accepted). AW checks it without following symlinks before any native probe,
+including `--version`, because importing the CLI loads that file.
+Every ancestor must belong to the caller or root and prevent group/other writes,
+except sticky directories such as `/tmp` that protect owned children. AW rejects
+unsafe paths without changing their permissions. Ctrl-C or SIGTERM cancels native
+installation probes/writers, removes staging copies and retains the signal exit status.
+Installation and launch probe errors remain visible before signal exit, including
+unverified process-group cleanup. Before probing or modifying the profile, installation
+validates configured native arguments using the same local-chat restrictions as launch.
+An executable-only `argv` remains supported; supply `chat` and its options after
+`aw run`'s `--` in that case.
+Chat `--help`/`-h` exits before plugin readiness, so AW rejects these options in
+configured arguments and arguments appended to `aw run`, before native probes or
+profile writes. Run `hermes chat --help` directly to view native help. Literal
+query values such as `--query=--help` remain supported.
+
+An AW upgrade can change the bundled plugin bytes. If launch or installation
+reports a mismatched or incomplete plugin, stop Hermes sessions and plugin writers, review
+`<profile>/plugins/aw-native-hooks`, and move that directory to a backup outside
+`<profile>/plugins`. Rerun the same `aw install` command to install matching files;
+the saved directory remains available for inspection or rollback.
+
+An empty `providers` and `events` configuration launches with zero AW callbacks.
+Existing native Hooks still run; AW records the session lifecycle without
+claiming per-tool policy checks or audit records. Explicit installation remains
+required.
+
+Subsequent `aw run` calls retain that profile's credentials, history and working
+directory. Native before/after callbacks run in Hermes registration order;
+a before block does not prevent later registered callbacks from running. Post
+callbacks also observe blocked and failed attempts. AW preserves native Hook
+parsing and the Agent's own approval flow; portable AW `ask` is not supported.
+With AW before callbacks configured, native Hook and tool-execution middleware
+argument rewrites are refused, including nested `execute_code` calls. Hermes can
+apply them after those callbacks, so the resulting arguments have not been checked.
+Observation-only execution middleware remains supported. Empty and after-only AW
+routes retain native rewrite behavior. When AW callbacks are configured, forced
+plugin reload during before checks or tool execution is refused before teardown to retain pending
+audit callbacks; reload between tools keeps native behavior.
+This adapter covers local `chat`, not the native TUI, Gateway or ACP. AW
+pins the entrypoint with native `--cli`; full chat options are required, and
+profile/worktree/resume switches and option abbreviations are unsupported. Event
+budgets are limited to 55,000 ms and must fit the native callback timeout.
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
+
+The [neutral Hermes example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.hermes.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
+## Connect your programs
+
+Each named object in `spec.providers` describes a program. An event step refers
+to its name through `provider`. Choose the protocol for the program you have:
+
+| Protocol | Input and result | Step fields |
+| --- | --- | --- |
+| `aw-hook/v1alpha1` (default) | The command reads one normalized event and returns JSON true/false; AW projects the configured effects on a match without a script handshake | `effects`, `on_error`; optional `reason_code`; omit `operation` or use `invoke` |
+| `aw-provider/v1alpha1` | AW performs `describe`, `validate_config` and `invoke`; responses contain checked candidate effects | `operation`, `effects`, `on_error` |
+| `native-hook/v1alpha1` | The command receives the selected adapter's native callback bytes; the adapter handles stdout, stderr and exit status | `native: {}`, `on_error`; omit `operation` and `effects` |
+
+For a native Hook, replace the example's `transport.argv` with the executable
+and literal arguments for your script. AW does not insert a shell; shell syntax
+requires an explicit `/bin/sh -c ...`. Keep `config: {}` for this protocol:
+there is no Provider configuration exchange. Qoder-specific native output is
+not automatically portable to another framework.
+
+For structured policies, use `aw-provider/v1alpha1` and put Provider-owned
+settings in `config`. The runnable [policy example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.yaml)
+shows before-tool `observe`/`block` and after-tool `observe`. Build its executable
+with `cargo build --locked -p aw-provider --example policy` and run from `src/aw`
+because its command path is relative. Its blocked tool name is illustrative;
+replace it with a tool actually used by your Agent when testing a block. The
+sample Provider is not sec-core.
+
+Raw commands use the actual callback environment, including profile-loaded
+variables. Structured Providers keep the environment pinned at binding.
+Environment contents are excluded from events and audit.
+
+`timeout_ms` limits one command; `default_event_budget_ms` limits the whole event.
+The Qoder launcher accepts event budgets from 1 to 55,000 milliseconds.
+The output ceiling bounds the returned bytes. `on_error` controls execution
+failures, separately from a Provider's successful policy block. For native
+commands, an ordinary nonzero exit remains native output, not an AW transport
+failure. Qoder interprets exit 2 as a blocking response where supported and
+other nonzero exits as nonblocking errors. An observe result adds no permission
+and does not override Qoder's own tool permissions.
+
+## Keep existing Hooks and scheduling
+
+Qoder continues to load its normal user, project and local settings. AW creates
+session-specific callback entries without editing those files. To include an
+existing JSON file that you normally pass through Qoder's `--settings`, use:
+
+```bash
+target/debug/aw run --config ./aw.yaml --agent qoder --native-settings ./qoder.settings.json
+```
+
+AW preserves that file's other fields and Hook entries, adds its callbacks and
+passes the merged settings to Qoder. Each AW step becomes a separate synchronous
+native Hook. Qoder determines serial or parallel execution, including how the
+new callbacks coexist with other matching Hooks.
+
+Set `spec.agents.qoder.qoder.sequential: true` to mark the generated groups as
+sequential. If any matching synchronous Qoder group requests sequential
+execution, all matching synchronous Hooks run in sequence. Omitting this field
+or setting it to false does not override an existing group's true value.
+Steps in one native event share the AW budget; later callbacks do not reset it.
+
+This adapter supports scripts whose input remains unchanged across AW steps.
+Sequential input-rewrite chains are not supported: if a command returns
+`updatedInput`, a later callback with changed input is rejected and follows that
+step's `on_error`. Forwarding native bytes does not promise every native effect
+combination or approval flow.
+
+The launcher rejects settings and arguments that would disable or replace its
+Hooks rather than overriding a user's disabled-hook choice. This includes raw
+`--settings`, `--setting-sources`, `--headless-fast-hooks` and conflicting native
+settings. Custom configuration roots, alternate Qoder configuration-directory
+modes, resumed sessions, remote sessions and worktree launch are outside the current adapter's
+scope. Pass short options separately rather than combining them, and launch from
+the intended working directory. Existing native Hooks remain
+responsible for their own behavior and audit records.
+
+## Service lifetime and records
+
+`spec.daemon.startup: on_demand` starts a service if none exists at the selected
+endpoint; `external` requires one to be running already. An existing service is
+reused only when its protocol and exact configuration revision match. With
+`endpoint: auto` and `state_dir: auto`, AW selects a private configuration-specific
+directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
+unset. Explicit paths must be absolute and agree on the `aw.sock` location.
+
+The service retains a fixed configuration snapshot. Editing `aw.yaml` does not
+reload it. Stop a service using its original file or socket before retiring that
+configuration; auto paths for changed configuration may select a different
+service. Exiting an Agent does not stop other sessions or the shared daemon.
+The local endpoint is a same-user boundary, not a sandbox.
+
+| Command | Purpose |
+| --- | --- |
+| `aw validate --config FILE` | Check syntax and static references without executing programs |
+| `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw and QwenPaw reject this command |
+| `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
+| `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
+| `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
+| `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
+
+`--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
+the implementation. This build implements Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`. `aw install`
+validates the configuration and dispatches to that adapter. Hermes supports
+persistent plugin installation; Qoder, OpenClaw and QwenPaw reject it.
+This command does not install AW packages or Agent software, start an Agent,
+or configure model credentials. `aw run` does not implicitly call `install`.
+
+| Adapter-specific option | Command | Current support |
+| --- | --- | --- |
+| `--native-settings JSON_FILE` | `run` | Qoder: optional extra JSON settings merged with generated Hooks; the original file remains unchanged. OpenClaw: required existing native JSON configuration |
+| `--native-profile PROFILE` | `run`, `install` | Hermes: required existing absolute profile for `run` and `install`. Qoder and OpenClaw reject it |
+| `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
+
+The shared command parser recognizes these adapter-specific options, but that
+alone does not enable them for a framework. QwenPaw rejects all these native
+override options and uses `QWENPAW_WORKING_DIR`. Pass supported AW options before
+`--`; arguments
+after it are forwarded literally to the Agent. `install` accepts no Agent
+arguments. Use `aw --help` to see the command syntax and current support.
+
+In a source checkout, use `target/debug/aw` for `aw`. `aw hook` is an internal
+callback generated by the launcher; users do not need to construct it. Service
+records contain metadata without tool input/results, private Provider
+configuration or raw stdout/stderr. A running service or completed invocation
+does not prove native policy adoption. Killed or disabled native callbacks can
+miss checks; this version does not provide final/protected execution or an OS
+fallback.
+
+## Containers and persistent data
+
+Prepare AW binaries, supported framework versions, policy programs and default
+configuration in the image. At runtime, supply the native profile and launch
+the selected Agent through `aw run`; a Dockerfile cannot retain a live service
+or a usable session binding. For Hermes, install the matching plugin into the
+**actual runtime profile** before launch. A mount over an image directory may
+hide files installed there during the image build; see Docker's
+[mount behavior](https://docs.docker.com/engine/storage/bind-mounts/#bind-mounting-over-existing-data).
+
+| Data | Container handling |
+| --- | --- |
+| AW binaries, scripts, fixed `aw.yaml` | Bake into the image or supply read-only; save editable configuration outside the disposable layer |
+| `<state_dir>/journal/` | Persist when execution history must survive container replacement; audit is enabled and metadata-only in this version |
+| Socket, locks, `launch-*` and session bindings | Runtime artifacts, not recoverable sessions; each service/Agent launch creates fresh runtime state |
+| Native profiles, credentials, conversations and workspaces | Persist according to the selected framework's requirements; these are not AW audit data |
+| sec-core backend data | Managed by sec-core independently of AW; see the [Preview backend setup](aw-preview.md#2-optionally-install-and-start-sec-core) |
+
+AW always needs writable local state even when no history is retained across
+container replacement. For durable history, set an absolute `daemon.state_dir`
+on a local persistent filesystem that honors `fsync`. Keep `endpoint: auto` to
+use its `aw.sock`. The directory must belong to the runtime UID with mode 0700;
+its parent must also belong to that UID and must not be writable by other users.
+Prepare volume ownership for the actual container UID before starting AW.
+The default `auto` directory under `XDG_RUNTIME_DIR` or `/tmp` is temporary storage.
+
+Plan the lifetime of long-running Gateway/App launches around this Preview's
+limit of 1,024 distinct correlated native events per AW instance. With both
+before and after enabled, each completed tool call consumes two entries. On
+exhaustion, opening a new correlated event fails with `native_event_limit`
+before any step script runs. This is an event-opening failure, not a Provider
+result. The AW callback bridge converts the failure into the selected
+framework's native response; a before callback with `on_error: block` requests
+denial. Final tool behavior follows that framework's native Hook semantics.
+Exit and relaunch the AW-managed Agent to create a new instance; starting another
+native conversation does not reset this limit.
+
+The current state directory contains both the journal and runtime artifacts.
+If you persist the entire directory, graceful shutdown removes the owned socket,
+but a forced container kill can leave it behind. Before reuse, confirm that its
+old service is gone and remove only that stale `aw.sock`; do not delete live
+endpoints or the journal. Do not share one state directory between independent
+AW daemons. Arrange container shutdown to exit Agents, stop AW and wait for the
+owned processes. A retained journal supports historical queries, not resuming
+or replaying interrupted tools. Docker volumes survive container removal; their
+deletion is a separate action described in the [volume lifecycle](https://docs.docker.com/engine/storage/volumes/#a-volumes-lifecycle).
+
+## Common setup failures
+
+| Symptom | Next check |
+| --- | --- |
+| Static validation passes, but launch fails | Check selected native version/entrypoint, executable paths and Provider private configuration; validation does not execute them |
+| Unsafe state/profile path | Check runtime UID, directory permissions and the explicit native path; use a private directory owned by that user |
+| Configuration changed but behavior did not | Exit old Agents, stop the old service with its original config/socket, then launch the edited file |
+| Hook readiness fails | Read the native launch error; confirm the required profile/plugin and supported version before sending requests |
+| No audit after a model response | Confirm a supported tool actually reached the callback; native permissions or a model refusal can prevent invocation |
+| Existing socket after forced termination | Confirm the old service has exited, then remove its stale socket as described above |
+
+## Run the local service demo
+
+This demonstration needs no Agent account or model request. From `src/aw`:
+
+```bash
+cargo build --locked -p aw-provider --example policy
+AW_DEMO_ROOT="$(mktemp -d "$PWD/target/aw-demo.XXXXXX")"
+printf 'Socket: %s\n' "$AW_DEMO_ROOT/state/aw.sock"
+target/debug/aw serve --config crates/aw-service/examples/aw.yaml \
+  --state-dir "$AW_DEMO_ROOT/state"
+```
+
+In a second terminal in `src/aw`, use the printed absolute socket path:
+
+```bash
+AW_DEMO_SOCKET=/absolute/socket/path/printed/above
+target/debug/aw status --socket "$AW_DEMO_SOCKET"
+cargo run --locked -p aw-service --example local -- "$AW_DEMO_SOCKET"
+```
+
+The example supplies synthetic capabilities and events. It checks `read_demo`,
+blocks `delete_demo`, observes an after event and prints audit keys. No native
+Agent or tool is started. Replace `AUDIT_KEY` with a reported preparation key or
+event ID to inspect its records:
+
+```bash
+printf '%s\n' '{"method":"audit","key":"AUDIT_KEY"}' | \
+  target/debug/aw request --socket "$AW_DEMO_SOCKET"
+target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+```
+
+`terminal: false` means no terminal record is present; the operation may be
+active or interrupted. A timed-out call must not be retried as a new step.
+The stop response acknowledges the request; wait for the foreground service to
+exit before removing this demo directory in its original terminal:
+
+```bash
+rm -r -- "$AW_DEMO_ROOT"
+```
+
+Normal shutdown retains audit history and removes the owned socket. After a
+forced kill, AW reports a stale socket instead of deleting it automatically.
+Verify that the old service has stopped before removing its owned `aw.sock`;
+keep its lock and journal when retaining the service directory. Restarting
+creates a new service identity; historical records remain queryable without
+resuming or replaying old events.
+
+The [configuration reference](../../../developer-guide/en/aw/configuration.md)
+covers every field and event name. The [local service contract](../../../../src/aw/docs/design/local-service.md)
+describes operation JSON, deadlines and lifecycle for Adapter developers.
+
+Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](aw-sec-core.md).

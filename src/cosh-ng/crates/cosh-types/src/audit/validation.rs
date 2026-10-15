@@ -87,6 +87,7 @@ fn validate_payload_shape(
             validate_payload::<AuditShellCommandData>(data)
         }
         KnownAuditEventType::EvidenceAccessed => validate_payload::<AuditEvidenceData>(data),
+        KnownAuditEventType::AuditTruncated => validate_payload::<AuditTruncationData>(data),
         KnownAuditEventType::AuditDegraded
         | KnownAuditEventType::AuditRecovered
         | KnownAuditEventType::RetentionPruned

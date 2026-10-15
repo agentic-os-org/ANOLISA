@@ -23,10 +23,11 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
     let peer = PeerCredentials::new(0, 0, std::process::id());
     for committed in [false, true] {
         let temporary = tempfile::tempdir().unwrap();
-        let state = temporary.path().join("state");
+        let fixture_root = temporary.path().canonicalize().unwrap();
+        let state = fixture_root.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let skill = temporary.path().join("skill");
+        let skill = fixture_root.join("skill");
         fs::create_dir(&skill).unwrap();
         fs::write(skill.join("SKILL.md"), "Safe fixture").unwrap();
         let service = SkillSecService::new(
@@ -63,7 +64,7 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
         )
         .unwrap();
         fs::set_permissions(&intent, fs::Permissions::from_mode(0o600)).unwrap();
-        let parked = temporary.path().join("parked");
+        let parked = fixture_root.join("parked");
         fs::rename(&skill, &parked).unwrap();
         // A changed configuration must not change the interrupted rotation's identity set.
         let service = Arc::new(
@@ -71,7 +72,7 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
                 SkillSecConfig {
                     state_dir: state.clone(),
                     managed_skill_dirs: vec![
-                        ManagedSkillDir::new(temporary.path().join("extra")).unwrap(),
+                        ManagedSkillDir::new(fixture_root.join("extra")).unwrap(),
                     ],
                 },
                 ScannerRegistry::default(),
@@ -143,16 +144,15 @@ fn startup_finalizes_preparation_failures_once_and_continues_with_the_next_skill
     }
     for mode in ["invalid", "timeout", "panic"] {
         let temporary = tempfile::tempdir().unwrap();
-        let state = temporary.path().join("state");
+        let root = temporary.path().canonicalize().unwrap();
+        let state = root.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let service = Arc::new(
             SkillSecService::new(
                 SkillSecConfig {
                     state_dir: state,
-                    managed_skill_dirs: vec![
-                        ManagedSkillDir::new(temporary.path().join("*")).unwrap(),
-                    ],
+                    managed_skill_dirs: vec![ManagedSkillDir::new(root.join("*")).unwrap()],
                 },
                 ScannerRegistry::default(),
             )
@@ -160,7 +160,7 @@ fn startup_finalizes_preparation_failures_once_and_continues_with_the_next_skill
         );
         service.initialize().unwrap();
         for name in ["bad", "good"] {
-            let path = temporary.path().join(name);
+            let path = root.join(name);
             fs::create_dir(&path).unwrap();
             fs::write(path.join("SKILL.md"), "Safe fixture").unwrap();
             service

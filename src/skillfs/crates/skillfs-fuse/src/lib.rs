@@ -22,6 +22,7 @@ mod handles;
 mod inode;
 mod mount;
 pub mod path;
+pub mod proc_mounts;
 mod sync;
 mod sys;
 mod xattr;
@@ -115,9 +116,13 @@ impl MountHandle {
 
         #[cfg(target_os = "linux")]
         {
-            let output = std::process::Command::new("fusermount3")
-                .args(["-u", &self.mountpoint.to_string_lossy()])
-                .output();
+            // Raw OS-string argument (see `unmount_commands`): a lossy UTF-8
+            // view of a mountpoint with invalid bytes names a different
+            // (nonexistent) path, so fusermount3 would fail and teardown
+            // would fall into the force loop below, which retries the wrong
+            // path 50 times and still leaks the mount.
+            let (program, argv) = &Self::unmount_commands(&self.mountpoint)[0];
+            let output = std::process::Command::new(program).args(argv).output();
 
             match output {
                 Ok(output) if output.status.success() => {
@@ -167,13 +172,36 @@ impl MountHandle {
     /// `std::fs::metadata`, which can succeed on a dead FUSE endpoint).
     #[cfg(target_os = "linux")]
     fn path_is_mounted(path: &std::path::Path) -> bool {
-        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        // Raw bytes on both sides: a lossy UTF-8 view would conflate a
+        // mounted invalid-byte path with a queried U+FFFD path, and
+        // read_to_string fails wholesale on any non-UTF-8 mount line.
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(mounts) = std::fs::read("/proc/mounts") else {
             return false;
         };
-        let target = path.to_string_lossy();
-        mounts
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+        crate::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
+    }
+
+    /// The unmount invocations for `mountpoint`, in escalation order: plain
+    /// `fusermount3 -u`, lazy `fusermount3 -u -z`, then `umount -l`. Element
+    /// 0 is the argv `unmount_inner` uses for its primary unmount attempt.
+    ///
+    /// The mountpoint rides as the raw OS string in every argv. The mount
+    /// *detection* side is byte-exact (`proc_mounts`), and the FUSE session
+    /// itself mounts such paths as raw bytes; a `to_string_lossy()` view
+    /// would replace an invalid byte with U+FFFD, so every command would
+    /// target a nonexistent path and the bounded force-unmount loop would
+    /// retry the wrong path until the mount leaks.
+    #[cfg(target_os = "linux")]
+    fn unmount_commands(
+        mountpoint: &std::path::Path,
+    ) -> [(&'static str, Vec<std::ffi::OsString>); 3] {
+        let raw = mountpoint.as_os_str().to_os_string();
+        [
+            ("fusermount3", vec!["-u".into(), raw.clone()]),
+            ("fusermount3", vec!["-u".into(), "-z".into(), raw.clone()]),
+            ("umount", vec!["-l".into(), raw]),
+        ]
     }
 
     /// One best-effort unmount pass: plain `fusermount3 -u`, then lazy
@@ -181,16 +209,9 @@ impl MountHandle {
     /// caller re-checks `/proc/mounts` to decide whether to retry.
     #[cfg(target_os = "linux")]
     fn try_unmount_once(path: &std::path::Path) {
-        let mountpoint = path.to_string_lossy();
-        let _ = std::process::Command::new("fusermount3")
-            .args(["-u", &mountpoint])
-            .output();
-        let _ = std::process::Command::new("fusermount3")
-            .args(["-u", "-z", &mountpoint])
-            .output();
-        let _ = std::process::Command::new("umount")
-            .args(["-l", &mountpoint])
-            .output();
+        for (program, args) in Self::unmount_commands(path) {
+            let _ = std::process::Command::new(program).args(&args).output();
+        }
     }
 
     /// Bounded, non-panicking force cleanup of a mountpoint. Returns as soon
@@ -256,6 +277,50 @@ mod tests {
     #[test]
     fn test_parse_path_root() {
         assert_eq!(parse_path(Path::new("/"), false), PathType::Root);
+    }
+
+    /// Every unmount invocation must address the mountpoint as raw OS-string
+    /// bytes. The CLI accepts non-UTF-8 mountpoints (`args_os`), the FUSE
+    /// session mounts them as raw bytes, and the mount detection
+    /// (`proc_mounts`) matches byte-exactly — a `to_string_lossy()` argv
+    /// would name a different (U+FFFD-mangled) path, so every unmount
+    /// attempt would fail and the bounded force loop would leak the mount.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unmount_commands_pass_the_mountpoint_as_raw_bytes() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::OsStrExt;
+
+        let mountpoint = Path::new(OsStr::from_bytes(b"/srv/mount-\xff"));
+        let commands = MountHandle::unmount_commands(mountpoint);
+
+        assert_eq!(commands[0].0, "fusermount3");
+        assert_eq!(commands[1].0, "fusermount3");
+        assert_eq!(commands[2].0, "umount");
+
+        for (index, (_, argv)) in commands.iter().enumerate() {
+            let mounted = argv
+                .iter()
+                .find(|arg| arg.as_encoded_bytes().contains(&0xff))
+                .unwrap_or_else(|| panic!("argv {index} must carry the raw mountpoint: {argv:?}"));
+            assert_eq!(
+                mounted.as_os_str(),
+                OsStr::from_bytes(b"/srv/mount-\xff"),
+                "argv {index} must address the mountpoint as raw bytes, not a \
+                 lossy U+FFFD view"
+            );
+        }
+
+        // Option spelling sanity for the escalation order.
+        let raw = OsStr::from_bytes(b"/srv/mount-\xff").to_os_string();
+        let expected: Vec<Vec<OsString>> = vec![
+            vec!["-u".into(), raw.clone()],
+            vec!["-u".into(), "-z".into(), raw.clone()],
+            vec!["-l".into(), raw],
+        ];
+        for (index, ((_, argv), want)) in commands.iter().zip(&expected).enumerate() {
+            assert_eq!(argv, want, "argv {index} spelling");
+        }
     }
 
     #[test]

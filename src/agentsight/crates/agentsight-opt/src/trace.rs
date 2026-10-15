@@ -3,8 +3,9 @@
 //! Extracts structured data from ATIF trajectories that all analysis
 //! dimensions (accuracy, perf, cost) consume.
 
-use crate::atif::{observation_looks_like_error, AtifTrajectory};
+use crate::atif::{observation_result_is_error, AtifTrajectory};
 use crate::types::ToolCallRecord;
+use agentsight_atif::same_call_id;
 
 // ── Public types ──
 
@@ -37,10 +38,25 @@ const CMD_TRUNCATE_CHARS: usize = 50;
 const USER_TURN_TEXT_CHARS: usize = 300;
 
 /// System-injected XML tags to strip from user/assistant text.
-/// These are injected by QoderWork/Qoder IDE and are not genuine user content.
+///
+/// These are injected by the IDEs and CLIs this pipeline reads (QoderWork/Qoder
+/// reminders, Claude Code slash-command transcripts) and are not genuine user
+/// content. The list must stay in step with
+/// `agentsight_trajectory_collector::strip_system_context`, whose copy is the
+/// documented contract for external callers: a tag only this list knows about is
+/// stripped here and kept there, and the two views of one trajectory then
+/// disagree about which turns the user actually wrote. The earlier two-pair list
+/// made the optimization pipeline count a `/clear` transcript as a user turn
+/// while the preferences page dropped it.
 const SYSTEM_TAGS: &[(&str, &str)] = &[
     ("<system-reminder>", "</system-reminder>"),
     ("<current_notes_content>", "</current_notes_content>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-name>", "</command-name>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-caveat>", "</local-command-caveat>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
 ];
 
 /// Known plain-text patterns that indicate a QoderWork system-injected block.
@@ -153,10 +169,7 @@ pub fn collect_tool_calls(traj: &AtifTrajectory) -> Vec<ToolCallRecord> {
 /// Same as [`collect_tool_calls`] with a custom command summary length.
 pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<ToolCallRecord> {
     let steps = &traj.steps;
-    let origin = match traj.origin_ts() {
-        Some(t) => t,
-        None => return vec![],
-    };
+    let origin = traj.origin_ts();
 
     let mut out = Vec::new();
     for (i, step) in steps.iter().enumerate() {
@@ -168,20 +181,37 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
         let per_call = if n > 0 { window / n as f64 } else { 0.0 };
         let start = step
             .end_ts()
-            .map(|t| (t - origin).as_seconds_f64())
+            .zip(origin)
+            .map(|(t, origin)| (t - origin).as_seconds_f64())
             .unwrap_or(0.0);
 
-        // Match observations to calls by id; positional fallback.
+        // Match observations to calls by id; positional fallback only for
+        // documents whose results carry no ids at all. Falling back whenever
+        // the id lookup misses would hand a sibling's observation to a call
+        // whose result never arrived (interrupted execution), reporting that
+        // call as failed and feeding the misattribution into the accuracy
+        // detectors and cost ledger. Ids are compared with the shared schema's
+        // tolerant rule: our own converters pair results to calls that way and
+        // then store the provider's echo, so a strict `==` misses exactly the
+        // documents they wrote.
         for (k, call) in step.calls().iter().enumerate() {
             let result = step
                 .results()
                 .iter()
-                .find(|r| r.source_call_id.as_deref() == Some(call.tool_call_id.as_str()))
-                .or_else(|| step.results().get(k));
-            let err = result
-                .and_then(|r| r.content.as_deref())
-                .map(observation_looks_like_error)
-                .unwrap_or(false);
+                .find(|r| {
+                    r.source_call_id
+                        .as_deref()
+                        .is_some_and(|id| same_call_id(id, &call.tool_call_id))
+                })
+                .or_else(|| {
+                    step.results()
+                        .iter()
+                        .all(|r| r.source_call_id.is_none())
+                        .then(|| step.results().get(k))
+                        .flatten()
+                });
+            // Structured flag first, text heuristic only for flag-less documents.
+            let err = result.map(observation_result_is_error).unwrap_or(false);
             out.push(ToolCallRecord {
                 name: call.display_name(),
                 call_id: call.tool_call_id.clone(),
@@ -189,11 +219,23 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 dur: per_call.max(0.0),
                 cmd: call.command_summary(cmd_chars),
                 err,
+                target: file_target(call),
                 result_tokens: None,
             });
         }
     }
     out
+}
+
+/// The file/path argument a call acts on, when it takes one. The command
+/// summary is a JSON blob truncated at ~50 chars - too short for deep paths -
+/// so consumers that need the target (e.g. files-touched aggregation) must
+/// read the argument, not the summary.
+fn file_target(call: &crate::atif::AtifToolCall) -> Option<String> {
+    ["file_path", "path", "notebook_path", "filePath"]
+        .iter()
+        .find_map(|k| call.arguments.get(k).and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 /// Tool execution window of agent step `idx`: next agent step's start (or
@@ -341,6 +383,45 @@ mod tests {
         assert_eq!(result, "用户真实问题");
     }
 
+    /// The tag list is shared with the trajectory collector, whose copy is the
+    /// documented contract for external callers and covers the slash-command and
+    /// local-command transcripts the IDEs inject as well. This copy had only the
+    /// first two pairs, so the optimization pipeline fed the summary stage a
+    /// `/clear` transcript as if the user had typed it — while the preferences
+    /// page stripped the same turn from the same trajectory.
+    #[test]
+    fn slash_command_transcripts_are_not_user_turns() {
+        for transcript in [
+            "<command-message>clear</command-message>\n<command-name>/clear</command-name>",
+            "<command-args></command-args>",
+            "<local-command-caveat>Caveat: the messages below were generated by the user</local-command-caveat>",
+            "<local-command-stdout>done</local-command-stdout>",
+            "<local-command-stderr>failed</local-command-stderr>",
+        ] {
+            assert_eq!(
+                strip_system_context(transcript),
+                "",
+                "{transcript} is system-injected, not user text"
+            );
+        }
+
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2025-01-01T00:00:00Z",
+             "message":"<command-message>clear</command-message>\n<command-name>/clear</command-name>"},
+            {"step_id":2,"source":"user","timestamp":"2025-01-01T00:00:01Z","message":"真正的问题"},
+            {"step_id":3,"source":"agent","timestamp":"2025-01-01T00:00:02Z","message":"回答"}
+        ]"#,
+        ));
+
+        assert_eq!(
+            inv.user_turns.len(),
+            1,
+            "only the genuine question is a turn"
+        );
+        assert_eq!(inv.user_turns[0].text, "真正的问题");
+    }
+
     #[test]
     fn strip_preserves_user_selected_text() {
         let input = "请分析这段代码\n<user-selected-text>fn main() {}</user-selected-text>";
@@ -395,6 +476,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_carry_file_target() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Edit",
+               "arguments":{"file_path":"src/agentsight/deep/path/mod.rs","old_string":"a","new_string":"b"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":2,"source":"agent","timestamp":"2025-01-01T00:00:02Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"cargo test"}}]}
+        ]"#,
+        ));
+        assert_eq!(
+            inv.tool_calls[0].target.as_deref(),
+            Some("src/agentsight/deep/path/mod.rs")
+        );
+        assert_eq!(inv.tool_calls[1].target, None);
+    }
+
+    #[test]
     fn user_turns_skip_target_file_session() {
         let inv = build_inventory(&traj(
             r#"[
@@ -403,5 +503,48 @@ mod tests {
         ]"#,
         ));
         assert!(inv.user_turns.is_empty());
+    }
+
+    #[test]
+    fn a_call_without_an_observation_does_not_inherit_a_siblings_error() {
+        // c1's tool result never arrived (interrupted execution); c2's did and
+        // failed. The positional fallback must not hand c2's observation to c1:
+        // err then claims c1 failed, which feeds the accuracy detectors and the
+        // cost ledger's churn accounting as a misattributed failure.
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"source_call_id":"c2","content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert_eq!(inv.tool_calls.len(), 2);
+        assert!(
+            !inv.tool_calls[0].err,
+            "a call with no observation must not inherit its sibling's failure"
+        );
+        assert!(inv.tool_calls[1].err, "c2's own observation is an error");
+    }
+
+    #[test]
+    fn id_less_observation_sets_still_pair_positionally() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"content":"file1"},
+                {"content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert!(!inv.tool_calls[0].err);
+        assert!(inv.tool_calls[1].err);
     }
 }

@@ -50,8 +50,8 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 /// Decompress an HTTP body based on its `Content-Encoding` header value.
 ///
 /// - `None` or `"identity"` → return body unchanged
-/// - `"gzip"` or `"x-gzip"` → decompress with GzDecoder
-/// - `"deflate"` → decompress with DeflateDecoder
+/// - `"gzip"` or `"x-gzip"` → every member, falling back to the first
+/// - `"deflate"` → zlib format (RFC 1950), falling back to raw deflate
 /// - `"zstd"` → decompress with the zstd decoder
 /// - `"br"` → decompress with the brotli decoder
 /// - Unknown encoding → return body unchanged
@@ -91,10 +91,8 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
     };
 
     match effective_encoding.as_deref() {
-        Some("gzip") | Some("x-gzip") => {
-            read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
-        }
-        Some("deflate") => read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate"),
+        Some("gzip") | Some("x-gzip") => decompress_gzip(body),
+        Some("deflate") => decompress_deflate(body),
         Some("zstd") => {
             // A streaming decoder (capped via `read_capped`) replaces
             // `zstd::decode_all`, which would allocate the full output up front
@@ -114,6 +112,38 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
         Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
     }
+}
+
+/// Decompress a `Content-Encoding: gzip` body.
+///
+/// A gzip body is a series of members (RFC 1952 §2.2), and a server that
+/// flushes one member per SSE event produces several — the same shape the
+/// zstd branch handles for concatenated frames. Decode all of them, but keep
+/// the first member when a truncated capture leaves the tail incomplete:
+/// `read_capped` returns `raw` unchanged when a decoder rejects the body, so
+/// an incomplete multi-member stream falls through to the single-member
+/// decoder instead of degrading to the still-compressed bytes.
+fn decompress_gzip(body: &[u8]) -> Vec<u8> {
+    let all = read_capped(flate2::read::MultiGzDecoder::new(body), body, "gzip");
+    if all != body {
+        return all;
+    }
+    read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
+}
+
+/// Decompress a `Content-Encoding: deflate` body.
+///
+/// RFC 9110 §8.4.1.2 defines `deflate` as the zlib format (RFC 1950), so that
+/// is tried first. Some servers still send raw deflate (RFC 1951), so a failed
+/// zlib attempt falls back to the raw decoder. `read_capped` returns `raw`
+/// unchanged when a decoder rejects the body, which is the fallback signal
+/// here: an over-cap zlib body ends up as raw either way.
+fn decompress_deflate(body: &[u8]) -> Vec<u8> {
+    let decoded = read_capped(flate2::read::ZlibDecoder::new(body), body, "deflate");
+    if decoded != body {
+        return decoded;
+    }
+    read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate")
 }
 
 /// Growable output sink for the incremental zstd decoder with the same hard
@@ -315,15 +345,19 @@ pub fn dechunk_body(raw: &[u8]) -> Vec<u8> {
         if size == 0 {
             break; // terminating zero-size chunk
         }
-        if i + size > raw.len() {
-            // Incomplete final chunk: salvage what is present.
+        // `size` is attacker-controlled: add it with `checked_add` so a value
+        // near `usize::MAX` cannot wrap the guard below and slice backwards.
+        let Some(end) = i.checked_add(size).filter(|end| *end <= raw.len()) else {
+            // Incomplete or overflowing final chunk: salvage what is present.
             out.extend_from_slice(&raw[i..]);
             break;
-        }
-        out.extend_from_slice(&raw[i..i + size]);
-        i += size;
-        // Skip the CRLF that follows the chunk data.
-        i += 2;
+        };
+        out.extend_from_slice(&raw[i..end]);
+        i = match end.checked_add(2) {
+            // Skip the CRLF that follows the chunk data.
+            Some(next) => next,
+            None => break,
+        };
     }
     out
 }
@@ -362,10 +396,15 @@ pub fn chunked_stream_complete(raw: &[u8]) -> bool {
         if size == 0 {
             return true; // terminating zero-size chunk reached
         }
-        if i + size > raw.len() {
+        // Same checked arithmetic as `dechunk_body`: a wrapped `i + size` used
+        // to walk onto garbage framing instead of reporting an incomplete chunk.
+        let Some(end) = i.checked_add(size).filter(|end| *end <= raw.len()) else {
             return false; // incomplete final chunk
-        }
-        i += size + 2; // skip chunk data + its trailing CRLF
+        };
+        i = match end.checked_add(2) {
+            Some(next) => next, // skip chunk data + its trailing CRLF
+            None => return false,
+        };
     }
     false
 }
@@ -469,6 +508,60 @@ mod tests {
     }
 
     #[test]
+    fn gzip_decodes_every_member() {
+        // RFC 1952: a gzip body is a series of members. A server that flushes
+        // one member per SSE chunk produced a body whose later members were
+        // dropped by the single-member decoder, truncating the stream.
+        let mut first = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        first.write_all(b"data: one\n\n").unwrap();
+        let first = first.finish().unwrap();
+        let mut second = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        second.write_all(b"data: two\n\n").unwrap();
+        let second = second.finish().unwrap();
+
+        let mut both = first;
+        both.extend_from_slice(&second);
+        assert_eq!(
+            decompress_body(&both, Some("gzip")),
+            b"data: one\n\ndata: two\n\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn gzip_truncated_tail_keeps_the_first_member() {
+        // A truncated capture of a multi-member stream is routine here, so the
+        // multi-member attempt must fall back to the first member rather than
+        // to the still-compressed bytes.
+        let mut first = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        first.write_all(b"first member").unwrap();
+        let first = first.finish().unwrap();
+        let mut second = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        second.write_all(b"second member").unwrap();
+        let second = second.finish().unwrap();
+
+        let mut truncated = first;
+        truncated.extend_from_slice(&second[..6]);
+        assert_eq!(
+            decompress_body(&truncated, Some("gzip")),
+            b"first member".to_vec()
+        );
+    }
+
+    #[test]
+    fn deflate_accepts_the_zlib_wrapper() {
+        // RFC 9110 defines `Content-Encoding: deflate` as the zlib format
+        // (RFC 1950). A zlib-wrapped body used to reach the raw decoder, fail,
+        // and come back still compressed, so the response was unreadable.
+        let plain = b"hello zlib";
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_ne!(compressed.as_slice(), plain.as_slice());
+
+        assert_eq!(decompress_body(&compressed, Some("deflate")), plain);
+    }
+
+    #[test]
     fn gzip_autodetected_by_magic() {
         let plain = b"auto-detect gzip";
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -498,6 +591,26 @@ mod tests {
         let raw = b"5hello";
         let result = dechunk_body(raw);
         assert!(result.is_empty());
+    }
+
+    /// 16 f's parse as `usize::MAX`: the `i + size` guard wraps below the
+    /// payload length, so the incomplete-final-chunk branch is skipped and the
+    /// `raw[i..i + size]` slice runs backwards. Truncated input must degrade to
+    /// partial output (the function's documented behavior), not panic.
+    #[test]
+    fn dechunk_survives_an_overflowing_chunk_size() {
+        let raw = b"ffffffffffffffff\r\n";
+        assert!(dechunk_body(raw).is_empty());
+    }
+
+    /// The completeness probe shares the framing arithmetic. Regression guard:
+    /// the wrap must not turn into "complete" (the pre-fix value is `false`
+    /// here too, but the same wrap shifts the parse onto garbage framing, so
+    /// both copies are fixed together).
+    #[test]
+    fn chunked_stream_complete_rejects_an_overflowing_chunk_size() {
+        let raw = b"fffffffffffffffe\r\n0123456789abcdef\r\n";
+        assert!(!chunked_stream_complete(raw));
     }
 
     #[test]

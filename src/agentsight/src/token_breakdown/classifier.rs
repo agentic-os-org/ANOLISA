@@ -31,12 +31,10 @@ pub fn classify_conversation(blocks: &[ChatMLBlock]) -> Vec<ConversationTurn> {
             } else {
                 ConversationTurnType::AssistantText
             }
+        } else if block.raw_content.contains("<tool_response>") {
+            ConversationTurnType::ToolResponse
         } else {
-            if block.raw_content.contains("<tool_response>") {
-                ConversationTurnType::ToolResponse
-            } else {
-                ConversationTurnType::UserMessage
-            }
+            ConversationTurnType::UserMessage
         };
 
         turns.push(ConversationTurn {
@@ -59,17 +57,19 @@ pub fn classify_conversation(blocks: &[ChatMLBlock]) -> Vec<ConversationTurn> {
 
 /// Classify a complete ChatML document into system content and messages.
 ///
-/// System prompt content is kept as-is (no sub-segmentation).
+/// System prompt content is kept as-is (no sub-segmentation); every system
+/// block is concatenated in order, because a template can render more than one
+/// (the Qwen template emits each system message as its own block).
 /// Response data is passed through if provided.
 pub fn classify_document(
     blocks: &[ChatMLBlock],
     response: Option<ResponseData>,
 ) -> ClassifiedDocument {
-    let system_content = blocks
+    let system_content: String = blocks
         .iter()
-        .find(|b| b.role == "system")
-        .map(|b| b.raw_content.clone())
-        .unwrap_or_default();
+        .filter(|b| b.role == "system")
+        .map(|b| b.raw_content.as_str())
+        .collect();
 
     let messages = classify_conversation(blocks);
 
@@ -111,7 +111,10 @@ mod tests {
         let blocks = vec![
             make_block("system", "sys"),
             make_block("user", "query"),
-            make_block("assistant", "<tool_call>\n<function=read>\n</function>\n</tool_call>"),
+            make_block(
+                "assistant",
+                "<tool_call>\n<function=read>\n</function>\n</tool_call>",
+            ),
         ];
         let turns = classify_conversation(&blocks);
         assert_eq!(turns[1].turn_type, ConversationTurnType::ToolCall);
@@ -169,10 +172,7 @@ mod tests {
 
     #[test]
     fn test_classify_document_with_response() {
-        let blocks = vec![
-            make_block("system", "sys"),
-            make_block("user", "Hello"),
-        ];
+        let blocks = vec![make_block("system", "sys"), make_block("user", "Hello")];
         let response = ResponseData {
             content: vec!["Hello!".to_string()],
             reasoning_content: Some("thinking...".to_string()),
@@ -191,5 +191,30 @@ mod tests {
         let doc = classify_document(&blocks, None);
         assert_eq!(doc.system_content, "");
         assert_eq!(doc.messages.len(), 1);
+    }
+
+    /// A request can carry more than one system message: the Qwen chat template
+    /// renders every system message as its own `<|im_start|>system` block (only
+    /// `loop.first` is special-cased). All of them are prompt content, so
+    /// keeping only the first drops tokens from the breakdown.
+    #[test]
+    fn test_classify_document_keeps_every_system_block() {
+        let blocks = vec![
+            make_block("system", "First prompt.\n"),
+            make_block("system", "Second prompt.\n"),
+            make_block("user", "hello"),
+        ];
+        let doc = classify_document(&blocks, None);
+        assert_eq!(doc.messages.len(), 1);
+        assert!(
+            doc.system_content.contains("Second prompt."),
+            "second system block vanished from the system prompt: {:?}",
+            doc.system_content
+        );
+        assert!(
+            doc.system_content.contains("First prompt."),
+            "first system block vanished from the system prompt: {:?}",
+            doc.system_content
+        );
     }
 }

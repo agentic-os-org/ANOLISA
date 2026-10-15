@@ -232,18 +232,12 @@ impl AuditService {
                 event_id: decision.sink_event_id,
             },
         )?;
-        let mut transitions = self
-            .store
-            .list_events(&AuditEventFilter {
-                start_ns: Some(source.occurred_at_ns),
-                end_ns: Some(event.occurred_at_ns),
-                event_type: Some("taint_transition".into()),
-                policy_id: Some(decision.policy_id.clone()),
-                binding_id: Some(event.identity.binding_id),
-                limit: 1_000,
-                ..AuditEventFilter::default()
-            })?
-            .items;
+        let mut transitions = self.all_window_transitions(
+            source.occurred_at_ns,
+            event.occurred_at_ns,
+            &decision.policy_id,
+            event.identity.binding_id,
+        )?;
         transitions.sort_by_key(|item| (item.occurred_at_ns, item.event_id));
         let transitions = transitions_on_process_chain(&source, &sink, transitions);
 
@@ -292,6 +286,46 @@ impl AuditService {
         };
         self.store.upsert_case(&case, &evidence_ids)?;
         Ok(())
+    }
+
+    /// Loads every transition in the correlation window across store pages.
+    ///
+    /// One store query is bounded to the 1_000 newest matching rows, so a
+    /// binding with more transitions in the window must be paged through;
+    /// otherwise the oldest edges — the hops closest to the source — are
+    /// dropped and the source can no longer reach the sink, silently
+    /// unlinking the whole evidence chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed persistence or decoding error when a page query fails.
+    fn all_window_transitions(
+        &self,
+        source_time_ns: u64,
+        decision_time_ns: u64,
+        policy_id: &str,
+        binding_id: Uuid,
+    ) -> Result<Vec<SecurityEvent>, AuditError> {
+        let mut items = Vec::new();
+        let mut offset: i64 = 0;
+        loop {
+            let page = self.store.list_events(&AuditEventFilter {
+                start_ns: Some(source_time_ns),
+                end_ns: Some(decision_time_ns),
+                event_type: Some("taint_transition".into()),
+                policy_id: Some(policy_id.to_owned()),
+                binding_id: Some(binding_id),
+                limit: 1_000,
+                offset,
+                ..AuditEventFilter::default()
+            })?;
+            let fetched = page.items.len();
+            items.extend(page.items);
+            if fetched < 1_000 {
+                return Ok(items);
+            }
+            offset += 1_000;
+        }
     }
 }
 

@@ -29,6 +29,7 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/dsh/package.json \
     $(ADAPTER_SRC_DIR)/hermes/plugin.yaml \
     $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json \
+    $(ADAPTER_SRC_DIR)/qwenwork/.qoder-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json \
@@ -77,6 +78,9 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 .PHONY: test-install-methods test-install-script test-install-docs \
         test-npm-postinstall test-npm-postinstall-strict
 
+.PHONY: qwenwork-install qwenwork-uninstall test-qwenwork \
+        test-qwenwork-install test-qwenwork-hooks
+
 # Default target
 all: build
 
@@ -123,6 +127,10 @@ $(ADAPTER_SRC_DIR)/hermes/plugin.yaml: $(ADAPTER_SRC_DIR)/hermes/plugin.yaml.in 
 
 $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json: $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json.in Cargo.toml
 	@echo "==> Generating qoder/.qoder-plugin/plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/qwenwork/.qoder-plugin/plugin.json: $(ADAPTER_SRC_DIR)/qwenwork/.qoder-plugin/plugin.json.in Cargo.toml
+	@echo "==> Generating qwenwork/.qoder-plugin/plugin.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json: \
@@ -305,22 +313,45 @@ test-claude-code-detect:
 # Python contract below. They cannot
 # go on `test-rtk-integration` instead: that target's own recipe is what fetches
 # and builds the vendored rtk, and this one runs earlier in the CI job.
-test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts
+# tests/test_verify_release_versions.py guards the PEP 440 wheel-version
+# contract of packaging/raw/verify-release.py: a normalized wheel filename
+# (0.9.0rc1) must match a Cargo 0.9.0-rc.1, a filename keeping the
+# unnormalized spelling must be rejected (pip refuses to install from such a
+# URL), and genuine drift must stay rejected. The suite is stdlib-only and
+# finishes in milliseconds, but nothing executed it: the file was
+# pytest-shaped, no tokenless target or workflow calls pytest (only the
+# hermes job does), and plain `python3` on a pytest-shaped file runs zero
+# tests. It is unittest-shaped now and rides on this target beside the other
+# plain-python3 suites the Test tokenless job already runs, which is what
+# gives the raw packaging gate regression coverage in CI.
+test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts test-qwenwork-hooks
 	@echo "==> Testing hook integration (Python)..."
-	python3 tests/test_compress_response_hook.py
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_hermes_lifecycle.py
 	python3 tests/test_compress_schema_hook.py
-	python3 tests/test_hook_contract.py
+	python3 tests/test_hook_payload_shapes.py
 	python3 tests/test_hermes_plugin_import.py
 	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_agentscope_v1.py
-	python3 tests/test_rewrite_hook.py
 	python3 tests/test_cosh_extension_matcher.py
-	python3 tests/test_resolve_agent_id.py
 	python3 tests/test_release_regression_probe.py
+	python3 tests/test_verify_release_versions.py
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
+
+# Keep this standalone entry free of Rust/plugin builds. CI runs the shared
+# suites through test-integration and only the installer through test-adapters.
+test-qwenwork: test-qwenwork-hooks test-qwenwork-install
+
+test-qwenwork-hooks:
+	python3 tests/test_compress_response_hook.py
+	python3 tests/test_hook_contract.py
+	python3 tests/test_rewrite_hook.py
+	python3 tests/test_resolve_agent_id.py
+
+test-qwenwork-install:
+	@echo "==> Testing QwenWork macOS local-mode sideloading..."
+	python3 tests/test_qwenwork_install.py
 
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
 # best-effort probe that must never stall the suite: a bare `$RTK_BIN` is
@@ -395,11 +426,15 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	bash tests/test-dsh-adapter.sh
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
+	@echo "==> Testing Qwen Code adapter installer..."
+	python3 tests/test_qwencode_install.py
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs
 	@echo "==> Testing QwenPaw adapter installer..."
 	bash tests/test-qwenpaw-adapter-install.sh
+	# Run after npm packaging has restored its stale-version fixture.
+	$(MAKE) test-qwenwork-install
 
 # Build the abi3 extension with unwind semantics so a Rust panic cannot abort
 # the embedding Python interpreter. The wheel remains platform-specific, but
@@ -619,6 +654,15 @@ qoder-uninstall:
 	@echo "==> Uninstalling tokenless Qoder CLI plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=qoder bash $(QODER_ADAPTER_DIR)/scripts/uninstall.sh
 
+# Explicit opt-in only; bulk adapter actions must not modify desktop plugins.
+qwenwork-install:
+	@echo "==> Sideloading tokenless for QwenWork (macOS local mode)..."
+	@bash "$(SHARE_DIR)/qwenwork/scripts/install.sh"
+
+qwenwork-uninstall:
+	@echo "==> Removing the tokenless QwenWork sideload..."
+	@bash "$(SHARE_DIR)/qwenwork/scripts/uninstall.sh"
+
 # --- Claude Code ---
 # Plugin is sourced from SHARE_DIR (FHS-installed adapter resources). When
 # claude is not available the scripts gracefully no-op so `make adapter-install`
@@ -794,6 +838,9 @@ help:
 	@echo "  hermes-uninstall  Uninstall Hermes Agent plugin"
 	@echo "  qoder-install     Register Qoder CLI plugin"
 	@echo "  qoder-uninstall   Unregister Qoder CLI plugin"
+	@echo "  qwenwork-install  Sideload QwenWork plugin (macOS local mode, opt-in)"
+	@echo "  qwenwork-uninstall Remove the QwenWork sideload"
+	@echo "  test-qwenwork     Test QwenWork installer and shared hooks (no Rust build)"
 	@echo "  claude-code-install   Register Claude Code plugin via claude CLI"
 	@echo "  claude-code-uninstall Unregister Claude Code plugin"
 	@echo "  codex-install     Register Codex plugin via codex CLI"

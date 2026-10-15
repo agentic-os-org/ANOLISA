@@ -2,7 +2,7 @@ use anyhow::Context;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ==================== Default Constants ====================
 
@@ -14,9 +14,6 @@ pub const DEFAULT_POLL_TIMEOUT_MS: u64 = 100;
 
 /// Default minimum duration threshold for HTTP requests (microseconds)
 pub const DEFAULT_MIN_DUR_US: u64 = 10_000;
-
-/// Default maximum body length for audit analyzer
-pub const DEFAULT_MAX_BODY_LEN: usize = 64 * 1024;
 
 /// Default maximum headers for HTTP parser
 pub const DEFAULT_MAX_HEADERS: usize = 64;
@@ -53,6 +50,10 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 pub const DEFAULT_MAINTENANCE_INTERVAL_SECS: u64 = 60;
 /// Default primary database size limit in MiB.
 pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
+/// Default combined size limit for all AgentSight SQLite databases in MiB.
+pub const DEFAULT_MAX_TOTAL_SIZE_MB: u64 = 2_200;
+/// Minimum non-zero combined limit, reserving 1 MiB for each managed database.
+pub const MIN_TOTAL_SIZE_MB: u64 = 9;
 
 /// Default bounded channel capacity for probe → event loop events.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
@@ -124,6 +125,59 @@ pub fn init_logging(verbose: bool, log_path: Option<&str>) {
 
 pub fn verbose() -> bool {
     VERBOSE.load(Ordering::SeqCst)
+}
+
+// ==================== Global Probe Poll Timeout =============}
+
+/// Process-wide ring-buffer poll timeout for the probe poll threads,
+/// applied by `AgentSight::new` from `AgentsightConfig::poll_timeout_ms`.
+///
+/// The poll threads (`Probes::run`, `ProcTrace::run`, `SslSniff::run`) are
+/// spawned from code that cannot see the config object, so the knob is
+/// published through this global — the same pattern the verbose flag uses.
+/// The timeout bounds how long one `rb.poll()` blocks, i.e. how quickly a
+/// poll thread notices its stop flag.
+static POLL_TIMEOUT_MS: AtomicU64 = AtomicU64::new(DEFAULT_POLL_TIMEOUT_MS);
+
+/// Publish the configured ring-buffer poll timeout (milliseconds).
+///
+/// Clamped to at least one millisecond: a zero timeout makes every
+/// `rb.poll()` return immediately, so `drive_poll_loop` degenerates into a
+/// non-blocking busy loop that spins a core while the tracer runs.
+pub fn set_poll_timeout_ms(ms: u64) {
+    POLL_TIMEOUT_MS.store(ms.max(1), Ordering::SeqCst);
+}
+
+/// Current ring-buffer poll timeout (milliseconds).
+pub fn poll_timeout_ms() -> u64 {
+    POLL_TIMEOUT_MS.load(Ordering::SeqCst)
+}
+
+// ==================== Global HTTP Trace Duration Floor ====================
+
+/// Process-wide floor for the duration of HTTP request/response Chrome trace
+/// events, applied by `AgentSight::new` from `AgentsightConfig::min_duration_us`.
+///
+/// The trace exporters (`ParsedRequest::to_chrome_trace_events`,
+/// `ParsedResponse::to_chrome_trace_events`,
+/// `AggregatedResponse::to_chrome_trace_events`) cannot see the config object,
+/// so the knob is published through this global — the same pattern the verbose
+/// flag uses. Trace viewers cannot render sub-pixel durations, so events
+/// shorter than the floor are drawn with the floor's duration.
+static MIN_DURATION_US: AtomicU64 = AtomicU64::new(DEFAULT_MIN_DUR_US);
+
+/// Publish the configured minimum HTTP trace-event duration.
+///
+/// The value is clamped to at least one microsecond: a zero duration would
+/// make complete ('X') trace events invisible in Perfetto, which is what the
+/// floor exists to prevent.
+pub fn set_min_duration_us(us: u64) {
+    MIN_DURATION_US.store(us.max(1), Ordering::SeqCst);
+}
+
+/// Current minimum HTTP trace-event duration (microseconds).
+pub fn min_duration_us() -> u64 {
+    MIN_DURATION_US.load(Ordering::SeqCst)
 }
 
 // ==================== FFI Rule Configuration ====================
@@ -341,6 +395,8 @@ pub struct StorageConfig {
     pub causal: PeriodicStoragePolicy,
     /// Policy for the private enforcement database.
     pub enforcement: PeriodicStoragePolicy,
+    /// Combined size limit in MiB; zero disables it, otherwise the minimum is 9.
+    pub max_total_size_mb: u64,
 }
 
 impl Default for StorageConfig {
@@ -356,6 +412,7 @@ impl Default for StorageConfig {
             reuse: PeriodicStoragePolicy::new(30, 200, 300),
             causal: PeriodicStoragePolicy::new(30, 200, 300),
             enforcement: PeriodicStoragePolicy::new(30, 100, 60),
+            max_total_size_mb: DEFAULT_MAX_TOTAL_SIZE_MB,
         }
     }
 }
@@ -384,6 +441,18 @@ impl StorageConfig {
     /// Returns the fixed path of the optimization database.
     pub fn optimization_path(&self) -> PathBuf {
         self.base_path.join(OPTIMIZATION_DB_NAME)
+    }
+
+    pub(crate) fn validate_total_size_mb(max_total_size_mb: u64) -> Result<(), String> {
+        if max_total_size_mb != 0 && max_total_size_mb < MIN_TOTAL_SIZE_MB {
+            return Err(format!(
+                "storage.max_total_size_mb must be zero or at least {MIN_TOTAL_SIZE_MB}"
+            ));
+        }
+        max_total_size_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "storage.max_total_size_mb is too large".to_string())?;
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -420,12 +489,15 @@ impl StorageConfig {
         ] {
             validate(name, policy.retention_days, policy.max_db_size_mb)?;
         }
-        Ok(())
+        Self::validate_total_size_mb(self.max_total_size_mb)
     }
 
     fn apply_json(&mut self, json: JsonStorageConfig) {
         if let Some(base_path) = json.base_path {
             self.base_path = base_path;
+        }
+        if let Some(max_total_size_mb) = json.max_total_size_mb {
+            self.max_total_size_mb = max_total_size_mb;
         }
         apply_periodic_policy(&mut self.primary, json.primary);
         apply_periodic_policy(&mut self.genai, json.genai);
@@ -443,6 +515,7 @@ impl StorageConfig {
 #[serde(default)]
 struct JsonStorageConfig {
     base_path: Option<PathBuf>,
+    max_total_size_mb: Option<u64>,
     primary: Option<JsonPeriodicStoragePolicy>,
     genai: Option<JsonPeriodicStoragePolicy>,
     interruptions: Option<JsonPeriodicStoragePolicy>,
@@ -728,14 +801,29 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
     (cmdline_rules, https_rules, http_targets)
 }
 
+/// One leading UTF-8 BOM (U+FEFF), as `read_to_string` decodes it. Windows
+/// editors saving as "UTF-8 with BOM" prefix the file with the mark, and
+/// serde_json rejects it at offset 0 — degrading a perfectly valid config to
+/// "invalid": the tracer fell back to embedded defaults (the user's cmdline
+/// rules silently not traced), the schema auto-upgrade froze the file on its
+/// old version, and the hot-reload watcher dropped its signal. The SSE
+/// reader already ignores exactly one leading BOM at a known stream start
+/// (the WHATWG parsing rule `sse_prefix` implements); the JSON config
+/// boundaries take the same one-mark rule, so a marked config parses as the
+/// config it is. Only the first mark is the format's: a second one is data
+/// and still fails the parse.
+fn strip_leading_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
+}
+
 /// Parse a JSON config string into cmdline rules, https rules, and http targets.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
 pub fn parse_json_rules(
     json: &str,
 ) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
-    let parsed: JsonFullConfig =
-        serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+    let parsed: JsonFullConfig = serde_json::from_str(strip_leading_bom(json))
+        .map_err(|e| format!("JSON parse error: {e}"))?;
     Ok(extract_rules(&parsed))
 }
 
@@ -760,6 +848,12 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+    // One leading BOM is the editor's mark, not the config's content (see
+    // [`strip_leading_bom`]). Strip it before the validity probe so a
+    // BOM-prefixed config takes the same valid/invalid decision — and the
+    // same schema upgrade — as its unmarked twin, instead of being frozen
+    // as "invalid" while the load falls back to embedded defaults.
+    let content = strip_leading_bom(&content);
 
     // If the file is not valid JSON at all, leave it untouched so the caller's
     // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
@@ -768,11 +862,11 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // *valid* JSON whose schema_version is outdated; silently overwriting an
     // invalid file masks the parse error and breaks the documented fallback
     // contract (see issue #1502).
-    if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+    if serde_json::from_str::<serde_json::Value>(content).is_err() {
         return Ok(());
     }
 
-    let on_disk_version = extract_schema_version(&content);
+    let on_disk_version = extract_schema_version(content);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
@@ -790,9 +884,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     std::fs::write(path, DEFAULT_AGENTS_JSON)
         .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
     log::info!(
-        "Config schema_version {:?} < {}, replaced it with defaults at {path:?} (backup at {backup:?})",
-        on_disk_version,
-        CURRENT_SCHEMA_VERSION
+        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, replaced it with defaults at {path:?} (backup at {backup:?})"
     );
     Ok(())
 }
@@ -1021,7 +1113,11 @@ pub struct AgentsightConfig {
     // --- Probe Configuration ---
     /// Optional UID filter for process tracing
     pub target_uid: Option<u32>,
-    /// Poll timeout for ring buffer polling (milliseconds)
+    /// Poll timeout for ring buffer polling (milliseconds). Bounds how long
+    /// one `rb.poll()` blocks in every probe poll thread, i.e. how quickly a
+    /// poll thread notices its stop flag. Applied process-wide at startup via
+    /// [`crate::config::set_poll_timeout_ms`]; a zero value is clamped to 1 ms
+    /// (a non-blocking poll would busy-spin).
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
@@ -1042,16 +1138,18 @@ pub struct AgentsightConfig {
     // --- HTTP/Aggregation Configuration ---
     /// LRU cache capacity for HTTP connections
     pub connection_capacity: usize,
-    /// Minimum duration threshold for HTTP requests (microseconds)
+    /// Minimum duration threshold for HTTP request/response Chrome trace
+    /// events (microseconds). Events shorter than this are emitted with the
+    /// floor's duration so they stay visible in trace viewers. Applied
+    /// process-wide at startup via [`crate::config::set_min_duration_us`].
     pub min_duration_us: u64,
 
     // --- Parser Configuration ---
-    /// Maximum number of HTTP headers to parse
+    /// Maximum number of HTTP headers the HTTP/1 parser accepts per message.
+    /// A message with more headers is rejected by `httparse` (TooManyHeaders)
+    /// and falls through to the raw-data path. Threads into
+    /// [`crate::parser::Parser::with_max_headers`] at startup.
     pub max_headers: usize,
-
-    // --- Analyzer Configuration ---
-    /// Maximum body length for audit analysis
-    pub max_body_len: usize,
 
     // --- Logging Configuration ---
     /// Enable verbose logging
@@ -1062,8 +1160,6 @@ pub struct AgentsightConfig {
     // --- Tokenizer Configuration ---
     /// Path to tokenizer file for accurate token counting (e.g., "/path/to/tokenizer.json")
     pub tokenizer_path: Option<PathBuf>,
-    /// URL to download tokenizer from (e.g., "https://modelscope.cn/.../tokenizer.json")
-    pub tokenizer_url: Option<String>,
 
     // --- FFI Rule Configuration ---
     /// User-defined cmdline rules for process allowlist/denylist
@@ -1154,9 +1250,6 @@ impl Default for AgentsightConfig {
             // Parser defaults
             max_headers: DEFAULT_MAX_HEADERS,
 
-            // Analyzer defaults
-            max_body_len: DEFAULT_MAX_BODY_LEN,
-
             // Logging defaults
             verbose: false,
             log_path: None,
@@ -1165,10 +1258,6 @@ impl Default for AgentsightConfig {
             tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH")
                 .ok()
                 .map(PathBuf::from),
-            tokenizer_url: Some(
-                "https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json"
-                    .to_owned(),
-            ),
 
             // FFI Rule defaults
             cmdline_rules: Vec::new(),
@@ -1284,8 +1373,11 @@ impl AgentsightConfig {
     ///
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
-        let mut parsed: JsonFullConfig =
-            serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+        // The --config and FFI `load_config()` entry point: one leading BOM
+        // (see [`strip_leading_bom`]) must not fail the whole load and leave
+        // the tracer on embedded defaults without the user's rules.
+        let mut parsed: JsonFullConfig = serde_json::from_str(strip_leading_bom(json))
+            .map_err(|e| format!("JSON parse error: {e}"))?;
 
         // Warn if the config's schema_version is older than expected. By this
         // point ensure_default_agents_config should have already upgraded stale
@@ -1311,11 +1403,17 @@ impl AgentsightConfig {
 
         // 加载加密公钥：优先 public_key（内联 PEM），其次 public_key_path（文件路径）
         if let Some(enc) = parsed.encryption.take() {
-            if let Some(pem) = enc.public_key {
-                let trimmed = pem.trim();
-                if !trimmed.is_empty() {
-                    self.encryption_public_key = Some(trimmed.to_string());
-                }
+            // A blank inline key counts as absent: the shipped default config
+            // contains `"public_key": ""`, and an operator adding
+            // `public_key_path` on top of it would otherwise lose the file
+            // fallback and silently upload conversation content in plaintext.
+            let inline_key = enc
+                .public_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|pem| !pem.is_empty());
+            if let Some(pem) = inline_key {
+                self.encryption_public_key = Some(pem.to_string());
             } else if let Some(path) = enc.public_key_path {
                 let trimmed = path.trim();
                 if !trimmed.is_empty() {
@@ -1418,11 +1516,17 @@ impl AgentsightConfig {
                     .as_ref()
                     .and_then(|f| f.enabled)
                     .unwrap_or(false),
+                // `sleep_or_stop(0)` returns immediately, so a zero interval
+                // turns the collector into a hot rescan loop (privileged
+                // daemon spinning on CPU/disk). Clamp at parse: other
+                // zero-valued knobs have explicit "disabled" semantics, this
+                // one has none.
                 trajectory_scan_interval_secs: features
                     .trajectory_collection
                     .as_ref()
                     .and_then(|f| f.scan_interval_secs)
-                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS),
+                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS)
+                    .max(1),
                 trajectory_scan_dirs: features
                     .trajectory_collection
                     .as_ref()
@@ -1432,6 +1536,20 @@ impl AgentsightConfig {
 
         // Parse runtime limits
         if let Some(limits) = parsed.runtime_limits.take() {
+            // A MiB budget becomes a byte budget with `* 1024 * 1024`. Do it
+            // checked: with overflow checks off (the workspace disables dev
+            // debug assertions) the multiply wraps silently in the shipped
+            // profile, and a wrapped 0 is read by ChannelBudget as "unlimited",
+            // which disables the memory guard instead of bounding it. Reject
+            // the config like the storage section does rather than running
+            // with a bogus budget.
+            let bytes_from_mb = |field: &str, mb: Option<usize>| -> Result<Option<usize>, String> {
+                mb.map(|mb| {
+                    mb.checked_mul(1024 * 1024)
+                        .ok_or_else(|| format!("runtime_limits.{field} is too large"))
+                })
+                .transpose()
+            };
             self.runtime_limits = RuntimeLimits {
                 event_channel_capacity: limits
                     .event_channel_capacity
@@ -1441,22 +1559,25 @@ impl AgentsightConfig {
                     .as_deref()
                     .map(ChannelPolicy::from)
                     .unwrap_or_default(),
-                event_channel_max_bytes: limits
-                    .event_channel_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
+                event_channel_max_bytes: bytes_from_mb(
+                    "event_channel_max_bytes_mb",
+                    limits.event_channel_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
                 pending_genai_max_count: limits
                     .pending_genai_max_count
                     .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
-                pending_genai_max_bytes: limits
-                    .pending_genai_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
+                pending_genai_max_bytes: bytes_from_mb(
+                    "pending_genai_max_bytes_mb",
+                    limits.pending_genai_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
                 pid_cache_size: limits.pid_cache_size.unwrap_or(DEFAULT_PID_CACHE_SIZE),
-                max_connection_body_bytes: limits
-                    .max_connection_body_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
+                max_connection_body_bytes: bytes_from_mb(
+                    "max_connection_body_mb",
+                    limits.max_connection_body_mb,
+                )?
+                .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
                 connection_idle_timeout_secs: limits
                     .connection_idle_timeout_secs
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
@@ -1483,12 +1604,6 @@ impl AgentsightConfig {
     /// Set tokenizer path
     pub fn set_tokenizer_path(mut self, path: Option<PathBuf>) -> Self {
         self.tokenizer_path = path;
-        self
-    }
-
-    /// Set tokenizer URL
-    pub fn set_tokenizer_url(mut self, url: Option<String>) -> Self {
-        self.tokenizer_url = url;
         self
     }
 
@@ -1561,7 +1676,10 @@ pub fn parse_runtime_sls_path(json: &str) -> Option<Option<String>> {
         #[serde(default)]
         runtime: Option<JsonRuntime>,
     }
-    let parsed: Partial = serde_json::from_str(json).ok()?;
+    // One leading BOM is stripped like every other JSON config boundary (see
+    // [`strip_leading_bom`]), or a marked file's hot-reload signal would
+    // read as "no change" and an SLS pause/re-activation would be dropped.
+    let parsed: Partial = serde_json::from_str(strip_leading_bom(json)).ok()?;
     let rt = parsed.runtime?;
     let path = rt.sls_logtail_path?;
     let trimmed = path.trim();
@@ -1656,7 +1774,6 @@ mod tests {
         assert_eq!(DEFAULT_CONNECTION_CAPACITY, 24);
         assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
-        assert_eq!(DEFAULT_MAX_BODY_LEN, 64 * 1024);
         assert_eq!(DEFAULT_MAX_HEADERS, 64);
         assert_eq!(PRIMARY_DB_NAME, "agentsight.db");
         assert_eq!(DEFAULT_AUDIT_TABLE, "audit_events");
@@ -1689,7 +1806,6 @@ mod tests {
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
         assert_eq!(config.max_headers, 64);
-        assert_eq!(config.max_body_len, 64 * 1024);
         assert!(!config.verbose);
         assert!(config.log_path.is_none());
         assert!(config.target_uid.is_none());
@@ -1804,6 +1920,17 @@ mod tests {
             u64::MAX
         );
         assert!(config.load_from_json(&json).is_err());
+
+        let mut config = AgentsightConfig::new();
+        let error = config
+            .load_from_json(r#"{"storage":{"max_total_size_mb":8}}"#)
+            .unwrap_err();
+        assert!(error.contains("must be zero or at least 9"));
+
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(r#"{"storage":{"max_total_size_mb":0}}"#)
+            .unwrap();
     }
 
     #[test]
@@ -1855,20 +1982,36 @@ mod tests {
     }
 
     #[test]
-    fn test_set_tokenizer_url() {
-        let config =
-            AgentsightConfig::new().set_tokenizer_url(Some("https://example.com/tok.json".into()));
-        assert_eq!(
-            config.tokenizer_url,
-            Some("https://example.com/tok.json".to_string())
-        );
-    }
-
-    #[test]
     fn test_verbose_default_false() {
         // verbose() reads from global static; default should be false
         // Note: other tests might have set it, so just check it doesn't panic
         let _ = verbose();
+    }
+
+    /// `AgentsightConfig::poll_timeout_ms` is published process-wide by
+    /// `AgentSight::new` and read by every probe poll thread, so the global
+    /// must round-trip a configured value and clamp the degenerate zero
+    /// (a non-blocking poll turns `drive_poll_loop` into a busy spin). All
+    /// mutations happen inside this single test so the process-wide global
+    /// cannot race a parallel test.
+    #[test]
+    fn poll_timeout_round_trips_and_clamps_zero() {
+        let saved = poll_timeout_ms();
+
+        set_poll_timeout_ms(250);
+        assert_eq!(poll_timeout_ms(), 250);
+
+        set_poll_timeout_ms(1);
+        assert_eq!(poll_timeout_ms(), 1, "one millisecond is a legal value");
+
+        set_poll_timeout_ms(0);
+        assert_eq!(
+            poll_timeout_ms(),
+            1,
+            "a zero poll timeout would busy-spin the poll threads"
+        );
+
+        set_poll_timeout_ms(saved);
     }
 
     #[test]
@@ -2009,6 +2152,37 @@ mod tests {
     fn test_parse_json_rules_invalid() {
         let json = r#"{ invalid json }"#;
         assert!(parse_json_rules(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_json_rules_tolerates_one_leading_bom() {
+        // A Windows editor saving the config as UTF-8-with-BOM prefixes the
+        // file with U+FEFF, and serde_json rejects the mark at offset 0 —
+        // which used to degrade the whole config to "invalid": the tracer
+        // fell back to embedded defaults (custom cmdline rules lost, a warn
+        // log the only trace) and `discover` answered from the built-ins.
+        // The SSE reader already ignores one leading BOM at a known stream
+        // start; the JSON config boundaries take the same one-mark rule.
+        let json =
+            "\u{feff}{\"cmdline\":{\"allow\":[{\"rule\":[\"node\"],\"agent_name\":\"Kept\"}]}}";
+        let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
+        assert_eq!(cmdline_rules.len(), 1);
+        assert_eq!(cmdline_rules[0].agent_name, Some("Kept".to_string()));
+        // Only the FIRST mark is whitespace-of-the-format: a second one is
+        // data and must still fail the parse.
+        assert!(parse_json_rules("\u{feff}\u{feff}{}").is_err());
+    }
+
+    #[test]
+    fn parse_runtime_sls_path_tolerates_one_leading_bom() {
+        // The config watcher parses the same file for its hot-reload signal;
+        // a BOM used to turn the signal into "no change" (None), silently
+        // dropping an SLS pause/re-activation.
+        let json = "\u{feff}{\"runtime\":{\"sls_logtail_path\":\"/var/log/filebeat\"}}";
+        assert_eq!(
+            parse_runtime_sls_path(json),
+            Some(Some("/var/log/filebeat".to_string()))
+        );
     }
 
     #[test]
@@ -2242,6 +2416,34 @@ mod tests {
     }
 
     #[test]
+    fn runtime_limits_reject_byte_budgets_that_overflow() {
+        // A MiB budget is converted with an unchecked multiply. With overflow
+        // checks disabled (the shipped profile) the wrap is silent: 2^44 MiB
+        // wraps to exactly 0, which ChannelBudget reads as "unlimited" and
+        // silently disables the memory guard, while u64::MAX wraps to a
+        // 1 KiB-class budget that drops everything. Both must be rejected at
+        // load time, like the storage size limits already are.
+        for field in [
+            "event_channel_max_bytes_mb",
+            "pending_genai_max_bytes_mb",
+            "max_connection_body_mb",
+        ] {
+            for mb in [u64::MAX, 1u64 << 44] {
+                let json = format!(r#"{{"runtime_limits": {{"{field}": {mb}}}}}"#);
+                let mut config = AgentsightConfig::new();
+                let result = config.load_from_json(&json);
+                let err = result.expect_err(&format!(
+                    "{field}={mb} overflows the byte budget and must be rejected"
+                ));
+                assert!(
+                    err.contains(field),
+                    "error for {field} must name the offending field: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_load_from_json_features() {
         let json = r#"{
             "features": {
@@ -2314,6 +2516,55 @@ mod tests {
         );
     }
 
+    /// The shipped default config contains `"public_key": ""`. An operator who
+    /// adds `public_key_path` on top of it must still get the file-based key;
+    /// otherwise the exporter silently uploads conversation content in
+    /// plaintext.
+    #[test]
+    fn encryption_blank_inline_key_falls_back_to_public_key_path() {
+        let dir = unique_temp_dir();
+        let pem_path = dir.join("public_key.pem");
+        let pem = "-----BEGIN PUBLIC KEY-----\nMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAK\n-----END PUBLIC KEY-----\n";
+        std::fs::write(&pem_path, pem).expect("write pem");
+
+        for blank in ["", "   \n"] {
+            let json = serde_json::json!({
+                "encryption": {
+                    "public_key": blank,
+                    "public_key_path": pem_path.to_string_lossy(),
+                }
+            })
+            .to_string();
+            let mut config = AgentsightConfig::new();
+            config.load_from_json(&json).unwrap();
+            assert_eq!(
+                config.encryption_public_key.as_deref(),
+                Some(pem),
+                "blank inline key {blank:?} must fall back to public_key_path"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `sleep_or_stop(0)` returns immediately, so a zero scan interval turns
+    /// the trajectory collector into a hot rescan loop. The parse step must
+    /// clamp it to at least one second.
+    #[test]
+    fn trajectory_scan_interval_zero_is_clamped() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": { "enabled": true, "scan_interval_secs": 0 }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(
+            config.features.trajectory_scan_interval_secs >= 1,
+            "zero interval would make the collector hot-loop, got {}",
+            config.features.trajectory_scan_interval_secs
+        );
+    }
+
     #[test]
     fn load_from_json_parses_server_auth_enabled() {
         let json = r#"{
@@ -2345,6 +2596,17 @@ mod tests {
                 }
             }
         }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.server_auth.enabled);
+    }
+
+    #[test]
+    fn load_from_json_tolerates_one_leading_bom() {
+        // The --config / FFI load_config entry point: a BOM-prefixed config
+        // used to fail the whole load ("JSON parse error") and the tracer
+        // continued on embedded defaults without the user's rules.
+        let json = "\u{feff}{\"server\":{\"auth\":{\"enabled\":false}}}";
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(!config.server_auth.enabled);
@@ -2427,12 +2689,31 @@ mod tests {
     }
 
     #[test]
+    fn ensure_default_agents_config_upgrades_a_bom_prefixed_stale_config() {
+        // A BOM must not demote a valid-but-stale config to "invalid": the
+        // validity probe used to reject the mark at offset 0, so the schema
+        // auto-upgrade skipped the file and left it frozen on the old
+        // schema_version forever (load then also failed, falling back to
+        // embedded defaults). Stripped of the one mark it is the stale config
+        // it is, and takes the normal backup-and-upgrade path.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, "\u{feff}{\"cmdline\": {\"allow\": []}}").unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION),
+            "a BOM-prefixed stale config must be upgraded, not frozen"
+        );
+    }
+
+    #[test]
     fn ensure_default_agents_config_preserves_current_config() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let custom = format!(
-            r#"{{"schema_version": {}, "features": {{"token_stats": true}}}}"#,
-            CURRENT_SCHEMA_VERSION
+            r#"{{"schema_version": {CURRENT_SCHEMA_VERSION}, "features": {{"token_stats": true}}}}"#
         );
         std::fs::write(&path, &custom).unwrap();
         ensure_default_agents_config(&path).unwrap();

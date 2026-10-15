@@ -101,6 +101,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # Valid JSON that is not an object (array/scalar/null) has no hook fields
+    # to read: exit silently so Codex treats it as allow, same as undecodable
+    # input above - mirroring the observability hook's payload guard.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Extract command from tool_input
     #    Codex normalizes all shell tools to tool_name="Bash",
     #    tool_input={"command": "..."}

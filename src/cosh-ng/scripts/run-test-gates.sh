@@ -79,6 +79,7 @@ for target in sorted(target["name"] for target in package["targets"] if "test" i
 run_shell_integrations() {
   cargo test --locked -p cosh-shell --test logic
   cargo test --locked -p cosh-shell --test protocol -- --test-threads=4
+  cargo build --locked -p cosh-core --bin cosh-core
   # raw_cli concurrency is governed by the in-tree shared/exclusive gate
   # (RAW_CLI_SHARED_PARALLELISM / COSH_RAW_CLI_TEST_PARALLELISM); give
   # libtest enough threads so that gate, not the runner, is the limiter.
@@ -148,6 +149,19 @@ case "${1:-all}" in
     run_core_integrations
     run_shell_integrations
     ;;
+  integration-process)
+    run_core_integrations
+    cargo test --locked -p cosh-shell --test logic
+    cargo test --locked -p cosh-shell --test protocol -- --test-threads=4
+    ;;
+  integration-raw-cli)
+    cargo build --locked -p cosh-core --bin cosh-core
+    cargo test --locked -p cosh-shell --test raw_cli -- --test-threads=16
+    ;;
+  integration-shell-host)
+    cargo build --locked -p cosh-core --bin cosh-core
+    cargo test --locked -p cosh-shell --test shell_host -- --test-threads=1
+    ;;
   heavy)
     run_heavy
     ;;
@@ -164,7 +178,7 @@ case "${1:-all}" in
     run_shell_integrations
     ;;
   *)
-    echo "usage: $0 [fast|integration|heavy|all]" >&2
+    echo "usage: $0 [fast|integration|integration-process|integration-raw-cli|integration-shell-host|heavy|all]" >&2
     exit 2
     ;;
 esac

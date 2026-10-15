@@ -190,6 +190,19 @@ pub struct TrajectoryStore {
     db_path: PathBuf,
 }
 
+/// SQL predicate selecting the direct subagent children of `?1`, the literal
+/// `<parent>:subagent:` prefix.
+///
+/// `LIKE ?1 || '%'` cannot be used: `_` / `%` inside the parent id are
+/// wildcards there, ASCII case is folded, and the trailing `%` also swallows
+/// the rows of a nested run (`opt:<parent>:subagent:<child>:subagent:<dim>`),
+/// which `retain_subagents` would then delete. `substr` compares the prefix
+/// literally and case-sensitively, the `instr` guard keeps the match to direct
+/// children, and `is_subagent` keeps a nested run's non-subagent root out.
+const DIRECT_SUBAGENT_CHILDREN: &str = "is_subagent = 1 \
+     AND substr(session_id, 1, length(?1)) = ?1 \
+     AND instr(substr(session_id, length(?1) + 1), ':') = 0";
+
 impl TrajectoryStore {
     /// Opens (creating if needed) the database at `path` and ensures the schema.
     ///
@@ -223,8 +236,11 @@ impl TrajectoryStore {
             )",
             [],
         )?;
-        // Lightweight bookkeeping for files that failed conversion (corrupted
-        // JSONL, empty events, etc.) so they are not re-read every scan round.
+        // Lightweight per-path scan bookkeeping so unchanged files are not
+        // re-read every scan round: it records files that failed conversion
+        // (corrupted JSONL, empty events, ...) and, via
+        // [`TrajectoryStore::upsert_trajectory`], successfully ingested
+        // paths whose session row no longer points at them.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skipped_files (
                 file_path TEXT PRIMARY KEY,
@@ -261,8 +277,9 @@ impl TrajectoryStore {
 
     /// Returns `(file_size, file_mtime_ns)` recorded for `file_path`, if any.
     /// Drives the incremental scan: unchanged files are skipped.
-    /// Checks both successfully ingested trajectories and skipped (corrupted)
-    /// files.
+    /// Checks the successfully ingested trajectory row first and the per-path
+    /// scan bookkeeping (failed conversions, and ingested paths the session
+    /// row no longer points at) second.
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
@@ -356,9 +373,21 @@ impl TrajectoryStore {
                 record.last_user_message,
             ],
         )?;
+        // Keep per-path scan bookkeeping for the ingested path. The
+        // trajectory row is keyed by session_id and stores a single
+        // file_path, so the same session discovered under two roots (e.g.
+        // a Codex rollout under `.codex/sessions` and
+        // `.codex/archived_sessions`) rewrites file_path on each upsert;
+        // without path-keyed bookkeeping the path not currently stored on
+        // the row would miss the incremental check and be fully re-read and
+        // re-upserted (collected_at_ns churn) on every scan round. Maintenance
+        // purges the bookkeeping row again once the trajectory row itself
+        // carries the same path (it serves the check directly).
         conn.execute(
-            "DELETE FROM skipped_files WHERE file_path = ?1",
-            params![record.file_path],
+            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+            params![record.file_path, record.file_size, record.file_mtime_ns],
         )?;
         Ok(())
     }
@@ -448,7 +477,13 @@ impl TrajectoryStore {
             args.push(Box::new(s.to_string()));
         }
         if let Some(a) = agent_name {
-            clauses.push("agent_name = ?".to_string());
+            // Every other agent-scoped query in the tree matches
+            // case-insensitively (genai latency/activity/timeseries, token
+            // summary, interruptions, skill metrics — see the genai store's
+            // `COLLATE NOCASE` filters), and the dashboard's agent filter is
+            // built from those merged case variants. An exact match here made
+            // a `Qoder` row invisible to a `qoder` filter and vice versa.
+            clauses.push("agent_name COLLATE NOCASE = ? COLLATE NOCASE".to_string());
             args.push(Box::new(a.to_string()));
         }
         if !clauses.is_empty() {
@@ -496,7 +531,12 @@ impl TrajectoryStore {
     ///
     /// Read-only, built for preference analysis: subagent rows are excluded
     /// because their "user" steps are the parent agent's instructions, not
-    /// genuine user input. The window filter uses `collected_at_ns` (always
+    /// genuine user input. The optimizer's synthetic run roots
+    /// (`opt:<session>`, source [`SYNTHETIC_RUN_SOURCE`]) are excluded for
+    /// the same reason with an added cost: they carry only agent dispatch
+    /// steps, so they flatten to zero preference rows while still displacing
+    /// real sessions from the `limit` window every time an analysis runs.
+    /// The window filter uses `collected_at_ns` (always
     /// present, monotonic i64) rather than the optional ISO `start_time` /
     /// `end_time` strings.
     ///
@@ -515,12 +555,13 @@ impl TrajectoryStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT session_id, atif_json FROM collected_trajectories
-             WHERE collected_at_ns >= ?1 AND is_subagent = 0
-             ORDER BY collected_at_ns DESC LIMIT ?2",
+             WHERE collected_at_ns >= ?1 AND is_subagent = 0 AND source != ?2
+             ORDER BY collected_at_ns DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![since_collected_at_ns, limit], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![since_collected_at_ns, SYNTHETIC_RUN_SOURCE, limit],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -545,18 +586,18 @@ impl TrajectoryStore {
     }
 
     /// Returns the ATIF JSON strings of all subagent trajectories belonging to
-    /// the given parent session (matching `<parent>:subagent:%`).
+    /// the given parent session (matching `<parent>:subagent:<stem>`).
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
         let conn = self.lock_conn()?;
-        let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt = conn.prepare(
-            "SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1 \
-             ORDER BY session_id",
-        )?;
-        let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+        let prefix = format!("{parent_session_id}:subagent:");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT atif_json FROM collected_trajectories WHERE {DIRECT_SUBAGENT_CHILDREN} \
+             ORDER BY session_id"
+        ))?;
+        let rows = stmt.query_map(params![prefix], |row| row.get(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -575,11 +616,12 @@ impl TrajectoryStore {
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn retain_subagents(&self, parent_session_id: &str, keep: &[String]) -> Result<usize> {
         let conn = self.lock_conn()?;
-        let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt =
-            conn.prepare("SELECT session_id FROM collected_trajectories WHERE session_id LIKE ?1")?;
+        let prefix = format!("{parent_session_id}:subagent:");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT session_id FROM collected_trajectories WHERE {DIRECT_SUBAGENT_CHILDREN}"
+        ))?;
         let existing: Vec<String> = stmt
-            .query_map(params![pattern], |row| row.get(0))?
+            .query_map(params![prefix], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         drop(stmt);
 
@@ -599,6 +641,10 @@ impl TrajectoryStore {
 
     /// Returns distinct project / source / agent_name values for UI filters.
     ///
+    /// Agent labels are merged case-insensitively (see
+    /// [`distinct_agent_names`]); project paths and source identifiers stay
+    /// exact, matching the filters that consume them.
+    ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn list_filters(&self) -> Result<TrajectoryFilters> {
@@ -606,7 +652,7 @@ impl TrajectoryStore {
         Ok(TrajectoryFilters {
             projects: distinct_column(&conn, "project")?,
             sources: distinct_column(&conn, "source")?,
-            agent_names: distinct_column(&conn, "agent_name")?,
+            agent_names: distinct_agent_names(&conn)?,
         })
     }
 
@@ -830,7 +876,9 @@ impl TrajectoryStore {
             args.push(Box::new(s.clone()));
         }
         if let Some(a) = &filter.agent_name {
-            clauses.push("agent_name = ?".to_string());
+            // Same convention as `list_summaries` above and the genai store:
+            // the agent filter matches case-insensitively.
+            clauses.push("agent_name COLLATE NOCASE = ? COLLATE NOCASE".to_string());
             args.push(Box::new(a.clone()));
         }
         if let Some(sid) = &filter.session_id {
@@ -988,6 +1036,12 @@ fn now_ns() -> i64 {
 /// stripping (see [`extract_user_message_previews`]).
 const SCHEMA_USER_VERSION: i32 = 2;
 
+/// Source label the optimizer stamps on its synthetic run rows
+/// (`opt:<session>` roots and their dimension subagents, written by the
+/// server crate). Those rows are bookkeeping about analyses, not observed
+/// agent sessions, so the preference-analysis window must not count them.
+const SYNTHETIC_RUN_SOURCE: &str = "agentsight-opt";
+
 /// Max characters kept per user-message preview column.
 const MESSAGE_PREVIEW_CHARS: usize = 200;
 
@@ -1128,6 +1182,27 @@ fn distinct_column(conn: &Connection, column: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Distinct agent labels for the UI filters, merged case-insensitively.
+///
+/// The agent filter itself is `COLLATE NOCASE` (`list_summaries`,
+/// `scan_steps`) and `list_agent_activity_summaries` groups the same way, so
+/// an exact `DISTINCT` would offer one dropdown entry per spelling while every
+/// one of them selects all spellings' rows. The display name is the smallest
+/// spelling, the same `MIN` the activity summary reports.
+fn distinct_agent_names(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT MIN(agent_name) AS agent_name FROM collected_trajectories
+         GROUP BY agent_name COLLATE NOCASE
+         ORDER BY agent_name",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1266,8 @@ mod tests {
         ] {
             let mut rec = sample_record();
             rec.session_id = id.into();
+            // Subagent rows carry the flag; the parent row does not.
+            rec.is_subagent = id.contains(":subagent:");
             store.upsert_trajectory(&rec).unwrap();
         }
 
@@ -1207,6 +1284,49 @@ mod tests {
     }
 
     #[test]
+    fn test_retain_subagents_ignores_nested_runs() {
+        // Real shapes: `opt:<session>` is one analysis run's root and
+        // `opt:<session>:subagent:<dim>` are its dimension rows. Analyzing a
+        // subagent trajectory of that session starts a second run:
+        // `opt:<session>:subagent:<child>` (its root) and
+        // `opt:<session>:subagent:<child>:subagent:<dim>` (its dimensions).
+        // A `LIKE '<session root>:subagent:%'` prefix reaches into that second
+        // run, so pruning the first run's stale dimensions deleted it.
+        let store = TrajectoryStore::new_with_path(&tmp_db("retain-nested")).unwrap();
+        let root = "opt:be0aa488-4e56-4604-bdf0-e12cc387392d";
+        let own_dim = format!("{root}:subagent:accuracy");
+        let child_root = format!("{root}:subagent:aExplore-b4b7e9141b9524f6");
+        let child_dim = format!("{child_root}:subagent:cost-waste");
+        for (id, is_subagent) in [
+            (root.to_string(), false),
+            (own_dim.clone(), true),
+            (child_root.clone(), false),
+            (child_dim.clone(), true),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id;
+            rec.is_subagent = is_subagent;
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let listed = store.get_subagent_atif_jsons(root).unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "only the run's own dimension row is a child of {root}"
+        );
+
+        let removed = store
+            .retain_subagents(root, std::slice::from_ref(&own_dim))
+            .unwrap();
+
+        assert_eq!(removed, 0, "another run's rows must not be pruned");
+        assert!(store.get(&child_root).unwrap().is_some());
+        assert!(store.get(&child_dim).unwrap().is_some());
+        assert!(store.get(&own_dim).unwrap().is_some());
+    }
+
+    #[test]
     fn test_file_state_roundtrip() {
         let store = TrajectoryStore::new_with_path(&tmp_db("state")).unwrap();
         let rec = sample_record();
@@ -1216,6 +1336,36 @@ mod tests {
         assert_eq!(
             store.get_file_state(&rec.file_path).unwrap(),
             Some((1024, 42))
+        );
+    }
+
+    #[test]
+    fn test_file_state_survives_session_repath() {
+        // The same session id under two discovery roots alternately wins the
+        // session_id primary key, rewriting the row's file_path. The path no
+        // longer stored on the row must keep its scan state, or that file
+        // misses the incremental check every round and is re-read and
+        // re-upserted forever.
+        let store = TrajectoryStore::new_with_path(&tmp_db("repath")).unwrap();
+        let a = sample_record();
+        store.upsert_trajectory(&a).unwrap();
+
+        let mut b = sample_record();
+        b.file_path = "/root/.codex/archived_sessions/s-1.jsonl".into();
+        b.file_size = 2048;
+        b.file_mtime_ns = 99;
+        store.upsert_trajectory(&b).unwrap();
+
+        assert_eq!(store.count().unwrap(), 1, "one row per session id");
+        assert_eq!(
+            store.get_file_state(&a.file_path).unwrap(),
+            Some((1024, 42)),
+            "the first path keeps its state after the row re-paths"
+        );
+        assert_eq!(
+            store.get_file_state(&b.file_path).unwrap(),
+            Some((2048, 99)),
+            "the winning path keeps its state via the row"
         );
     }
 
@@ -1265,6 +1415,85 @@ mod tests {
     }
 
     #[test]
+    fn test_list_summaries_matches_agent_case_insensitively() {
+        // Every other agent-scoped view merges case variants of one agent
+        // (genai stores filter with COLLATE NOCASE; /api/agent-names reports
+        // one merged entry), so the trajectory list must not split them.
+        let store = TrajectoryStore::new_with_path(&tmp_db("list-case")).unwrap();
+        for (id, agent) in [
+            ("case-1", "Qoder"),
+            ("case-2", "qoder"),
+            ("case-3", "codex"),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id.into();
+            rec.agent_name = agent.into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        for probe in ["qoder", "Qoder", "QODER"] {
+            let rows = store.list_summaries(None, None, Some(probe), 100).unwrap();
+            assert_eq!(
+                rows.len(),
+                2,
+                "agent filter {probe:?} must match both case variants: {rows:?}"
+            );
+        }
+        // A different agent still selects nothing.
+        assert!(store
+            .list_summaries(None, None, Some("other"), 100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_scan_steps_matches_agent_case_insensitively() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("scan-case")).unwrap();
+        for (id, agent) in [
+            ("scan-1", "Qoder"),
+            ("scan-2", "qoder"),
+            ("scan-3", "codex"),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id.into();
+            rec.agent_name = agent.into();
+            rec.atif_json = r#"{"schema_version":"ATIF-v1.7","agent":{"name":"test"},"steps":[
+                {"step_id":1,"source":"user","message":"fix the login bug"},
+                {"step_id":2,"source":"agent","message":"done"}
+            ]}"#
+            .into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let filter = StepScanFilter {
+            agent_name: Some("qoder".into()),
+            categories: vec![StepCategory::UserInput],
+            limit: 10,
+            context_radius: 0,
+            max_scan: 100,
+            ..StepScanFilter::default()
+        };
+        let outcome = store.scan_steps(&filter).unwrap();
+        assert_eq!(outcome.hits.len(), 2, "both case variants must match");
+        assert_eq!(
+            outcome.scanned_trajectories, 2,
+            "the codex row is excluded before any JSON is parsed"
+        );
+        let mut hit_ids: Vec<&str> = outcome.hits.iter().map(|h| h.session_id.as_str()).collect();
+        hit_ids.sort();
+        assert_eq!(hit_ids, vec!["scan-1", "scan-2"]);
+
+        // The uppercase probe matches the same rows.
+        let upper = store
+            .scan_steps(&StepScanFilter {
+                agent_name: Some("QODER".into()),
+                ..filter
+            })
+            .unwrap();
+        assert_eq!(upper.hits.len(), 2);
+    }
+
+    #[test]
     fn test_list_recent_atif_jsons_window_limit_and_subagents() {
         let store = TrajectoryStore::new_with_path(&tmp_db("recent")).unwrap();
         for (id, is_subagent) in [("m-1", false), ("m-2", false), ("m-1:subagent:x", true)] {
@@ -1288,6 +1517,31 @@ mod tests {
             .list_recent_atif_jsons(i64::MAX, 100)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_list_recent_atif_jsons_excludes_opt_run_rows() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("recent-opt")).unwrap();
+        // A real user session plus a synthetic optimization run root, both
+        // main-agent rows.
+        let mut real = sample_record();
+        real.session_id = "real-1".into();
+        store.upsert_trajectory(&real).unwrap();
+        let mut opt = sample_record();
+        opt.session_id = "opt:real-1".into();
+        opt.source = "agentsight-opt".into();
+        opt.file_path = String::new();
+        store.upsert_trajectory(&opt).unwrap();
+
+        let rows = store.list_recent_atif_jsons(0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "the run root must not surface: {rows:?}");
+        assert_eq!(rows[0].0, "real-1");
+
+        // A window of one must still surface the real session even though the
+        // synthetic row is the newest main-agent row in the table.
+        let one = store.list_recent_atif_jsons(0, 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0, "real-1");
     }
 
     #[test]
@@ -1406,6 +1660,27 @@ mod tests {
             vec!["qoder".to_string(), "qoderwork".to_string()]
         );
         assert_eq!(f.agent_names, vec!["qoder".to_string()]);
+    }
+
+    #[test]
+    fn test_list_filters_merges_agent_case_variants() {
+        // `list_summaries` / `scan_steps` filter agent_name case-insensitively
+        // and `list_agent_activity_summaries` groups the same way, so one agent
+        // spelled two ways is one selectable agent. An exact DISTINCT left the
+        // dropdown with one entry per spelling, each selecting every spelling.
+        let store = TrajectoryStore::new_with_path(&tmp_db("filters-case")).unwrap();
+        for (session_id, agent_name) in [("a", "Qoder"), ("b", "qoder"), ("c", "codex")] {
+            let mut rec = sample_record();
+            rec.session_id = session_id.into();
+            rec.agent_name = agent_name.into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let f = store.list_filters().unwrap();
+        assert_eq!(
+            f.agent_names,
+            vec!["Qoder".to_string(), "codex".to_string()]
+        );
     }
 
     #[test]

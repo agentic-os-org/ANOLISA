@@ -43,6 +43,7 @@ pub async fn identify_waste(
             items: vec![],
             considered: 0,
             dismissed: 0,
+            failed: 0,
             model: candidates.model,
         });
     }
@@ -100,6 +101,9 @@ pub async fn identify_waste(
 
     let mut items: Vec<WasteItem> = Vec::new();
     let mut dismissed = 0usize;
+    let mut failed = 0usize;
+    let mut last_err = None;
+    let judged = results.len();
 
     for (cand, strategy, result) in results {
         let v = match result {
@@ -129,7 +133,8 @@ pub async fn identify_waste(
             }
             Err(err) => {
                 tracing::warn!("Cost: strategy '{}' LLM call failed: {}", cand.id, err);
-                dismissed += 1;
+                failed += 1;
+                last_err = Some(err);
                 continue;
             }
         };
@@ -212,10 +217,21 @@ pub async fn identify_waste(
         STRATEGIES.len()
     );
 
+    // A report built from zero successful judgments reads as a clean "no
+    // waste" verdict downstream (it is persisted and rendered as such), so an
+    // all-failed run must surface its error instead.
+    if judged > 0 && failed == judged {
+        let err = last_err.expect("failed count implies an error");
+        return Err(anyhow::anyhow!(
+            "all {failed} cost-waste LLM judgments failed: {err:#}"
+        ));
+    }
+
     Ok(WasteReport {
         items,
         considered,
         dismissed,
+        failed,
         model: candidates.model.clone(),
     })
 }
@@ -481,5 +497,28 @@ mod tests {
             findings: vec![finding(vec![0, 1, 2, 3, 4])],
         });
         assert!(rows.is_empty());
+    }
+
+    /// When every per-candidate judgment call fails (endpoint down, bad key),
+    /// the run must surface an error instead of returning a report: an empty
+    /// report is persisted and rendered as "evaluated N candidates, no waste
+    /// found" - a false clean verdict that outlives the outage as stored data.
+    #[tokio::test]
+    async fn all_failed_judgments_error_instead_of_a_clean_report() {
+        let client = LlmClient::with_config("http://127.0.0.1:1/v1", "key", "test-model");
+        let big = "x ".repeat(4000); // ~2k tokens: fires the user_prompt candidate
+        let t = AtifTrajectory::from_json(&format!(
+            r#"{{"schema_version":"ATIF-v1.6","session_id":"s1",
+                "agent":{{"name":"a","version":"1","model_name":"m"}},"steps":[
+                {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"{big}"}},
+                {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z","message":"ok"}}
+            ]}}"#
+        ))
+        .unwrap();
+        let report = identify_waste(&client, &t).await;
+        assert!(
+            report.is_err(),
+            "all judgments failed against a dead endpoint; expected Err, got {report:?}"
+        );
     }
 }

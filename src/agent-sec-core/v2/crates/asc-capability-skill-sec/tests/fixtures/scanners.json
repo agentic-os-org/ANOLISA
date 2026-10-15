@@ -5502,10 +5502,26 @@
       },
       "links": {},
       "code": [],
-      "static": [],
+      "static": [
+        {
+          "rule": "scan-scope-skip",
+          "level": "warn",
+          "message": "Skill contains scanner-excluded directories whose files are still signed and published.",
+          "metadata": {
+            "category": "scanner_limit",
+            "directories": [
+              "build",
+              "node_modules"
+            ],
+            "remediation": "Remove build output and dependencies from the Skill, or review them manually.",
+            "source": "static-scanner-coverage",
+            "title": "Signed but unscanned directories"
+          }
+        }
+      ],
       "analyze": {
         "schema_version": "1",
-        "status": "pass",
+        "status": "warn",
         "coverage_complete": true,
         "scanners": [
           {
@@ -5519,9 +5535,25 @@
           {
             "name": "static-scanner",
             "version": "cisco-static-only-0.1.1",
-            "status": "pass",
+            "status": "warn",
             "coverage_complete": true,
-            "findings": [],
+            "findings": [
+              {
+                "rule": "scan-scope-skip",
+                "level": "warn",
+                "message": "Skill contains scanner-excluded directories whose files are still signed and published.",
+                "metadata": {
+                  "category": "scanner_limit",
+                  "directories": [
+                    "build",
+                    "node_modules"
+                  ],
+                  "remediation": "Remove build output and dependencies from the Skill, or review them manually.",
+                  "source": "static-scanner-coverage",
+                  "title": "Signed but unscanned directories"
+                }
+              }
+            ],
             "errors": []
           }
         ],

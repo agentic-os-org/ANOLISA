@@ -31,7 +31,7 @@ fn labels(data: &LocalState) -> std::result::Result<&crate::reuse::ReuseStore, H
 }
 
 /// POST /api/reuse/triage — see `server::reuse::run_triage`.
-#[post("/reuse/triage")]
+#[post("/api/reuse/triage")]
 pub async fn run_triage(
     data: web::Data<LocalState>,
     query: web::Query<TriageQuery>,
@@ -55,7 +55,7 @@ pub async fn run_triage(
 }
 
 /// GET /api/reuse/sessions — see `server::reuse::list_sessions`.
-#[get("/reuse/sessions")]
+#[get("/api/reuse/sessions")]
 pub async fn list_sessions(
     data: web::Data<LocalState>,
     query: web::Query<SessionsQuery>,
@@ -77,7 +77,7 @@ pub async fn list_sessions(
 ///
 /// Confirms or replaces one trajectory's label. The only route to `bad`: the
 /// deterministic rules never accuse.
-#[post("/reuse/sessions/{session_id}/label")]
+#[post("/api/reuse/sessions/{session_id}/label")]
 pub async fn apply_label(
     data: web::Data<LocalState>,
     path: web::Path<String>,
@@ -97,7 +97,7 @@ pub async fn apply_label(
 ///
 /// Endorses several automatic verdicts in one call; missing ids are skipped so a
 /// stale entry cannot fail a whole page.
-#[post("/reuse/sessions/labels:batch-confirm")]
+#[post("/api/reuse/sessions/labels:batch-confirm")]
 pub async fn confirm_labels(
     data: web::Data<LocalState>,
     body: web::Json<BatchConfirmRequest>,
@@ -118,7 +118,7 @@ pub async fn confirm_labels(
 /// GET /api/reuse/label-stats
 ///
 /// How often a person accepted or overturned each rule's verdict.
-#[get("/reuse/label-stats")]
+#[get("/api/reuse/label-stats")]
 pub async fn label_stats(data: web::Data<LocalState>) -> impl Responder {
     let store = match labels(&data) {
         Ok(store) => store,
@@ -142,7 +142,7 @@ pub async fn label_stats(data: web::Data<LocalState>) -> impl Responder {
 /// Takes the optimize state rather than [`LocalState`] alone: the label store
 /// and the model client live in different places on this side, and that state
 /// already carries both.
-#[post("/reuse/judge")]
+#[post("/api/reuse/judge")]
 pub async fn run_judgements(
     data: web::Data<super::optimize::OptimizeAppState>,
     body: web::Json<JudgeQuery>,

@@ -102,7 +102,8 @@ pub struct SysomProvider {
     /// cached process-wide, so the probe still runs at most once.
     configured_endpoint: String,
     credentials: RwLock<SysomCredentials>,
-    is_sts: bool,
+    /// Only ECS RAM Role credentials may be replaced from instance metadata.
+    refresh_from_ecs_metadata: bool,
     cancelled: Arc<AtomicBool>,
     /// Resolved once per provider instance, including a negative result; only the
     /// on-disk cache honours [`INSTANCE_ID_CACHE_TTL_SECS`].
@@ -116,7 +117,6 @@ impl SysomProvider {
         security_token: Option<&str>,
         configured_endpoint: &str,
     ) -> Self {
-        let is_sts = security_token.is_some();
         Self {
             configured_endpoint: configured_endpoint.to_string(),
             credentials: RwLock::new(SysomCredentials {
@@ -124,7 +124,7 @@ impl SysomProvider {
                 access_key_secret: access_key_secret.to_string(),
                 security_token: security_token.map(|s| s.to_string()),
             }),
-            is_sts,
+            refresh_from_ecs_metadata: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
         }
@@ -138,7 +138,7 @@ impl SysomProvider {
                 access_key_secret: String::new(),
                 security_token: None,
             }),
-            is_sts: true,
+            refresh_from_ecs_metadata: true,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
         }
@@ -150,7 +150,22 @@ impl SysomProvider {
         messages: &[Message],
         tools: &[ToolDeclaration],
         config: &GenerateConfig,
-    ) -> Value {
+    ) -> Result<Value, String> {
+        // Fields this builder constructs below. `tool_choice` and
+        // `instance_id` are owned here but not by the generic OpenAI-compatible
+        // builder, so the set is enumerated per provider.
+        const OWNED_REQUEST_FIELDS: [&str; 8] = [
+            "messages",
+            "model",
+            "stream",
+            "use_dashscope",
+            "version",
+            "tools",
+            "tool_choice",
+            "instance_id",
+        ];
+        super::reject_owned_field_overrides(&OWNED_REQUEST_FIELDS, config.extra_params.as_ref())?;
+
         let mut inner = serde_json::json!({
             "messages": messages,
             "model": config.model,
@@ -200,9 +215,9 @@ impl SysomProvider {
         super::clamp_output_cap_fields(&mut inner, config.max_tokens);
 
         // Wrap in llmParamString
-        serde_json::json!({
+        Ok(serde_json::json!({
             "llmParamString": inner.to_string()
-        })
+        }))
     }
 
     /// Compute ACS3-HMAC-SHA256 authorization header.
@@ -271,10 +286,10 @@ impl ContentGenerator for SysomProvider {
         self.cancelled.store(false, Ordering::SeqCst);
         self.instance_id.get_or_init(resolve_instance_id).await;
 
-        let body = self.build_request_body(messages, tools, config);
+        let body = self.build_request_body(messages, tools, config)?;
         let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("JSON serialize: {e}"))?;
 
-        if self.is_sts
+        if self.refresh_from_ecs_metadata
             && self.credentials.read().unwrap().security_token.is_none()
             && !self.refresh_sts_credentials().await
         {
@@ -284,7 +299,7 @@ impl ContentGenerator for SysomProvider {
         // First attempt
         match self.do_streaming_request(&body_bytes).await {
             Ok(stream) => Ok(stream),
-            Err(e) if self.is_sts && is_sts_error(&e) => {
+            Err(e) if self.refresh_from_ecs_metadata && is_sts_error(&e) => {
                 // STS credential expired — try to refresh from ECS metadata and retry once
                 tracing::debug!("STS credential error, attempting refresh...");
                 if self.refresh_sts_credentials().await {

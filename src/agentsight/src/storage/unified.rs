@@ -146,7 +146,10 @@ impl Storage {
                 Self::with_sqlite_config(&config)
             }
             StorageBackend::Sls { .. } => {
-                // TODO: Implement SLS storage
+                // TODO(sight-storage): implement the SLS backend — the
+                // StorageBackend::Sls enum variant exists so callers can
+                // parse config that selects it, but every store here is
+                // SQLite-shaped and there is no SLS writer yet.
                 anyhow::bail!("SLS storage backend is not yet implemented");
             }
             StorageBackend::Noop => Self::noop(),
@@ -243,9 +246,6 @@ impl Storage {
     /// This hot path only persists data; lifecycle maintenance is owned by the
     /// process-wide database worker.
     pub fn store(&self, result: &AnalysisResult) -> Result<i64> {
-        if let AnalysisResult::Http(_) = result {
-            return Ok(0);
-        }
         if matches!(self.backend, StorageBackend::Noop) {
             log::trace!("Noop storage dropping analysis result");
             return Ok(0);
@@ -320,14 +320,24 @@ impl Storage {
     ///
     /// Returns an error when retention, checkpoint, measurement, or pruning fails.
     pub fn maintain(&self) -> Result<()> {
+        self.maintain_with_limit_bytes(self.max_db_size_bytes)
+    }
+
+    /// Same as [`maintain`] with an explicit size limit in bytes, used when
+    /// the global storage budget reduces this store's effective capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when retention, checkpoint, measurement, or pruning fails.
+    pub fn maintain_with_limit_bytes(&self, limit_bytes: u64) -> Result<()> {
         let deleted_by_age = self.purge_expired()?;
-        if (deleted_by_age > 0 || self.max_db_size_bytes > 0)
+        if (deleted_by_age > 0 || limit_bytes > 0)
             && self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy
         {
             log::warn!("Primary WAL checkpoint remained busy before size maintenance");
             return Ok(());
         }
-        self.purge_oversized()
+        self.purge_oversized_with(limit_bytes)
     }
 
     /// Purge oldest records when the database exceeds the size limit.
@@ -335,10 +345,14 @@ impl Storage {
     /// The lifecycle crate controls measurement and convergence while each
     /// business store retains ownership of its deletion query.
     pub fn purge_oversized(&self) -> Result<()> {
+        self.purge_oversized_with(self.max_db_size_bytes)
+    }
+
+    fn purge_oversized_with(&self, limit_bytes: u64) -> Result<()> {
         let policy = SizePolicy {
-            limit_bytes: self.max_db_size_bytes,
-            trigger_bytes: self.max_db_size_bytes,
-            target_bytes: self.max_db_size_bytes.saturating_mul(9) / 10,
+            limit_bytes,
+            trigger_bytes: limit_bytes,
+            target_bytes: limit_bytes.saturating_mul(9) / 10,
             trigger_basis: SizeBasis::Physical,
             target_basis: SizeBasis::Logical,
             max_rounds: 20,
@@ -378,7 +392,7 @@ impl Storage {
                 "Size-based purge stopped with {:?}: database remains {} bytes (limit {})",
                 report.status,
                 report.after.logical_bytes,
-                self.max_db_size_bytes
+                limit_bytes
             ),
             MaintenanceStatus::TargetReached => log::info!(
                 "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
@@ -471,6 +485,7 @@ fn purge_share(rows: u64, pct: f64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::HttpRecord;
     use crate::analyzer::token::TokenRecord;
 
     #[test]
@@ -512,6 +527,68 @@ mod tests {
         // Just verify it doesn't panic
         let _ = storage.is_noop();
         drop(storage);
+    }
+
+    /// Minimal HTTP record used by the Http persistence contract tests.
+    fn sample_http_record() -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            pid: 4242,
+            comm: "python".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: Some("{}".to_string()),
+            response_headers: "{}".to_string(),
+            response_body: Some("{}".to_string()),
+            duration_ns: 1_000_000,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    /// `should_persist_analysis_result` routes Http records to `store`, the
+    /// docs list `http_records` as a persistence output, and the table is
+    /// created, indexed and maintained. Pin that Http results are actually
+    /// inserted: a silent early return previously dropped every HTTP record.
+    #[test]
+    fn test_store_http_result_persists_to_http_store() {
+        let dir = unique_base_dir("http_persist");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+
+        let record = sample_http_record();
+        let id = storage
+            .store(&AnalysisResult::Http(record.clone()))
+            .unwrap();
+
+        assert!(
+            id > 0,
+            "Http analysis results must be inserted, not dropped (id={id})"
+        );
+        assert_eq!(storage.http().count().unwrap(), 1);
+        let stored = storage.http().query_since(0).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].path, record.path);
+        assert_eq!(stored[0].method, record.method);
+        assert_eq!(stored[0].pid, record.pid);
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The noop backend silently drops every result type, including Http.
+    /// This pins the other half of the contract so a persist-path fix cannot
+    /// accidentally start writing through the noop backend.
+    #[test]
+    fn test_noop_storage_drops_http_result() {
+        let storage = Storage::noop().unwrap();
+        let id = storage
+            .store(&AnalysisResult::Http(sample_http_record()))
+            .unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(storage.http().count().unwrap(), 0);
     }
 
     /// Unique per-test directory under the system temp dir.

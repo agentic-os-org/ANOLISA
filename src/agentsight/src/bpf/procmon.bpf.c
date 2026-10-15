@@ -49,8 +49,10 @@ int trace_execve_exit(struct syscall_trace_exit *ctx)
 
     // Reserve space in ring buffer
     struct procmon_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     // Fill event
     event->source = EVENT_SOURCE_PROCMON;
@@ -88,8 +90,10 @@ int trace_process_exit(void *ctx)
 
     // Reserve space in ring buffer
     struct procmon_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     // Fill event
     event->source = EVENT_SOURCE_PROCMON;

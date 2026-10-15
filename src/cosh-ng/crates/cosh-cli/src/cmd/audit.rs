@@ -827,6 +827,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audit_status_reports_default_cap_with_explicit_configuration_paths() {
+        use cosh_platform::audit::config::AuditRootSource;
+        use cosh_platform::audit::config::{load_audit_settings_from, AuditConfigPaths};
+        use cosh_types::audit::AuditSettingSource;
+        let directory = tempfile::tempdir().unwrap();
+        let managed = directory.path().join("managed-system.toml");
+        std::fs::write(&managed, "[audit]\nmax_disk_bytes = 1073741824\n").unwrap();
+        let mut paths = AuditConfigPaths {
+            system: directory.path().join("empty-system.toml"),
+            user: None,
+            project: None,
+        };
+        let loaded = load_audit_settings_from(&paths).unwrap();
+        let status = audit::query::audit_status(
+            directory.path(),
+            AuditRootSource::Environment,
+            loaded.settings,
+        )
+        .unwrap();
+        let value = serde_json::to_value(status).unwrap();
+        assert_eq!(value["settings"]["max_disk_bytes"], 100 * 1024 * 1024);
+        assert_eq!(value["settings"]["max_disk_bytes_source"], "default");
+        assert_eq!(value["settings"]["retention_days"], 30);
+        paths.system = managed;
+        let settings = load_audit_settings_from(&paths).unwrap().settings;
+        assert_eq!(settings.max_disk_bytes, 1073741824);
+        assert_eq!(settings.max_disk_bytes_source, AuditSettingSource::System);
+    }
+
+    #[test]
     fn no_tokens_parse_failure_uses_synthetic_denial() {
         let loaded = audit::builtin::balanced();
         let raw = " \t".to_string();

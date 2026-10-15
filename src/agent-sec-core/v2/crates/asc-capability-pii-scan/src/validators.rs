@@ -8,6 +8,91 @@ use base64::engine::{
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
 
+type CardNetwork = (&'static str, &'static [(u32, u32)], &'static [usize]);
+
+// Prefixes and lengths: braintree/credit-card-type at c50db7708ce3945a1cf00aca4220ee2356d2a580.
+const CARD_NETWORKS: &[CardNetwork] = &[
+    ("visa", &[(4, 4)], &[16, 18, 19]),
+    ("mastercard", &[(51, 55), (2221, 2720)], &[16]),
+    ("amex", &[(34, 34), (37, 37)], &[15]),
+    ("diners", &[(300, 305), (36, 36), (38, 39)], &[14, 16, 19]),
+    ("discover", &[(6011, 6011), (644, 649), (65, 65)], &[16, 19]),
+    (
+        "jcb",
+        &[(2131, 2131), (1800, 1800), (3528, 3589)],
+        &[16, 17, 18, 19],
+    ),
+    (
+        "unionpay",
+        &[
+            (620, 620),
+            (62100, 62182),
+            (62184, 62187),
+            (62185, 62197),
+            (62200, 62205),
+            (622_010, 622_999),
+            (622_018, 622_018),
+            (62207, 62209),
+            (623, 626),
+            (6270, 6270),
+            (6272, 6272),
+            (6276, 6276),
+            (627_700, 627_779),
+            (627_781, 627_799),
+            (6282, 6289),
+            (6291, 6291),
+            (6292, 6292),
+            (810, 810),
+            (8110, 8131),
+            (8132, 8151),
+            (8152, 8163),
+            (8164, 8171),
+        ],
+        &[14, 15, 16, 17, 18, 19],
+    ),
+];
+
+/// Requires a complete supported card format, network structure and checksum.
+pub(crate) fn credit_card(value: &str) -> bool {
+    // The longest supported grouping has 19 digits and four separators.
+    if value.chars().take(24).count() > 23 {
+        return false;
+    }
+    let separator = value.chars().find(|c| matches!(c, ' ' | '-'));
+    let groups: Vec<_> = separator.map_or_else(|| vec![value], |c| value.split(c).collect());
+    if groups.iter().any(|group| group.is_empty()) {
+        return false;
+    }
+    let Some(digits): Option<Vec<_>> = groups.iter().flat_map(|g| g.chars()).map(decimal).collect()
+    else {
+        return false;
+    };
+    for (network, prefixes, lengths) in CARD_NETWORKS {
+        if !lengths.contains(&digits.len())
+            || !prefixes.iter().any(|(low, high)| {
+                let prefix = digits[..low.to_string().len()]
+                    .iter()
+                    .fold(0, |n, d| n * 10 + d);
+                (*low..=*high).contains(&prefix)
+            })
+        {
+            continue;
+        }
+        if separator.is_some() {
+            let expected = match (*network, digits.len()) {
+                ("amex", _) => vec![4, 6, 5],
+                ("diners", 14) => vec![4, 6, 4],
+                _ => digits.chunks(4).map(<[u32]>::len).collect(),
+            };
+            if !groups.iter().map(|g| g.chars().count()).eq(expected) {
+                continue;
+            }
+        }
+        return luhn(value);
+    }
+    false
+}
+
 pub(crate) fn decimal(c: char) -> Option<u32> {
     // Adjacent decimal alphabets each contain 0..9; some ranges combine several.
     let index = DECIMAL_RANGES.partition_point(|(_, end)| *end < c);

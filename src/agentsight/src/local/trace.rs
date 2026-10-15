@@ -1,5 +1,6 @@
 //! macOS trace implementation — trajectory collector only (no eBPF).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -73,7 +74,12 @@ pub fn run_local_trace(verbose: bool, config: AgentsightConfig) {
         },
     };
 
-    let jobs = match trajectory_maintenance_jobs(&manager, &config.storage, Arc::clone(&store)) {
+    let jobs = match trajectory_maintenance_jobs(
+        &manager,
+        &config.storage,
+        config.config_path.clone(),
+        Arc::clone(&store),
+    ) {
         Ok(jobs) => jobs,
         Err(error) => {
             eprintln!("Failed to configure trajectory maintenance: {error}");
@@ -106,6 +112,7 @@ pub fn run_local_trace(verbose: bool, config: AgentsightConfig) {
 fn trajectory_maintenance_jobs(
     manager: &DatabaseManager,
     storage_config: &StorageConfig,
+    config_path: Option<PathBuf>,
     store: Arc<TrajectoryStore>,
 ) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
     let policy = storage_config.trajectories;
@@ -113,14 +120,19 @@ fn trajectory_maintenance_jobs(
         return Ok(Vec::new());
     }
 
-    let maintenance_policy = TrajectoryMaintenancePolicy {
-        retention_days: policy.retention_days,
-        max_db_size_mb: policy.max_db_size_mb,
-    };
+    let budget = Arc::new(crate::storage_budget::StorageBudget::new(
+        config_path,
+        storage_config,
+    ));
     let job = manager.maintenance_job(
         DatabaseId::Trajectories,
         Duration::from_secs(policy.check_interval_secs),
         move || {
+            let maintenance_policy = TrajectoryMaintenancePolicy {
+                retention_days: policy.retention_days,
+                max_db_size_mb: budget
+                    .effective_limit_mb(DatabaseId::Trajectories, policy.max_db_size_mb),
+            };
             store
                 .maintain(maintenance_policy)
                 .map(|_| ())
@@ -157,7 +169,8 @@ mod tests {
         let store = Arc::new(TrajectoryStore::new_with_path(&path).unwrap());
         let config = StorageConfig::default();
 
-        let jobs = trajectory_maintenance_jobs(&manager, &config, Arc::clone(&store)).unwrap();
+        let jobs =
+            trajectory_maintenance_jobs(&manager, &config, None, Arc::clone(&store)).unwrap();
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].id(), DatabaseId::Trajectories.as_str());
@@ -187,7 +200,8 @@ mod tests {
         let mut config = StorageConfig::default();
         config.trajectories.check_interval_secs = 0;
 
-        let jobs = trajectory_maintenance_jobs(&manager, &config, Arc::clone(&store)).unwrap();
+        let jobs =
+            trajectory_maintenance_jobs(&manager, &config, None, Arc::clone(&store)).unwrap();
 
         assert!(jobs.is_empty());
         drop(store);

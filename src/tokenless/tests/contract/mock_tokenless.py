@@ -138,6 +138,8 @@ def respond_post_tool(request: dict, behavior: str) -> int:
         disposition = "passthrough"
     elif input_data["output_optimization"] == "rtk":
         disposition = "passthrough"
+    elif input_data["content_origin"] == "file_content":
+        disposition = "passthrough"
     elif behavior == "applied" and can_replace:
         output = json.dumps(
             truncate_strings(json.loads(content)),

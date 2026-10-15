@@ -30,9 +30,9 @@ pub fn extract_token_data(
         }
 
         // Extract tools
-        if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+        if let Some(tools) = crate::parser::llm::extract_tools_view(req) {
             for tool in tools {
-                if let Ok(tool_str) = serde_json::to_string(tool) {
+                if let Ok(tool_str) = serde_json::to_string(&tool) {
                     token_data.tools.push(tool_str);
                     has_content = true;
                 }
@@ -118,6 +118,88 @@ pub fn extract_response_content(
                         }
                     }
                 }
+
+                // SysOM's Copilot streams spell the same tool calls
+                // `message.tool_use` — an array of {index, id, type,
+                // function: {name, arguments}} — instead of `tool_calls`.
+                // Without this arm a SysOM tool call counted zero tool
+                // tokens in the manual counters and the drain estimate;
+                // the calls arrive whole on cumulative snapshots, whose
+                // repetition the merge layer already handles like the
+                // snapshot's text.
+                if let Some(calls) = msg.get("tool_use").and_then(|t| t.as_array()) {
+                    for tool_call in calls {
+                        if let Some(func) = tool_call.get("function") {
+                            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let arguments =
+                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let tool_content = format!("{name}: {arguments}");
+                            if !tool_content.is_empty() {
+                                tool_calls.push(tool_content);
+                                has_data = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if has_data {
+        return Some((content, reasoning, tool_calls));
+    }
+
+    // Anthropic streams carry the assistant output in `delta` events and in
+    // `content[]` blocks. Without these arms the manual counters recorded a
+    // real answer as zero output tokens (and the drain estimate as empty),
+    // because nothing here recognised the protocol.
+    if let Some(delta) = resp.get("delta") {
+        match delta.get("type").and_then(|t| t.as_str()) {
+            Some("text_delta") => {
+                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        content.push_str(text);
+                        has_data = true;
+                    }
+                }
+            }
+            Some("thinking_delta") => {
+                if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                    if !thinking.is_empty() {
+                        reasoning = match reasoning {
+                            Some(existing) => Some(existing + thinking),
+                            None => Some(thinking.to_string()),
+                        };
+                        has_data = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(blocks) = resp.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            content.push_str(text);
+                            has_data = true;
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let arguments = block
+                        .get("input")
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        tool_calls.push(format!("{name}: {arguments}"));
+                        has_data = true;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -171,11 +253,313 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // Anthropic Messages streams text, thinking and tool input as
+            // `content_block_delta` events, each carrying its own
+            // `delta.type`. The drained-stream and analyze-chatml paths
+            // aggregate the same shape, so leaving it unextracted makes the
+            // callers count a response with content as zero output tokens.
+            "content_block_delta" => {
+                if let Some(delta) = resp.get("delta") {
+                    match delta.get("type").and_then(|t| t.as_str()) {
+                        Some("text_delta") => {
+                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    return Some((text.to_string(), None, Vec::new()));
+                                }
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                if !thinking.is_empty() {
+                                    return Some((
+                                        String::new(),
+                                        Some(thinking.to_string()),
+                                        Vec::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let Some(partial) =
+                                delta.get("partial_json").and_then(|t| t.as_str())
+                            {
+                                if !partial.is_empty() {
+                                    return Some((String::new(), None, vec![partial.to_string()]));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // A Responses function call is announced by
+            // `response.output_item.added` (which carries the name) and then
+            // streamed as `response.function_call_arguments.delta` fragments.
+            // The chat-completions and Anthropic arms already produce the
+            // `name: arguments` text the manual counters tokenize, so these
+            // two events keep that convention: the announcement contributes
+            // `name: `, each fragment its raw partial JSON. Without them a
+            // truncated stream that only made a tool call counted zero output
+            // tokens. `response.function_call_arguments.done` and the
+            // function-call `response.output_item.done` repeat the full
+            // arguments and are deliberately not read here: the deltas already
+            // delivered them, and counting both would double the call.
+            "response.output_item.added" => {
+                if let Some(item) = resp.get("item") {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                            if !name.is_empty() {
+                                return Some((String::new(), None, vec![format!("{name}: ")]));
+                            }
+                        }
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(delta) = resp.get("delta").and_then(|d| d.as_str()) {
+                    if !delta.is_empty() {
+                        return Some((String::new(), None, vec![delta.to_string()]));
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     None
+}
+
+/// Merge the assistant output of one SSE capture into
+/// `(content, reasoning, tool_call_fragments)`.
+///
+/// [`extract_response_content`] returns the whole answer for the closing
+/// `response.output_text.done` and `response.output_item.done` events in
+/// addition to every `response.output_text.delta`, so a plain fold over a
+/// complete capture counts the answer two or three times. Deltas are always
+/// counted; a closing event is read only when no delta carried text, which
+/// keeps late-joined captures (only the closing events present) working.
+pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, Vec<String>) {
+    // An empty delta carries no text, so it must not suppress the closing
+    // event's full-text fallback.
+    let saw_text_delta = chunks.iter().any(|chunk| {
+        chunk.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta")
+            && chunk
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .is_some_and(|delta| !delta.is_empty())
+    });
+    let repeats_full_text = |chunk: &Value| {
+        matches!(
+            chunk.get("type").and_then(|t| t.as_str()),
+            Some("response.output_text.done") | Some("response.output_item.done")
+        )
+    };
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls = Vec::new();
+    // A snapshot's tool calls are whole and repeat with every snapshot chunk,
+    // so the last one's calls are kept aside and used only when no delta
+    // fragment carried any — the same delta-wins rule the closing Responses
+    // events follow.
+    let mut snapshot_tool_calls: Vec<String> = Vec::new();
+    for chunk in chunks {
+        if saw_text_delta && repeats_full_text(chunk) {
+            continue;
+        }
+        // A choice carrying `message` instead of `delta` speaks in cumulative
+        // snapshots: each frame repeats the answer so far rather than an
+        // increment (SysOM's Copilot stream sends nothing else, and an
+        // OpenAI-compatible gateway's final frame is a whole `message`).
+        // Appending such a frame once per captured chunk counted the answer
+        // N times; accumulate it the way the SSE merger does — replace when
+        // the snapshot extends what we have.
+        let snapshot = carries_message_snapshot(chunk);
+        if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
+            extract_response_content(Some(chunk))
+        {
+            if !chunk_content.is_empty() {
+                if snapshot {
+                    accumulate_text(&mut content, &chunk_content);
+                } else {
+                    content.push_str(&chunk_content);
+                }
+            }
+            if let Some(reasoning_chunk) = chunk_reasoning {
+                if !reasoning_chunk.is_empty() {
+                    if snapshot {
+                        accumulate_text(&mut reasoning, &reasoning_chunk);
+                    } else {
+                        reasoning.push_str(&reasoning_chunk);
+                    }
+                }
+            }
+            if snapshot {
+                snapshot_tool_calls = chunk_tool_calls;
+            } else {
+                for tool_call in chunk_tool_calls {
+                    if !tool_call.is_empty() {
+                        tool_calls.push(tool_call);
+                    }
+                }
+            }
+        }
+    }
+    if tool_calls.is_empty() {
+        tool_calls = snapshot_tool_calls;
+    }
+
+    (content, reasoning, tool_calls)
+}
+
+/// A choice that carries `message` instead of `delta` speaks in cumulative
+/// snapshots: each frame repeats the answer so far rather than an increment.
+fn carries_message_snapshot(chunk: &Value) -> bool {
+    chunk
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice.get("message").is_some() && choice.get("delta").is_none())
+        })
+}
+
+/// Accumulate cumulative-or-incremental text into `buf`, mirroring the SSE
+/// merger's helper: a frame that repeats the whole text so far replaces the
+/// buffer; a frame that carries only an increment appends.
+fn accumulate_text(buf: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if next.starts_with(buf.as_str()) {
+        *buf = next.to_string();
+    } else {
+        buf.push_str(next);
+    }
+}
+
+/// Reconstruct complete tool calls before discarding their protocol identity.
+pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
+    use crate::analyzer::message::ResponsesToolCalls;
+    use std::collections::BTreeMap;
+
+    // Maps bound the number of calls, without allocating slots up to a wire
+    // index. Choice identity matters too: each choice starts its indices at 0.
+    let mut chat: BTreeMap<(u64, u64), (String, String)> = BTreeMap::new();
+    let mut current: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut responses = ResponsesToolCalls::default();
+    let mut compatible: Vec<String> = Vec::new();
+    for chunk in chunks {
+        responses.observe(chunk);
+        if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
+            for (choice_pos, choice) in choices.iter().enumerate() {
+                if choice.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                    continue;
+                }
+                let choice_index = choice
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(choice_pos as u64);
+                let snapshot = choice.get("message");
+                let message = snapshot.or_else(|| choice.get("delta"));
+                let Some(message) = message else {
+                    continue;
+                };
+                // SysOM uses tool_use for the same Chat call shape.
+                let calls = ["tool_calls", "tool_use"]
+                    .into_iter()
+                    .filter_map(|field| message.get(field).and_then(Value::as_array))
+                    .flatten();
+                for (call_pos, call) in calls.enumerate() {
+                    if call.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                        continue;
+                    }
+                    let Some(function) = call.get("function") else {
+                        continue;
+                    };
+                    let index = call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(|| {
+                            if snapshot.is_some() {
+                                call_pos as u64
+                            } else if function
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty())
+                            {
+                                // Unindexed compatible streams retain the sequential
+                                // fallback: a name starts a call, continuations use it.
+                                chat.keys()
+                                    .filter(|(choice, _)| *choice == choice_index)
+                                    .map(|(_, index)| *index)
+                                    .max()
+                                    .map_or(0, |index| index.saturating_add(1))
+                            } else {
+                                current.get(&choice_index).copied().unwrap_or(0)
+                            }
+                        });
+                    let key = (choice_index, index);
+                    if !chat.contains_key(&key) && chat.len() >= 256 {
+                        continue;
+                    }
+                    current.insert(choice_index, index);
+                    let (name, arguments) = chat.entry(key).or_default();
+                    if snapshot.is_some() {
+                        // A message carries the whole call, not another delta.
+                        *name = function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        *arguments = function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                    } else {
+                        if let Some(fragment) = function.get("name").and_then(Value::as_str) {
+                            name.push_str(fragment);
+                        }
+                        if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
+                            arguments.push_str(fragment);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if chunk
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.starts_with("response."))
+        {
+            continue;
+        }
+        // Retain the legacy fragment contract for other compatible providers;
+        // Responses and Chat calls never pass through this unnamed stream.
+        if let Some((_, _, fragments)) = extract_response_content(Some(chunk)) {
+            for fragment in fragments {
+                let starts_call = matches!(fragment.split_once(": "), Some((name, _)) if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'));
+                if starts_call || compatible.is_empty() {
+                    compatible.push(fragment);
+                } else if let Some(last) = compatible.last_mut() {
+                    last.push_str(fragment.strip_prefix(": ").unwrap_or(&fragment));
+                }
+            }
+        }
+    }
+    chat.into_values()
+        .filter(|(name, arguments)| !name.is_empty() || !arguments.is_empty())
+        .map(|(name, arguments)| format!("{name}: {arguments}"))
+        .chain(
+            responses
+                .into_calls()
+                .map(|(_, name, arguments)| format!("{name}: {arguments}")),
+        )
+        .chain(compatible)
+        .collect()
 }
 
 /// Extract role and content from OpenAI message JSON
@@ -222,6 +606,70 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_tools_replace_cumulative_chat_snapshots() {
+        let chunks = [
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":"}}]}}]}),
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {\"x\":1}"]);
+        assert_eq!(
+            merge_response_tool_calls(&[
+                serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{}}]}}]})
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn manual_tools_ignore_invalid_identities_and_keep_sparse_calls() {
+        let chunks = [
+            serde_json::json!({"choices":[{"index":-1,"delta":{"tool_calls":[{"function":{"name":"invalid"}}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":-1,"function":{"name":"invalid"}},{"index":0}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":u64::MAX,"function":{"name":"lookup","arguments":"{}"}}]}},{"index":1,"delta":{"content":"hello"}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {}"]);
+        let mut chunks = Vec::new();
+        for index in 0..257 {
+            chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":index,"function":{"name":"lookup","arguments":"a"}}]}}]}));
+        }
+        chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"b"}}]}}]}));
+        let calls = merge_response_tool_calls(&chunks);
+        assert_eq!(calls.len(), 256);
+        assert_eq!(calls[0], "lookup: ab");
+        assert!(calls[1..].iter().all(|call| call == "lookup: a"));
+    }
+
+    #[test]
+    fn manual_tools_keep_unindexed_sequential_continuations() {
+        let chunks = [
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"orphan"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"first","arguments":"a"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"b"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"second","arguments":"c"}}]}}]}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            [": orphan", "first: ab", "second: c"]
+        );
+    }
+
+    #[test]
+    fn manual_tools_keep_compatible_provider_fragments() {
+        let chunks = [
+            serde_json::json!({"content":[{"type":"tool_use","name":"lookup","input":{}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"1}"}}),
+            serde_json::json!({"content":[{"type":"tool_use","name":"other","input":{"y":2}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            ["lookup: {}{\"x\":1}", "other: {\"y\":2}"]
+        );
+        assert_eq!(merge_response_tool_calls(&chunks[1..3]), ["{\"x\":1}"]);
+    }
 
     #[test]
     fn test_extract_openai_request() {
@@ -283,6 +731,33 @@ mod tests {
 
         let data = token_data.unwrap();
         assert_eq!(data.tools.len(), 1);
+    }
+
+    /// DashScope/Bailian native requests carry their tool definitions under
+    /// the top-level `parameters` object, so a top-level-only read reports no
+    /// tools at all for that protocol.
+    #[test]
+    fn test_extract_native_parameters_tools() {
+        let request = serde_json::json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "What's the weather?"}]},
+            "parameters": {
+                "temperature": 0.5,
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather info"
+                    }
+                }]
+            }
+        });
+
+        let token_data = extract_token_data(Some(&request), None);
+        assert!(token_data.is_some());
+
+        let data = token_data.unwrap();
+        assert_eq!(data.tools.len(), 1, "native parameters.tools must be read");
     }
 
     #[test]
@@ -378,6 +853,124 @@ mod tests {
         assert_eq!(content, "first second");
     }
 
+    /// The closing `*.done` events replay the whole answer; merging must count
+    /// the deltas once and read the closing events only as a late-join
+    /// fallback.
+    #[test]
+    fn test_merge_response_output_text_counts_deltas_once() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hello "}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "there"}),
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "message", "content": [{"text": "hello there"}]}}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+    }
+
+    /// A capture that joined late only has the closing events; they must still
+    /// provide the answer. An empty delta carries no text and must not
+    /// suppress that fallback.
+    #[test]
+    fn test_merge_response_output_text_falls_back_to_closing_events() {
+        let only_done =
+            vec![serde_json::json!({"type": "response.output_text.done", "text": "hello there"})];
+        assert_eq!(merge_response_output_text(&only_done).0, "hello there");
+
+        let only_item_done = vec![serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "content": [{"text": "hello there"}]}})];
+        assert_eq!(merge_response_output_text(&only_item_done).0, "hello there");
+
+        let empty_delta = vec![
+            serde_json::json!({"type": "response.output_text.delta", "delta": ""}),
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+        ];
+        assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
+    }
+
+    /// A `choices[].message` snapshot repeats the answer so far (SysOM's
+    /// Copilot stream sends nothing else), so the fold must count the answer
+    /// once, not once per captured chunk.
+    #[test]
+    fn test_merge_response_output_text_counts_message_snapshots_once() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"Hello"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there!"},"finish_reason":"stop"}]}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Hello there!");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+    }
+
+    /// An OpenAI-compatible gateway's final frame can be a whole `message`
+    /// after a run of deltas; the snapshot completes the text instead of
+    /// appending to it.
+    #[test]
+    fn test_merge_response_output_text_snapshot_completes_delta_text() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"delta":{"content":"Do"},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}),
+        ];
+        let (content, _, _) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Done");
+    }
+
+    /// A snapshot's tool calls are whole and repeat with every chunk; the
+    /// last snapshot's calls must be counted once, not once per chunk.
+    #[test]
+    fn test_merge_response_output_text_snapshot_tool_calls_do_not_repeat() {
+        let second = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"index":0,"id":"c1","function":{
+                            "name":"get_weather",
+                            "arguments": serde_json::json!({"city":"Beijing"}).to_string()}}
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+                {"index":0,"id":"c1","function":{"name":"get_weather","arguments":"{}"}}]}}]}),
+            second,
+        ];
+        let (content, _, tool_calls) = merge_response_output_text(&chunks);
+        assert!(content.is_empty());
+        assert_eq!(
+            tool_calls,
+            vec![format!(
+                "get_weather: {}",
+                serde_json::json!({"city":"Beijing"})
+            )]
+        );
+    }
+
+    /// Reasoning and tool fragments pass through the same merge unchanged.
+    #[test]
+    fn test_merge_response_output_text_keeps_reasoning_and_tool_fragments() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "think "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "again"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "answer"}),
+            serde_json::json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"path\":"}}),
+            serde_json::json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "\"/tmp/a\"}"}}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "answer");
+        assert_eq!(reasoning, "think again");
+        assert_eq!(tool_calls, vec!["{\"path\":", "\"/tmp/a\"}"]);
+    }
+
     #[test]
     fn test_responses_api_unknown_type_returns_none() {
         let chunk = serde_json::json!({
@@ -385,6 +978,132 @@ mod tests {
             "response": {"id": "abc"},
         });
         assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    /// Responses streams a function call as `response.output_item.added`
+    /// (carrying the name) followed by `response.function_call_arguments.delta`
+    /// fragments. The chat-completions and Anthropic arms already produce the
+    /// `name: arguments` text the manual counters tokenize; the Responses arm
+    /// recognised neither event, so a tool-only turn counted zero output
+    /// tokens.
+    #[test]
+    fn test_responses_api_function_call_events_yield_tool_call_fragments() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "read_file",
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the call's name must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(tool_calls, vec!["read_file: ".to_string()]);
+
+        let first = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": "{\"path\":",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&first)).expect("delta fragments must be extracted");
+        assert_eq!(tool_calls, vec!["{\"path\":".to_string()]);
+
+        let second = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": "\"/tmp/a.md\"}",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&second)).expect("delta fragments must be extracted");
+        assert_eq!(tool_calls, vec!["\"/tmp/a.md\"}".to_string()]);
+
+        // The consumers join the fragments and split on the first ": " to
+        // recover `name` and `arguments`; the pieces above must reconstruct the
+        // exact string they expect.
+        let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
+        assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// A message item that arrives after the call is announced must keep
+    /// counting as text: the new arm only claims function-call items.
+    #[test]
+    fn test_responses_api_output_item_added_message_is_not_a_tool_call() {
+        let chunk = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        });
+        let extracted = extract_response_content(Some(&chunk));
+        assert!(
+            extracted.is_none_or(|(_, _, calls)| calls.is_empty()),
+            "a message item must not be reported as a tool call"
+        );
+    }
+
+    /// Anthropic streams content as `content_block_delta` events; the drained
+    /// and analyze-chatml paths aggregate them, so the shared extractor must
+    /// not count the whole response as zero output tokens.
+    #[test]
+    fn test_anthropic_text_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hel"},
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract the text delta");
+        assert_eq!(content, "Hel");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_thinking_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "step by step"},
+        });
+        let (content, reasoning, _) =
+            extract_response_content(Some(&chunk)).expect("should extract the thinking delta");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("step by step"));
+    }
+
+    #[test]
+    fn test_anthropic_input_json_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"},
+        });
+        let (content, _, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract the tool input fragment");
+        assert!(content.is_empty());
+        assert_eq!(tools, vec!["{\"city\":".to_string()]);
+    }
+
+    #[test]
+    fn test_anthropic_non_content_events_are_not_extracted() {
+        // Guard: a message_start/message_delta/ping carries no assistant text
+        // and must keep returning None instead of a fabricated empty payload.
+        for chunk in [
+            serde_json::json!({"type": "message_start", "message": {"id": "msg_1"}}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            serde_json::json!({"type": "ping"}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
     }
 
     #[test]
@@ -498,5 +1217,101 @@ mod tests {
             tool_calls.is_empty(),
             "tool_call without function should be skipped"
         );
+    }
+
+    /// SysOM's Copilot streams spell the assistant's tool calls
+    /// `choices[].message.tool_use` — an array of
+    /// `{index, id, type, function: {name, arguments}}` — instead of the
+    /// OpenAI `tool_calls`. The extractor read only the OpenAI spelling, so
+    /// a SysOM tool call counted zero tool tokens in the manual counters and
+    /// the drain estimate.
+    #[test]
+    fn sysom_tool_use_snapshots_yield_tool_calls() {
+        let response = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("a SysOM tool call must count");
+        assert_eq!(
+            tool_calls,
+            vec!["read_file: {\"file_path\":\"/tmp/a.md\"}".to_string()]
+        );
+    }
+
+    /// A SysOM snapshot can carry text and tool calls together: both feed the
+    /// counters (the text as content, the call as its `name: arguments`
+    /// string), exactly like an OpenAI message carrying both.
+    #[test]
+    fn sysom_tool_use_alongside_content_is_extracted() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Reading the file first.",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("text and calls must both count");
+        assert_eq!(content, "Reading the file first.");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].starts_with("read_file: "));
+    }
+
+    /// Anthropic streams deliver the answer as `content_block_delta` events and
+    /// complete bodies as `content[]` blocks; neither shape was recognised, so
+    /// the manual counters recorded a real answer as zero output tokens.
+    #[test]
+    fn anthropic_shapes_yield_content_reasoning_and_tool_calls() {
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello there"}
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&delta)).expect("text delta extracts");
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_none());
+        assert!(tool_calls.is_empty());
+
+        let thinking = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "let me think"}
+        });
+        let (_, reasoning, _) =
+            extract_response_content(Some(&thinking)).expect("thinking extracts");
+        assert_eq!(reasoning.as_deref(), Some("let me think"));
+
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "content": [
+                {"type": "text", "text": "the answer"},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                 "input": {"city": "Paris"}}
+            ]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&body)).expect("complete body extracts");
+        assert_eq!(content, "the answer");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].starts_with("get_weather: "));
     }
 }

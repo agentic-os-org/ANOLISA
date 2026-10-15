@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createConnection, closeConnection } from "../src/db/connection.js";
 import { runMigrations } from "../src/db/migration.js";
 import { MessageStore } from "../src/store/message-store.js";
@@ -15,7 +15,57 @@ describe("MessageStore", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     closeConnection(db);
+  });
+
+  describe("prepared statement reuse", () => {
+    it("reuses fixed queries while rebinding sessions and observing writes", () => {
+      const prepare = vi.spyOn(db, "prepare");
+      for (const sessionId of ["s1", "s2"]) {
+        for (let seq = 1; seq <= 2; seq++) {
+          expect(store.getNextSeq(sessionId)).toBe(seq);
+          expect(store.getMaxTurnSeq(sessionId)).toBe(seq - 1);
+          store.createMessage({ sessionId, seq, turnSeq: seq, role: "user", content: `deployment ${sessionId} ${seq}`, tokenCount: 3 });
+          store.setTurnSummary(sessionId, seq, `summary ${sessionId} ${seq}`);
+          expect(store.getMessageCount(sessionId)).toBe(seq);
+          expect(store.getLastUserSeq(sessionId)).toBe(seq);
+          expect(store.getLastMessage(sessionId)?.content).toBe(`deployment ${sessionId} ${seq}`);
+          expect(store.getMessages(sessionId)).toHaveLength(seq);
+          expect(store.getDistinctTurnSeqs(sessionId)).toEqual(Array.from({ length: seq }, (_, index) => index + 1));
+          expect(store.getTurnSummaries(sessionId).at(-1)?.summary).toBe(`summary ${sessionId} ${seq}`);
+          expect(store.searchMessages(sessionId, "deployment", 5)).toHaveLength(seq);
+        }
+      }
+      const queries = prepare.mock.calls.map(([sql]) => sql);
+      expect(queries.length).toBe(new Set(queries).size);
+      expect(queries).toHaveLength(11);
+      expect(store.getMessages("s1").map((message) => message.content)).toEqual(["deployment s1 1", "deployment s1 2"]);
+      expect(store.getMessages("s2").map((message) => message.content)).toEqual(["deployment s2 1", "deployment s2 2"]);
+    });
+
+    it("does not retain arbitrarily sized turn-selection statements", () => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "one", tokenCount: 1 });
+      store.createMessage({ sessionId: "s1", seq: 2, turnSeq: 2, role: "user", content: "two", tokenCount: 1 });
+      const prepare = vi.spyOn(db, "prepare");
+      for (const turnSeqs of [[1], [1, 2], [2], [1, 2]]) {
+        expect(store.getMessagesByTurnSeqs("s1", turnSeqs).map((message) => message.turnSeq)).toEqual(turnSeqs);
+      }
+      expect(prepare).toHaveBeenCalledTimes(4);
+    });
+
+    it("recovers search when FTS becomes available after preparation failed", () => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "deployment plan", tokenCount: 2 });
+      db.exec("DROP TRIGGER messages_ai; DROP TRIGGER messages_ad; DROP TRIGGER messages_au; DROP TABLE messages_fts");
+      expect(store.searchMessages("s1", "deployment", 5)).toEqual([]);
+      expect(store.searchMessages("s1", "deployment", 5)).toEqual([]);
+      runMigrations(db);
+      store.createMessage({ sessionId: "s1", seq: 2, turnSeq: 2, role: "user", content: "recovered search", tokenCount: 2 });
+      const prepare = vi.spyOn(db, "prepare");
+      expect(store.searchMessages("s1", "recovered", 5).map((message) => message.content)).toEqual(["recovered search"]);
+      expect(store.searchMessages("s1", "recovered", 5)).toHaveLength(1);
+      expect(prepare).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("messages", () => {
@@ -109,6 +159,21 @@ describe("MessageStore", () => {
   });
 
   describe("turn summaries", () => {
+    it.each(["system", "assistant", "tool"] as const)("persists and overwrites a %s-led turn summary", (role) => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role, content: "first message", tokenCount: 1 });
+      store.createMessage({ sessionId: "s1", seq: 2, turnSeq: 1, role: "assistant", content: "continuation", tokenCount: 1 });
+      store.createMessage({ sessionId: "s1", seq: 3, turnSeq: 2, role: "user", content: "next turn", tokenCount: 1 });
+      store.createMessage({ sessionId: "s2", seq: 1, turnSeq: 1, role, content: "another session", tokenCount: 1 });
+
+      store.setTurnSummary("s1", 1, "first summary");
+      store.setTurnSummary("s1", 1, "replacement summary");
+
+      expect(store.getTurnSummaries("s1")).toEqual([{ turnSeq: 1, summary: "replacement summary" }]);
+      expect(store.getTurnSummaries("s2")).toEqual([]);
+      const anchors = db.prepare("SELECT seq FROM messages WHERE session_id = ? AND summary IS NOT NULL").all("s1");
+      expect(anchors).toEqual([{ seq: 1 }]);
+    });
+
     it("sets and gets turn summary", () => {
       store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "q1", tokenCount: 1 });
       store.createMessage({ sessionId: "s1", seq: 2, turnSeq: 1, role: "assistant", content: "a1", tokenCount: 1 });
@@ -134,6 +199,41 @@ describe("MessageStore", () => {
     });
   });
 
+  describe("legacy turn migration", () => {
+    it("assigns ordinal turns per session including system and implicit turns", () => {
+      const sessions = [
+        { id: "user-start", roles: ["user", "assistant", "tool", "user", "assistant"], turns: [1, 1, 1, 2, 2] },
+        { id: "system-start", roles: ["system", "assistant", "user", "assistant", "system"], turns: [1, 1, 2, 2, 3] },
+        { id: "implicit-start", roles: ["assistant", "tool", "user", "assistant", "system"], turns: [1, 1, 2, 2, 3] },
+      ] as const;
+      for (const session of sessions) {
+        session.roles.forEach((role, index) => {
+          store.createMessage({ sessionId: session.id, seq: index * 2 + 3, turnSeq: 99, role, content: `${session.id} ${index}`, tokenCount: 1 });
+        });
+      }
+      // Model an older archive while retaining its populated FTS index.
+      db.exec("ALTER TABLE messages DROP COLUMN turn_seq");
+
+      runMigrations(db);
+
+      for (const session of sessions) {
+        expect(store.getMessages(session.id).map((message) => message.turnSeq)).toEqual(session.turns);
+      }
+      expect(store.getMessagesByTurnSeqs("user-start", [2]).map((message) => message.role)).toEqual(["user", "assistant"]);
+    });
+
+    it("preserves existing turn identifiers on subsequent migrations", () => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 5, role: "user", content: "archived turn", tokenCount: 1 });
+      store.setTurnSummary("s1", 5, "saved summary");
+
+      runMigrations(db);
+      runMigrations(db);
+
+      expect(store.getDistinctTurnSeqs("s1")).toEqual([5]);
+      expect(store.getTurnSummaries("s1")).toEqual([{ turnSeq: 5, summary: "saved summary" }]);
+    });
+  });
+
   describe("getDistinctTurnSeqs", () => {
     it("returns distinct turn_seqs in order", () => {
       store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "q1", tokenCount: 1 });
@@ -147,6 +247,32 @@ describe("MessageStore", () => {
 
     it("returns empty for empty conversation", () => {
       expect(store.getDistinctTurnSeqs("s1")).toEqual([]);
+    });
+  });
+
+  describe("FTS availability migration", () => {
+    it("indexes archived rows when the full-text table is created later", () => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "legacyunique", tokenCount: 1 });
+      db.exec("DROP TRIGGER messages_ai; DROP TRIGGER messages_ad; DROP TRIGGER messages_au; DROP TABLE messages_fts;");
+
+      runMigrations(db);
+      expect(store.searchMessages("s1", "legacyunique", 10).map((message) => message.seq)).toEqual([1]);
+      runMigrations(db);
+      expect(store.searchMessages("s1", "legacyunique", 10)).toHaveLength(1);
+    });
+
+    it("keeps insert, update and delete triggers usable for rebuilt archive rows", () => {
+      store.createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "user", content: "archivedword", tokenCount: 1 });
+      db.exec("DROP TRIGGER messages_ai; DROP TRIGGER messages_ad; DROP TRIGGER messages_au; DROP TABLE messages_fts;");
+      runMigrations(db);
+
+      expect(() => db.exec("UPDATE messages SET content = 'updatedword' WHERE seq = 1")).not.toThrow();
+      expect(store.searchMessages("s1", "archivedword", 10)).toEqual([]);
+      expect(store.searchMessages("s1", "updatedword", 10)).toHaveLength(1);
+      store.createMessage({ sessionId: "s1", seq: 2, turnSeq: 2, role: "user", content: "insertedword", tokenCount: 1 });
+      expect(store.searchMessages("s1", "insertedword", 10)).toHaveLength(1);
+      db.exec("DELETE FROM messages WHERE seq = 1");
+      expect(store.searchMessages("s1", "updatedword", 10)).toEqual([]);
     });
   });
 });

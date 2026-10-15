@@ -3,6 +3,9 @@
   "name": "Tokenless",
   "version": "@VERSION@",
   "description": "Protocol v2 PreTool RTK rewriting and PostTool optimization. Wraps the tokenless system binary via child_process — this is expected and not malicious.",
+  "contracts": {
+    "agentToolResultMiddleware": ["openclaw"]
+  },
   "activation": {
     "onCapabilities": ["hook"]
   },

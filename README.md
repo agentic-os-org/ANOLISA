@@ -27,9 +27,9 @@ Agent framework, and sandbox you already run.
 [中文版](README_zh.md) · [Website](https://agentic-os.sh/) ·
 [Quick Start](https://agentic-os.sh/docs/quickstart/) ·
 [User Guide](https://agentic-os.sh/docs/user-guide/) ·
-[Contributing](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING.md)
+[Contributing](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
 [![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/en/agent-security/owasp-agentic-top10.md)
@@ -76,10 +76,13 @@ capability can be enabled independently.
     <tr>
       <td></td>
       <td></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/blaze/">Blaze</a></strong><br><sub>Sandbox lifecycle</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>Unified Agent policy configuration</sub></td>
     </tr>
   </tbody>
 </table>
+
+Blaze has moved to its standalone repository,
+[blaze-rs](https://github.com/agentic-os-org/blaze-rs).
 
 ## What it solves
 
@@ -287,14 +290,14 @@ Scan with DingTalk to join the ANOLISA community.
 
 </div>
 
-- [Open an issue](https://github.com/alibaba/anolisa/issues) for bugs and
+- [Open an issue](https://github.com/agentic-os-org/ANOLISA/issues) for bugs and
   feature requests.
-- Read [CONTRIBUTING.md](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING.md)
+- Read [CONTRIBUTING.md](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md)
   before submitting a pull request.
 - Report vulnerabilities through the
-  [Security Policy](https://github.com/alibaba/anolisa/blob/main/SECURITY.md).
+  [Security Policy](https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md).
 
 ## License
 
 ANOLISA is released under the
-[Apache License 2.0](https://github.com/alibaba/anolisa/blob/main/LICENSE).
+[Apache License 2.0](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE).

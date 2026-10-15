@@ -136,6 +136,9 @@ agentsight audit --pid 12345 --type llm
 
 # Summary statistics
 agentsight audit --summary
+
+# Read a database copied from another host
+agentsight audit --db /backup/agentsight/agentsight.db
 ```
 
 ### `agentsight serve`
@@ -454,6 +457,14 @@ Configure buffer caps to prevent unbounded memory growth:
 | `max_connection_body_mb` | 8 | Per-connection HTTP body buffer cap |
 | `connection_idle_timeout_secs` | 60 | HTTP connection idle timeout (seconds) |
 | `ring_buffer_mb` | 32 | eBPF Ring Buffer size (must be power of 2) |
+
+### Runtime Metrics Export
+
+Set `AGENTSIGHT_METRICS_FILE` to write Prometheus runtime metrics to a file.
+`AGENTSIGHT_METRICS_INTERVAL_SECS` sets the minimum time between updates in
+positive whole seconds (default: `1`). A final snapshot is written on shutdown
+regardless of this interval. The interval setting has no effect when the metrics
+file is not enabled.
 
 ### Minimal Memory Configuration
 

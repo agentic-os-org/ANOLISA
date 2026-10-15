@@ -29,7 +29,6 @@ on:
           - os-skills
           - copilot-shell
           - cosh-ng
-          - blaze
           - ktuner
       review_scope:
         description: 'auto reviews new commits, falls back to full when needed, and skips an already-reviewed head; full always reviews all; incremental requires a reliable delta'
@@ -743,7 +742,6 @@ jobs:
               agentsight) add_context_file "src/agentsight/AGENTS.md" ;;
               skillfs) add_context_file "src/skillfs/AGENTS.md" ;;
               cosh-ng) add_context_file "src/cosh-ng/AGENTS.md" ;;
-              blaze) add_context_file "src/blaze/AGENTS.md" ;;
             esac
           }
 
@@ -810,7 +808,6 @@ jobs:
             if grep -qE '^src/os-skills/' "$files_file"; then [[ "$component" == "general" ]] && component="os-skills"; fi
             if grep -qE '^deprecated/copilot-shell/' "$files_file"; then [[ "$component" == "general" ]] && component="copilot-shell"; fi
             if grep -qE '^src/cosh-ng/' "$files_file"; then [[ "$component" == "general" ]] && component="cosh-ng"; fi
-            if grep -qE '^src/blaze/' "$files_file"; then [[ "$component" == "general" ]] && component="blaze"; fi
             if grep -qE '^src/ktuner/' "$files_file"; then [[ "$component" == "general" ]] && component="ktuner"; fi
           else
             add_component_context "$component"

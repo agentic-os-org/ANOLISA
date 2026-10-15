@@ -4,16 +4,18 @@ use std::time::Duration;
 
 use asc_action_runtime::{
     ActionRuntime, AuditProjector, CapabilityExecutor, Diagnostic, DiagnosticSink,
-    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus,
+    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus, WarmupStatus,
 };
-use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CodeScanRequest};
+use asc_action_types::{
+    ActionId, ActionOutcome, AuditProjection, CodeScanRequest, PromptScanRequest,
+    PromptScanWarmupRequest,
+};
 use asc_daemon::{BootstrapConfig, serve};
 use asc_daemon_core::{ActionService, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_service::ShutdownToken;
 use asc_pap::PapService;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_security_events::SecurityEvent;
 use asc_telemetry::TelemetryRecord;
 use serde_json::{Map, json};
@@ -75,6 +77,34 @@ impl AuditProjector for Projector {
         }
     }
 }
+// The scenario drives `action.code_scan` only; the prompt-scan registration
+// just has to satisfy the service's constructor.
+struct UnusedPromptScan;
+impl CapabilityExecutor for UnusedPromptScan {
+    type Request = PromptScanRequest;
+    fn execute(&self, _: &ExecutionControl, _: &PromptScanRequest) -> ActionOutcome {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan")
+    }
+}
+struct UnusedPromptScanProjector;
+impl AuditProjector for UnusedPromptScanProjector {
+    type Request = PromptScanRequest;
+    fn project(&self, _: &PromptScanRequest, outcome: &ActionOutcome) -> AuditProjection {
+        AuditProjection::Completed {
+            request: Map::new(),
+            result: outcome.data.clone(),
+            failure: None,
+        }
+    }
+}
+// The warmup registration likewise just satisfies the service's constructor.
+struct UnusedWarmup;
+impl asc_action_runtime::CapabilityWarmup for UnusedWarmup {
+    type Request = PromptScanWarmupRequest;
+    fn warmup(&self, _: &PromptScanWarmupRequest) -> WarmupStatus {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan.warmup")
+    }
+}
 #[derive(Default)]
 struct Outputs {
     audit: Mutex<Vec<SecurityEvent>>,
@@ -113,7 +143,7 @@ fn controlled_actions(
         ActionService::new(
             ActionRuntime::new(
                 ActionId::CodeScan,
-                asc_capability_code_scan::CodeScanExecutor,
+                asc_capability_code_scan::CodeScanExecutor::default(),
                 asc_capability_code_scan::CodeScanAuditProjector,
                 finalizer.clone(),
             ),
@@ -125,6 +155,13 @@ fn controlled_actions(
                 asc_capability_pii_scan::PiiAuditProjector,
                 asc_action_runtime::testing::discarding_finalizer(),
             ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
         )
         .with_skill_sec(ActionRuntime::new(
             ActionId::SkillSec,
@@ -143,6 +180,13 @@ fn controlled_actions(
                 asc_capability_pii_scan::PiiAuditProjector,
                 asc_action_runtime::testing::discarding_finalizer(),
             ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
         )
     }
 }
@@ -160,10 +204,7 @@ async fn scenario(kind: Scenario, skill_sec: bool) {
     let finalizer = Finalizer::new(output.clone(), output.clone(), output.clone());
     let actions = controlled_actions(skill_sec, executor, finalizer);
     let dispatcher = Arc::new(DaemonDispatcher::new(
-        PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        ),
+        PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap())),
         Arc::new(RootManagedPrincipalPolicy::default()),
         Arc::new(actions),
     ));

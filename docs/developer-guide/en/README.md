@@ -4,6 +4,12 @@
 
 Use this guide when you need to understand, extend, test, or contribute to ANOLISA.
 
+## AW
+
+- [Build, configure and integrate a component](./aw/integration.md)
+- [Configuration reference](./aw/configuration.md)
+- [Four-framework usage and operations](../../user-guide/en/user-entrypoint/aw.md)
+
 ## Copilot Shell
 
 - [Architecture](./copilot-shell/architecture.md)

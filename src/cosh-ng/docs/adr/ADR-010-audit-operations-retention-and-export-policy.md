@@ -26,7 +26,7 @@ the existing configuration files:
 [audit]
 mode = "best_effort" # best_effort | required
 retention_days = 30
-max_disk_bytes = 1073741824
+max_disk_bytes = 104857600
 ```
 
 - System: `/etc/copilot-shell/config.toml`.
@@ -84,7 +84,7 @@ audit/
 
 ### Apply bounded retention
 
-- Default to 30 days and 1 GiB, whichever limit is reached first.
+- Default to 30 days and 100 MiB, whichever limit is reached first.
 - Clean only closed `.jsonl` segments. Recover `.jsonl.active` crash orphans only after obtaining
   their exclusive file lock non-blockingly; never delete a locked active segment.
 - Delete by age first, then oldest-first while usage exceeds the byte cap.
@@ -148,11 +148,26 @@ reading in the standalone Shell crate or change that crate's dependency boundary
 Rejected. Local filesystem failures would break Shell-first availability and incorrectly block
 native PTY commands. Managed `required` covers only cosh-governed Provider and Agent behavior.
 
+### Upgrade default and explicit overrides (2026-10-13)
+
+The approved built-in audit cap is now 100 MiB with 30-day retention. An upgrade
+applies it only where `max_disk_bytes` is absent. Existing explicit system/user
+values remain effective under the same precedence; an explicit 1 GiB value is
+not rewritten. The smaller default may prune closed history sooner for an
+unconfigured installation. `audit status` reports the effective cap and source.
+Operators who require the former cap must set `max_disk_bytes = 1073741824`
+explicitly in the authoritative configuration before upgrading.
+
+Diagnostic logs have a separate per-user 3-day/20 MiB cap across Core and Shell.
+Each record acquires the shared directory `.budget.lock` before measuring,
+reclaiming and writing. Lock contention or exhausted capacity suppresses optional
+logs without blocking native commands. No audit failure-mode rule changes.
+
 ## Consequences
 
 - Core, Shell, and CLI must share `[audit]` defaults and effective-source semantics. Project-level
   forbidden fields need stable warnings and tests.
-- The directory may consume up to 1 GiB of user state and needs clear `status`, `prune --dry-run`,
+- The directory may consume up to 100 MiB of user state and needs clear `status`, `prune --dry-run`,
   and cleanup diagnostics.
 - Incident bundles are safe by default but contain no raw content; troubleshooting relies on event
   correlation, outcome classification, hashes, and evidence references.

@@ -141,7 +141,7 @@ codex-plugin-tokenless/
 
 ## Related
 
-- [Tokenless Rust CLI](../../crates/tokenless-cli/) — core compression engine
+- [Tokenless Rust CLI](../../../crates/tokenless-cli/) — core compression engine
 - [OpenClaw Plugin](../openclaw/) — same compression for OpenClaw
 - [Hermes Plugin](../hermes/) — same compression for Hermes
 

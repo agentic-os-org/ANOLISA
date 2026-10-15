@@ -10,11 +10,11 @@ notifications, or extra context, and enable them only from a source you trust.
 For `cosh-core`, declaring a Hook enables it by default; `hooks.enabled = true`
 is optional. An explicit `hooks.enabled = false` disables config Hooks and emits
 a warning when definitions are present. A system/user disable also prevents
-Extension Hooks from auto-enabling. A project disable affects only config Hooks;
-installed Extensions cannot re-enable those disabled config Hooks. `--bare`
+Extension Hooks from auto-enabling. Core ignores the `[hooks]` section of a
+project `.copilot-shell/config.toml`, including `hooks.enabled`. `--bare`
 continues to disable all Hooks.
 
-Define them in `~/.copilot-shell/config.toml` or a trusted project config:
+Define them in `~/.copilot-shell/config.toml`:
 
 ```toml
 [[hooks.PreToolUse]]
@@ -34,9 +34,9 @@ In the interactive terminal:
 /hooks disable <id>
 ```
 
-Project Hooks do not run until the project root is trusted. Use
-`/hooks untrust-project` to remove that trust. Shell Hook state is session-local;
-Agent Hook state is persisted by the registry.
+Project Shell Hooks under `.cosh/hooks` do not run until the project root is
+trusted. Use `/hooks untrust-project` to remove that trust. Shell Hook state is
+session-local; Agent Hook state is persisted by the registry.
 
 ## Event names
 

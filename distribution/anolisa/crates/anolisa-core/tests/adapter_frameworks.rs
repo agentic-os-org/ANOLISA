@@ -66,6 +66,11 @@ const MANAGED_ENV: &[&str] = &[
     "QWENPAW_HOME",
     "FAKE_QWENPAW_LOG",
     "FAKE_QWENPAW_FAIL",
+    "HERMES_BIN",
+    "HERMES_HOME",
+    "FAKE_HERMES_LOG",
+    "FAKE_HERMES_STATE",
+    "FAKE_HERMES_FAIL",
 ];
 
 struct EnvGuard {
@@ -763,6 +768,143 @@ fn stage_codex_hook_bundle(root: &Path) {
     .expect("hooks.json");
 }
 
+fn stage_hermes_bundle(root: &Path) {
+    std::fs::write(root.join("README.md"), b"hermes plugin\n").expect("readme");
+    std::fs::write(root.join("plugin.js"), b"// stub plugin\n").expect("plugin.js");
+}
+
+/// Fake `hermes` CLI: appends each argv line to `$FAKE_HERMES_LOG` and keeps
+/// enabled/disabled sets under `$FAKE_HERMES_STATE`, modelling the real
+/// contract: `plugins disable` moves the name into the disabled set (the
+/// plugin stays installed and listed, marked `disabled`), and disabling a
+/// plugin that is not enabled exits non-zero without changing state.
+/// `FAKE_HERMES_FAIL=disable` instead simulates a hard failure: non-zero
+/// exit with the plugin left enabled.
+fn write_fake_hermes(dir: &Path) -> PathBuf {
+    let path = dir.join("hermes");
+    write_exec(
+        &path,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_HERMES_LOG"
+st="$FAKE_HERMES_STATE"; mkdir -p "$st" 2>/dev/null
+in_enabled() { [ -f "$st/plugins" ] && grep -qx "$1" "$st/plugins"; }
+remove_from() { [ -f "$1" ] && { grep -vx "$2" "$1" > "$1.tmp" 2>/dev/null || true; mv "$1.tmp" "$1" 2>/dev/null || true; }; }
+if [ "$1" = "plugins" ]; then
+  case "$2" in
+    enable)
+      remove_from "$st/disabled" "$3"
+      in_enabled "$3" || echo "$3" >> "$st/plugins" ;;
+    disable)
+      [ "$FAKE_HERMES_FAIL" = "disable" ] && { echo "disable boom" >&2; exit 1; }
+      in_enabled "$3" || { echo "plugin not enabled: $3" >&2; exit 1; }
+      remove_from "$st/plugins" "$3"
+      echo "$3" >> "$st/disabled" ;;
+    remove)
+      remove_from "$st/plugins" "$3"
+      remove_from "$st/disabled" "$3" ;;
+    list)
+      cat "$st/plugins" 2>/dev/null || true
+      if [ -f "$st/disabled" ]; then sed 's/^/disabled /' "$st/disabled"; fi ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+    path
+}
+
+fn apply_hermes_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> PathBuf {
+    let hermes_home = world.prefix.join("hermes-home");
+    std::fs::create_dir_all(&hermes_home).expect("hermes home");
+    let log = world.prefix.join("hermes.log");
+    let state = world.prefix.join("hermes-state");
+    guard.set("HERMES_BIN", fake_bin);
+    guard.set("HERMES_HOME", &hermes_home);
+    guard.set("FAKE_HERMES_LOG", &log);
+    guard.set("FAKE_HERMES_STATE", &state);
+    hermes_home
+}
+
+/// Install a second raw-owned component into an already staged world, with
+/// its own contract declaring one adapter, so cross-component framework
+/// state can be exercised. Returns the second component's resource root.
+fn add_component(
+    world: &World,
+    name: &str,
+    framework: &str,
+    adapter_type: &str,
+    dest: &str,
+    stage_bundle: impl Fn(&Path),
+) -> PathBuf {
+    let resource_root = PathBuf::from(
+        dest.replace("{datadir}", &world.layout.datadir.to_string_lossy())
+            .replace("{component}", name),
+    );
+    std::fs::create_dir_all(&resource_root).expect("second resource root");
+    stage_bundle(&resource_root);
+
+    let manifest_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(name)
+        .join("component.toml");
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).expect("manifest dir");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"[component]
+name = "{name}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "{framework}"
+adapter_type = "{adapter_type}"
+plugin_id = "{name}"
+dest = "{dest}"
+"#
+        ),
+    )
+    .expect("second contract");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = anolisa_core::state_store::StateStore::load(
+        &state_path,
+        anolisa_platform::privilege::effective_uid(),
+    )
+    .expect("load fixture state");
+    let mut installation = state
+        .find(anolisa_core::state::ObjectKind::Component, COMPONENT)
+        .expect("fixture component")
+        .clone();
+    installation.name = name.to_string();
+    let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+        panic!("fixture component must be raw-owned");
+    };
+    artifact.files = fixture_package_files(&resource_root)
+        .into_iter()
+        .map(|file| OwnedFile {
+            path: PathBuf::from(file.path),
+            owner: FileOwner::Anolisa,
+            sha256: file.digest,
+            kind: match file.kind {
+                PackageFileKind::Symlink => OwnedFileKind::Symlink,
+                _ => OwnedFileKind::File,
+            },
+            referent: file.link_target.map(PathBuf::from),
+            mode: None,
+            capabilities: Vec::new(),
+        })
+        .collect();
+    state.upsert(installation);
+    state.save(&state_path).expect("save fixture state");
+    resource_root
+}
+
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
 /// marketplace/plugin registries under `$FAKE_CODEX_STATE` so `list`
 /// reflects prior `add`/`remove` calls.
@@ -782,6 +924,18 @@ if [ "$1" = "app-server" ]; then
           printf '{"id":1,"result":{"data":[{"hooks":[],"warnings":[],"errors":[]}]}}\n'
         else
           printf '{"id":1,"result":{"data":[{"hooks":[{"key":"tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0","currentHash":"sha256:trusted","source":"plugin","pluginId":"tokenless@anolisa-tokenless","isManaged":false}],"warnings":[],"errors":[]}]}}\n'
+        fi ;;
+      *'"method":"config/read"'*)
+        # The user layer holds the entry enable trusted plus a foreign one.
+        state='"other@m:hooks/hooks.json:stop:0:0":{"trusted_hash":"sha256:other"}'
+        [ -f "$st/trust-request" ] && state="$state"',"tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0":{"trusted_hash":"sha256:trusted"}'
+        printf '{"id":1,"result":{"config":{},"layers":[{"name":{"type":"user","file":"config.toml"},"version":"sha256:v1","config":{"hooks":{"state":{%s}}}}]}}\n' "$state" ;;
+      *'"method":"config/batchWrite"'*'"mergeStrategy":"replace"'*)
+        printf '%s\n' "$line" > "$st/revoke-request"
+        if [ "$FAKE_CODEX_FAIL" = "revoke-conflict" ]; then
+          printf '{"id":1,"error":{"code":-32600,"message":"Configuration was modified since last read."}}\n'
+        else
+          printf '{"id":1,"result":{"status":"ok"}}\n'
         fi ;;
       *'"method":"config/batchWrite"'*)
         printf '%s\n' "$line" > "$st/trust-request"
@@ -833,7 +987,10 @@ fn apply_codex_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> (PathBuf
     guard.set("XDG_DATA_HOME", &xdg);
     guard.set("FAKE_CODEX_LOG", &log);
     guard.set("FAKE_CODEX_STATE", &state);
-    let marketplace_root = xdg.join("anolisa").join("codex-marketplace");
+    let marketplace_root = xdg
+        .join("anolisa")
+        .join("codex-marketplaces")
+        .join("anolisa-tokenless");
     (log, marketplace_root)
 }
 
@@ -921,6 +1078,106 @@ fn codex_enable_records_argv_and_builds_marketplace() {
     );
 }
 
+fn codex_marketplace_root(outcome: EnableOutcome) -> PathBuf {
+    let EnableOutcome::Enabled(claim) = outcome else {
+        panic!("expected enabled");
+    };
+    claim
+        .resources
+        .iter()
+        .find_map(|r| match &r.kind {
+            ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
+            _ => None,
+        })
+        .expect("marketplace dir resource")
+}
+
+fn marketplace_name_in(root: &Path) -> String {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".agents/plugins/marketplace.json"))
+            .expect("marketplace manifest"),
+    )
+    .expect("manifest json");
+    manifest["name"]
+        .as_str()
+        .expect("manifest name")
+        .to_string()
+}
+
+/// Two components enabled for Codex must not share a marketplace root: Codex
+/// keys a local marketplace by its directory and reads the name from the one
+/// manifest there, so a shared root lets the second enable overwrite the
+/// first marketplace and either disable delete the other's files.
+#[test]
+fn codex_components_keep_separate_marketplaces() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let sec_root = add_component(
+        &world,
+        "sec-core",
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        |root| {
+            std::fs::create_dir_all(root.join(".codex-plugin")).expect("codex-plugin");
+            std::fs::write(
+                root.join(".codex-plugin/plugin.json"),
+                br#"{"name":"sec-core"}"#,
+            )
+            .expect("plugin.json");
+        },
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    let manager = world.manager();
+
+    let tokenless_root = codex_marketplace_root(
+        manager
+            .enable(COMPONENT, Some("codex"), false)
+            .expect("enable tokenless"),
+    );
+    let sec_market_root = codex_marketplace_root(
+        manager
+            .enable("sec-core", Some("codex"), false)
+            .expect("enable sec-core"),
+    );
+    assert_ne!(
+        tokenless_root, sec_market_root,
+        "marketplace roots must differ"
+    );
+    assert!(!tokenless_root.starts_with(&sec_market_root));
+    assert!(!sec_market_root.starts_with(&tokenless_root));
+    assert_eq!(marketplace_name_in(&tokenless_root), "anolisa-tokenless");
+    assert_eq!(marketplace_name_in(&sec_market_root), "anolisa-sec-core");
+    assert_eq!(
+        std::fs::read_link(tokenless_root.join(COMPONENT)).expect("tokenless symlink"),
+        world.resource_root
+    );
+    assert_eq!(
+        std::fs::read_link(sec_market_root.join("sec-core")).expect("sec-core symlink"),
+        sec_root
+    );
+
+    let disabled = manager
+        .disable("sec-core", Some("codex"), false)
+        .expect("disable sec-core");
+    assert!(disabled.claim_removed);
+    assert!(!sec_market_root.exists(), "sec-core marketplace removed");
+    // Disabling one component leaves the other's marketplace untouched.
+    assert_eq!(marketplace_name_in(&tokenless_root), "anolisa-tokenless");
+    assert_eq!(
+        std::fs::read_link(tokenless_root.join(COMPONENT)).expect("tokenless symlink"),
+        world.resource_root
+    );
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
 #[test]
 fn codex_enable_trusts_declared_hooks() {
     let guard = EnvGuard::acquire();
@@ -948,6 +1205,79 @@ fn codex_enable_trusts_declared_hooks() {
         request["params"]["edits"][0]["value"]["tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0"]
             ["trusted_hash"],
         "sha256:trusted"
+    );
+}
+
+#[test]
+fn codex_disable_revokes_the_hook_trust_enable_wrote() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    let request: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(world.prefix.join("codex-state/revoke-request"))
+            .expect("revoke request"),
+    )
+    .expect("valid request");
+    let edit = &request["params"]["edits"][0];
+    assert_eq!(edit["keyPath"], "hooks.state");
+    assert_eq!(edit["mergeStrategy"], "replace");
+    assert_eq!(request["params"]["expectedVersion"], "sha256:v1");
+    // Only the plugin's own entry goes; the foreign trust is written back.
+    assert_eq!(
+        edit["value"],
+        serde_json::json!({
+            "other@m:hooks/hooks.json:stop:0:0": { "trusted_hash": "sha256:other" }
+        })
+    );
+}
+
+#[test]
+fn codex_disable_keeps_receipt_when_hook_trust_revocation_fails() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+    guard.set("FAKE_CODEX_FAIL", Path::new("revoke-conflict"));
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(
+        !disabled.claim_removed,
+        "a failed revocation must keep the receipt for a retry"
+    );
+    assert!(
+        disabled
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("hook trust revocation failed")),
+        "{:?}",
+        disabled.report.messages
     );
 }
 
@@ -1470,6 +1800,119 @@ fn codex_disable_keeps_receipt_when_cli_removal_fails() {
         .cloned()
         .expect("receipt kept");
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn hermes_disable_keeps_receipt_when_deregistration_fails() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    // Force `plugins disable` to hard-fail: the plugin stays in the enabled
+    // set, so the driver must keep both the plugin directory and the receipt
+    // instead of reporting a completed cleanup.
+    guard.set("FAKE_HERMES_FAIL", Path::new("disable"));
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        !disabled.claim_removed,
+        "receipt must be kept when deregistration fails"
+    );
+    assert!(!disabled.report.cleanup_complete);
+    assert!(
+        hermes_home.join("plugins").join(COMPONENT).is_dir(),
+        "plugin directory must survive for the retry"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "hermes")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn hermes_disable_completes_when_cli_succeeds() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        disabled.claim_removed,
+        "successful disable drops the receipt"
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !hermes_home.join("plugins").join(COMPONENT).exists(),
+        "plugin directory must be removed after a successful disable"
+    );
+}
+
+#[test]
+fn hermes_disable_treats_already_disabled_as_deregistered() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "hermes",
+        "plugin",
+        "{datadir}/adapters/{component}/hermes/",
+        stage_hermes_bundle,
+    );
+    let fake = write_fake_hermes(&world.prefix);
+    let hermes_home = apply_hermes_env(&guard, &world, &fake);
+    let state = world.prefix.join("hermes-state");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable");
+
+    // Simulate an out-of-band disable: the real CLI moves the name from the
+    // enabled set into plugins.disabled and refuses a repeated disable with
+    // a non-zero exit, while `plugins list` keeps showing the plugin with a
+    // `disabled` marker. Presence alone must not read as "still registered"
+    // — that made a successful deregistration retry forever.
+    std::fs::write(state.join("plugins"), b"").expect("clear enabled set");
+    std::fs::write(state.join("disabled"), format!("{COMPONENT}\n").as_bytes())
+        .expect("mark disabled");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable runs");
+    assert!(
+        disabled.claim_removed,
+        "a listed-but-disabled plugin is deregistered; the receipt must go"
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !hermes_home.join("plugins").join(COMPONENT).exists(),
+        "plugin directory must be removed once the disabled state is verified"
+    );
 }
 
 /// Regression: when the resource bundle is resolved from a packaged datadir

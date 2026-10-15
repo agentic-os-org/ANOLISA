@@ -4,10 +4,10 @@ use asc_policy_types::identifiers::{ResourceId, Revision};
 use serde::{Deserialize, Serialize};
 
 /// Versioned format of the `AgentSight` Binding plan passed through PCP.
-pub const AGENTSIGHT_BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v1";
+pub const AGENTSIGHT_BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v2";
 
 /// Schema version encoded by [`AgentSightBindingPlan`].
-pub const AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION: u16 = 1;
+pub const AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION: u16 = 2;
 
 /// Media type of the nested `ActPlane` DSL text.
 pub const ACTPLANE_POLICY_MEDIA_TYPE: &str = "application/vnd.actplane.dsl.v1";
@@ -40,8 +40,6 @@ pub struct AgentSightSourceBinding {
     pub policy_revision: Revision,
     /// Stable source Scope identity.
     pub scope_id: ResourceId,
-    /// Source Scope revision retained for provenance; Client use is optional.
-    pub scope_revision: Revision,
 }
 
 /// `ActPlane` policy payload nested in the `AgentSight` plan.
@@ -67,5 +65,7 @@ pub enum AgentSightScopePlan {
     ProcessTree {
         /// Positive PID accepted by the `AgentSight` apply protocol.
         root_pid: i32,
+        /// Exact instance selected by Scope discovery.
+        process: asc_policy_types::process_discovery::ProcessIdentity,
     },
 }

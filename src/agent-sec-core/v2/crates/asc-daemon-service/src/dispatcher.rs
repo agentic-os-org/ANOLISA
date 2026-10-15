@@ -157,6 +157,14 @@ pub trait ConnectionSession: Send {
 /// owns and bounds that writer. Transport rejection encoding is a separate
 /// [`RejectionEncoder`] dependency.
 pub trait RequestDispatcher: Send + Sync + 'static {
+    /// Classifies a kernel-authenticated peer for reserved connection capacity.
+    /// Called before reading any request bytes; use only bounded, in-memory
+    /// server-owned identity policy, never caller attribution or application I/O.
+    /// The default grants no administrator capacity.
+    fn is_administrator(&self, _peer: PeerCredentials) -> bool {
+        false
+    }
+
     /// Optionally begins an authenticated connection-local exchange.
     /// Performs bounded parsing/cryptography only. Ordinary requests return `None`.
     ///
@@ -171,7 +179,7 @@ pub trait RequestDispatcher: Send + Sync + 'static {
     }
 
     /// Selects a method-specific execution budget after a complete bounded frame arrives.
-    /// The transport caps overrides at 120 seconds. Default adapters keep configured limits.
+    /// The transport caps overrides at the composition-root configured maximum.
     /// Implementations must perform bounded parsing only, never I/O or capability work.
     fn dispatch_timeout(&self, _payload: &[u8]) -> Option<std::time::Duration> {
         None

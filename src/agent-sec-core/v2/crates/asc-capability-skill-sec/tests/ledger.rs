@@ -522,3 +522,26 @@ fn resolved_directory_replacement_is_rejected_before_ledger_access() {
     );
     assert!(!f.root.io_dir.join(".skill-meta").exists());
 }
+
+#[test]
+fn ledger_scan_status_reflects_scan_scope_skip() {
+    let f = Fixture::new();
+    fs::create_dir(f.root.io_dir.join("build")).unwrap();
+    fs::write(f.root.io_dir.join("build/main.sh"), "rm -rf /\n").unwrap();
+    let result = f
+        .service
+        .scan(&f.root, &ScanOptions::default(), deadline())
+        .unwrap();
+    // The skipped payload is signed into the manifest...
+    assert!(
+        f.manifest().file_hashes.contains_key("build/main.sh"),
+        "the unscanned payload must be part of the signed content"
+    );
+    // ...and the certified verdict is now warn, not pass, so the trust
+    // pipeline no longer claims full scanner coverage over signed bytes
+    // it never examined.
+    assert_eq!(result["scanStatus"], "warn");
+    let checked = f.check();
+    assert_eq!(checked["status"], "warn");
+    assert_eq!(checked["findings"][0]["rule"], "scan-scope-skip");
+}

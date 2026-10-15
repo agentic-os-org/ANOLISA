@@ -99,6 +99,11 @@ Shell，同时仍可获得命令执行后的洞察。再次按下即可返回 As
 （或单次会话使用 `COSH_SHELL_STATUS_SYMBOLS=1`）后，每个提示符上方会显示
 `◇`（Assisted）或 `◌`（Shell-only）状态行。默认关闭。
 
+登录时，`cosh-shell` 会在后台检查托管安装的 `cosh-ng` 是否有可用更新，并在
+下一个空闲提示符处显示提示。该检查默认开启；设置 `COSH_SHELL_UPGRADE_CHECK=off`
+可在下一次会话禁用检查。完整的关闭取值与缓存路径见
+[登录升级提示](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#登录升级提示)。
+
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
 
 ```bash
@@ -120,9 +125,13 @@ bash: hello: command not found
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。
 需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
-普通 Shell prompt 保留原生路径补全。
+普通 Shell prompt 保留原生路径补全。运行 `/bug <description>` 可输出经过预填、
+可检查的 GitHub issue URL。命令不会读取日志或提交 issue；本地日志目录存在时，
+只会提醒你自行检查、脱敏并粘贴相关内容。
 
-`cosh-core` 中的配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
+`cosh-core` 中的系统和用户配置 Hook 默认启用，无需设置 `hooks.enabled = true`。
+项目配置中的 Hook 定义被忽略；`.cosh/hooks` 中的项目 Shell Hook 另由
+`/hooks trust-project` 授权。
 显式设置 `hooks.enabled = false` 后，即使安装了 Extension，配置 Hook 也保持禁用。
 禁用范围和 `PreToolUse` 默认阻断行为详见
 [Hooks](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/hooks.md)。

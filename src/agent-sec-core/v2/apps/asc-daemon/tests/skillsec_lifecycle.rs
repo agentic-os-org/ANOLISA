@@ -56,8 +56,9 @@ impl DiagnosticSink for Outputs {
 fn analyze_audits_once_without_ledger_writes_despite_independent_output_failures() {
     for failure in ["none", "audit", "telemetry", "diagnostics"] {
         let temporary = tempfile::tempdir().unwrap();
-        let state = temporary.path().join("state");
-        let skill = temporary.path().join("skill");
+        let root = temporary.path().canonicalize().unwrap();
+        let state = root.join("state");
+        let skill = root.join("skill");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(&skill).unwrap();
@@ -150,7 +151,7 @@ fn rpc_context_reaches_skill_audit_without_leaking_into_telemetry_or_the_next_re
     let service = Arc::new(
         SkillSecService::new(
             SkillSecConfig {
-                state_dir: state.path().into(),
+                state_dir: state.path().canonicalize().unwrap(),
                 managed_skill_dirs: Vec::new(),
             },
             ScannerRegistry::default(),
@@ -159,10 +160,9 @@ fn rpc_context_reaches_skill_audit_without_leaking_into_telemetry_or_the_next_re
     );
     let outputs = Arc::new(Outputs::default());
     let dispatcher = asc_daemon_handler::DaemonDispatcher::new(
-        asc_pap::PapService::new(
-            Arc::new(asc_pap_repository_memory::ProcessLocalPapRepository::default()),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        ),
+        asc_pap::PapService::new(Arc::new(
+            asc_policy_repository_sqlite::SqlitePolicyRepository::temporary().unwrap(),
+        )),
         Arc::new(asc_daemon_core::RootManagedPrincipalPolicy::default()),
         asc_daemon::skill_application(
             Finalizer::new(outputs.clone(), outputs.clone(), outputs.clone()),

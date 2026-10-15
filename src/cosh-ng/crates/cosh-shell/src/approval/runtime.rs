@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::agent::run::ActiveAgentRun;
 use crate::approval::broker::ApprovalOutcome;
 use crate::approval::cards::write_approval_receipt;
@@ -25,6 +27,13 @@ pub(crate) fn render_approval_actions<W: Write>(
 ) -> std::io::Result<()> {
     for (idx, event) in events.iter().enumerate() {
         let event_index = event_index_base + idx;
+        if event_index < state.approval_slice.invalidated_card_events_before
+            && event.component.as_deref() == Some("card")
+            && (approval_focus_from_event(event, &state.approvals.requests).is_some()
+                || approval_command_from_event(event).is_some())
+        {
+            continue;
+        }
         if let Some((id, action)) = approval_focus_from_event(event, &state.approvals.requests) {
             let key = format!("approval-focus-{event_index}");
             if !state.approvals.handled_actions.insert(key) {
@@ -33,7 +42,7 @@ pub(crate) fn render_approval_actions<W: Write>(
             if approval_is_pending(state, &id) {
                 state.approvals.focus.insert(id, action);
                 redraw_current_approval_request(state, output)?;
-                output.flush()?;
+                flush_legacy_approval_panel(state, output)?;
             }
             continue;
         }
@@ -90,7 +99,11 @@ pub(crate) fn render_approval_actions<W: Write>(
                 }
                 render_runtime_details(state, blocks, &command.id, output)?;
             }
-            output.flush()?;
+            if event.component.as_deref() == Some("card") {
+                flush_legacy_approval_panel(state, output)?;
+            } else {
+                output.flush()?;
+            }
             continue;
         }
 
@@ -142,12 +155,16 @@ pub(crate) fn render_approval_actions<W: Write>(
         }
 
         if let Some(decision) = apply_approval_decision(state, request_index, command.kind) {
-            // Capture the consented run before delivery: fallback handoff
+            // Capture the consented run and its blocks before delivery: fallback handoff
             // paths may stop the run (clearing the consent state) while the
             // remaining queued requests of this turn still must be swept.
             let sweep_run_id = (command.kind == ApprovalCommandKind::ApproveTurn
                 && decision.request.status == ApprovalRequestStatus::Approved)
-                .then(|| decision.request.run_id.clone());
+                .then(|| {
+                    let run_id = decision.request.run_id.clone();
+                    let blocked = state.control.trust.blocked_commands_for_run(&run_id);
+                    (run_id, blocked)
+                });
             // When a sweep follows, it owns the final next-card repaint so
             // requests it is about to resolve never flash their own card.
             let render_next_card = sweep_run_id.is_none();
@@ -159,17 +176,31 @@ pub(crate) fn render_approval_actions<W: Write>(
                 output,
                 render_next_card,
             )?;
-            if let Some(run_id) = sweep_run_id {
+            if let Some((run_id, blocked)) = sweep_run_id {
                 // Swept resolutions are not tied to the user's input event:
                 // pass None so any recovery/continuation run they spawn does
                 // not anchor selectable-command state to an unrelated event
                 // index (review note on PR #1825).
-                sweep_batch_consented_requests(&run_id, None, adapter, state, output)?;
+                sweep_batch_consented_requests_with_blocks(
+                    &run_id, None, adapter, state, output, blocked,
+                )?;
             }
         }
         output.flush()?;
     }
 
+    Ok(())
+}
+
+fn flush_legacy_approval_panel<W: Write>(
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if state.approval_slice.inline_geometry.is_none()
+        && !crate::approval::slice_present::slice_surface_is_live(state)
+    {
+        output.flush()?;
+    }
     Ok(())
 }
 
@@ -231,19 +262,34 @@ fn deliver_approval_decision<W: Write>(
         }
 
         if outcome == ApprovalOutcome::ForegroundShellHandoff {
-            render_approval_resolution(state, &decision.request, decision.title, output)?;
+            let committed_slice = state.approval_slice.activation.is_some()
+                && decision.request.status == ApprovalRequestStatus::Approved;
             let active_owner = state
                 .agent_run
                 .active
                 .as_ref()
                 .is_some_and(|run| active_run_owns_provider_approval(run, &decision.request));
-            if decision.request.status == ApprovalRequestStatus::Approved && active_owner {
-                mark_provider_approval_resolved(state);
+            if committed_slice {
+                queue_approved_shell_handoff(state, &decision.request);
+                if active_owner {
+                    mark_provider_approval_resolved(state);
+                    if !request_can_receive_host_executed_result(state, &decision.request) {
+                        stop_active_agent_run_without_rendering(state, output)?;
+                    }
+                }
             }
-            if active_owner && !request_can_receive_host_executed_result(state, &decision.request) {
-                stop_active_agent_run_without_rendering(state, output)?;
+            render_approval_resolution(state, &decision.request, decision.title, output)?;
+            if !committed_slice {
+                if decision.request.status == ApprovalRequestStatus::Approved && active_owner {
+                    mark_provider_approval_resolved(state);
+                }
+                if active_owner
+                    && !request_can_receive_host_executed_result(state, &decision.request)
+                {
+                    stop_active_agent_run_without_rendering(state, output)?;
+                }
+                queue_approved_shell_handoff(state, &decision.request);
             }
-            queue_approved_shell_handoff(state, &decision.request);
             if render_next_card {
                 render_current_approval_request(state, output)?;
             }
@@ -302,6 +348,36 @@ fn deliver_approval_decision<W: Write>(
     Ok(())
 }
 
+/// Whether a pending request must keep its own card despite run-scope consent.
+///
+/// The live block set is run-bound; captured blocks survive owner teardown.
+/// It holds commands whose last attempt in that run left the effect
+/// state uncertain, keyed by `trust_key_from_command` of the command a handoff
+/// executes. The lookup has to derive that same command rather than the display
+/// preview: a `{"cmd": ...}` tool input shows the serialized object on the card
+/// while executing the `cmd` value, and a spelling differing only in whitespace
+/// the key preserves must not miss either. Fails closed — a request that cannot
+/// be mapped to an executable command is exactly the case that must not be
+/// replayed on a blanket consent.
+fn blocked_from_turn_consent(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+    captured_blocks: &HashSet<String>,
+) -> bool {
+    match crate::approval::handoff::shell_handoff_command_from_request(request) {
+        Ok(command) => {
+            crate::approval::handoff::trust_key_from_command(&command).is_some_and(|key| {
+                captured_blocks.contains(&key)
+                    || state
+                        .control
+                        .trust
+                        .is_blocked_for_turn_consent(&request.run_id, &key)
+            })
+        }
+        Err(_) => true,
+    }
+}
+
 /// After the user grants turn-scope batch consent, sweep the queue: resolve
 /// every remaining pending request of the consented run that the consent
 /// covers, each through the same resolution + delivery pipeline as a user
@@ -314,12 +390,23 @@ pub(crate) fn sweep_batch_consented_requests<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    while let Some(request_index) = state
-        .approvals
-        .requests
-        .iter()
-        .position(|request| batch_consent_covers_request(request, run_id))
-    {
+    let blocked = state.control.trust.blocked_commands_for_run(run_id);
+    sweep_batch_consented_requests_with_blocks(run_id, event_index, adapter, state, output, blocked)
+}
+
+fn sweep_batch_consented_requests_with_blocks<W: Write>(
+    run_id: &str,
+    event_index: Option<usize>,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+    mut captured_blocks: HashSet<String>,
+) -> std::io::Result<()> {
+    captured_blocks.extend(state.control.trust.blocked_commands_for_run(run_id));
+    while let Some(request_index) = state.approvals.requests.iter().position(|request| {
+        batch_consent_covers_request(request, run_id)
+            && !blocked_from_turn_consent(state, request, &captured_blocks)
+    }) {
         if approval_resolution_needs_queue_slot(state, &state.approvals.requests[request_index])
             && !control_queue_has_capacity(state)
         {
@@ -487,7 +574,7 @@ pub(crate) fn drain_unhomed_control_requests_with_handle(
     state.control.approval_ledger_mut().clear_run(run_id);
 }
 
-fn active_run_owns_provider_approval(
+pub(crate) fn active_run_owns_provider_approval(
     active_run: &ActiveAgentRun,
     request: &RuntimeApprovalRequest,
 ) -> bool {

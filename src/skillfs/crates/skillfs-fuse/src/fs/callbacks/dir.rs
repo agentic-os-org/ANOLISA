@@ -43,7 +43,10 @@ impl SkillFs {
                     (FUSE_ROOT_ID, FileType::Directory, ".".to_string()),
                     (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
                     (
-                        self.inodes.lookup_by_path("/skills").unwrap_or(2),
+                        // Single resolution point (paths::skills_dir_ino):
+                        // reallocates after FORGET; a dangling constant would
+                        // bind the "skills" dentry to a dead inode.
+                        self.skills_dir_ino(),
                         FileType::Directory,
                         "skills".to_string(),
                     ),
@@ -65,6 +68,20 @@ impl SkillFs {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().to_string();
+                        // The ordinary view hides the same top-level entries
+                        // the flat `/skills` listing hides (S3 reserved roots,
+                        // I2 staging roots, D1.1 hidden skills).
+                        if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
+                            continue;
+                        }
+                        // I2/H3: top-level staging roots are installer-private
+                        // workspaces; hide them from the root listing exactly
+                        // as the flat layout hides them from /skills and the
+                        // Hermes CategoryDir branch hides them inside a
+                        // category.
+                        if self.is_staging_skill_root(&name) {
+                            continue;
+                        }
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -199,9 +216,14 @@ impl SkillFs {
                         (parent_ino, FileType::Directory, "..".to_string()),
                     ];
 
-                    let md_path = format!("{}/SKILL.md", path);
-                    let md_ino = self.inodes.readdir_ino(&md_path);
-                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    // Same gate as the opendir snapshot: list the virtual
+                    // SKILL.md only when lookup/getattr/open can serve it
+                    // (present, and within the mount's size ceiling).
+                    if self.skill_md_listable(&skill_name) {
+                        let md_path = format!("{}/SKILL.md", path);
+                        let md_ino = self.inodes.readdir_ino(&md_path);
+                        entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    }
 
                     if skill_name != "skill-discover" {
                         let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
@@ -476,6 +498,18 @@ impl SkillFs {
                         // files/dirs under the category are passthrough and
                         // are always listed with their true file type.
                         if is_dir {
+                            // A dot-prefixed directory is a managed/reserved
+                            // location (the resolver refuses those components)
+                            // and the store loader skips it, so a nested
+                            // `.foo/SKILL.md` is never a managed Skill: keep
+                            // it out of the listing, like the Hermes root
+                            // filter does. Plain dot content (files and
+                            // non-skill dirs) stays listed.
+                            if name.starts_with('.')
+                                && skillfs_core::store::has_regular_skill_md(&entry.path())
+                            {
+                                continue;
+                            }
                             // H3: staging roots inside category are hidden.
                             if self.is_staging_skill_root(&name) {
                                 continue;
@@ -506,10 +540,12 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                // H3: staging and pending install bypass for nested skills.
+                // H3: staging and pending install bypass for nested skills
+                // (activation and the SKILL.md size gate alike).
                 let nested_id = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id)
-                    && !self.is_pending_install(&nested_id)
+                let gated =
+                    !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
+                if gated
                     && matches!(
                         self.resolve_hermes_nested_read(category, skill_name),
                         ReadResolution::Hidden
@@ -538,6 +574,9 @@ impl SkillFs {
                     for entry in dir_iter.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name == SKILL_META_DIR && !show_meta {
+                            continue;
+                        }
+                        if !self.nested_entry_listable(&entry, gated) {
                             continue;
                         }
                         let kind = dir_entry_file_type(&entry);
@@ -702,6 +741,20 @@ impl SkillFs {
                                 continue;
                             }
                             let name = entry.file_name().to_string_lossy().to_string();
+                            // The ordinary view hides the same top-level
+                            // entries the flat `/skills` listing hides (S3
+                            // reserved roots, I2 staging roots, D1.1 hidden
+                            // skills).
+                            if self.hermes_root_entry_is_hidden(&name, &entry.path()) {
+                                continue;
+                            }
+                            // I2/H3: top-level staging roots are hidden from
+                            // the opendir snapshot too (the readdir branch
+                            // filters them; a snapshot taken at opendir must
+                            // not leak them either).
+                            if self.is_staging_skill_root(&name) {
+                                continue;
+                            }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = self.skill_inode_path(&name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1143,6 +1196,18 @@ impl SkillFs {
                                 continue;
                             }
                             let name = entry.file_name().to_string_lossy().to_string();
+                            // A dot-prefixed directory with SKILL.md is never
+                            // a managed Skill (the store loader skips hidden
+                            // directories and the resolver refuses dot
+                            // components), so the category listing hides it
+                            // exactly as the Hermes root filter does. Plain
+                            // dot content stays listed.
+                            if entry.path().is_dir()
+                                && name.starts_with('.')
+                                && skillfs_core::store::has_regular_skill_md(&entry.path())
+                            {
+                                continue;
+                            }
                             // H3: staging roots inside category hidden from listing.
                             if entry.path().is_dir() && self.is_staging_skill_root(&name) {
                                 continue;
@@ -1178,8 +1243,11 @@ impl SkillFs {
                 ref skill_name,
             } => {
                 let nested_id = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id)
-                    && !self.is_pending_install(&nested_id)
+                // Staging and pending installs bypass activation and the
+                // SKILL.md size gate alike.
+                let gated =
+                    !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
+                if gated
                     && matches!(
                         self.resolve_hermes_nested_read(category, skill_name),
                         ReadResolution::Hidden
@@ -1210,6 +1278,9 @@ impl SkillFs {
                         for entry in phys_entries {
                             let name = entry.file_name().to_string_lossy().to_string();
                             if name == SKILL_META_DIR && !show_meta {
+                                continue;
+                            }
+                            if !self.nested_entry_listable(&entry, gated) {
                                 continue;
                             }
                             let kind = dir_entry_file_type(&entry);

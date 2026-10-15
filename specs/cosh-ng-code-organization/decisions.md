@@ -212,3 +212,17 @@ Task state growth, extract a Task presentation state holder with its owning
 fields and lifecycle together; continue the existing per-domain state split
 before reaching the 1000-line growth bar. Do not move the two fields alone
 into a new cross-owner interface.
+
+## D22: raw relay tests use the approval action-set DTO
+
+The private relay component fixtures construct RawInputCapture::Approval with
+ApprovalActionSet::Standard and StandardHighRisk. D15 already places this
+stable presentation DTO in ui/agent_render/actions.rs. These two references
+are confined to test data; they call no renderer and mutate no approval or
+runtime state. Moving the DTO owner would change the existing capture contract
+across raw_input and UI, which is outside this slice.
+
+Review the two registered references with the capture generation and queued
+input assertions. Revisit this exception when D15 moves the DTO to types/;
+remove the two references and the inventory entry together. Production
+shell_host dependency direction remains unchanged.

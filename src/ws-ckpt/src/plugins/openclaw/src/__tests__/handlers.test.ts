@@ -578,6 +578,56 @@ describe("handleConfig", () => {
     persistSpy.mockRestore();
   });
 
+  it("update workspace refuses when cwd is inside the new workspace", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    process.cwd = () => "/new/path/sub";
+    const r = await handleConfig("update", "workspace", "/new/path");
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("Refused");
+    expect(pluginState.resolvedConfig!.workspace).toBe("/ws");
+    expect(migrateSpy).not.toHaveBeenCalled();
+    expect(persistSpy).not.toHaveBeenCalled();
+    migrateSpy.mockRestore();
+    persistSpy.mockRestore();
+  });
+
+  it("update workspace warns when setup of the new workspace fails", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    const origManager = pluginState.manager;
+    pluginState.manager = { ensureWorkspace: vi.fn().mockResolvedValue(false) } as any;
+    try {
+      const r = await handleConfig("update", "workspace", "/new/path");
+      expect(r.isError).toBe(false);
+      expect(r.text).toContain("Config updated: workspace = /new/path");
+      expect(r.text).toContain("WARNING");
+      expect(r.text).toContain("setup failed");
+      expect(pluginState.resolvedConfig!.workspace).toBe("/new/path");
+    } finally {
+      pluginState.manager = origManager;
+      migrateSpy.mockRestore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("update workspace reports clean success when setup succeeds", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    const origManager = pluginState.manager;
+    pluginState.manager = { ensureWorkspace: vi.fn().mockResolvedValue(true) } as any;
+    try {
+      const r = await handleConfig("update", "workspace", "/new/path");
+      expect(r.isError).toBe(false);
+      expect(r.text).toContain("Config updated: workspace = /new/path");
+      expect(r.text).not.toContain("WARNING");
+    } finally {
+      pluginState.manager = origManager;
+      migrateSpy.mockRestore();
+      persistSpy.mockRestore();
+    }
+  });
+
   it("update maxSnapshotsNum without value returns error", async () => {
     const r = await handleConfig("update", "maxSnapshotsNum");
     expect(r.isError).toBe(true);
@@ -882,5 +932,18 @@ describe("handleRollback — numAncestors", () => {
     const r = await handleRollback(undefined, undefined, 2);
     expect(r.isError).toBe(false);
     expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2, false);
+  });
+  it("update workspace rejects line breaks", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const r = await handleConfig(
+      "update",
+      "workspace",
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+    );
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("single-line");
+    expect(pluginState.resolvedConfig!.workspace).toBe("/ws");
+    expect(migrateSpy).not.toHaveBeenCalled();
+    migrateSpy.mockRestore();
   });
 });

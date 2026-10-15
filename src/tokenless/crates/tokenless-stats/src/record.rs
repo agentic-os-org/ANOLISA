@@ -22,6 +22,7 @@ pub enum OperationType {
 }
 
 impl OperationType {
+    /// Stable string form used in the SQLite `operation` column and CLI output.
     pub fn as_str(&self) -> &'static str {
         match self {
             OperationType::CompressSchema => "compress-schema",
@@ -62,6 +63,7 @@ pub enum CompressionMode {
 }
 
 impl CompressionMode {
+    /// Stable string form used in the SQLite `mode` column and CLI output.
     pub fn as_str(&self) -> &'static str {
         match self {
             CompressionMode::Active => "active",
@@ -206,6 +208,13 @@ impl StatsRecord {
     /// Set the tool use ID
     pub fn with_tool_use_id(mut self, tool_use_id: impl Into<String>) -> Self {
         self.tool_use_id = Some(tool_use_id.into());
+        self
+    }
+
+    /// Set an explicit timestamp (for callers that backfill records with
+    /// known times instead of the construction-time `Local::now()`)
+    pub fn with_timestamp(mut self, timestamp: DateTime<Local>) -> Self {
+        self.timestamp = timestamp;
         self
     }
 

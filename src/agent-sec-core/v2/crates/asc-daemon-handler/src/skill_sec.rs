@@ -80,6 +80,9 @@ mod tests {
     };
     use asc_action_types::ActionId;
     use asc_capability_code_scan::{CodeScanAuditProjector, CodeScanExecutor};
+    use asc_capability_prompt_scan::{
+        CachingScannerProvider, PromptScanAuditProjector, PromptScanExecutor, PromptScanWarmup,
+    };
     use asc_capability_skill_sec::SkillSecService;
     use asc_capability_skill_sec::executor::{SkillSecAuditProjector, SkillSecExecutor};
     use asc_capability_skill_sec::{SkillSecConfig, scanner::ScannerRegistry};
@@ -102,7 +105,7 @@ mod tests {
             ActionService::new(
                 ActionRuntime::new(
                     ActionId::CodeScan,
-                    CodeScanExecutor,
+                    CodeScanExecutor::default(),
                     CodeScanAuditProjector,
                     finalizer.clone(),
                 ),
@@ -114,6 +117,13 @@ mod tests {
                     asc_capability_pii_scan::PiiAuditProjector,
                     asc_action_runtime::testing::discarding_finalizer(),
                 ),
+                ActionRuntime::new(
+                    ActionId::PromptScan,
+                    PromptScanExecutor::default(),
+                    PromptScanAuditProjector,
+                    asc_action_runtime::testing::discarding_finalizer(),
+                ),
+                PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
             )
             .with_skill_sec(ActionRuntime::new(
                 ActionId::SkillSec,
@@ -127,7 +137,7 @@ mod tests {
     #[test]
     fn consumer_errors_and_kernel_identity_remain_distinct_from_protocol_errors() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().join("state");
+        let state = directory.path().canonicalize().unwrap().join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let service = Arc::new(
@@ -180,16 +190,15 @@ mod tests {
     #[test]
     fn skill_budget_does_not_change_ordinary_methods_or_embedding_defaults() {
         use asc_daemon_service::RequestDispatcher as _;
-        let pap = asc_pap::PapService::new(
-            Arc::new(asc_pap_repository_memory::ProcessLocalPapRepository::default()),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        );
+        let pap = asc_pap::PapService::new(Arc::new(
+            asc_policy_repository_sqlite::SqlitePolicyRepository::temporary().unwrap(),
+        ));
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let service = Arc::new(
             SkillSecService::new(
                 SkillSecConfig {
-                    state_dir: directory.path().into(),
+                    state_dir: directory.path().canonicalize().unwrap(),
                     managed_skill_dirs: Vec::new(),
                 },
                 ScannerRegistry::default(),
@@ -242,7 +251,7 @@ mod tests {
         let service = Arc::new(
             SkillSecService::new(
                 SkillSecConfig {
-                    state_dir: directory.path().into(),
+                    state_dir: directory.path().canonicalize().unwrap(),
                     managed_skill_dirs: Vec::new(),
                 },
                 ScannerRegistry::default(),
@@ -255,7 +264,7 @@ mod tests {
             ActionService::new(
                 ActionRuntime::new(
                     ActionId::CodeScan,
-                    CodeScanExecutor,
+                    CodeScanExecutor::default(),
                     CodeScanAuditProjector,
                     finalizer.clone(),
                 ),
@@ -267,6 +276,13 @@ mod tests {
                     asc_capability_pii_scan::PiiAuditProjector,
                     asc_action_runtime::testing::discarding_finalizer(),
                 ),
+                ActionRuntime::new(
+                    ActionId::PromptScan,
+                    PromptScanExecutor::default(),
+                    PromptScanAuditProjector,
+                    asc_action_runtime::testing::discarding_finalizer(),
+                ),
+                PromptScanWarmup::new(Arc::new(CachingScannerProvider::default())),
             )
             .with_skill_sec(ActionRuntime::new(
                 ActionId::SkillSec,

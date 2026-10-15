@@ -11,9 +11,10 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
 | cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
-| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
+| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
+| QwenWorkCN (macOS local) | `qwenwork` | — | Replaces Bash input | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
@@ -32,9 +33,11 @@ there because the original would remain visible and total context would grow. It
 only for additive environment-error guidance. A statistics record proves that a candidate became
 smaller, not by itself that the host removed the original from its model request.
 
+PostTool leaves the entire JSON response unchanged when its parser cannot preserve a numeric value. Otherwise, cleanup and record reduction can proceed; Core selects TOON only when decoding it recovers the same retained values and types.
+
 ## Adapter processing rules
 
-The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one
+The shared Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode PostTool hook sends one
 `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
 with the existing shell tool. Otherwise Core accepts only lossless candidates. Every non-`applied`
@@ -83,6 +86,81 @@ RTK wrapper from the command Hermes actually executed. All three therefore bypas
 compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
+
+### QwenWork (macOS local mode)
+
+The `qwenwork` adapter targets QwenWorkCN (千问办公), independently of Qoder CLI,
+Qwen Code, and QwenPaw. QwenWorkCN 1.2.5 macOS local sessions have been tested for
+Bash rewriting, full MCP response replacement, JSON-to-TOON output, and Read
+passthrough. Security-workspace/Linux VM sessions are unsupported and the hook
+dispatcher passes through outside macOS.
+
+PreToolUse matches **Bash only** and rewrites supported commands through RTK.
+PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
+the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
+pass through because replacing their real output with telemetry would lose content;
+full `mcp_call` responses still use normal compression. Accepted results replace
+the original through `updatedToolOutput`; objects and arrays retain their types,
+while text slots can use TOON. File-content protection, unsupported-content
+passthrough, and RTK deduplication still apply. Statistics use the separate Agent
+ID `qwenwork`. Tool Ready and Schema hooks are not registered.
+
+Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
+Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but
+not for response compression; a missing RTK produces a warning. Ensure these
+binaries are available to the desktop session, not only an interactive terminal.
+
+Quit QwenWorkCN before installation or upgrade, then run:
+
+```bash
+anolisa adapter scan
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
+```
+
+The CLI copies a self-contained plugin to `~/.qwenworkcn/plugins-custom/tokenless`
+and records file ownership. Restart QwenWorkCN and open a new **local** session;
+check plugin activation in the application. `status` verifies application presence
+and managed files, while loading and activation remain `unknown`. Sideloading
+never changes settings, permissions, databases, or disabled/blocked plugin lists.
+Versions other than the validated 1.2.5 produce a compatibility warning.
+
+`TOKENLESS_QWENWORK_APP` selects a non-default application bundle;
+`TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults search `/Applications`
+and `~/Applications`, with data under `~/.qwenworkcn`. Use absolute paths (a leading
+`~` is supported). Keep the same data directory for status, disable, and re-enable;
+to move it, disable using the original setting first. Do not use Qoder CLI or
+Qwen Code configuration directories.
+
+Existing installations without a CLI receipt are not adopted. If you previously
+used the bundled scripts or `make qwenwork-install`, uninstall with the original
+script before enabling through the CLI (adjust the resource path as needed):
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+anolisa adapter enable tokenless qwenwork
+```
+
+Use the CLI to remove CLI-managed copies:
+
+```bash
+anolisa --dry-run adapter disable tokenless qwenwork
+anolisa adapter disable tokenless qwenwork
+```
+
+Removal does not require the application, source bundle, or hook dependencies.
+It removes only unchanged receipt-owned files and empty plugin directories;
+unrelated files remain. Modified files are preserved and keep a failed-cleanup
+receipt: restore or remove the reported conflict, then retry. Re-enable refuses
+to overwrite user changes. Interrupted copies retain a receipt for retry or cleanup.
+Restart the application after removal as well.
+
+The standalone bundled scripts and source-checkout `make qwenwork-install` /
+`make qwenwork-uninstall` remain separate alternatives. CLI copies exclude those
+lifecycle scripts and their ownership marker. Neither route uses the embedded
+Qoder CLI or undocumented desktop APIs. To return to standalone management,
+disable the CLI-managed adapter first, then use the standalone installer.
 
 ### DeepSeek Harness native processing
 
@@ -313,7 +391,44 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. OpenClaw 2026.6.6 or later is required. Explicitly enable the Tokenless plugin so its declared tool-result middleware can replace text before the same-turn model request. Response compression and RTK rewriting default to enabled; Core selects eligible lossless TOON candidates. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+
+Tokenless processes only the result delivered by OpenClaw. On legacy hosts such as
+2026.8.2, registering any applicable result middleware causes the host to cap each
+text block at 100,000 UTF-16 code units before the callback, even if the middleware
+returns no replacement. Large `details` may also be truncated, losing fields such
+as exit status. Fail-open preserves this received result; it cannot recover text
+or metadata already removed by the host. A clipped JSON document may therefore
+pass through without compression. These hosts remain supported within that limit.
+
+For full native text input at this boundary, prefer an OpenClaw build containing
+[upstream commit `2f620b970a04`](https://github.com/openclaw/openclaw/commit/2f620b970a0458531588d6c8067540164197580e).
+The tested build and the earlier release both report `2026.10.2`, so the version
+string alone does not establish that the fix is present. Legacy nested
+`toolResult` normalization, individual tools and downstream model-context budgets
+can still limit output. Tokenless does not automatically read a saved full-output
+file or restore a discarded tail. Set `post_tool_enabled: false` to stop Tokenless
+from registering this middleware; other plugins may still register their own.
+
+The optional `selective-claw` context engine has its own configuration under
+`plugins.entries.selective-claw.config`, separate from the response adapter:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "selective-claw": {
+        "config": { "enabled": true, "freshTailTurns": 3, "dbPath": "~/.openclaw/selective-claw.db" }
+      }
+    }
+  }
+}
+```
+
+`~/` expands to the current user's home directory. With no `dbPath`, the archive
+is `selective-claw.db` under `OPENCLAW_STATE_DIR`, or under `~/.openclaw` when that
+variable is unset. Setting the plugin's `enabled` option to `false` skips database,
+context engine and recall tool registration.
 
 ### Hermes
 
@@ -343,6 +458,10 @@ adapter with `anolisa adapter disable tokenless dsh`; the receipt already
 records the profile names, so disable does not accept another `--profile`.
 
 ### OpenCode
+
+Schema compression uses the host's model-facing JSON Schema while preserving its runtime
+parameter validator. Hosts that expose only a runtime validator skip schema compression;
+response compression and command rewriting remain available.
 
 OpenCode discovers global local plugins at startup. For an ANOLISA-managed installation, use:
 

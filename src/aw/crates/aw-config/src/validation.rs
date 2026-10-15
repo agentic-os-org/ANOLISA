@@ -19,8 +19,27 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     // Called only after schema validation; these conversions still propagate a
     // visible error if the bundled shape and semantic validator ever diverge.
     let spec = &document["spec"];
+    for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
+        require(
+            agent.get("qoder").is_none() || agent["adapter"] == "qoder",
+            &format!("/spec/agents/{name}/qoder"),
+            "Qoder settings require the Qoder Adapter",
+        )?;
+    }
     let providers = spec["providers"].as_object().ok_or(Error::InvalidSchema)?;
     let events = spec["events"].as_object().ok_or(Error::InvalidSchema)?;
+    for (name, provider) in providers {
+        let protocol = provider["protocol"]
+            .as_str()
+            .unwrap_or(crate::HOOK_PROTOCOL);
+        require(
+            !matches!(protocol, "native-hook/v1alpha1" | crate::HOOK_PROTOCOL)
+                || provider.get("config").is_none()
+                || provider["config"].as_object().is_some_and(|config| config.is_empty()),
+            &format!("/spec/providers/{name}/config"),
+            "command hooks have no Provider private configuration; use explicit argv and environment",
+        )?;
+    }
     for (name, event) in events {
         let path = format!("/spec/events/{name}");
         let enabled = event["enabled"] == true;
@@ -72,11 +91,48 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 &format!("{path}/provider"),
                 "unknown Provider reference",
             )?;
+            let native = step.get("native").is_some();
+            let protocol = providers[provider]["protocol"]
+                .as_str()
+                .unwrap_or(crate::HOOK_PROTOCOL);
+            require(
+                native == (protocol == "native-hook/v1alpha1"),
+                &format!("{path}/provider"),
+                "step shape must match the referenced Provider protocol",
+            )?;
+            require(
+                protocol != "aw-provider/v1alpha1" || step.get("operation").is_some(),
+                &format!("{path}/operation"),
+                "structured Providers require an explicit operation",
+            )?;
+            require(
+                protocol != crate::HOOK_PROTOCOL
+                    || step.get("operation").is_none()
+                    || step["operation"] == "invoke",
+                &format!("{path}/operation"),
+                "boolean hooks support only the default invoke operation",
+            )?;
+            require(
+                step.get("reason_code").is_none() || protocol == crate::HOOK_PROTOCOL,
+                &format!("{path}/reason_code"),
+                "configured reason codes belong only to boolean hooks",
+            )?;
+            require(
+                !native || matches!(name.as_str(), "tool.before" | "tool.after"),
+                &path,
+                "native hooks are defined only for tool.before and tool.after",
+            )?;
+            require(
+                !native || matches!(step["on_error"].as_str(), Some("report" | "block")),
+                &format!("{path}/on_error"),
+                "native hooks support report or block failure actions",
+            )?;
             let active = enabled && step["enabled"] != false;
-            for (index, effect) in step["effects"]
-                .as_array()
-                .ok_or(Error::InvalidSchema)?
-                .iter()
+            for (index, effect) in step
+                .get("effects")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
                 .enumerate()
             {
                 let effect = effect.as_str().ok_or(Error::InvalidSchema)?;

@@ -90,8 +90,10 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
 #define SSL_EMIT_ONE(TYPE, TIER, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_) \
     do {                                                                        \
         struct TYPE *_d = bpf_ringbuf_reserve(&rb, sizeof(struct TYPE), 0);     \
-        if (!_d)                                                                \
+        if (!_d) {                                                              \
+            record_ring_buffer_drop();                                          \
             break;                                                              \
+        }                                                                       \
         _d->source = EVENT_SOURCE_SSL;                                          \
         _d->timestamp_ns = (ts_);                                              \
         _d->delta_ns = (delta_);                                               \
@@ -366,8 +368,10 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
      * handshake costs ~one header in the ring instead of the prior 4 MiB reserve. */
     struct probe_SSL_data_t *data =
         bpf_ringbuf_reserve(&rb, __builtin_offsetof(struct probe_SSL_data_t, buf), 0);
-    if (!data)
+    if (!data) {
+        record_ring_buffer_drop();
         return 0;
+    }
 
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;

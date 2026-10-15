@@ -95,6 +95,17 @@ stage_payload() {
         dsh/dist/index.js \
         hermes/plugin.yaml \
         qoder/.qoder-plugin/plugin.json \
+        qwenwork/.qoder-plugin/plugin.json \
+        qwenwork/hooks/hooks.json \
+        qwenwork/hooks/run-hook.sh \
+        qwenwork/hooks/shared/hook_utils.py \
+        qwenwork/hooks/shared/rewrite_hook.py \
+        qwenwork/hooks/shared/compress_response_hook.py \
+        qwenwork/hooks/shared/tool_categories.json \
+        qwenwork/scripts/detect.sh \
+        qwenwork/scripts/install.sh \
+        qwenwork/scripts/uninstall.sh \
+        qwenwork/scripts/lifecycle.py \
         claude-code/.claude-plugin/marketplace.json \
         claude-code/.claude-plugin/plugin.json \
         claude-code/hooks/run-hook.sh \
@@ -136,6 +147,21 @@ stage_payload() {
     materialize_hook "$stage" "claude-code/hooks/run-hook.sh"
     materialize_hook "$stage" "qwencode/hooks/run-hook.sh"
 
+    # A native desktop sideload must remain self-contained outside the FHS tree.
+    rm -rf "$stage/adapters/qwenwork/hooks/shared"
+    python3 - "$stage/adapters" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+adapters = Path(sys.argv[1])
+shutil.copytree(
+    adapters / "common/hooks",
+    adapters / "qwenwork/hooks/shared",
+    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+)
+PY
+
     install -p -m 0644 \
         "$adapters/common/cosh-extension.json" \
         "$adapters/common/tool-ready-spec.json" \
@@ -152,7 +178,9 @@ stage_payload() {
         "$stage/adapters/openclaw/index.ts" \
         "$stage/adapters/openclaw/tsconfig.json"
     find "$stage/adapters" "$stage/extensions/tokenless" \
-        \( -name '*.in' -o -name '.gitignore' \) -delete
+        -type d -name '__pycache__' -prune -exec rm -rf {} +
+    find "$stage/adapters" "$stage/extensions/tokenless" \
+        \( -name '*.in' -o -name '.gitignore' -o -name '*.pyc' -o -name '*.pyo' \) -delete
     normalize_modes "$stage"
 
     if [ -n "$(find "$stage" -type l -print -quit)" ]; then

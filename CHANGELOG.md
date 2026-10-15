@@ -7,6 +7,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5] - 2026-09-24
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.13.2 |
+| agentsight | 0.13.1 |
+| tokenless | 0.8.4 |
+| agent-memory | 0.2.8 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.15 |
+| skillfs | 0.5.0 |
+| ws-ckpt | 0.5.0 |
+| cosh-ng | 0.26.0 |
+
+> **Note:** copilot-shell and os-skills are unchanged since v1.4; they are
+> listed to show the complete stack composition.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.26.0, adds persistent managed Tasks with progress inspection after reconnecting and snapshot preview, diff, and switching, users can continue long-running work and launch new Tasks against the restored workspace without restarting the Gateway (#2911, #3438)
+- **agent-sec-core**: Updated to v0.13.2, adds V2 Policy, Scope, and Binding management and brings code scanning, security events, telemetry, and AgentSight policy delivery into one runtime flow, administrators can manage and audit security policies through a unified workflow (#3062, #3097, #3103, #3203, #3246, #3300)
+- **agentsight**: Updated to v0.13.1, adds user preference analysis, classified trajectory-step search, and human labeling and review while strengthening file-delete protection, users can discover reusable experience in historical Agent sessions
+- **tokenless**: Updated to v0.8.4, adds Git diff and HTML reduction plus shared paths in search results, agents can reduce context while retaining key structure, diagnostics, and access to the original content (#3299, #3306, #3173)
+- **anolisa**: Updated to v0.3.15, adds OpenCode integration and cosh-ng diagnostic bundles, unifies Yum 3/DNF 4 behavior, and strengthens RPM verification and diagnostic redaction, administrators get more trustworthy installation and troubleshooting results (#3346, #3317, #3318, #3417, #3431)
+- **agent-memory**: Updated to v0.2.8, adds unprivileged session-directory fallback, corrects BM25 ranking, and separates plugin tool names from OpenClaw's built-in memory tools, agents can recall more relevant memories and use both memory systems without naming conflicts (#3266, #3296, #3347)
+- **skillfs**: Updated to v0.5.0, merges multiple Skill sources into a unified read-only view and adds Kubernetes delivery through Skill Ledger scanning and activation with automatic FUSE recovery, operators can distribute Skills more flexibly while controlling agent-visible access (#3200, #3182, #2701)
+- **ws-ckpt**: Updated to v0.5.0, unifies workspace path identity, recovers interrupted initialization and unregistration, and provides guarded rollback for cosh-ng managed Tasks, users can recover workspace state safely across interrupted operations (#2911)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.26.0, adds `/task` submission for persistent Core/Codex Tasks with checkpoint policies and protected snapshot preview, diff, and switching; adds prefix search and Tab completion in `/agent`, automatic Provider naming and bounded, cancellable ECS RAM Role detection, native Bash 4+ login identity, and Intel macOS 11.0+ installation; hides the ownership status line by default, fixes readonly approval, system-directory traversal, `/dev/null` classification, and Hook request identification, and defaults diagnostic logging to `info`, users can reconnect to ongoing work and use restored workspaces with more reliable setup and shell interaction (#2911, #3438, #3224, #3298, #3358, #3448, #3449, #3345, #3208, #3436, #2708, #2710, #3248, #3331)
+- **agent-sec-core**: Updated to v0.13.2, adds root-authorized V2 Policy/Scope/Binding APIs and CLI commands, AgentSight policy delivery with bounded concurrent reconciliation, daemon-backed Bash/Python regex scanning and capability queries, and compatible JSONL/SQLite scan-event records with trace-context correlation; unifies Skill Ledger inputs, skips unmanaged read-only Raw user Skills, bundles the `pii-checker` Skill with optional redaction, and delivers a hardened systemd service plus OpenClaw 2.0 capability consent and SQLite session evidence, administrators can manage policies and audit security outcomes without one failed binding blocking other processing (#3062, #3097, #3103, #3194, #3203, #3243, #3246, #3300, #3253, #3183, #3241, #3217, #3440)
+- **agentsight**: Updated to v0.13.1, analyzes language, collaboration, testing, correction, and tool preferences with supporting user turns; adds contextual ATIF step queries by message, reasoning, and tool categories, reusable-trajectory labels with human review and search, and Linux 5.10/6.6 file-delete protection with domain isolation, violation events, and startup cleanup; fixes namespace PID resolution, enforcement event consumption, `conversation_id` initialization, silent macOS trajectory errors, and log filtering, and adds a Token Plan Provider preset, users can investigate and reuse historical runs with clearer evidence and more reliable observability (#3041, #3378, #3186)
+- **tokenless**: Updated to v0.8.4, adds opt-in Git diff cropping that retains changed lines and file metadata, recoverable HTML-to-Markdown extraction with removed-element counts while preserving file reads, and shared search paths that retain matches, line numbers, and line endings; preserves output after `</html>`, handles SVG-heavy pages correctly, and provides `rtk recall` for retained truncated output; adds a standalone installer and `install-tokenless` Skill with failed-install recovery, ownership-aware uninstall that preserves runtime data by default, OpenCode support, and improved Claude Code activation, QwenPaw preflight, and repeated uninstall, agents can reduce more output and recover originals with safer installation management (#3299, #3306, #3173, #3386, #3396, #3273, #2322, #3324, #3346, #2193, #3289, #3412)
+- **anolisa**: Updated to v0.3.15, adds OpenCode adapter enable/status/disable with custom config directories, conflict protection, and interrupted-operation retries, plus local cosh-ng diagnostic bundles with health findings in Markdown/JSON reports and no automatic upload; supports Yum 3/DNF 4 with exact versions, direct RPM metadata validation honoring system proxy/private CA settings, and local package queries or Raw installation without remote repositories; checks combined RPM install conflicts in root upgrade previews, distinguishes failed probes from missing components, verifies declared subpackage payloads, and redacts repository credentials, paths, and query strings while retaining origins, administrators get reliable lifecycle checks and actionable diagnostics (#3346, #3317, #3318, #3353, #3294, #3230, #3240, #3280, #3285, #3292, #3417, #3431)
+- **agent-memory**: Updated to v0.2.8, falls back to private per-user runtime or temporary session directories with ownership, permission, and symlink checks, corrects BM25 ranking for search, hybrid retrieval, and automatic recall, and renames OpenClaw tools to `anolisa_memory_search` and `anolisa_memory_get`; declares all four tools in the `coding` profile, rejects the unsupported `expert` profile with guidance, strengthens `sessionId`/`sessionDir` validation and old-client shutdown ordering, and restores source-archive configuration, examples, and adapter assets, users can run without privileged session-directory setup and retain stable access to both memory systems (#3266, #3296, #3347, #3238, #3213, #3231)
+- **skillfs**: Updated to v0.5.0, adds ordered multi-source mounts where earlier sources supply whole same-name Skill directories, copies read-only packages into a private writable source for Ledger scanning and activation, and prevents writes through the agent-visible mount; detects failures through real FUSE reads and attempts bounded remounts within the sidecar, while existing transformed `SKILL.md` handles retain consistent content and new handles see source updates with bounded caches and handle budgets, agents get stable Skill reads and operators can recover mounts with less impact on workload containers (#3200, #3182, #2701, #3202)
+- **ws-ckpt**: Updated to v0.5.0, identifies workspaces by canonical path, rejects conflicting aliases, serializes concurrent initialization, and recovers interrupted init/unregister operations after daemon restart; adds guarded rollback V2 for managed Tasks, snapshots empty workspaces, fails fast with recovery guidance when directories are externally replaced, reports partial `recover --all` failures, and protects recovery data during failed recovery or removal while improving low-space handling; manages OpenClaw tool allowlists through its config CLI, preserves administrator-edited RPM configuration, and fixes Raw adapter discovery, users can trust snapshot outcomes and recover workspaces with fewer state conflicts (#2911, #3059, #3069, #3053, #3221, #3070)
+
+### Compatibility
+
+- **agent-memory OpenClaw tool names**: Replace `memory_search` and `memory_get` in prompts and tool allowlists with `anolisa_memory_search` and `anolisa_memory_get`, restart the OpenClaw Gateway, and start a new conversation. Internal MCP names and stored memories are unchanged (#3347).
+- **ws-ckpt and cosh-ng version pairing**: Managed Task guarded rollback requires ws-ckpt daemon 0.5.0 or newer. The ws-ckpt OpenClaw adapter requires OpenClaw 2026.2.13 or newer. Upgrade cosh-ng and ws-ckpt together and check the OpenClaw version before enabling the adapter (#2911, #3221).
+- **Tokenless installation requirements**: npm requires Node.js 16.7 or newer. Linux source installation provides only the Tokenless CLI; RTK and framework adapters are supplied by npm. Prefer npm for full Agent integration and check resource ownership before switching installation methods (#2322).
+- **cosh-ng login shell behavior**: Enhanced Bash uses native login shell identity by default on Bash 4+ and loads `/etc/profile` and `~/.bash_profile`. Set `shell.login_identity = false` to retain the previous behavior (#3358).
+
 ## [1.4] - 2026-09-10
 
 ### Component Versions

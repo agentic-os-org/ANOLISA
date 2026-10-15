@@ -6,17 +6,123 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
+mod private_key;
+
+use private_key::{private_key_marker_range, redact_private_key_blocks};
+
 use crate::provider::{Message, MessageContent, MessageContentBlock};
 
+#[cfg(test)]
+thread_local! {
+    static REDACTION_WORK: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn redaction_work(reset: bool) -> (usize, usize, usize) {
+    REDACTION_WORK.with(|work| {
+        let current = work.get();
+        if reset {
+            work.set((0, 0, 0));
+        }
+        current
+    })
+}
+
+#[cfg(test)]
+fn record_work(intervals: usize, aliases: usize, bytes: usize) {
+    let current = redaction_work(false);
+    REDACTION_WORK.with(|work| {
+        work.set((
+            current.0 + intervals,
+            current.1 + aliases,
+            current.2 + bytes,
+        ))
+    });
+}
+
 pub(crate) fn redact_text(text: &str) -> String {
-    let (mut redacted, _) = redact_private_key_blocks(text);
+    let (redacted, private_key_block) = redact_text_patterns(text);
+    if private_key_block {
+        return redacted;
+    }
+    if let Ok(mut value @ (Value::Object(_) | Value::Array(_))) =
+        serde_json::from_str::<Value>(text)
+    {
+        let sensitive = redact_json_text_value(&mut value);
+        return if !sensitive && redacted == text {
+            text.to_string()
+        } else {
+            serde_json::to_string(&value).unwrap_or_default()
+        };
+    }
+    redacted
+}
+
+fn redact_json_text_value(value: &mut Value) -> bool {
+    match value {
+        Value::Object(values) => {
+            let reserved: std::collections::HashSet<_> = values.keys().cloned().collect();
+            let mut sensitive = false;
+            let mut next_suffix = std::collections::HashMap::new();
+            for (key, mut value) in std::mem::take(values) {
+                let mut safe_key = redact_text_patterns(&key).0;
+                if safe_key != key {
+                    sensitive = true;
+                    let base = safe_key.clone();
+                    let suffix = next_suffix.entry(base.clone()).or_insert(0usize);
+                    while reserved.contains(&safe_key) || values.contains_key(&safe_key) {
+                        #[cfg(test)]
+                        record_work(0, 1, 0);
+                        *suffix += 1;
+                        safe_key = format!("{base}-{suffix}");
+                    }
+                }
+                if is_sensitive_key(&key)
+                    || sensitive_assignment_pattern().is_match(&format!("{key}=x"))
+                {
+                    value = Value::String("<redacted>".to_string());
+                    sensitive = true;
+                } else {
+                    sensitive |= redact_json_text_value(&mut value);
+                }
+                values.insert(safe_key, value);
+            }
+            sensitive
+        }
+        Value::Array(values) => {
+            let mut sensitive = false;
+            for value in values {
+                sensitive |= redact_json_text_value(value);
+            }
+            sensitive
+        }
+        Value::String(text) => {
+            let redacted = redact_text(text);
+            let sensitive = redacted.as_str() != text.as_str();
+            *text = redacted;
+            sensitive
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn redact_text_patterns(text: &str) -> (String, bool) {
+    let (mut redacted, private_key_block) = redact_private_key_blocks(text);
+    if private_key_block
+        && matches!(
+            serde_json::from_str::<Value>(text),
+            Ok(Value::Object(_) | Value::Array(_))
+        )
+    {
+        return (redacted, true);
+    }
     for (pattern, replacement) in [
         (cookie_header_pattern(), "$prefix<redacted>"),
         (authorization_pattern(), "$prefix$scheme <redacted>"),
         (bearer_pattern(), "$prefix<redacted>"),
         (url_password_pattern(), "$prefix<redacted>@"),
-        (sensitive_flag_pattern(), "$prefix<redacted>$suffix"),
-        (sensitive_assignment_pattern(), "$prefix<redacted>$suffix"),
+        (sensitive_flag_pattern(), "$prefix<redacted>"),
+        (sensitive_assignment_pattern(), "$prefix<redacted>"),
         (github_token_pattern(), "<redacted>"),
         (opaque_token_pattern(), "<redacted>"),
         (jwt_pattern(), "<redacted>"),
@@ -25,7 +131,7 @@ pub(crate) fn redact_text(text: &str) -> String {
     ] {
         redacted = pattern.replace_all(&redacted, replacement).into_owned();
     }
-    redacted
+    (redacted, private_key_block)
 }
 
 /// Returns whether text matches a redaction rule or private-key end marker.
@@ -196,66 +302,37 @@ fn is_sensitive_key(key: &str) -> bool {
             | "accesstoken"
             | "refreshtoken"
             | "idtoken"
+            | "sessiontoken"
+            | "authtoken"
             | "secret"
+            | "secretkey"
+            | "secretaccesskey"
             | "clientsecret"
+            | "privatekey"
             | "apikey"
+            | "accesskey"
             | "accesskeyid"
             | "accesskeysecret"
             | "securitytoken"
             | "awssecretaccesskey"
+            | "awsaccesskeyid"
             | "openaiapikey"
             | "dashscopeapikey"
             | "githubtoken"
+            | "credentials"
+            | "credential"
+            | "bearer"
             | "authorization"
             | "cookie"
             | "setcookie"
     )
 }
 
-fn redact_private_key_blocks(text: &str) -> (String, bool) {
-    let mut output = String::with_capacity(text.len());
-    let mut in_private_key = false;
-    let mut changed = false;
-
-    for line in text.split_inclusive('\n') {
-        if in_private_key {
-            changed = true;
-            if let Some((_, end)) = private_key_marker_range(line, "-----END ") {
-                output.push_str(&line[end..]);
-                in_private_key = false;
-            }
-            continue;
-        }
-        if let Some((start, end)) = private_key_marker_range(line, "-----BEGIN ") {
-            output.push_str(&line[..start]);
-            output.push_str("<redacted private key block>");
-            let remainder = &line[end..];
-            if let Some((_, private_key_end)) = private_key_marker_range(remainder, "-----END ") {
-                output.push_str(&remainder[private_key_end..]);
-            } else {
-                in_private_key = true;
-            }
-            changed = true;
-            continue;
-        }
-        output.push_str(line);
-    }
-
-    (output, changed)
-}
-
-fn private_key_marker_range(line: &str, marker: &str) -> Option<(usize, usize)> {
-    let upper = line.to_ascii_uppercase();
-    let start = upper.find(marker)?;
-    let marker_end = upper[start..].find("PRIVATE KEY-----")?;
-    Some((start, start + marker_end + "PRIVATE KEY-----".len()))
-}
-
 fn cookie_header_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?im)(?P<prefix>^(?:set-cookie|cookie)\s*:\s*).*$")
+        Regex::new(r"(?im)(?P<prefix>\b(?:set-cookie|cookie)\s*:\s*)[^\r\n]*")
             .unwrap_or_else(|_| unreachable!("static cookie pattern must compile"))
     })
 }
@@ -298,13 +375,18 @@ fn sensitive_flag_pattern() -> &'static Regex {
             (?P<prefix>
                 (?:^|\s)
                 --(?:password|passwd|passphrase|token|access[_-]?token|refresh[_-]?token|
-                     id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
+                     id[_-]?token|secret|secret[_-]?key|secret[_-]?access[_-]?key|
+                     private[_-]?key|auth[_-]?token|session[_-]?token|credentials?|bearer|
+                     client[_-]?secret|api[_-]?key|apikey|access[_-]?key|
                      access[_-]?key[_-]?secret|security[_-]?token|authorization)
                 (?:=|\s+)
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive flag pattern must compile"))
@@ -322,16 +404,22 @@ fn sensitive_assignment_pattern() -> &'static Regex {
                 (?:alibaba[_-]?cloud[_-]?access[_-]?key[_-]?id|
                    aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|
                    aws[_-]?secret[_-]?access[_-]?key|access[_-]?key[_-]?secret|
+                   access[_-]?key|
+                   secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|
+                   session[_-]?token|auth[_-]?token|credentials?|bearer|
                    dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
                    client[_-]?secret|security[_-]?token|refresh[_-]?token|
                    access[_-]?token|github[_-]?token|id[_-]?token|
                    password|passphrase|passwd|api[_-]?key|apikey|token|secret)
                 ["']?
                 \s*(?:=|:)\s*
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive assignment pattern must compile"))

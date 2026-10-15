@@ -43,6 +43,13 @@ impl ShellHandoffState {
         self.pending.front()
     }
 
+    pub(crate) fn ready_front(&self) -> Option<&ShellHandoffRequest> {
+        if !self.pending.is_empty() {
+            return None;
+        }
+        self.approved.front().map(|handoff| &handoff.request)
+    }
+
     pub(crate) fn pop_pending(&mut self) -> Option<PendingApprovedShellHandoff> {
         self.pending.pop_front()
     }

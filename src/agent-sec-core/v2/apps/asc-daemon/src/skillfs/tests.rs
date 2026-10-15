@@ -48,10 +48,9 @@ fn start_bridge(
 
 fn ordinary_dispatcher(application: Arc<ActionService>) -> DaemonDispatcher {
     DaemonDispatcher::new(
-        asc_pap::PapService::new(
-            Arc::new(asc_pap_repository_memory::ProcessLocalPapRepository::default()),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        ),
+        asc_pap::PapService::new(Arc::new(
+            asc_policy_repository_sqlite::SqlitePolicyRepository::temporary().unwrap(),
+        )),
         Arc::new(RootManagedPrincipalPolicy::default()),
         application,
     )
@@ -508,19 +507,7 @@ async fn public_socket_authenticates_notify_and_keeps_v2_requests_separate() {
         ordinary_dispatcher(application),
         Some(bridge.clone()),
     ));
-    assert_eq!(
-        dispatcher
-            .dispatch_timeout(br#"{"method":"action.skill_sec","params":{"command":"scan"}}"#),
-        Some(Duration::from_secs(60))
-    );
-    assert_eq!(
-        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{}}"#),
-        None
-    );
-    assert_eq!(
-        dispatcher.dispatch_timeout(br#"{"type":"auth.init"}"#),
-        None
-    );
+    assert_dispatch_timeouts(&dispatcher);
     let socket = fixture.directory.path().join("daemon.sock");
     let bound = BoundUnixSocket::bind(&socket, 0o666).unwrap();
     let server = UnixService::new(
@@ -588,6 +575,26 @@ async fn public_socket_authenticates_notify_and_keeps_v2_requests_separate() {
     tokio::task::spawn_blocking(move || worker.shutdown().unwrap())
         .await
         .unwrap();
+}
+
+fn assert_dispatch_timeouts(dispatcher: &SkillFsDispatcher) {
+    assert_eq!(
+        dispatcher
+            .dispatch_timeout(br#"{"method":"action.skill_sec","params":{"command":"scan"}}"#),
+        Some(Duration::from_secs(60))
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{}}"#),
+        None
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{"mode":"llm"}}"#),
+        Some(Duration::from_secs(91))
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"type":"auth.init"}"#),
+        None
+    );
 }
 
 fn assert_notify_contract(inputs: &Fixture, path: &Path) {
@@ -662,10 +669,13 @@ fn transport_config() -> ServiceConfig {
         max_request_frame_bytes: 4 * 1024 * 1024,
         max_response_frame_bytes: 4 * 1024 * 1024,
         max_connections: 8,
+        reserved_administrator_connections: 0,
+        max_connections_per_uid: 8,
         max_rejection_connections: 2,
         rejection_encode_timeout: Duration::from_millis(250),
         request_read_timeout: Duration::from_secs(5),
         dispatch_timeout: Duration::from_secs(5),
+        max_dispatch_timeout: asc_model_client::MAX_CODE_SCAN_BUDGET,
         response_write_timeout: Duration::from_secs(5),
         drain_timeout: Duration::from_secs(5),
         accept_error_backoff: Duration::from_millis(10),
@@ -753,4 +763,89 @@ async fn assert_activation_after_scan_error(
     let activate = serde_json::to_value(&events[before + 1]).unwrap();
     assert_eq!(scan["details"]["request"]["command"], "scan");
     assert_eq!(activate["details"]["request"]["command"], "activate");
+}
+
+// The authenticated session exchanges frames through a bounded 64 KiB buffer,
+// while the acceptance response echoes the notify request back as diagnostics:
+// with 16 unique paths close to the 4 KiB per-path bound the request still
+// fits the session read bound, but the echo plus the response envelope crosses
+// the response bound. The queue commits the notify before the response is
+// written, so a dropped frame would leave SkillFS unable to distinguish
+// acceptance from rejection (and identical retries would never converge).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acceptance_whose_echo_exceeds_the_session_frame_is_delivered_degraded() {
+    let fixture = Arc::new(Fixture::new());
+    let service = fixture.service();
+    let events = Arc::new(Events::default());
+    let worker = SkillWorker::default();
+    let bridge = Arc::new(SkillFsBridge::prepare(fixture.config(), &worker).unwrap());
+    let executor = SkillSecExecutor::new(service.clone()).with_environment(bridge.environment());
+    let application = crate::skill_application(
+        audit_finalizer(events),
+        Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        executor,
+    );
+    worker
+        .start(application.clone(), || Ok(Vec::new()))
+        .unwrap();
+    let dispatcher = Arc::new(SkillFsDispatcher::new(
+        ordinary_dispatcher(application),
+        Some(bridge),
+    ));
+    let socket = fixture.directory.path().join("daemon.sock");
+    let bound = BoundUnixSocket::bind(&socket, 0o666).unwrap();
+    let server = UnixService::new(
+        bound,
+        transport_config(),
+        dispatcher,
+        Arc::new(asc_daemon_handler::JsonRejectionEncoder),
+    )
+    .unwrap();
+    let shutdown = ShutdownToken::new();
+    let task = tokio::spawn(server.serve(shutdown.clone()));
+
+    // Sixteen unique single-component relative paths, each below the 4 KiB
+    // validation bound, sized so the serialized request stays inside the
+    // session read bound while the echoed acceptance crosses the response
+    // bound.
+    let mut paths: Vec<String> = (0..16)
+        .map(|index| format!("{index:02}") + &"a".repeat(3997))
+        .collect();
+    let mut request = fixture.notification(&json!(paths));
+    while serde_json::to_vec(&request).unwrap().len() < 65_500 {
+        for path in &mut paths {
+            if path.len() < 4096 {
+                path.push('a');
+            }
+        }
+        request = fixture.notification(&json!(paths));
+    }
+    let wire = serde_json::to_vec(&request).unwrap();
+    assert!(
+        wire.len() <= 65_535,
+        "the notify request must stay readable inside the session frame: {}",
+        wire.len()
+    );
+
+    let key = fixture.secret.clone();
+    let response =
+        tokio::task::spawn_blocking(move || notify(&socket, &key, &request, false, false))
+            .await
+            .unwrap()
+            .expect("the acceptance must be delivered after the queue committed the notify");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["data"]["schemaVersion"], 2);
+    assert_eq!(response["data"]["accepted"], true);
+    assert!(
+        response["data"]["skill"].get("paths").is_none(),
+        "the degraded echo must omit the paths array"
+    );
+    assert_eq!(response["data"]["skill"]["pathsOmitted"], json!(16));
+
+    shutdown.request();
+    task.await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || worker.shutdown().unwrap())
+        .await
+        .unwrap();
 }

@@ -39,7 +39,8 @@ function deriveTurns(messages: AgentMessage[]): Turn[] {
       turns.push(current);
     }
     if (!current) {
-      current = { turnSeq: 1, messages: [], tokenCount: 0 };
+      turnSeq = 1;
+      current = { turnSeq, messages: [], tokenCount: 0 };
       turns.push(current);
     }
     const tokens = estimateTokens(JSON.stringify(msg));
@@ -116,11 +117,11 @@ export class Assembler {
       result.push(...turn.messages);
     }
 
-    const tailTokens = tail.reduce((s, t) => s + t.tokenCount, 0);
+    const estimatedTokens = result.reduce((total, message) => total + estimateTokens(JSON.stringify(message)), 0);
 
     return {
       messages: result,
-      estimatedTokens: tailTokens,
+      estimatedTokens,
       stats: {
         totalTurns: turns.length,
         freshTailTurnCount: tail.length,

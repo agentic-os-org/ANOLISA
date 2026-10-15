@@ -34,6 +34,7 @@ fn raw_cli_help_renders_slash_command_reference() {
         "{output}"
     );
     assert!(normalized.contains("/status"), "{output}");
+    assert!(normalized.contains("/bug <description>"), "{output}");
     // /auth renders as an indented group entry with its own summary line; the
     // contextual /audit stays hidden below. Config-group membership is pinned
     // by the registry unit test recommendations_and_auth_are_public_config_controls.
@@ -127,6 +128,33 @@ fn raw_cli_status_about_and_stats_render_without_reaching_bash() {
             "{command} reached bash: {output}"
         );
     }
+}
+
+#[test]
+fn raw_cli_bug_renders_reviewable_url_without_reaching_bash() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/bug failed once\necho after-bug\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    assert!(output.contains("Report a bug"), "{output}");
+    assert!(output.contains("copy the link"), "{output}");
+    assert!(
+        output.contains("title=failed%20once&diagnostics=version%3A%20"),
+        "{output}"
+    );
+    assert!(output.contains("component=cosh-ng"), "{output}");
+    assert!(
+        output.contains("shell%3A%20bash%20%28enhanced%29"),
+        "{output}"
+    );
+    assert!(output.contains("after-bug"), "{output}");
+    assert!(!output.contains("bash: /bug:"), "{output}");
+    assert!(
+        !output.contains("bash: /bug: No such file or directory"),
+        "{output}"
+    );
 }
 
 #[test]

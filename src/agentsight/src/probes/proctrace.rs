@@ -6,7 +6,7 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle, RingBufferBuilder,
+    Link, MapFlags, MapHandle, RingBufferBuilder,
     skel::{OpenSkel, SkelBuilder},
 };
 use std::{
@@ -34,9 +34,6 @@ mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));
 }
 use bpf::*;
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-const POLL_TIMEOUT_MS: u64 = 100;
 
 // Re-export types from generated bindings
 pub type ProcEventHeader = bpf::proc_event_header;
@@ -614,6 +611,33 @@ impl ProcTrace {
         MapHandle::try_clone(map).context("failed to create MapHandle from rb")
     }
 
+    /// Create a handle to the shared per-CPU internal metrics map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the loaded map handle cannot be cloned.
+    pub fn internal_metrics_handle(&self) -> Result<MapHandle> {
+        let binding = self.skel.maps();
+        let map = binding.internal_metrics();
+        MapHandle::try_clone(map).context("failed to create MapHandle from internal_metrics")
+    }
+
+    /// Sum ring-buffer reservation failures across all CPUs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the map cannot be read or contains an unexpected
+    /// value width.
+    pub fn ring_buffer_dropped(&self) -> Result<u64> {
+        let binding = self.skel.maps();
+        let values = binding
+            .internal_metrics()
+            .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
+            .context("failed to read internal_metrics")?
+            .ok_or_else(|| anyhow::anyhow!("internal_metrics key 0 is missing"))?;
+        sum_per_cpu_counter(&values)
+    }
+
     /// Attach tracepoints for process tracking
     pub fn attach(&mut self) -> Result<()> {
         let mut links = Vec::new();
@@ -683,22 +707,26 @@ impl ProcTrace {
             .context("failed to add ring buffer")?;
         let rb = rb_builder.build().context("failed to build ring buffer")?;
 
+        // Read the configured poll timeout on this thread before spawning so
+        // the poller observes exactly the value `AgentSight::new` published
+        // (crate::config::set_poll_timeout_ms), not whatever the global holds
+        // when the thread happens to get scheduled.
+        let poll_timeout = Duration::from_millis(crate::config::poll_timeout_ms());
+
         let handle = thread::Builder::new()
             .name("proctrace-poll".into())
             .spawn(move || {
-                let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
-                loop {
-                    if stop_flag_inner.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match rb.poll(timeout) {
-                        Ok(_) => {}
-                        Err(e) if e.kind() == libbpf_rs::ErrorKind::Interrupted => break,
-                        Err(e) => {
-                            eprintln!("proctrace poll error: {e:#}");
-                            break;
-                        }
-                    }
+                let timeout = poll_timeout;
+                let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
+                    rb.poll(timeout)
+                        .map(|_| ())
+                        .map_err(|error| match error.kind() {
+                            libbpf_rs::ErrorKind::Interrupted => super::PollFailure::Interrupted,
+                            _ => super::PollFailure::Fatal(format!("{error:#}")),
+                        })
+                });
+                if let super::PollEnd::Failed(message) = outcome {
+                    eprintln!("proctrace poll error: {message}");
                 }
             })
             .context("failed to spawn poll thread")?;
@@ -718,6 +746,16 @@ impl ProcTrace {
     pub fn try_recv(&self) -> Option<VariableEvent> {
         self.rx.try_recv().ok()
     }
+}
+
+fn sum_per_cpu_counter(values: &[Vec<u8>]) -> Result<u64> {
+    values.iter().try_fold(0u64, |total, value| {
+        let bytes: [u8; 8] = value
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid internal_metrics value size"))?;
+        Ok(total.saturating_add(u64::from_ne_bytes(bytes)))
+    })
 }
 
 // ─── Poll thread handle ─────────────────────────────────────────────────────
@@ -743,5 +781,33 @@ impl Drop for ProcPoller {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sum_per_cpu_counter;
+
+    #[test]
+    fn per_cpu_counter_is_summed_without_overflow() {
+        let values = vec![
+            7u64.to_ne_bytes().to_vec(),
+            11u64.to_ne_bytes().to_vec(),
+            u64::MAX.to_ne_bytes().to_vec(),
+        ];
+        assert_eq!(
+            sum_per_cpu_counter(&values).expect("valid values"),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn per_cpu_counter_rejects_invalid_value_width() {
+        let error = sum_per_cpu_counter(&[vec![0; 4]]).expect_err("invalid width");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid internal_metrics value size")
+        );
     }
 }

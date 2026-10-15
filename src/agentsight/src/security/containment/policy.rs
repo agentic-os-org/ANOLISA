@@ -116,18 +116,39 @@ fn resolve_policy_binding(
     let compiled = parse_compiled_policy(&request.policy_dsl, CompiledMode::Audit)?;
     let source_policy_snapshot = source_policy_snapshot?;
     let source_policy = source_policy_snapshot.policy().ok()?;
+    // The adapter compiles one sorted, de-duplicated `source` line per pattern,
+    // so a snapshot persisted before the server normalized its request — the
+    // order and duplicates are the caller's — describes the same policy in a
+    // different vector. Comparing the vectors rejected such a binding outright,
+    // and no containment action could ever be created or recovered for its
+    // case. Both sides are compared as sets, exactly as the acknowledgement
+    // check above does.
+    let snapshot_sources = source_policy
+        .source_patterns
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let compiled_sources = compiled
+        .source_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let snapshot_endpoints = source_policy
+        .trusted_endpoints
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let compiled_endpoints = compiled
+        .trusted_endpoints
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     if source_policy.mode != PolicyMode::Audit
         || source_policy.policy_id != request.policy_id
         || source_policy.revision.to_string() != request.policy_revision
         || source_policy.taint_label != "CREDENTIAL"
-        || source_policy.source_patterns
-            != compiled
-                .source_paths
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .as_slice()
-        || source_policy.trusted_endpoints != compiled.trusted_endpoints
+        || snapshot_sources != compiled_sources
+        || snapshot_endpoints != compiled_endpoints
     {
         return None;
     }
@@ -205,10 +226,12 @@ pub(super) fn select_candidate(
 
 pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredentialPolicy) -> bool {
     let request = &binding.request;
-    let expected_source = match expected.policy.source_patterns.as_slice() {
-        [source] => source,
-        _ => return false,
-    };
+    let expected_sources: HashSet<&str> = expected
+        .policy
+        .source_patterns
+        .iter()
+        .map(String::as_str)
+        .collect();
     if expected.policy.taint_label != "CREDENTIAL"
         || expected.policy.destination_scope != DestinationScope::PublicIpv4
         || expected.policy.mode != PolicyMode::Enforce
@@ -224,8 +247,15 @@ pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredent
     {
         return false;
     }
+    // The adapter compiles one `source` line per pattern, so the
+    // acknowledgement must carry exactly the requested source set; requiring
+    // a single expected entry rolled back every accepted multi-source policy.
     parse_compiled_policy(&request.policy_dsl, CompiledMode::Enforce).is_some_and(|compiled| {
-        compiled.source_paths.contains(&expected_source.to_string())
+        compiled.source_paths.len() == expected_sources.len()
+            && compiled
+                .source_paths
+                .iter()
+                .all(|source| expected_sources.contains(source.as_str()))
             && compiled.trusted_endpoints == expected.policy.trusted_endpoints
     })
 }

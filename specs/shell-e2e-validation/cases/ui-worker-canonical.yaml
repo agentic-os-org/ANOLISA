@@ -1,0 +1,224 @@
+version: 1
+suite: ui-worker-canonical
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  shell_mode: isolated
+  approval_mode: auto
+  analysis_mode: smart
+  render: terminal
+  real_provider: false
+  terminal_cols: 80
+  terminal_rows: 30
+  timeout_ms: 180000
+cases:
+  - id: UI-CANONICAL-RESIZE-001
+    title: Real Shell Core worker uses fallback after CJK output and viewport shrink
+    tags: [shell, ui-worker, approval, resize, cjk, loopback-model]
+    command:
+      - bash
+      - -lc
+      - exec python3 /work/repo/src/cosh-ng/e2e/fixtures/ui_worker.py --profile "$CARGO_TARGET_DIR/debug" --scenario resize
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 90000
+      - type: line
+        text: "printf '%s%s%s%s%s\\n' UI_LEFT_ SENTINEL 'abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出abcdefgh终端输出' UI_RIGHT_ SENTINEL; printf '%s%s\\n' UI_HISTORY_ READY"
+      - id: cjk-output-ready
+        type: wait_for
+        text: UI_HISTORY_READY
+        timeout_ms: 10000
+      - type: line
+        text: "?? canonical resize approval"
+      - type: wait_for
+        text: "Allow once"
+        timeout_ms: 60000
+      - type: wait_for
+        text: Details
+        timeout_ms: 10000
+      - id: worker-card-ready
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: resize
+        rows: 20
+        cols: 47
+      - type: wait_for
+        text: "The approval display above is no longer current"
+        timeout_ms: 30000
+      - id: resized-current-card
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: UI_CANONICAL_MODEL_DONE
+        timeout_ms: 60000
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "printf '%s%s\\n' UI_BASH_ READY; exit"
+      - id: bash-returned
+        type: wait_for
+        text: UI_BASH_READY
+        timeout_ms: 30000
+    expect:
+      status: 0
+      contains:
+        - UI_HISTORY_READY
+        - UI_LEFT_SENTINEL
+        - UI_RIGHT_SENTINEL
+        - "The approval display above is no longer current"
+        - UI_CANONICAL_MODEL_DONE
+        - UI_BASH_READY
+        - "UI_CANONICAL_RESULT effect=1 requests=2 cleanup=0 worker_seen=1 status=PASS"
+      not_contains:
+        - "UI_CANONICAL_RESULT effect=0"
+        - "status=FAIL"
+    evidence:
+      points:
+        - id: cjk-output
+          trigger_event: cjk-output-ready
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: worker-card
+          trigger_event: worker-card-ready
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: resized-current-card
+          trigger_event: resized-current-card
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: bash-returned
+          trigger_event: bash-returned
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: UI-CANONICAL-FAULT-001
+    title: Real worker killed after complete physical pending frames falls back then resizes
+    tags: [shell, ui-worker, approval, fault, loopback-model]
+    command:
+      - bash
+      - -lc
+      - exec python3 /work/repo/src/cosh-ng/e2e/fixtures/ui_worker.py --profile "$CARGO_TARGET_DIR/debug" --scenario kill-frame
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 90000
+      - type: line
+        text: "?? canonical fault approval"
+      - type: wait_for
+        text: "> [ Allow once ]"
+        timeout_ms: 60000
+      - type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b43"
+      - type: wait_for
+        text: "> [ Deny ]"
+        timeout_ms: 10000
+      - id: fault-focused-deny
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b44"
+      - type: wait_for
+        text: "> [ Allow once ]"
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b43"
+      - type: wait_for
+        text: "> [ Deny ]"
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b44"
+      - type: wait_for
+        text: "> [ Allow once ]"
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b43"
+      - type: wait_for
+        text: "> [ Deny ]"
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b44"
+      - type: wait_for
+        text: "> [ Allow once ]"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "The approval display above is no longer current"
+        timeout_ms: 60000
+      - type: wait_for
+        text: "Allow once"
+        timeout_ms: 10000
+      - type: wait_for
+        text: Details
+        timeout_ms: 10000
+      - id: fault-current-card
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: resize
+        rows: 20
+        cols: 47
+      - id: fault-resized-card
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: UI_CANONICAL_MODEL_DONE
+        timeout_ms: 60000
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "printf '%s%s\\n' UI_BASH_ READY; exit"
+      - id: fault-bash-returned
+        type: wait_for
+        text: UI_BASH_READY
+        timeout_ms: 30000
+    expect:
+      status: 0
+      contains:
+        - "The approval display above is no longer current"
+        - UI_CANONICAL_MODEL_DONE
+        - UI_BASH_READY
+        - "UI_CANONICAL_RESULT effect=1 requests=2 cleanup=0 worker_seen=1 status=PASS"
+      not_contains: ["status=FAIL"]
+    evidence:
+      points:
+        - id: fault-focused-deny
+          trigger_event: fault-focused-deny
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: fault-current-card
+          trigger_event: fault-current-card
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: fault-bash-returned
+          trigger_event: fault-bash-returned
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: fault-resized-card
+          trigger_event: fault-resized-card
+          layout_sensitive: true
+          required_types: [screenshot]

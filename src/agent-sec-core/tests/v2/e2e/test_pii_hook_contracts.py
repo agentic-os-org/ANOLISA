@@ -26,18 +26,35 @@ TEXT = f"password={SECRET}"
 
 
 def _asset(host):
-    installed = os.environ.get("PII_HOOK_LAYOUT", "source") == "installed"
-    relative = {
-        "codex": "codex-plugin/hooks-plugin/hooks",
-        "qoder": "qoder-plugin/hooks",
-        "qwen": "qwen-code-extension/hooks",
-        "cosh": "cosh-extension/hooks",
-        "hermes": "hermes-plugin",
-        "openclaw": "openclaw-plugin/dist",
-    }[host]
-    path = (Path("/opt/agent-sec") if installed else ROOT) / relative
-    if installed and host == "cosh":
-        path = Path("/usr/share/anolisa/extensions/agent-sec-core/hooks")
+    layout = os.environ.get("PII_HOOK_LAYOUT", "source")
+    assert layout in {
+        "source",
+        "installed",
+        "raw",
+    }, f"unknown PII hook layout: {layout}"
+    if layout == "raw":
+        path = {
+            "codex": Path("/usr/local/share/anolisa/adapters/sec-core/codex/hooks"),
+            "qoder": Path("/usr/local/share/anolisa/adapters/sec-core/qoder/hooks"),
+            "qwen": Path("/usr/local/share/anolisa/adapters/sec-core/qwencode/hooks"),
+            "cosh": Path("/usr/local/share/anolisa/extensions/sec-core/hooks"),
+            "hermes": Path("/usr/local/share/anolisa/adapters/sec-core/hermes"),
+            "openclaw": Path(
+                "/usr/local/share/anolisa/adapters/sec-core/openclaw/dist"
+            ),
+        }[host]
+    else:
+        relative = {
+            "codex": "codex-plugin/hooks-plugin/hooks",
+            "qoder": "qoder-plugin/hooks",
+            "qwen": "qwen-code-extension/hooks",
+            "cosh": "cosh-extension/hooks",
+            "hermes": "hermes-plugin",
+            "openclaw": "openclaw-plugin/dist",
+        }[host]
+        path = (Path("/opt/agent-sec") if layout == "installed" else ROOT) / relative
+        if layout == "installed" and host == "cosh":
+            path = Path("/usr/share/anolisa/extensions/agent-sec-core/hooks")
     assert path.is_dir(), f"required {host} plugin assets missing: {path}"
     return path
 
@@ -197,10 +214,14 @@ def test_standalone_scanner_failure_preserves_fail_open(
 
 
 def _hermes(hook, event):
+    plugin_root = _asset("hermes")
+    environment = {"PYTHONPATH": str(plugin_root)}
+    if os.environ.get("PII_HOOK_LAYOUT") == "raw":
+        environment["PII_TEST_HERMES_PLUGIN_ROOT"] = str(plugin_root)
     return _run(
         [sys.executable, str(FIXTURES / "hermes_pii_hook.py")],
         {"hook": hook, "event": event},
-        {"PYTHONPATH": str(_asset("hermes"))},
+        environment,
     )
 
 

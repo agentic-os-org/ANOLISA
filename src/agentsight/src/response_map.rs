@@ -127,6 +127,14 @@ impl ResponseSessionMapper {
             }
         };
 
+        // Recorded before the buffer is inspected: the association comes from
+        // the filename, and it is the only way an agent whose rollout embeds
+        // no `response_id` (e.g. Codex CLI) is attributed to a session, so a
+        // write this process made must not be dropped because its buffer
+        // happens to be undecodable (a line split inside a multi-byte
+        // character). Only the id extraction below needs valid UTF-8.
+        self.pid_map.put(event.pid, session_id.clone());
+
         let text = match std::str::from_utf8(&event.buf) {
             Ok(s) => s,
             Err(e) => {
@@ -152,11 +160,6 @@ impl ResponseSessionMapper {
                 self.map.put(response_id, session_id.clone());
             }
         }
-
-        // Always record the pid → session_id association so agents whose
-        // rollout file does not embed an LLM response_id (e.g. Codex CLI)
-        // can still resolve the session via their writing pid.
-        self.pid_map.put(event.pid, session_id);
     }
 
     /// Look up sessionId by responseId.
@@ -200,8 +203,12 @@ impl ResponseSessionMapper {
         // Strip .jsonl suffix
         let stem = basename.strip_suffix(".jsonl")?;
 
-        // Plain `<UUID>.jsonl` (OpenClaw / Cosh / Claude Code)
-        if stem.len() == 36 {
+        // Plain `<UUID>.jsonl` (OpenClaw / Cosh / Claude Code). The UUID shape
+        // is required to mirror the BPF-side filter, whose strict branch
+        // validates `is_uuid`: without the check here, any 36-char `.jsonl`
+        // basename that reaches userspace is stored verbatim as a session id
+        // and poisons both the response-id and the pid mapping.
+        if stem.len() == 36 && Self::is_uuid(stem) {
             return Some(stem.to_string());
         }
 
@@ -267,6 +274,36 @@ mod tests {
         assert_eq!(id.as_deref(), Some("019ef987-dbc1-7663-81b0-589cbe5e47e8"));
     }
 
+    /// The pid → session pair comes from the *filename*, so the buffer's
+    /// encoding must not decide whether it is recorded: `process_filewrite`
+    /// documents the association as unconditional ("Always record the pid →
+    /// session_id association"), for agents whose rollout never embeds an LLM
+    /// response_id. A write whose buffer is not valid UTF-8 — a line split
+    /// inside a multi-byte character, or one stray byte in a large rollout —
+    /// returned early and dropped the pair with it.
+    #[test]
+    fn a_non_utf8_write_still_records_the_pid_session_pair() {
+        let mut mapper = ResponseSessionMapper::new();
+        let session = "019ef987-dbc1-7663-81b0-589cbe5e47e8";
+        let event = FileWriteEvent {
+            pid: 4242,
+            tid: 4242,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "codex".to_string(),
+            filename: format!(
+                "/root/.codex/sessions/2026/06/24/rollout-2026-06-24T20-08-10-{session}.jsonl"
+            ),
+            cgroup_id: 0,
+            // The tail of a multi-byte character: not valid UTF-8, while the
+            // filename still names the session.
+            buf: vec![b'{', b'"', 0xE4, 0xB8],
+        };
+        mapper.process_filewrite(&event);
+        assert_eq!(mapper.get_session_by_pid(4242), Some(session));
+    }
+
     #[test]
     fn test_codex_pid_to_session_lookup() {
         // Codex CLI's rollout file does not embed an LLM response_id, so the
@@ -311,6 +348,50 @@ mod tests {
     #[test]
     fn test_extract_session_id_wrong_length() {
         assert!(ResponseSessionMapper::extract_session_id("short.jsonl").is_none());
+    }
+
+    #[test]
+    fn test_extract_session_id_rejects_non_uuid_stem() {
+        // A 36-char stem without the UUID shape must not be taken for a
+        // session id: the BPF filter admits `rollout-` prefixed files without
+        // checking suffixes or shape (the verifier rejects variable-length
+        // checks), and this is exactly the shape that can slip through there.
+        assert!(
+            ResponseSessionMapper::extract_session_id("rollout-2026-06-24T20-08-10-abcdefgh.jsonl")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_rejects_plain_non_uuid_stem() {
+        // 36 chars, no `rollout-` prefix: still not a session file.
+        assert!(
+            ResponseSessionMapper::extract_session_id("agent-session-log-2026-10-03-1234567")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_process_filewrite_ignores_non_uuid_stem_files() {
+        // A non-UUID `.jsonl` write that reached userspace must poison
+        // neither mapping: neither the response ids found in its buffer nor
+        // the writing pid may be bound to a stem that is not a session id.
+        let mut mapper = ResponseSessionMapper::new();
+        let event = FileWriteEvent {
+            pid: 4321,
+            tid: 4321,
+            uid: 1000,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "codex".to_string(),
+            filename: "rollout-2026-06-24T20-08-10-abcdefgh.jsonl".to_string(),
+            cgroup_id: 0,
+            buf: br#"{"responseId":"chatcmpl-poison"}"#.to_vec(),
+        };
+        mapper.process_filewrite(&event);
+
+        assert_eq!(mapper.get_session_by_response_id("chatcmpl-poison"), None);
+        assert_eq!(mapper.get_session_by_pid(4321), None);
     }
 
     #[test]

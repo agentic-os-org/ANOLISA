@@ -72,8 +72,11 @@
 //!   [`drift::DriftEvent`] records and emits them through an injected
 //!   [`drift::SourceDriftObserver`]. Coverage is intentionally narrow:
 //!   the producer in `skillfs-core::watcher::classify_event` only surfaces
-//!   `<source>/<skill>/SKILL.md` create/modify/delete and immediate
-//!   skill-directory create/delete, so W1 only observes that subset.
+//!   `SKILL.md` manifests at any depth under the source (flat
+//!   `<source>/<skill>/SKILL.md` and nested/categorized
+//!   `<source>/<category>/<skill>/SKILL.md`) create/modify/delete and
+//!   immediate skill-directory create/delete, so W1 only observes that
+//!   subset.
 //!   Default behavior is still no-op; nothing wires the watcher into the
 //!   FUSE runtime unless an operator explicitly turns audit logging on
 //!   (see the CLI `--audit-log` flag).
@@ -154,9 +157,9 @@ pub use event::{
     InMemoryEventSink, NoopEventSink, SkillEvent, SkillEventAction, SkillEventKind, SkillEventSink,
 };
 pub use event_stream::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, InMemorySecurityEventWriter, JsonlSecurityEventWriter,
-    NoopSecurityEventWriter, SecurityEvent, SecurityEventSink, SecurityEventWriter,
-    resolve_events_path,
+    DEFAULT_EVENT_QUEUE_CAPACITY, EventsPathError, InMemorySecurityEventWriter,
+    JsonlSecurityEventWriter, NoopSecurityEventWriter, SecurityEvent, SecurityEventSink,
+    SecurityEventWriter, resolve_events_path, resolve_events_path_outside_source,
 };
 pub use inbox::{
     INBOX_DIR_NAME, INBOX_SKILL_NAME_MAX_LEN, INSTALL_COMPLETE_SENTINEL, is_inbox_dir_name,

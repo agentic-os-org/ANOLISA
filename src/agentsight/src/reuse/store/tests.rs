@@ -565,6 +565,97 @@ fn rule_stats_separate_overrides_from_confirmations() {
 }
 
 #[test]
+fn confirming_an_overridden_row_keeps_it_overridden() {
+    // The dashboard offers Confirm on every row, including overridden ones.
+    // Re-confirming used to rewrite the row as `Confirmed`, which moved it
+    // from the `overridden` bucket to the `confirmed` one in
+    // `rule_override_stats` and understated the rule-misfire signal the
+    // statistics exist to measure.
+    let store = store("confirm-keeps-override");
+    for id in ["single", "batch"] {
+        store
+            .upsert_auto_label(
+                id,
+                identity(),
+                outcome(TrajectoryLabel::Bad, &["R1"]),
+                "h",
+                "v1",
+            )
+            .unwrap();
+        store
+            .apply_decision(
+                id,
+                LabelAction::Override(TrajectoryLabel::Good),
+                "alice",
+                None,
+            )
+            .unwrap();
+    }
+
+    let single = store
+        .apply_decision("single", LabelAction::Confirm, "bob", None)
+        .unwrap();
+    store.confirm_batch(&["batch".to_string()], "bob").unwrap();
+    let batch = store.get_label("batch").unwrap().unwrap();
+
+    for label in [single, batch] {
+        assert_eq!(
+            label.confirm_state,
+            ConfirmState::Overridden,
+            "a re-confirm endorses the human's verdict, not the rules'"
+        );
+        assert_eq!(label.human_label, Some(TrajectoryLabel::Good));
+        // Still signed off by a person: an override is not an unconfirmed row.
+        assert!(label.is_human_backed());
+    }
+
+    let stats = store.rule_override_stats().unwrap();
+    let r1 = stats.iter().find(|s| s.rule == "R1").unwrap();
+    assert_eq!(
+        r1.overridden, 2,
+        "the misfire signal must survive the confirm"
+    );
+    assert_eq!(r1.confirmed, 0);
+}
+
+#[test]
+fn a_confirmed_judged_row_still_counts_against_the_rules() {
+    // The rules fired `unknown`, the model judge said `good`, and a person
+    // confirmed the model's verdict. `apply_decision` pins
+    // `human_label = effective_label()` (good), so the row is human-backed —
+    // but bucketing by `confirm_state` alone recorded it as a rule
+    // confirmation even though the accepted verdict contradicts the rules,
+    // while `tally_override` counts the same row as an override. The two
+    // statistics derived from one store must agree.
+    let store = store("stats-judged-confirm");
+    store
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &["R1"]),
+            "h",
+            "v1",
+        )
+        .unwrap();
+    store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Good, vec![1], false))
+        .unwrap();
+    let confirmed = store
+        .apply_decision("s1", LabelAction::Confirm, "alice", None)
+        .unwrap();
+    assert!(confirmed.is_human_backed());
+    assert_eq!(confirmed.human_label, Some(TrajectoryLabel::Good));
+
+    let stats = store.rule_override_stats().unwrap();
+    let r1 = stats.iter().find(|s| s.rule == "R1").unwrap();
+    assert_eq!(
+        r1.confirmed, 0,
+        "the confirmed verdict (good) contradicts the rule verdict (unknown)"
+    );
+    assert_eq!(r1.overridden, 1, "the rule misfire must be visible");
+}
+
+#[test]
 fn unconfirmed_rows_contribute_nothing_to_rule_stats() {
     let store = store("stats-unconfirmed");
     store

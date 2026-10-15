@@ -50,6 +50,13 @@ pub enum PrincipalRole {
 pub trait PrincipalPolicy: Send + Sync {
     /// Selects the role for one kernel-authenticated peer.
     fn role_for(&self, peer: PeerCredentials) -> PrincipalRole;
+
+    /// Grants reserved ingress capacity using bounded, in-memory policy only.
+    /// Called before request dispatch; must not invoke blocking authorization or I/O.
+    /// Policies without an ingress classifier retain ordinary connection limits.
+    fn is_administrator_for_admission(&self, _peer: PeerCredentials) -> bool {
+        false
+    }
 }
 
 /// Deployment-configured Policy-administrator allowlist with root-only delegation.
@@ -99,13 +106,16 @@ impl RootManagedPrincipalPolicy {
 }
 
 impl PrincipalPolicy for RootManagedPrincipalPolicy {
-    fn role_for(&self, peer: PeerCredentials) -> PrincipalRole {
-        if peer.uid() == 0
+    fn is_administrator_for_admission(&self, peer: PeerCredentials) -> bool {
+        peer.uid() == 0
             || self
                 .allowed_uids
                 .read()
                 .is_ok_and(|allowed| allowed.contains(&peer.uid()))
-        {
+    }
+
+    fn role_for(&self, peer: PeerCredentials) -> PrincipalRole {
+        if self.is_administrator_for_admission(peer) {
             PrincipalRole::PolicyAdministrator
         } else {
             PrincipalRole::LocalUser
@@ -173,16 +183,20 @@ mod tests {
 
         assert_eq!(policy.role_for(root), PrincipalRole::PolicyAdministrator);
         assert_eq!(policy.role_for(delegated), PrincipalRole::LocalUser);
+        assert!(policy.is_administrator_for_admission(root));
+        assert!(!policy.is_administrator_for_admission(delegated));
         policy.allow_uid(root, delegated.uid()).unwrap();
         assert_eq!(
             policy.role_for(delegated),
             PrincipalRole::PolicyAdministrator
         );
+        assert!(policy.is_administrator_for_admission(delegated));
         assert_eq!(
             policy.allow_uid(delegated, other.uid()),
             Err(PrincipalPolicyError::RootRequired)
         );
         assert_eq!(policy.role_for(other), PrincipalRole::LocalUser);
+        assert!(!policy.is_administrator_for_admission(other));
     }
 
     #[test]
@@ -197,6 +211,7 @@ mod tests {
         );
         assert_eq!(policy.role_for(root), PrincipalRole::PolicyAdministrator);
         assert_eq!(policy.role_for(other), PrincipalRole::LocalUser);
+        assert!(policy.is_administrator_for_admission(configured));
         assert_eq!(
             policy.allow_uid(configured, 2000),
             Err(PrincipalPolicyError::RootRequired)

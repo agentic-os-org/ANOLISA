@@ -108,6 +108,12 @@ Status symbols are optional: set `shell.status_symbols = true` in `config.toml`
 (or `COSH_SHELL_STATUS_SYMBOLS=1` for one session) to show a `◇` (Assisted) or
 `◌` (Shell-only) status line above each prompt. They are off by default.
 
+At login, `cosh-shell` checks in the background whether a managed `cosh-ng`
+update is available and shows a notice at the next idle prompt. The check is
+on by default; set `COSH_SHELL_UPGRADE_CHECK=off` to disable it for the next
+session. See [Login upgrade notice](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#login-upgrade-notice)
+for all opt-out values and the cache path.
+
 Start Native explicitly when the session must have no Cosh hooks, observation,
 or insights:
 
@@ -134,9 +140,14 @@ Composer that accepts a leading `/skill:<name>` and validated workspace-local
 Up/Down to select, and press Enter to execute the selected command. Use Tab to
 complete a command before adding arguments; Enter submits drafts with arguments
 or multiple lines as written.
-Ordinary shell prompts keep native path completion.
+Ordinary shell prompts keep native path completion. Run `/bug <description>`
+to print a reviewable, pre-filled GitHub issue URL. It never reads logs or
+submits the issue; when the local log directory exists, it only reminds you to
+inspect and redact relevant entries before pasting them yourself.
 
-In `cosh-core`, configured Hooks run by default without `hooks.enabled = true`.
+In `cosh-core`, system and user config Hooks run by default without `hooks.enabled = true`.
+Project config Hook definitions are ignored; project Shell Hooks in `.cosh/hooks` require
+separate consent through `/hooks trust-project`.
 Explicit `hooks.enabled = false` keeps config Hooks disabled even when Extensions
 are installed. See [Hooks](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md)
 for disable scope and fail-closed `PreToolUse` behavior.

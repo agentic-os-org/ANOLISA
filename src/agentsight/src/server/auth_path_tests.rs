@@ -127,6 +127,102 @@ async fn authenticated_encoded_mutations_only_reach_matching_routes() {
     }
 }
 
+/// The credential gate exists because "loopback is a network location, not an
+/// authorization boundary: unprivileged local processes must not be able to use
+/// the root server as a confused deputy" (the rationale on the gate itself).
+/// Two mutations that fit that description were missing from its list:
+/// `POST /api/optimize/config` rewrites where the root server sends its stored
+/// LLM credential, and `POST /api/agent-health/{pid}/restart` kills and
+/// re-execs an agent process as root.
+#[actix_web::test]
+async fn privileged_mutations_fail_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/optimize/config",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/agent-health/{pid}/restart",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/optimize/config",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_ne!(response.status(), StatusCode::OK, "{uri} bypassed auth");
+    }
+
+    // The gate is for mutations only: reading the same configuration over
+    // loopback stays available, so the dashboard keeps working.
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::get()
+            .uri("/api/optimize/config")
+            .peer_addr(loopback)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a loopback read must still pass"
+    );
+}
+
+/// A caller that does hold the credential keeps full access, so the gate does
+/// not break the dashboard's own writes.
+#[actix_web::test]
+async fn privileged_mutations_accept_a_valid_credential() {
+    let fixture = AuthFixture::new();
+    let token = fixture
+        .auth
+        .read_token_from_file()
+        .expect("the fixture writes a token file");
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/optimize/config",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/agent-health/{pid}/restart",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(loopback)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri} did not route");
+    }
+}
+
 #[actix_web::test]
 async fn remote_encoded_api_paths_share_canonical_auth_classification() {
     let fixture = AuthFixture::new();

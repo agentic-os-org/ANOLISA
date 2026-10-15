@@ -267,10 +267,31 @@ class TokenlessMiddleware(MiddlewareBase):
             return
 
         contract = self.contract_for(source.name)
-        arguments = json.loads(source.input)
-        if not isinstance(arguments, dict):
-            raise TypeError("AgentScope tool input must decode to a JSON object")
         attribution = Attribution(str(agent.name), agent.state.session_id, source.id)
+        try:
+            arguments = json.loads(source.input)
+            if not isinstance(arguments, dict):
+                raise TypeError(
+                    "AgentScope tool input must decode to a JSON object"
+                )
+        except (json.JSONDecodeError, TypeError):
+            # AgentScope repairs malformed tool arguments upstream, but the
+            # raw string still reaches the middleware. Raising here kills
+            # the whole agent reply; instead fail open: forward the call
+            # untransformed and keep lossless-only output handling.
+            async for item in next_handler(**input_kwargs):
+                if isinstance(item, ToolResponse):
+                    yield await self._after_response(
+                        item,
+                        source.name,
+                        contract,
+                        OutputOptimization.NONE,
+                        attribution,
+                        None,
+                    )
+                else:
+                    yield item
+            return
         optimization = OutputOptimization.NONE
         forwarded = source
         if contract.command_field is not None and self.config.rtk_enabled:
@@ -289,15 +310,19 @@ class TokenlessMiddleware(MiddlewareBase):
             if transformed.action is PreToolAction.BLOCK_AND_SUGGEST:
                 raise RuntimeError("Core returned block_and_suggest without host capability")
             optimization = transformed.output_optimization
+            arguments = transformed.arguments
             forwarded = source.model_copy(
                 update={
                     "input": json.dumps(
-                        transformed.arguments,
+                        arguments,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
                 }
             )
+        command = None
+        if contract.command_field is not None:
+            command = arguments.get(contract.command_field)
         async for item in next_handler(**{**input_kwargs, "tool_call": forwarded}):
             if isinstance(item, ToolResponse):
                 yield await self._after_response(
@@ -306,6 +331,7 @@ class TokenlessMiddleware(MiddlewareBase):
                     contract,
                     optimization,
                     attribution,
+                    command if isinstance(command, str) else None,
                 )
             else:
                 yield item
@@ -317,6 +343,7 @@ class TokenlessMiddleware(MiddlewareBase):
         contract: ToolContract,
         optimization: OutputOptimization,
         attribution: Attribution,
+        command: str | None,
     ) -> ToolResponse:
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
@@ -342,6 +369,7 @@ class TokenlessMiddleware(MiddlewareBase):
                         replace_with_text=True,
                     ),
                     attribution=attribution,
+                    command=command,
                 )
             )
             extra_context = extra_context or transformed.additional_context

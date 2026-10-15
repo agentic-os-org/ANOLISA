@@ -48,6 +48,7 @@ use crate::interruption::{
 use crate::parser::Parser;
 use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
+use crate::runtime_metrics::{MetricsFileExporter, RuntimeMetrics, record_event_received};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
@@ -96,13 +97,11 @@ pub struct AgentSight {
     /// ResponseId → SessionId mapper for FileWrite events
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
-    pending_genai: Vec<PendingGenAI>,
+    pending_genai: PendingGenAiQueue,
     /// Calls exported with a fallback session_id after the deferral window
     /// timed out, keyed by pid, awaiting a late FileWrite mapping for
     /// retroactive session fix-up (issue #2059).
     retro_session_fixup: lru::LruCache<u32, Vec<RetroFixupEntry>>,
-    /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
-    pending_genai_bytes: usize,
     /// Runtime limits for bounded buffers and eviction policies.
     runtime_limits: crate::config::RuntimeLimits,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
@@ -131,6 +130,8 @@ pub struct AgentSight {
     features: crate::config::FeatureFlags,
     /// Process-wide database inventory and maintenance worker owner.
     database_manager: Arc<DatabaseManager>,
+    /// Optional atomic file exporter used by benchmark and operations tooling.
+    metrics_exporter: Option<MetricsFileExporter>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -151,6 +152,169 @@ impl PendingGenAI {
     }
 }
 
+/// The deferred-GenAI queue with its byte-accounting counter. The counter is
+/// an invariant (always the sum of the queued entries' estimates) maintained
+/// inside the queue rather than by the callers: every drain path resyncs it,
+/// so the memory gauge and the eviction gate can never disagree with the
+/// queue. (Pre-fix, the counter only ever grew because its sole decrement
+/// lived in the forced-eviction loop.)
+#[derive(Default)]
+struct PendingGenAiQueue {
+    entries: Vec<PendingGenAI>,
+    /// Total estimated bytes of `entries` (memory budget enforcement).
+    bytes: usize,
+}
+
+/// One drained batch plus the pid whose retroactive session fix-up the
+/// caller should register (timeout exports only).
+struct DrainedGenAi {
+    events: Vec<GenAISemanticEvent>,
+    fixup_pid: Option<u32>,
+}
+
+impl PendingGenAiQueue {
+    fn push(&mut self, pending: PendingGenAI) {
+        self.bytes += pending.estimated_bytes();
+        self.entries.push(pending);
+    }
+
+    /// Re-derive the counter from the queue contents.
+    fn resync(&mut self) {
+        self.bytes = self.entries.iter().map(|p| p.estimated_bytes()).sum();
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Drain entries whose session_id can now be resolved, or that timed out
+    /// and must fall back; the rest stay queued.
+    fn resolve(&mut self, mapper: &ResponseSessionMapper) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for mut pending in pending_items {
+            if let Some(session_id) = mapper
+                .get_session_by_response_id(&pending.response_id)
+                .or_else(|| mapper.get_session_by_pid(pending.pid))
+                .map(|s| s.to_string())
+            {
+                log::debug!(
+                    "Deferred session_id resolved: response_id={} → session_id={}",
+                    pending.response_id,
+                    session_id
+                );
+                for event in &mut pending.events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        call.metadata
+                            .insert("session_id".to_string(), session_id.clone());
+                    }
+                }
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: None,
+                });
+            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id timed out for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain entries whose deferral window has expired.
+    fn flush_expired(&mut self) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for pending in pending_items {
+            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id expired for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain everything (shutdown): no fix-ups — the process is exiting, so
+    /// no further FileWrite can arrive to repair a fallback session_id.
+    fn flush_all(&mut self) -> Vec<Vec<GenAISemanticEvent>> {
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        self.bytes = 0;
+        pending_items
+            .into_iter()
+            .map(|pending| {
+                log::debug!(
+                    "Flushing pending GenAI event on shutdown: response_id={}",
+                    pending.response_id
+                );
+                pending.events
+            })
+            .collect()
+    }
+
+    /// Drain only the given (exited) pid's entries; other pids keep waiting.
+    fn flush_for_pid(&mut self, pid: u32) -> Vec<Vec<GenAISemanticEvent>> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
+        self.entries = still_pending;
+        self.resync();
+        to_export
+    }
+
+    /// Evict oldest entries while count or bytes exceed the limits; returns
+    /// the evicted batches for export.
+    fn enforce_limits(
+        &mut self,
+        limits: &crate::config::RuntimeLimits,
+    ) -> Vec<Vec<GenAISemanticEvent>> {
+        let max_count = limits.pending_genai_max_count.max(1);
+        let max_bytes = limits.pending_genai_max_bytes.max(1);
+        let mut evicted = Vec::new();
+        while !self.entries.is_empty()
+            && (self.entries.len() >= max_count || self.bytes >= max_bytes)
+        {
+            let oldest = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(oldest.estimated_bytes());
+            log::warn!(
+                "pending_genai limit exceeded (count={}/{}, bytes={}/{}),                  flushing oldest response_id={}",
+                self.entries.len() + 1,
+                max_count,
+                self.bytes + oldest.estimated_bytes(),
+                max_bytes,
+                oldest.response_id
+            );
+            evicted.push(oldest.events);
+        }
+        evicted
+    }
+}
+
 /// Maximum time to wait for ResponseSessionMapper to resolve a session_id
 const PENDING_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -167,6 +331,57 @@ const RETRO_FIXUP_CAPACITY: usize = 256;
 /// (call_id, registration time, agent_name of the pid at registration time).
 /// The agent name guards against pid reuse (see `apply_retro_session_fixup`).
 type RetroFixupEntry = (String, std::time::Instant, Option<String>);
+
+/// Resolve a configured tokenizer path to the `tokenizer.json` file.
+///
+/// The two places that describe this setting disagree: the environment
+/// variable's row in the user guide says "directory holding local tokenizer
+/// models" while the config-file field documents the file itself. Accept both,
+/// so following either description works — a directory resolves to the
+/// `tokenizer.json` inside it, and its `tokenizer_config.json` sibling is then
+/// found by the existing parent lookup.
+fn resolve_tokenizer_file(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.join("tokenizer.json")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Load the tokenizer configured at `path`, or `None` when there is none to load.
+///
+/// `None` covers both "no such file" and "the file would not load": each means
+/// the caller runs without a tokenizer, and each is logged with the resolved
+/// file so the message names what was actually opened rather than what was
+/// configured.
+fn load_tokenizer(path: &Path) -> Option<LlmTokenizer> {
+    let tokenizer_file = resolve_tokenizer_file(path);
+    if !tokenizer_file.exists() {
+        log::warn!(
+            "Tokenizer file not found: {tokenizer_file:?}. Using analyzer without tokenizer."
+        );
+        return None;
+    }
+
+    // Assume tokenizer_config.json is in the same directory
+    let config_path = tokenizer_file
+        .parent()
+        .map(|p| p.join("tokenizer_config.json"))
+        .unwrap_or_else(|| Path::new("tokenizer_config.json").to_path_buf());
+
+    match LlmTokenizer::from_file(&tokenizer_file, &config_path) {
+        Ok(tokenizer) => {
+            log::info!("Tokenizer loaded from: {tokenizer_file:?}");
+            Some(tokenizer)
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to load tokenizer from {tokenizer_file:?}: {e}. Using analyzer without tokenizer."
+            );
+            None
+        }
+    }
+}
 
 fn trace_database_specs(config: &AgentsightConfig) -> Vec<DatabaseSpec> {
     vec![
@@ -309,6 +524,12 @@ impl AgentSight {
             }
         }
 
+        // Publish the configured ring-buffer poll timeout before any probe
+        // poll thread can spawn (`Probes::run` below, and the standalone
+        // `ProcTrace::run` / `SslSniff::run` paths read the same global); the
+        // poll threads read it via `crate::config::poll_timeout_ms()`.
+        crate::config::set_poll_timeout_ms(config.poll_timeout_ms);
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes = Probes::new_with_cgroup_filter(
@@ -420,8 +641,7 @@ impl AgentSight {
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
-                path
+                "SLS sysom mode detected (path={path}), skipping SQLite and default SLS exporter"
             );
             if logtail_currently_enabled {
                 let exporter = LogtailExporter::new_with_fixed_path(
@@ -506,35 +726,24 @@ impl AgentSight {
             }
         }
 
-        // Create analyzer with tokenizer if configured
-        let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
-            if Path::new(tokenizer_path).exists() {
-                // Assume tokenizer_config.json is in the same directory
-                let config_path = Path::new(tokenizer_path)
-                    .parent()
-                    .map(|p| p.join("tokenizer_config.json"))
-                    .unwrap_or_else(|| Path::new("tokenizer_config.json").to_path_buf());
+        // Apply the configured tokenizer cache size before any token count can
+        // create the global manager; the `tokenizer_enabled` flag itself gates
+        // the drain fallback at its call site.
+        crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
 
-                match LlmTokenizer::from_file(tokenizer_path, &config_path) {
-                    Ok(tokenizer) => {
-                        log::info!("Tokenizer loaded from: {tokenizer_path:?}");
-                        Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load tokenizer from {tokenizer_path:?}: {e}. Using analyzer without tokenizer."
-                        );
-                        Analyzer::new()
-                    }
-                }
-            } else {
-                log::warn!(
-                    "Tokenizer file not found: {tokenizer_path:?}. Using analyzer without tokenizer."
-                );
-                Analyzer::new()
-            }
-        } else {
-            Analyzer::new()
+        // Publish the configured HTTP trace-event duration floor before any
+        // aggregated result can be exported to the Chrome trace file; the
+        // exporters read it via `crate::config::min_duration_us()`.
+        crate::config::set_min_duration_us(config.min_duration_us);
+
+        // Create analyzer with tokenizer if configured
+        let analyzer = match config
+            .tokenizer_path
+            .as_deref()
+            .and_then(|path| load_tokenizer(Path::new(path)))
+        {
+            Some(tokenizer) => Analyzer::with_tokenizer(tokenizer.clone(), tokenizer),
+            None => Analyzer::new(),
         };
 
         // Initialize interruption store only when interruption detection is enabled.
@@ -608,6 +817,12 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
+        // Global capacity budget shared by every maintenance job: each job
+        // re-evaluates its effective size limit right before running.
+        let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
+            config.config_path.clone(),
+            &config.storage,
+        ));
         if config.features.sqlite_storage_enabled && config.storage.primary.check_interval_secs > 0
         {
             // The primary facade uses bare rusqlite connections and is Send but
@@ -616,13 +831,18 @@ impl AgentSight {
             let target = database_manager.open_read_write(DatabaseId::Primary, |db_path| {
                 Self::create_storage(db_path, &config)
             })?;
+            let budget = Arc::clone(&storage_budget);
+            let own_limit_mb = config.storage.primary.max_db_size_mb;
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Primary,
                 Duration::from_secs(config.storage.primary.check_interval_secs),
                 move || {
-                    target.maintain().map_err(|error| {
-                        LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
-                    })
+                    let limit_mb = budget.effective_limit_mb(DatabaseId::Primary, own_limit_mb);
+                    target
+                        .maintain_with_limit_bytes(limit_mb.saturating_mul(1024 * 1024))
+                        .map_err(|error| {
+                            LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
+                        })
                 },
             )?);
         }
@@ -630,11 +850,14 @@ impl AgentSight {
             && config.storage.genai.check_interval_secs > 0
         {
             let target = Arc::clone(target);
+            let budget = Arc::clone(&storage_budget);
+            let own_limit_mb = config.storage.genai.max_db_size_mb;
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::GenAi,
                 Duration::from_secs(config.storage.genai.check_interval_secs),
                 move || {
-                    target.maintain().map_err(|error| {
+                    let limit_mb = budget.effective_limit_mb(DatabaseId::GenAi, own_limit_mb);
+                    target.maintain_with_limit_mb(limit_mb).map_err(|error| {
                         LifecycleError::MaintenanceJobFailed(format!("genai: {error}"))
                     })
                 },
@@ -645,12 +868,15 @@ impl AgentSight {
         {
             let target = Arc::clone(target);
             let policy = config.storage.interruptions;
+            let budget = Arc::clone(&storage_budget);
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Interruptions,
                 Duration::from_secs(policy.check_interval_secs),
                 move || {
+                    let limit_mb =
+                        budget.effective_limit_mb(DatabaseId::Interruptions, policy.max_db_size_mb);
                     target
-                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .purge_old_and_oversized(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| {
                             LifecycleError::MaintenanceJobFailed(format!("interruptions: {error}"))
@@ -662,14 +888,18 @@ impl AgentSight {
             && config.storage.trajectories.check_interval_secs > 0
         {
             let target = Arc::clone(target);
-            let policy = agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
-                retention_days: config.storage.trajectories.retention_days,
-                max_db_size_mb: config.storage.trajectories.max_db_size_mb,
-            };
+            let retention_days = config.storage.trajectories.retention_days;
+            let own_limit_mb = config.storage.trajectories.max_db_size_mb;
+            let budget = Arc::clone(&storage_budget);
             maintenance_jobs.push(database_manager.maintenance_job(
                 DatabaseId::Trajectories,
                 Duration::from_secs(config.storage.trajectories.check_interval_secs),
                 move || {
+                    let policy = agentsight_trajectory_collector::TrajectoryMaintenancePolicy {
+                        retention_days,
+                        max_db_size_mb: budget
+                            .effective_limit_mb(DatabaseId::Trajectories, own_limit_mb),
+                    };
                     target.maintain(policy).map(|_| ()).map_err(|error| {
                         LifecycleError::MaintenanceJobFailed(format!("trajectories: {error}"))
                     })
@@ -700,6 +930,8 @@ impl AgentSight {
             Arc::clone(&resource_targets),
             Arc::clone(&running),
         );
+        let metrics_exporter = MetricsFileExporter::from_env()
+            .context("failed to configure AgentSight runtime metrics export")?;
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
@@ -731,8 +963,14 @@ impl AgentSight {
 
         Ok(AgentSight {
             probes,
-            parser: Parser::new(),
-            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits),
+            // The configured header cap governs which HTTP/1 messages the
+            // parser accepts; messages beyond the cap fall to the raw-data
+            // path instead of being parsed. The aggregator gets the same cap
+            // so its re-parse sites (1xx chains, byte assembly) never hold
+            // assembled messages to a limit the parser already accepted.
+            parser: Parser::with_max_headers(config.max_headers),
+            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits)
+                .with_http_max_headers(config.max_headers),
             analyzer,
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
@@ -754,13 +992,12 @@ impl AgentSight {
             } else {
                 ResponseSessionMapper::disabled()
             },
-            pending_genai: Vec::new(),
+            pending_genai: PendingGenAiQueue::default(),
             // RETRO_FIXUP_CAPACITY is a non-zero constant, so the unwrap is
             // guaranteed unreachable.
             retro_session_fixup: lru::LruCache::new(
                 std::num::NonZeroUsize::new(RETRO_FIXUP_CAPACITY).unwrap(),
             ),
-            pending_genai_bytes: 0,
             runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
@@ -775,6 +1012,7 @@ impl AgentSight {
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
             features: config.features.clone(),
             database_manager,
+            metrics_exporter,
         })
     }
 
@@ -950,10 +1188,17 @@ impl AgentSight {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let status = match fs::read_to_string(proc_root.join(format!("{pid}/status"))) {
-                Ok(s) => s,
+            let status = match fs::read(proc_root.join(format!("{pid}/status"))) {
+                Ok(bytes) => bytes,
                 Err(_) => continue,
             };
+            // `/proc/<pid>/status` embeds the process name, and the kernel
+            // allows non-UTF-8 bytes in a name (`prctl(PR_SET_NAME)`, or an
+            // executable whose name is not valid UTF-8). `read_to_string`
+            // rejected the whole file, so that pid and its whole subtree
+            // dropped out of the descendant set. The `PPid:` line is ASCII, so
+            // a lossy decode still finds it.
+            let status = String::from_utf8_lossy(&status);
             let ppid = status
                 .lines()
                 .find_map(|line| line.strip_prefix("PPid:\t"))
@@ -1006,6 +1251,7 @@ impl AgentSight {
 
         let event = self.probes.try_recv()?;
         self.event_count += 1;
+        record_event_received(event.event_type());
 
         log::trace!("Processing event: {:?}", event.event_type());
 
@@ -1166,8 +1412,7 @@ impl AgentSight {
                         }
                     } else {
                         log::warn!(
-                            "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            response_id
+                            "Deferred GenAI call queued without pending_info (response_id={response_id}), crash detection blind spot remains"
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
@@ -1176,8 +1421,6 @@ impl AgentSight {
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
-                    self.pending_genai_bytes +=
-                        self.pending_genai.last().map_or(0, |p| p.estimated_bytes());
                     self.enforce_pending_genai_limits();
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
@@ -1342,6 +1585,7 @@ impl AgentSight {
             // a saturated byte budget keeps the queue non-empty, which is exactly
             // when the watermarks matter most.
             self.maybe_log_buffer_watermarks();
+            self.maybe_export_runtime_metrics();
             if let Some(result) = self.try_process() {
                 log::trace!("[Event {result}] Processed");
             } else {
@@ -1359,6 +1603,7 @@ impl AgentSight {
 
         // On shutdown, flush all remaining pending events with fallback session_id
         self.flush_all_pending_genai();
+        self.export_final_runtime_metrics();
 
         Ok(self.event_count)
     }
@@ -1376,6 +1621,7 @@ impl AgentSight {
         }
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
+        self.export_final_runtime_metrics();
         // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit
         // (mirrors Storage::Drop which checkpoints agentsight.db).
         if let Some(ref store) = self.genai_sqlite_store {
@@ -1388,14 +1634,24 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Ok(mut guard) = self.pending_logtail.try_lock() {
-            if let Some(exporter) = guard.take() {
-                log::info!(
-                    "Registering dynamically-activated LogtailExporter: '{}'",
-                    exporter.name()
-                );
-                self.genai_exporters.push(exporter);
-            }
+        Self::register_pending_logtail(&mut self.genai_exporters, &self.pending_logtail);
+    }
+
+    /// Drain the pending_logtail mailbox into `exporters`.
+    ///
+    /// Split out of [`Self::check_pending_logtail`] so the registration rule —
+    /// a re-activated dynamic exporter replaces its predecessor instead of
+    /// being registered next to it — is testable without a running monitor.
+    fn register_pending_logtail(
+        exporters: &mut Vec<Box<dyn GenAIExporter>>,
+        pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
+    ) {
+        if let Some(exporter) = crate::background::take_pending_logtail(pending_logtail) {
+            log::info!(
+                "Registering dynamically-activated LogtailExporter: '{}'",
+                exporter.name()
+            );
+            install_exporter(exporters, exporter);
         }
     }
 
@@ -1456,6 +1712,7 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            let genai = self.genai_sqlite_store.as_deref();
             // Build a call_id → (session_id, conversation_id) lookup from
             // LLMCall events in this batch, so ToolUse events can inherit
             // the conversation context of their parent call.
@@ -1481,83 +1738,7 @@ impl AgentSight {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
                     for ie in &interruptions {
-                        // Deduplicate: skip if same (conversation_id, type, error_msg)
-                        // already recorded.  Same error retried N times produces only
-                        // 1 interruption; different errors each get 1.
-                        // NOTE: RetryStorm detection only fires when conversation_id is Some.
-                        // When None, each error inserts a separate row (no dedup, no storm detect).
-                        if let Some(ref cid) = ie.conversation_id {
-                            let error_msg = llm_call.error.as_deref();
-                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
-                            {
-                                log::debug!(
-                                    "Skipping duplicate {:?} for conversation_id={} error={:?}",
-                                    ie.interruption_type,
-                                    cid,
-                                    error_msg
-                                );
-                                // Still stamp the genai_events row so the call is marked
-                                if let Some(ref sqlite) = self.genai_sqlite_store {
-                                    let _ = sqlite.update_interruption_type(
-                                        &llm_call.call_id,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    // RetryStorm: if >= 5 total calls with same error type in
-                                    // this conversation, emit critical alert
-                                    let count = sqlite.count_interruption_type_for_conversation(
-                                        cid,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    if count >= 5
-                                        && ie.interruption_type
-                                            != crate::interruption::InterruptionType::RetryStorm
-                                    {
-                                        let storm_event =
-                                            crate::interruption::InterruptionEvent::new(
-                                                crate::interruption::InterruptionType::RetryStorm,
-                                                ie.session_id.clone(),
-                                                ie.trace_id.clone(),
-                                                ie.conversation_id.clone(),
-                                                ie.call_id.clone(),
-                                                ie.pid,
-                                                ie.agent_name.clone(),
-                                                llm_call.end_timestamp_ns as i64,
-                                                Some(serde_json::json!({
-                                                    "repeated_type": ie.interruption_type.as_str(),
-                                                    "count": count,
-                                                })),
-                                            );
-                                        if !istore.exists_for_conversation(
-                                            cid,
-                                            &crate::interruption::InterruptionType::RetryStorm,
-                                            None,
-                                        ) {
-                                            let _ = istore.insert(&storm_event);
-                                            log::warn!(
-                                                "RetryStorm detected: {} × {:?} in conversation {}",
-                                                count,
-                                                ie.interruption_type,
-                                                cid
-                                            );
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                        if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {e}");
-                        }
-                        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
-                        // so the SLS index keeps interruption records co-located with LLM calls.
-                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
-                        // Also stamp genai_events row with interruption_type
-                        if let Some(ref sqlite) = self.genai_sqlite_store {
-                            let _ = sqlite.update_interruption_type(
-                                &llm_call.call_id,
-                                ie.interruption_type.as_str(),
-                            );
-                        }
+                        store_interruption(ie, llm_call, istore, genai);
                     }
 
                     // ── Cross-call DeadLoop detection ──────────────────────────────
@@ -1593,9 +1774,6 @@ impl AgentSight {
                                     &recent,
                                 ) {
                                     let _ = istore.insert(&loop_event);
-                                    crate::genai::logtail::export_interruption_events(
-                                        std::slice::from_ref(&loop_event),
-                                    );
                                     log::warn!(
                                         "DeadLoop detected in conversation {}: {:?}",
                                         cid,
@@ -1655,7 +1833,6 @@ impl AgentSight {
                         if let Err(e) = istore.insert(ie) {
                             log::warn!("Failed to store tool_failure interruption: {e}");
                         }
-                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
                         log::warn!(
                             "ToolFailure detected: tool={} error={:?}",
                             tool.tool_name,
@@ -1728,12 +1905,17 @@ impl AgentSight {
         }
 
         // 3. Query all pending calls for this PID (including any persisted earlier)
-        let pending_calls = if let Some(ref store) = self.genai_sqlite_store {
-            store
-                .list_pending_for_pids(&[pid as i32])
-                .unwrap_or_default()
-        } else {
-            vec![]
+        let Some(pending_calls) =
+            pending_calls_for_crash_detection(self.genai_sqlite_store.as_deref(), pid)
+        else {
+            // The lookup itself failed: "we could not ask" is not "there were
+            // none", and only the empty answer means a normal shutdown. The
+            // trace process gets no second chance at this decision, so it must
+            // not record one on an answer it never received.
+            log::error!(
+                "[CrashDetect] pending-call lookup failed for pid={pid}; skipping the crash decision",
+            );
+            return;
         };
 
         if pending_calls.is_empty() {
@@ -1853,6 +2035,10 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
+                    // A dead connection retains no completing read, so the
+                    // header event is the only provenance left for the
+                    // synthetic events; these feed pending-row usage
+                    // extraction only, not duration accounting.
                     crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
                         &buf,
                         content_encoding.as_deref(),
@@ -1922,101 +2108,34 @@ impl AgentSight {
                                     .as_deref()
                                     .or(pending.model.as_deref())
                                     .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                if let Some(tokenizer) =
+                                    drain_fallback_tokenizer(&self.features, model_name)
                                 {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
                                         if let Some(body) = request.json_body() {
-                                            if let Some(messages) =
-                                                body.get("messages").and_then(|m| m.as_array())
+                                            if let Some(count) =
+                                                drain_request_input_tokens(&body, &tokenizer)
                                             {
-                                                let mut msgs = messages.clone();
-                                                // Parse tool_calls.arguments from string to object
-                                                for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg
-                                                        .get_mut("tool_calls")
-                                                        .and_then(|tc| tc.as_array_mut())
-                                                    {
-                                                        for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function")
-                                                            {
-                                                                if let Some(a) = f
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                {
-                                                                    if let Ok(p) =
-                                                                        serde_json::from_str::<
-                                                                            serde_json::Value,
-                                                                        >(
-                                                                            a
-                                                                        )
-                                                                    {
-                                                                        f["arguments"] = p;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let tools_json: Option<Vec<serde_json::Value>> =
-                                                    body.get("tools")
-                                                        .and_then(|t| t.as_array())
-                                                        .map(|a| a.to_vec());
-                                                let count = match tokenizer
-                                                    .apply_chat_template_with_tools(
-                                                        &msgs,
-                                                        tools_json.as_deref(),
-                                                        true,
-                                                    ) {
-                                                    Ok(formatted) => {
-                                                        tokenizer.count(&formatted).unwrap_or(0)
-                                                    }
-                                                    Err(_) => {
-                                                        // Fallback: raw message count
-                                                        msgs.iter()
-                                                            .filter_map(|m| {
-                                                                serde_json::to_string(m).ok()
-                                                            })
-                                                            .map(|s| {
-                                                                tokenizer.count(&s).unwrap_or(0)
-                                                            })
-                                                            .sum()
-                                                    }
-                                                };
-                                                if count > 0 {
-                                                    enrichment.input_tokens = Some(count as i64);
-                                                }
+                                                enrichment.input_tokens = Some(count);
                                             }
                                         }
                                     }
                                     // ── output tokens ──
                                     if enrichment.output_tokens.is_none() {
-                                        use crate::analyzer::token::extract_response_content;
-                                        let mut all_content = String::new();
-                                        let mut all_reasoning = String::new();
-                                        let mut all_tool_calls = Vec::new();
-                                        for ev in &sse_events {
-                                            if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) =
-                                                    extract_response_content(Some(&chunk))
-                                                {
-                                                    if !content.is_empty() {
-                                                        all_content.push_str(&content);
-                                                    }
-                                                    if let Some(r) = reasoning {
-                                                        if !r.is_empty() {
-                                                            all_reasoning.push_str(&r);
-                                                        }
-                                                    }
-                                                    for tc in tool_calls {
-                                                        if !tc.is_empty() {
-                                                            all_tool_calls.push(tc);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        // The shared merge counts each delta
+                                        // once and reads the Responses closing
+                                        // events only as a fallback, so a
+                                        // complete capture is not counted
+                                        // two or three times.
+                                        let chunks: Vec<serde_json::Value> = sse_events
+                                            .iter()
+                                            .filter_map(|ev| ev.json_body())
+                                            .collect();
+                                        let (all_content, all_reasoning, all_tool_calls) =
+                                            crate::analyzer::token::merge_response_output_text(
+                                                &chunks,
+                                            );
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
                                             let wrapped =
@@ -2035,11 +2154,6 @@ impl AgentSight {
                                             enrichment.output_tokens = Some(total as i64);
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
@@ -2074,16 +2188,21 @@ impl AgentSight {
                     .unwrap_or(0);
 
                 let mut checked_pids: HashSet<u32> = HashSet::new();
-                for (pid, _call_id, session_id, agent_name, conversation_id) in &persisted_pending {
+                for (pid, ..) in &persisted_pending {
                     if !checked_pids.insert(*pid) {
                         continue; // already checked this PID
                     }
-                    if was_pid_oom_killed(*pid as i32) {
-                        let call_ids: Vec<&str> = persisted_pending
-                            .iter()
-                            .filter(|(p, _, _, _, _)| *p == *pid)
-                            .map(|(_, c, _, _, _)| c.as_str())
-                            .collect();
+                    if !was_pid_oom_killed(*pid as i32) {
+                        continue;
+                    }
+                    // One event per conversation: writing only the first
+                    // tuple's session/conversation while marking every call
+                    // interrupted left the other conversations without a
+                    // parent agent_crash event (OpenClaw = one pid, many
+                    // sessions).
+                    for (agent_name, session_id, conversation_id, call_ids) in
+                        oom_crash_groups_for_pid(*pid, &persisted_pending)
+                    {
                         log::info!(
                             "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
                             pid,
@@ -2092,16 +2211,16 @@ impl AgentSight {
                         );
                         let detail = serde_json::json!({
                             "pid": pid,
-                            "agent_name": agent_name,
+                            "agent_name": agent_name.clone(),
                             "call_ids": call_ids,
                             "oom": true,
                             "source": "drain+dmesg",
                         });
                         let event = InterruptionEvent::new(
                             InterruptionType::AgentCrash,
-                            session_id.clone(),
+                            session_id,
                             None,
-                            conversation_id.clone(),
+                            conversation_id,
                             None,
                             Some(*pid as i32),
                             agent_name.clone(),
@@ -2115,15 +2234,15 @@ impl AgentSight {
                         } else {
                             log::info!("[DrainCheck] Recorded OOM agent_crash for pid={pid}");
                         }
-                        // Mark all pending calls for this PID as interrupted
-                        if let Some(ref store) = self.genai_sqlite_store {
-                            if let Err(e) =
-                                store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
-                            {
-                                log::warn!(
-                                    "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
-                                );
-                            }
+                    }
+                    // Mark all pending calls for this PID as interrupted
+                    if let Some(ref store) = self.genai_sqlite_store {
+                        if let Err(e) =
+                            store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
+                        {
+                            log::warn!(
+                                "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
+                            );
                         }
                     }
                 }
@@ -2168,85 +2287,30 @@ impl AgentSight {
     /// Try to resolve pending GenAI events whose session_id can now be looked up.
     /// Called after FileWrite events update the ResponseSessionMapper.
     fn resolve_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for mut pending in pending_items {
-            if let Some(session_id) = self
-                .response_mapper
-                .get_session_by_response_id(&pending.response_id)
-                .or_else(|| self.response_mapper.get_session_by_pid(pending.pid))
-                .map(|s| s.to_string())
-            {
-                // Resolved — update session_id in all event metadata
-                log::debug!(
-                    "Deferred session_id resolved: response_id={} → session_id={}",
-                    pending.response_id,
-                    session_id
-                );
-                for event in &mut pending.events {
-                    if let GenAISemanticEvent::LLMCall(call) = event {
-                        call.metadata
-                            .insert("session_id".to_string(), session_id.clone());
-                    }
-                }
-                to_export.push(pending.events);
-            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                // Timed out — export with fallback session_id
-                log::debug!(
-                    "Deferred session_id timed out for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                // Still waiting
-                still_pending.push(pending);
+        let drained = self.pending_genai.resolve(&self.response_mapper);
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
     pub fn flush_expired_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for pending in pending_items {
-            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                log::debug!(
-                    "Deferred session_id expired for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                still_pending.push(pending);
+        let drained = self.pending_genai.flush_expired();
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
@@ -2258,16 +2322,9 @@ impl AgentSight {
     /// `apply_retro_session_fixup`; the remaining pendings are persisted with
     /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        for pending in &pending_items {
-            log::debug!(
-                "Flushing pending GenAI event on shutdown: response_id={}",
-                pending.response_id
-            );
-        }
-        for pending in pending_items {
-            self.complete_and_export_deferred_genai(&pending.events);
-            self.detect_and_store_interruptions(&pending.events);
+        for events in self.pending_genai.flush_all() {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2283,19 +2340,11 @@ impl AgentSight {
     /// Falling back to the response_id-based session_id therefore loses
     /// nothing. Deferred events of other (still-live) pids keep waiting.
     fn flush_deferred_genai_for_pid(&mut self, pid: u32) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
-        self.pending_genai = still_pending;
-
         // No retro fix-up registration here: the pid is dead, so the FileWrite
         // that would reveal its session mapping can never arrive anymore.
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for events in self.pending_genai.flush_for_pid(pid) {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2327,7 +2376,9 @@ impl AgentSight {
     /// Add a custom GenAI exporter at runtime
     pub fn add_genai_exporter(&mut self, exporter: Box<dyn GenAIExporter>) {
         log::info!("Registered GenAI exporter: '{}'", exporter.name());
-        self.genai_exporters.push(exporter);
+        // Same identity rule as the mailbox path: a same-named exporter is
+        // replaced, otherwise every registration would write the batch again.
+        install_exporter(&mut self.genai_exporters, exporter);
     }
 
     /// Get reference to agent scanner
@@ -2373,26 +2424,7 @@ impl AgentSight {
     /// If pending GenAI queue exceeds count or byte limits, flush the oldest
     /// entries with the fallback session_id to prevent unbounded memory growth.
     fn enforce_pending_genai_limits(&mut self) {
-        let max_count = self.runtime_limits.pending_genai_max_count.max(1);
-        let max_bytes = self.runtime_limits.pending_genai_max_bytes.max(1);
-
-        while !self.pending_genai.is_empty()
-            && (self.pending_genai.len() >= max_count || self.pending_genai_bytes >= max_bytes)
-        {
-            let oldest = self.pending_genai.remove(0);
-            self.pending_genai_bytes = self
-                .pending_genai_bytes
-                .saturating_sub(oldest.estimated_bytes());
-            log::warn!(
-                "pending_genai limit exceeded (count={}/{}, bytes={}/{}), \
-                 flushing oldest response_id={}",
-                self.pending_genai.len() + 1,
-                max_count,
-                self.pending_genai_bytes + oldest.estimated_bytes(),
-                max_bytes,
-                oldest.response_id
-            );
-            let events = oldest.events;
+        for events in self.pending_genai.enforce_limits(&self.runtime_limits) {
             self.complete_and_export_deferred_genai(&events);
             self.detect_and_store_interruptions(&events);
         }
@@ -2433,6 +2465,65 @@ impl AgentSight {
             log::debug!("{report}");
         }
     }
+
+    fn runtime_metrics(&self) -> Result<RuntimeMetrics> {
+        let channel = self.probes.channel_watermarks();
+        let connections = self.aggregator.connection_metrics();
+        Ok(RuntimeMetrics {
+            event_channel_bytes: channel.in_flight_bytes as u64,
+            event_channel_budget_bytes: channel.budget_bytes as u64,
+            channel_length: self.probes.channel_length() as u64,
+            channel_dropped: self.probes.channel_dropped() as u64,
+            ring_buffer_dropped: self.probes.ring_buffer_dropped()?,
+            connection_cache_bytes: connections.connection_cache_bytes as u64,
+            pending_genai_count: self.pending_genai.len() as u64,
+            pending_genai_bytes: self.pending_genai.bytes as u64,
+            pending_connection_count: connections.pending_connection_count as u64,
+            pending_connection_bytes: connections.pending_connection_bytes as u64,
+            eviction_count: connections.eviction_count,
+            completed: self.event_count,
+        })
+    }
+
+    fn maybe_export_runtime_metrics(&mut self) {
+        if !self
+            .metrics_exporter
+            .as_ref()
+            .is_some_and(MetricsFileExporter::is_due)
+        {
+            return;
+        }
+        let metrics = match self.runtime_metrics() {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                log::warn!("Failed to read AgentSight runtime metrics: {error:#}");
+                return;
+            }
+        };
+        if let Some(exporter) = self.metrics_exporter.as_mut()
+            && let Err(error) = exporter.maybe_export(metrics)
+        {
+            log::warn!("Failed to export AgentSight runtime metrics: {error:#}");
+        }
+    }
+
+    fn export_final_runtime_metrics(&mut self) {
+        if self.metrics_exporter.is_none() {
+            return;
+        }
+        let metrics = match self.runtime_metrics() {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                log::warn!("Failed to read final AgentSight runtime metrics: {error:#}");
+                return;
+            }
+        };
+        if let Some(exporter) = self.metrics_exporter.as_mut()
+            && let Err(error) = exporter.export(metrics)
+        {
+            log::warn!("Failed to export final AgentSight runtime metrics: {error:#}");
+        }
+    }
 }
 
 impl Drop for AgentSight {
@@ -2458,6 +2549,27 @@ fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
             GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
             _ => false,
         })
+}
+
+/// Register `exporter`, replacing a registered exporter that has the same
+/// name.
+///
+/// `GenAIExporter::name` is the exporter's identity, which is why the Logtail
+/// exporter answers `logtail-file-dynamic` for a dynamically activated one:
+/// "so the runtime can replace an existing dynamic exporter instead of
+/// accumulating duplicates when the SLS path is deactivated and re-activated
+/// repeatedly". The mailbox registration pushed unconditionally, so every
+/// deactivate/reactivate cycle of `runtime.sls_logtail_path` added another
+/// dynamic exporter; each of them re-reads the process-global path and writes
+/// the same batch, so a record was written once per cycle.
+fn install_exporter(exporters: &mut Vec<Box<dyn GenAIExporter>>, exporter: Box<dyn GenAIExporter>) {
+    let name = exporter.name().to_string();
+    if let Some(existing) = exporters.iter_mut().find(|e| e.name() == name) {
+        log::info!("Replacing the registered '{name}' GenAI exporter");
+        *existing = exporter;
+        return;
+    }
+    exporters.push(exporter);
 }
 
 fn complete_deferred_genai(
@@ -2615,7 +2727,7 @@ fn apply_retro_session_fixup(
         // safe and is required: dropping the entry after only one store
         // succeeded would leave the other permanently unrepaired.
         let interruption_repaired = match istore {
-            Some(istore) => match istore.backfill_null_session_id(&call_id, &session_id) {
+            Some(istore) => match istore.backfill_placeholder_session_id(&call_id, &session_id) {
                 Ok(n) => {
                     if n > 0 {
                         log::debug!(
@@ -2654,6 +2766,189 @@ fn apply_retro_session_fixup(
     }
 }
 
+/// Group LLM calls by `(session_id, conversation_id)`.
+///
+/// Returns groups in first-seen order, each carrying only the call ids that
+/// belong to its conversation. A single agent process can serve several
+/// conversations (OpenClaw is one gateway pid with many sessions); attributing
+/// a crash to only the first tuple leaves every other conversation's
+/// interrupted calls without a parent `agent_crash` event.
+fn group_calls_by_conversation<'a>(
+    calls: impl Iterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
+) -> Vec<(Option<String>, Option<String>, Vec<String>)> {
+    let mut groups: Vec<((Option<String>, Option<String>), Vec<String>)> = Vec::new();
+    for (call_id, session_id, conversation_id) in calls {
+        let key = (
+            session_id.map(str::to_owned),
+            conversation_id.map(str::to_owned),
+        );
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, call_ids)) => call_ids.push(call_id.to_owned()),
+            None => groups.push((key, vec![call_id.to_owned()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((session_id, conversation_id), call_ids)| (session_id, conversation_id, call_ids))
+        .collect()
+}
+
+/// Per-conversation OOM crash groups for one dead pid.
+///
+/// `persisted_pending` rows are `(pid, call_id, session_id, agent_name,
+/// conversation_id)`; agent name is a property of the pid, so the first row
+/// of that pid is representative. Returned tuples are `(agent_name,
+/// session_id, conversation_id, call_ids)` — one per conversation, so the
+/// drain path can write one event each instead of only the first tuple's.
+fn oom_crash_groups_for_pid(
+    pid: u32,
+    persisted_pending: &[(u32, String, Option<String>, Option<String>, Option<String>)],
+) -> Vec<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
+    let agent_name = persisted_pending
+        .iter()
+        .find(|(p, ..)| *p == pid)
+        .and_then(|(_, _, _, name, _)| name.clone());
+    group_calls_by_conversation(persisted_pending.iter().filter(|(p, ..)| *p == pid).map(
+        |(_, call_id, session_id, _, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ))
+    .into_iter()
+    .map(|(session_id, conversation_id, call_ids)| {
+        (agent_name.clone(), session_id, conversation_id, call_ids)
+    })
+    .collect()
+}
+
+/// The failure message an interruption's own detail carries, if any.
+///
+/// This is the `error` key `InterruptionStore::exists_for_conversation`
+/// matches stored rows on.  An interruption detected from a call's request
+/// history (the detector's traced `tool_result` path) has no transport error:
+/// the call itself succeeded, so `call.error` is `None` and its message only
+/// exists here.
+fn detail_error_key(ie: &crate::interruption::InterruptionEvent) -> Option<String> {
+    let detail = ie.detail.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(detail).ok()?;
+    value
+        .get("error")
+        .and_then(|error| error.as_str())
+        .map(str::to_owned)
+}
+
+/// Store one detected interruption: message-matched dedup, the insert, the
+/// logtail export, the per-call `genai_events` stamp, and the RetryStorm
+/// threshold.
+///
+/// Extracted from `detect_and_store_interruptions` so the dedup / stamp /
+/// storm path is unit-testable without constructing a full `AgentSight`.
+fn store_interruption(
+    ie: &crate::interruption::InterruptionEvent,
+    call: &crate::genai::LLMCall,
+    istore: &InterruptionStore,
+    genai_store: Option<&GenAISqliteStore>,
+) {
+    // Deduplicate: skip if same (conversation_id, type, error_msg)
+    // already recorded.  Same error retried N times produces only
+    // 1 interruption; different errors each get 1.
+    // NOTE: RetryStorm detection only fires when conversation_id is Some.
+    // When None, each error inserts a separate row (no dedup, no storm detect).
+    //
+    // The key is the message a caller retried on.  `call.error` is the
+    // transport error, which a traced tool failure does not have: keyed on its
+    // `None`, the store matches *any* unresolved row of the same type in the
+    // conversation, dropping a second, different failure.
+    let detail_error = detail_error_key(ie);
+    let error = call.error.as_deref().or(detail_error.as_deref());
+    let duplicate = ie
+        .conversation_id
+        .as_deref()
+        .is_some_and(|cid| istore.exists_for_conversation(cid, &ie.interruption_type, error));
+    if duplicate {
+        log::debug!(
+            "Skipping duplicate {:?} for conversation_id={:?} error={:?}",
+            ie.interruption_type,
+            ie.conversation_id,
+            error
+        );
+    } else if let Err(e) = istore.insert(ie) {
+        log::warn!("Failed to store interruption event: {e}");
+    }
+    // Stamp the genai_events row, then run the type-counted RetryStorm check
+    // on both paths: the dedup above matches one *message*, while the storm
+    // threshold counts one *type*.
+    if let Some(sqlite) = genai_store {
+        let _ = sqlite.update_interruption_type(&call.call_id, ie.interruption_type.as_str());
+        if let Some(ref cid) = ie.conversation_id {
+            maybe_record_retry_storm(cid, ie, call.end_timestamp_ns as i64, istore, sqlite);
+        }
+    }
+}
+
+/// Write one unresolved `RetryStorm` for a conversation once the same
+/// interruption type reaches the retry threshold.
+///
+/// `RetryStorm`'s contract counts one *type* ("the same error type repeats at
+/// least 5 times within one conversation"), which is what
+/// `count_interruption_type_for_conversation` measures, so the check must not
+/// live inside the message-matched dedup branch: five same-type errors whose
+/// texts differ all take the insert path and never reached it.
+///
+/// Extracted as a free function so the decision is unit-testable without
+/// constructing a full `AgentSight` instance.
+fn maybe_record_retry_storm(
+    cid: &str,
+    ie: &crate::interruption::InterruptionEvent,
+    occurred_at_ns: i64,
+    istore: &InterruptionStore,
+    genai_store: &GenAISqliteStore,
+) {
+    use crate::interruption::{InterruptionEvent, InterruptionType};
+
+    if ie.interruption_type == InterruptionType::RetryStorm {
+        return;
+    }
+
+    // >= 5 calls with the same error type in this conversation: the agent is
+    // stuck retrying.
+    let count =
+        genai_store.count_interruption_type_for_conversation(cid, ie.interruption_type.as_str());
+    if count < 5 {
+        return;
+    }
+
+    // At most one unresolved storm per conversation.
+    if istore.exists_for_conversation(cid, &InterruptionType::RetryStorm, None) {
+        return;
+    }
+
+    let storm_event = InterruptionEvent::new(
+        InterruptionType::RetryStorm,
+        ie.session_id.clone(),
+        ie.trace_id.clone(),
+        ie.conversation_id.clone(),
+        ie.call_id.clone(),
+        ie.pid,
+        ie.agent_name.clone(),
+        occurred_at_ns,
+        Some(serde_json::json!({
+            "repeated_type": ie.interruption_type.as_str(),
+            "count": count,
+        })),
+    );
+    let _ = istore.insert(&storm_event);
+    log::warn!(
+        "RetryStorm detected: {} × {:?} in conversation {}",
+        count,
+        ie.interruption_type,
+        cid
+    );
+}
+
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
@@ -2667,6 +2962,27 @@ fn apply_retro_session_fixup(
 ///
 /// Extracted as a free function so the crash decision is unit-testable
 /// without constructing a full `AgentSight` instance.
+/// Pending calls for one pid, with "could not ask" kept apart from "none".
+///
+/// The empty list is the signal for a normal shutdown: the caller `return`s on
+/// it without recording anything. A failed query therefore has to be reported as
+/// something else, or a storage error is indistinguishable from a clean exit and
+/// the crash it may represent is never recorded. `None` covers "no store
+/// configured" for the same reason — there is no evidence either way.
+fn pending_calls_for_crash_detection(
+    store: Option<&GenAISqliteStore>,
+    pid: u32,
+) -> Option<Vec<(String, Option<String>, Option<String>, Option<String>)>> {
+    let store = store?;
+    match store.list_pending_for_pids(&[pid as i32]) {
+        Ok(calls) => Some(calls),
+        Err(error) => {
+            log::error!("[CrashDetect] failed to query pending calls for pid={pid}: {error}");
+            None
+        }
+    }
+}
+
 fn record_agent_crash_interruptions(
     pid: u32,
     agent_name: &str,
@@ -2703,20 +3019,21 @@ fn record_agent_crash_interruptions(
     let is_oom = was_pid_oom_killed(pid as i32);
 
     // Group by (session_id, conversation_id) to produce one event per conversation
-    let mut by_conv: std::collections::HashMap<(Option<String>, Option<String>), Vec<String>> =
-        std::collections::HashMap::new();
-    for (call_id, session_id, _trace_id, conversation_id) in pending_calls {
-        by_conv
-            .entry((session_id.clone(), conversation_id.clone()))
-            .or_default()
-            .push(call_id.clone());
-    }
+    let groups = group_calls_by_conversation(pending_calls.iter().map(
+        |(call_id, session_id, _trace_id, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ));
 
-    for ((session_id, conversation_id), call_ids) in &by_conv {
+    for (session_id, conversation_id, call_ids) in groups {
         let mut detail = serde_json::json!({
             "pid": pid,
             "agent_name": agent_name,
-            "call_ids": call_ids,
+            "call_ids": call_ids.clone(),
             "source": "trace_procmon_exit",
             "exit_code": exit_status.code,
             "signal": exit_status.signal,
@@ -2761,6 +3078,92 @@ fn record_agent_crash_interruptions(
             log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}");
         }
     }
+}
+
+/// Resolve the tokenizer used by the dead-PID drain fallback.
+///
+/// Returns `None` when `features.tokenizer.enabled` is off: a disabled feature
+/// must not be instantiated at all, so the global manager is never touched and
+/// no tokenizer is constructed or downloaded. Also `None` when the lookup or
+/// download fails for an enabled feature.
+///
+/// Extracted as a free function so the feature gate is unit-testable without
+/// constructing a full `AgentSight` instance.
+pub(crate) fn drain_fallback_tokenizer(
+    features: &crate::config::FeatureFlags,
+    model_name: &str,
+) -> Option<Arc<LlmTokenizer>> {
+    if !features.tokenizer_enabled {
+        log::debug!(
+            "[DrainCheck] tokenizer feature disabled, skipping token computation for {model_name:?}"
+        );
+        return None;
+    }
+    match crate::tokenizer::get_global_tokenizer(model_name) {
+        Ok(tokenizer) => Some(tokenizer),
+        Err(e) => {
+            log::warn!(
+                "[DrainCheck] tokenizer unavailable for model {model_name:?}, skipping token computation: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Count the input tokens of a drained request from its captured body.
+///
+/// The drain fallback runs for streams that ended before the terminal usage
+/// event, and it has to count the same request shapes the analyzer and the
+/// token breakdown count. It reads the parser-layer message view instead of a
+/// private top-level `messages` array, which recognized only OpenAI chat
+/// bodies: a drained Responses (`input` with `instructions`) or DashScope
+/// native (`input.messages`) call kept `input_tokens` NULL while its output
+/// side was still counted from the same events.
+///
+/// Extracted as a free function, like `record_agent_crash_interruptions`, so
+/// the fallback is unit-testable without constructing a full `AgentSight`
+/// instance.
+fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer) -> Option<i64> {
+    let (mut messages, instructions) = crate::parser::llm::extract_messages_view(body)?;
+    if let Some(system) = instructions.filter(|text| !text.is_empty()) {
+        messages.insert(0, serde_json::json!({"role": "system", "content": system}));
+    }
+    // Parse tool_calls.arguments from string to object
+    for msg in messages.iter_mut() {
+        if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            for tc in tcs.iter_mut() {
+                if let Some(f) = tc.get_mut("function") {
+                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
+                            f["arguments"] = p;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // DashScope/Bailian native requests nest their tool definitions under
+    // "parameters" (the OpenAI-compatible spelling is top level), the same
+    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
+    // this the drained call is estimated without tools the template renders.
+    let tools_json: Option<Vec<serde_json::Value>> = body
+        .get("tools")
+        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
+        .and_then(|t| t.as_array())
+        .map(|a| a.to_vec());
+    let count =
+        match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(_) => {
+                // Fallback: raw message count
+                messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_string(m).ok())
+                    .map(|s| tokenizer.count(&s).unwrap_or(0))
+                    .sum()
+            }
+        };
+    if count > 0 { Some(count as i64) } else { None }
 }
 
 /// Render the buffer watermark report, and whether it needs operator attention.
@@ -2864,6 +3267,77 @@ mod tests {
         );
     }
 
+    /// The environment variable's row in the user guide calls this setting a
+    /// *directory* ("Directory holding local tokenizer models") while the
+    /// config field documents the `tokenizer.json` file, so following the guide
+    /// used to end in "Tokenizer file not found" and an analyzer without a
+    /// tokenizer. Both forms now resolve.
+    #[test]
+    fn a_tokenizer_directory_resolves_to_its_tokenizer_json() {
+        let dir = unique_tmp_dir("tokenizer-path");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tokenizer.json");
+        std::fs::write(&file, b"{}").unwrap();
+
+        assert_eq!(resolve_tokenizer_file(&dir), file);
+        assert_eq!(resolve_tokenizer_file(&file), file);
+        // A path that does not exist yet stays as given, so the existing
+        // "not found" warning keeps naming what the operator configured.
+        let missing = dir.join("missing.json");
+        assert_eq!(resolve_tokenizer_file(&missing), missing);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Minimal WordLevel tokenizer + config, single-line so the fixtures stay
+    /// readable next to the assertions that use them.
+    fn write_tokenizer_fixture(dir: &Path) {
+        let tokenizer = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0},"unk_token":"[UNK]"}}"#;
+        let config = r#"{"tokenizer_class":"PreTrainedTokenizerFast","chat_template":"{% for message in messages %}{{ message['role'] + '\n' + message['content'] + '\n' }}{% endfor %}","bos_token":null,"eos_token":null,"unk_token":"[UNK]","model_max_length":32768}"#;
+        std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), config).unwrap();
+    }
+
+    /// The guide's *directory* form loads the `tokenizer.json` inside it.
+    #[test]
+    fn a_tokenizer_directory_loads_its_tokenizer_json() {
+        let dir = unique_tmp_dir("tokenizer-load-dir");
+        write_tokenizer_fixture(&dir);
+        assert!(load_tokenizer(&dir).is_some(), "directory form must load");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The config field's *file* form still loads.
+    #[test]
+    fn a_tokenizer_file_loads_from_its_own_directory() {
+        let dir = unique_tmp_dir("tokenizer-load-file");
+        write_tokenizer_fixture(&dir);
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_some());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Nothing to load is not an error: the caller just runs without one.
+    #[test]
+    fn a_missing_tokenizer_loads_nothing() {
+        let dir = unique_tmp_dir("tokenizer-load-missing");
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_none());
+        assert!(load_tokenizer(&dir.join("models")).is_none());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file that will not load falls back instead of aborting startup.
+    #[test]
+    fn an_unloadable_tokenizer_loads_nothing() {
+        let dir = unique_tmp_dir("tokenizer-load-broken");
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_none());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn resource_sampler_starts_when_enabled_with_sqlite() {
         let dir = unique_tmp_dir("resource-sampler");
@@ -2923,6 +3397,207 @@ mod tests {
         info.pid = pid;
         genai_store.insert_pending(&info).expect("insert_pending");
         (dir, genai_store, istore)
+    }
+
+    #[test]
+    fn retry_storm_counts_one_type_not_one_message() {
+        // `RetryStorm` is documented as "the same error type repeats at least
+        // 5 times within one conversation". `exists_for_conversation` matches
+        // on the error message, so five same-type failures whose texts differ
+        // are never duplicates — and while the storm check sat inside the
+        // duplicate branch, none of them ever reached it.
+        let dir = unique_tmp_dir("retry-storm-same-type");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+
+        for i in 0..5 {
+            let call_id = format!("storm-call-{i}");
+            let mut info = make_test_pending_info(&call_id);
+            info.conversation_id = Some("conv-storm".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call_id, "context_overflow")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::ContextOverflow,
+                Some("sess-storm".to_string()),
+                Some("trace-storm".to_string()),
+                Some("conv-storm".to_string()),
+                Some(call_id.clone()),
+                Some(7),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({
+                    "error": format!(
+                        "prompt is too long: {} tokens > 200000 maximum",
+                        210_000 + i * 10_000
+                    ),
+                })),
+            );
+            // Each failure carries a different message, so none of them is a
+            // duplicate of a recorded interruption.
+            let seen = istore.exists_for_conversation("conv-storm", &ie.interruption_type, None);
+            assert!(
+                !seen,
+                "precondition: failure {i} must not match a recorded interruption"
+            );
+            maybe_record_retry_storm("conv-storm", &ie, i as i64, &istore, &genai_store);
+        }
+
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-storm", &storm, None));
+
+        // A RetryStorm-typed event must return before the threshold check, so
+        // the guard never records a storm of storms.
+        let storm_typed = crate::interruption::InterruptionEvent::new(
+            storm.clone(),
+            Some("sess-storm".to_string()),
+            Some("trace-storm".to_string()),
+            Some("conv-storm".to_string()),
+            Some("storm-call-4".to_string()),
+            Some(7),
+            Some("test-agent".to_string()),
+            5,
+            None,
+        );
+        maybe_record_retry_storm("conv-storm", &storm_typed, 5, &istore, &genai_store);
+        assert_eq!(istore.count_for_conversation("conv-storm", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive the extracted store path end to end: the same message twice is a
+    /// duplicate, a different message inserts, and the storm threshold counts
+    /// one *type* across messages whose texts differ — the shape the dedup
+    /// branch used to hide (this is the placement the PR changes).
+    #[test]
+    fn store_interruption_dedups_by_message_and_storms_by_type() {
+        let dir = unique_tmp_dir("store-interruption");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+        let rate_limit = crate::interruption::InterruptionType::RateLimit;
+
+        let mut call = make_test_llm_call("store-call-0");
+        let mut last = None;
+        for i in 0..5 {
+            call.call_id = format!("store-call-{i}");
+            call.error = Some(format!("rate limit exceeded, retry after {}s", 30 + i));
+            let mut info = make_test_pending_info(&call.call_id);
+            info.conversation_id = Some("conv-store".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call.call_id, "rate_limit")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                rate_limit.clone(),
+                Some("sess-store".to_string()),
+                Some("trace-store".to_string()),
+                Some("conv-store".to_string()),
+                Some(call.call_id.clone()),
+                Some(8),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({ "error": call.error.clone() })),
+            );
+            store_interruption(&ie, &call, &istore, Some(&genai_store));
+            assert_eq!(
+                istore.count_for_conversation("conv-store", &rate_limit),
+                i + 1
+            );
+            last = Some(ie);
+        }
+
+        // Same error *type*, five different messages: the count is what the
+        // storm threshold measures, so the storm must exist.
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-store", &storm, None));
+
+        // Replaying the last failure verbatim is a message duplicate: no new
+        // row, and the "at most one storm" guard keeps the count at one.
+        let replay = last.expect("last event");
+        store_interruption(&replay, &call, &istore, Some(&genai_store));
+        assert_eq!(istore.count_for_conversation("conv-store", &rate_limit), 5);
+        assert_eq!(istore.count_for_conversation("conv-store", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tool failure detected from the call's *request history* — the
+    /// detector's traced `tool_result` path — carries no transport error:
+    /// `call.error` is `None` because the HTTP call itself succeeded, and the
+    /// failure message only exists in the event's detail. Keyed on that
+    /// `None`, the dedup matched any unresolved `ToolFailure` row of the
+    /// conversation, so a second, different failure was silently dropped.
+    #[test]
+    fn store_interruption_keeps_a_second_distinct_traced_tool_failure() {
+        fn traced_call(call_id: &str, message: &str) -> crate::genai::LLMCall {
+            let mut call = make_test_llm_call(call_id);
+            call.metadata
+                .insert("conversation_id".to_string(), "conv-traced".to_string());
+            call.request.messages = vec![crate::genai::semantic::InputMessage {
+                role: "user".to_string(),
+                parts: vec![crate::genai::semantic::MessagePart::ToolCallResponse {
+                    id: Some(format!("toolu-{call_id}")),
+                    response: serde_json::json!({
+                        "is_error": true,
+                        "content": message,
+                    }),
+                }],
+                name: None,
+            }];
+            call
+        }
+
+        let dir = unique_tmp_dir("store-traced-tool-failure");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+        let detector = crate::interruption::InterruptionDetector::default();
+        let tool_failure = crate::interruption::InterruptionType::ToolFailure;
+        let first_message = "read failed: ENOENT: no such file or directory, access '/tmp/missing'";
+        let second_message = "build failed: make check\n(exit code 2)";
+
+        let first = traced_call("traced-call-0", first_message);
+        let events = detector.detect(&first);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        assert_eq!(events[0].interruption_type, tool_failure);
+        assert!(first.error.is_none(), "precondition: no transport error");
+        store_interruption(&events[0], &first, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            1
+        );
+
+        // A different message is what the dedup is documented to keep.
+        let second = traced_call("traced-call-1", second_message);
+        let events = detector.detect(&second);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        assert_eq!(events[0].interruption_type, tool_failure);
+        assert!(second.error.is_none(), "precondition: no transport error");
+        store_interruption(&events[0], &second, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            2,
+            "a different traced tool failure is not a duplicate"
+        );
+
+        // The same message again is still the duplicate it always was.
+        let replay = traced_call("traced-call-2", first_message);
+        let events = detector.detect(&replay);
+        assert_eq!(events.len(), 1, "precondition: one traced failure");
+        store_interruption(&events[0], &replay, &istore, None);
+        assert_eq!(
+            istore.count_for_conversation("conv-traced", &tool_failure),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn list_crash_events(
@@ -3005,6 +3680,48 @@ mod tests {
             1,
             "pending call must stay pending on graceful reap"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed pending-call lookup must not be reported as an empty answer.
+    ///
+    /// The empty list is the signal for a normal shutdown, so folding a storage
+    /// error into it made a crash indistinguishable from a clean exit — and the
+    /// trace process never revisits the decision.
+    #[test]
+    fn a_failed_pending_lookup_is_not_an_empty_answer() {
+        let dir = unique_tmp_dir("crashdetect-lookup-failure");
+        let db = dir.join("foreign.db");
+        // A database whose events table has none of the columns the lookup
+        // selects: the shape a foreign or legacy file has.
+        rusqlite::Connection::open(&db)
+            .expect("fixture connection")
+            .execute_batch("CREATE TABLE genai_events (id INTEGER PRIMARY KEY);")
+            .expect("fixture schema");
+        let store = GenAISqliteStore::open_read_only_existing(&db).expect("foreign store");
+
+        // "could not ask" must not read as "there were none".
+        let failed = pending_calls_for_crash_detection(Some(&store), 4242);
+        assert!(failed.is_none(), "a failed lookup is not empty");
+        // No store is the same kind of answer: there is no evidence either way.
+        assert!(pending_calls_for_crash_detection(None, 4242).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An answered lookup is passed through unchanged.
+    ///
+    /// The two "no answer" cases above only stay distinguishable from a clean
+    /// shutdown because a real answer still arrives as `Some`.
+    #[test]
+    fn an_answered_pending_lookup_is_passed_through() {
+        let pid = 4_242_001;
+        let (dir, genai_store, _istore) = setup_crash_stores("crashdetect-lookup-ok", pid);
+
+        let calls = pending_calls_for_crash_detection(Some(genai_store.as_ref()), pid as u32);
+        let calls = calls.expect("an answered lookup is not unknown");
+        assert_eq!(calls.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3137,6 +3854,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The drain path checks each dead pid once but must still attribute its
+    /// OOM crash to every conversation it served: two pending tuples with the
+    /// same pid and different conversations must yield two groups, each with
+    /// its own call ids, not one event for the first tuple only.
+    #[test]
+    fn oom_crash_groups_cover_every_conversation_of_a_dead_pid() {
+        let pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = vec![
+            (
+                42,
+                "call-a".to_string(),
+                Some("sess-a".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-a".to_string()),
+            ),
+            (
+                42,
+                "call-b".to_string(),
+                Some("sess-b".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-b".to_string()),
+            ),
+        ];
+
+        let groups = oom_crash_groups_for_pid(42, &pending);
+
+        assert_eq!(groups.len(), 2, "one group per conversation");
+        let by_conv: std::collections::HashMap<Option<String>, Vec<String>> = groups
+            .iter()
+            .map(|(_, _, conversation_id, call_ids)| (conversation_id.clone(), call_ids.clone()))
+            .collect();
+        assert_eq!(by_conv[&Some("conv-a".to_string())], vec!["call-a"]);
+        assert_eq!(by_conv[&Some("conv-b".to_string())], vec!["call-b"]);
+        assert!(
+            groups
+                .iter()
+                .all(|(agent, ..)| agent.as_deref() == Some("OpenClaw")),
+            "every group must keep the pid's agent attribution"
+        );
+    }
+
     // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──
 
     #[test]
@@ -3192,6 +3949,53 @@ mod tests {
         fn export(&self, events: &[GenAISemanticEvent]) {
             self.events.lock().unwrap().extend_from_slice(events);
         }
+    }
+
+    /// A re-activated dynamic Logtail exporter must replace its predecessor.
+    /// The mailbox registration pushed unconditionally, so every deactivate /
+    /// reactivate cycle of `runtime.sls_logtail_path` left one more exporter
+    /// registered, and every one of them writes the same batch to the same
+    /// file — a record was duplicated once per cycle.
+    #[test]
+    fn pending_logtail_registration_replaces_a_reactivated_exporter() {
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+
+        // Two activation cycles deposit a fresh dynamic exporter each time.
+        for _ in 0..2 {
+            *mailbox.lock().unwrap() =
+                Some(Box::new(RecordingExporter::new("logtail-file-dynamic")));
+            AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        }
+        assert_eq!(
+            exporters.len(),
+            1,
+            "the re-activated exporter must replace its predecessor, not accumulate"
+        );
+
+        // A different exporter is still registered alongside it.
+        *mailbox.lock().unwrap() = Some(Box::new(RecordingExporter::new("logtail-file")));
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+    }
+
+    /// `install_exporter` resolves an exporter by `name()`, the identity the
+    /// Logtail exporter documents ("so the runtime can replace an existing
+    /// dynamic exporter instead of accumulating duplicates").
+    #[test]
+    fn install_exporter_replaces_an_exporter_of_the_same_name() {
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters[0].name(), "logtail-file-dynamic");
+
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters.len(), 1, "same name → replace");
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {
@@ -3433,6 +4237,93 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    #[test]
+    fn pending_genai_byte_counter_resyncs_on_every_flush_path() {
+        // The counter is a queue invariant: after every drain path it must
+        // equal the sum of the surviving entries' estimates. Pre-fix it only
+        // ever grew (the sole decrement lived in the eviction loop), so the
+        // gauge reported stale values and the eviction gate stayed tripped.
+        let expired_at =
+            std::time::Instant::now() - PENDING_SESSION_TIMEOUT - std::time::Duration::from_secs(1);
+        let pending = |id: &str, pid: u32, at: std::time::Instant| PendingGenAI {
+            events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(id))],
+            response_id: id.to_string(),
+            pid,
+            created_at: at,
+        };
+        let sum_bytes = |queue: &PendingGenAiQueue| -> usize {
+            queue.entries.iter().map(|p| p.estimated_bytes()).sum()
+        };
+
+        // 1) resolve: the expired entry drains, the fresh one stays.
+        let mut queue = PendingGenAiQueue::default();
+        queue.push(pending("resolve-expired", 11, expired_at));
+        queue.push(pending("resolve-fresh", 11, std::time::Instant::now()));
+        let mapper = ResponseSessionMapper::disabled();
+        let drained = queue.resolve(&mapper);
+        assert_eq!(drained.len(), 1, "the expired entry must drain");
+        assert_eq!(queue.len(), 1, "the fresh entry must survive");
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+        assert!(queue.bytes > 0);
+
+        // 2) flush_expired: age the survivor, flush it, counter reaches 0.
+        queue.entries[0].created_at = expired_at;
+        let drained = queue.flush_expired();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0, "counter must reach 0 with the queue");
+
+        // 3) flush_for_pid: the dead pid drains, the other stays.
+        queue.push(pending("dead-pid", 42, std::time::Instant::now()));
+        queue.push(pending("live-pid", 43, std::time::Instant::now()));
+        let exported = queue.flush_for_pid(42);
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+
+        // 4) flush_all: everything drains, counter goes to 0.
+        let exported = queue.flush_all();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0);
+    }
+
+    #[test]
+    fn pending_genai_eviction_keeps_counter_in_sync() {
+        // The count limit evicts oldest-first until the queue is below the
+        // limit, and the counter must match whatever survives.
+        let mut queue = PendingGenAiQueue::default();
+        for i in 0..4 {
+            queue.push(PendingGenAI {
+                events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(&format!(
+                    "evict-{i}"
+                )))],
+                response_id: format!("r{i}"),
+                pid: 1,
+                created_at: std::time::Instant::now(),
+            });
+        }
+        let limits = crate::config::RuntimeLimits {
+            pending_genai_max_count: 2,
+            ..Default::default()
+        };
+        let evicted = queue.enforce_limits(&limits);
+        assert_eq!(
+            evicted.len(),
+            3,
+            "4 entries at count-limit 2 evict down to 1"
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.bytes,
+            queue
+                .entries
+                .iter()
+                .map(|p| p.estimated_bytes())
+                .sum::<usize>()
+        );
     }
 
     // ── Test for exit-time deferred flush (issue #2032) ──
@@ -3952,6 +4843,28 @@ mod tests {
         let got = AgentSight::collect_descendant_pids_impl(1, &dir);
         let mut want = HashSet::new();
         want.extend([1, 2]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_reads_a_status_with_a_non_utf8_name() {
+        // `/proc/<pid>/status` embeds the process name, and the kernel allows
+        // non-UTF-8 bytes in a name. `read_to_string` rejected the whole file,
+        // so that pid and everything below it dropped out of the descendant
+        // set and never entered the traced_processes map.
+        let dir = unique_tmp_dir("non-utf8-name");
+        write_fake_status(&dir, 1, 0);
+        let child_dir = dir.join("2");
+        std::fs::create_dir_all(&child_dir).expect("create fake proc dir");
+        std::fs::write(child_dir.join("status"), b"Name:\tnode\xa0-22\nPPid:\t1\n")
+            .expect("write non-UTF-8 status");
+        write_fake_status(&dir, 3, 2);
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 2, 3]);
         assert_eq!(got, want);
 
         let _ = std::fs::remove_dir_all(&dir);

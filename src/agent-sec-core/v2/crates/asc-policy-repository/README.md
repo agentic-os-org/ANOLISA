@@ -1,6 +1,6 @@
 # Binding reconciliation repository contract
 
-Shared data and storage ports sit below PAP's memory repository, Reconciler and
+Shared data and storage ports sit below PAP's SQLite repository, Reconciler and
 Policy Runtime. This crate has no Client calls, execution locks or scheduling logic.
 
 | Operation | Contract |
@@ -17,7 +17,7 @@ constructor selects only reconciliation fields; spec remains owned by PAP.
 A write compares Binding revision/phase and only the status explanation/deployments
 it updates. Thus a deployment-only write preserves a concurrent diagnostic update;
 it does not require a global resourceVersion. Aggregate removal compares all
-reconciliation fields. Reads and writes share the authoritative PAP Binding map.
+reconciliation fields. Reads and writes share the authoritative SQLite Binding state.
 
 The latest write receipt acknowledges an exact replay within a call, including
 a post-commit panic. Reusing its ID with different contents is invalid. Missing
@@ -33,7 +33,9 @@ Deployments retain target identity/cleanup and observations, including UNKNOWN
 responsibility. AgentSight cleanup contains schema version and Binding ID/revision
 only; process identity and request digest remain in call-local prepared data.
 
-The implementation is process-local memory. Rebuilding WorkQueue resets counts
-and deadlines; a future SQL implementation retains status/error and deployment
-responsibility, not retry progress. See the
+Production and tests use `asc-policy-repository-sqlite`. The test-only
+`test-support` feature opens isolated temporary on-disk databases through the
+production connection, schema, transactions and validation. Rebuilding WorkQueue resets counts
+and deadlines; SQLite retains status/error and deployment responsibility,
+not retry progress. See the
 [runtime design](../../../docs/design/BINDING_RECONCILER_RUNTIME_DESIGN_zh.md).

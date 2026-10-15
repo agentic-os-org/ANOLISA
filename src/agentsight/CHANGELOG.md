@@ -1,13 +1,41 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
+
+### Features
+- Unify SQLite storage under one configurable total cap (default 2200 MB); the largest databases are trimmed first and the cap is re-read without a restart.
 
 ### Fixes
-- Let `agentsight-enforcer` recover by itself when an upgrade leaves an
-  enforcement layout the new binary cannot reuse: the stale layout is now
-  detected and replaced automatically, so file-delete guard and enforcement
-  health no longer stay down until someone removes the old layout by hand.
-  (#3445)
+- Preserve and correctly count streamed content, reasoning, tool calls, response IDs, finish reasons, and token usage across Anthropic, Gemini, Codex, and Responses providers.
+- Make agent discovery, trajectory filtering, reuse labels, semantic search, dashboard metrics, savings, and interruption aggregates more accurate and robust.
+- Harden enforcement, credential discovery, IMDSv2 access, BPF polling, process restart, OOM detection, and audit/event validation paths.
+- Make SQLite maintenance, storage budgeting, UTF-8 handling, SSE/HPACK parsing, and time handling resilient to malformed or edge-case input.
+- Support legacy kernel enforcement, wrapped inode guard labels, legacy function-call tool requests, and additional process/file reference formats.
+
+### Tests
+- Expand provider, SLS, trajectory, dashboard filter, storage-budget, and enforcement regression coverage.
+
+## 0.13.1
+
+### Features
+- Add JSON output and graceful CLI errors.
+
+### Fixes
+- Resolve namespace PIDs to host PIDs with an init-namespace self-check. (#3041)
+- Honor the RUST_LOG regex in the main logger. (#3186)
+- Add inode guard support for file-delete-guard on 5.10/6.6 kernels.
+- Drop the trace_id alias in the traces list. (#3261)
+- Fix a stale file descriptor in the enforcer ringbuf consumer after mmap advance.
+- Harden credential discovery.
+- Pin the drain trigger to membarrier.
+- Add a token-plan provider preset.
+- Recover empty tool_call names from request tool definitions.
+- Log semantic-search degradation causes. (#3443)
+- Harden the SQLite lifecycle.
+- Map qwen3.8-max to its tokenizer. (#3409)
+- Restore `agentsight-enforcer` automatically when an upgrade leaves a stale enforcement layout, so file-delete guard and enforcement health do not require manual cleanup. (#3445)
+- Keep an application's process tree under policy when its binding is recreated. (#3370)
+- Reject unsupported event filters on audit cases instead of silently ignoring them.
 
 ## 0.13.0
 

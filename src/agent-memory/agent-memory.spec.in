@@ -201,6 +201,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Oct 11 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.9-1
+- Reject directory-valued OpenClaw binary paths during startup
+- Skip PATH directory shadows while accepting executable file symlinks
+
 * Sun Sep 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.8-1
 - Namespace OpenClaw tools; prompts and tool policies require migration
 - Avoid memory-core takeover and declare coding profile tool membership

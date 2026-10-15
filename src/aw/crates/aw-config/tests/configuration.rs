@@ -333,3 +333,113 @@ fn document_depth_size_and_alias_expansion_are_bounded() {
         Err(Error::Document { .. })
     ));
 }
+
+#[test]
+fn native_hook_steps_are_explicit_and_cannot_claim_provider_effects() {
+    let mut value = example();
+    value["spec"]["providers"]["raw"] = json!({
+        "protocol": "native-hook/v1alpha1", "config": {}, "timeout_ms": 1000,
+        "max_output_bytes": 4096,
+        "transport": {"type": "stdio", "location": "agent", "argv": ["/bin/cat"]}
+    });
+    value["spec"]["events"]["tool.before"]["steps"] = json!([
+        {"id": "raw", "provider": "raw", "native": {}, "on_error": "block"}
+    ]);
+    parse(&value).unwrap();
+    for (pointer, replacement) in [
+        ("/spec/providers/raw/config", json!({"ignored": true})),
+        (
+            "/spec/providers/raw/protocol",
+            json!("aw-provider/v1alpha1"),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/native",
+            json!({"ignored": true}),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/on_error",
+            json!("withhold_result"),
+        ),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&invalid).is_err(), "{pointer}");
+    }
+    for (field, replacement) in [("operation", json!("fake")), ("effects", json!(["block"]))] {
+        let mut invalid = value.clone();
+        invalid["spec"]["events"]["tool.before"]["steps"][0][field] = replacement;
+        assert!(parse(&invalid).is_err(), "{field}");
+    }
+    value["spec"]["events"]["tool.after"]["steps"] =
+        value["spec"]["events"]["tool.before"]["steps"].clone();
+    assert!(parse(&value).is_err());
+    value["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("report");
+    parse(&value).unwrap();
+}
+
+#[test]
+fn boolean_hooks_default_to_invoke_without_inserting_defaults() {
+    let mut value = example();
+    value["spec"]["providers"]["boolean"] = json!({
+        "transport":{"type":"stdio","location":"agent","argv":["/not-executed"]},
+        "timeout_ms":1000,"max_output_bytes":32
+    });
+    value["spec"]["events"]["tool.before"]["steps"] = json!([
+        {"id":"match","provider":"boolean","effects":["block"],"on_error":"block"}
+    ]);
+    assert_eq!(parse(&value).unwrap().as_value(), &value);
+    let yaml = serde_yaml_ng::to_string(&value).unwrap();
+    assert_eq!(VALIDATOR.parse(yaml.as_bytes()).unwrap().as_value(), &value);
+    value["spec"]["providers"]["boolean"]["protocol"] = json!(aw_config::HOOK_PROTOCOL);
+    value["spec"]["providers"]["boolean"]["config"] = json!({});
+    value["spec"]["events"]["tool.before"]["steps"][0]["operation"] = json!("invoke");
+    value["spec"]["events"]["tool.before"]["steps"][0]["reason_code"] =
+        json!("parameter_contains_12345");
+    parse(&value).unwrap();
+    for (pointer, replacement) in [
+        (
+            "/spec/providers/boolean/protocol",
+            json!("aw-provider/v1alpha1"),
+        ),
+        ("/spec/providers/boolean/config", json!({"unused":true})),
+        (
+            "/spec/events/tool.before/steps/0/operation",
+            json!("check_12345"),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/reason_code",
+            json!("invalid reason"),
+        ),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&invalid).is_err(), "{pointer}");
+    }
+    let provider = value["spec"]["providers"]["boolean"]
+        .as_object_mut()
+        .unwrap();
+    provider.remove("protocol");
+    provider.remove("config");
+    value["spec"]["events"]["tool.before"]["steps"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
+    parse(&value).unwrap();
+    value["spec"]["providers"]["boolean"]["protocol"] = json!("aw-provider/v1alpha1");
+    value["spec"]["providers"]["boolean"]["config"] = json!({});
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn native_qoder_scheduling_is_an_explicit_adapter_setting() {
+    let mut value = example();
+    value["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential": true});
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["qoder"]["sequential"] = json!(false);
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("openclaw");
+    assert!(parse(&value).is_err());
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("qoder");
+    value["spec"]["agents"]["qoder"]["qoder"]["unknown"] = json!(true);
+    assert!(parse(&value).is_err());
+}

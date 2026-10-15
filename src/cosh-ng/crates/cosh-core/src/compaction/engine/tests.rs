@@ -3,7 +3,7 @@ use crate::provider::mock::MockProvider;
 use crate::provider::Message;
 
 fn store(temp: &tempfile::TempDir) -> SessionStore {
-    SessionStore::for_workspace(temp.path().join("sessions").to_str().unwrap(), temp.path())
+    SessionStore::for_test_workspace(temp.path().join("sessions").to_str().unwrap(), temp.path())
         .expect("session store")
 }
 
@@ -50,6 +50,216 @@ async fn compact(
         None,
     )
     .await
+}
+
+struct BlockingSummaryProvider {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    inner: MockProvider,
+}
+
+impl BlockingSummaryProvider {
+    fn new() -> Self {
+        Self {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            inner: summary_provider(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ContentGenerator for BlockingSummaryProvider {
+    async fn generate(
+        &self,
+        messages: &[Message],
+        tools: &[crate::provider::ToolDeclaration],
+        config: &crate::provider::GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.inner.generate(messages, tools, config).await
+    }
+
+    fn cancel(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn blocked_compaction_rejects_a_second_compactor() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let provider = BlockingSummaryProvider::new();
+    let config = CoreConfig::default();
+    let mut first = Box::pin(compact(&store, &session, &provider, &config));
+    tokio::select! {
+        result = first.as_mut() => panic!("compaction finished before barrier: {result:?}"),
+        () = provider.started.notified() => {}
+    }
+    let second = compact(&store, &session, &summary_provider(), &config).await;
+    assert!(
+        matches!(
+            second,
+            Err(CompactionError::Session(SessionError::Conflict { .. }))
+        ),
+        "a second compactor must not start while the first provider is blocked: {second:?}"
+    );
+    provider.release.notify_one();
+    first.await.expect("first compaction commits");
+}
+
+#[tokio::test]
+async fn compaction_coexists_with_the_runtime_live_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let _runtime = store.acquire_live_lease(&session.session_id).unwrap();
+    compact(
+        &store,
+        &session,
+        &summary_provider(),
+        &CoreConfig::default(),
+    )
+    .await
+    .expect("compaction must not conflict with the runtime activity lease");
+    assert!(matches!(
+        store.acquire_live_lease(&session.session_id),
+        Err(SessionError::Conflict { .. })
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_compaction_releases_its_created_activity_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let path = store
+        .session_file(&session.session_id)
+        .with_file_name(format!(".{}.compact", session.session_id));
+    let provider = BlockingSummaryProvider::new();
+    let config = CoreConfig::default();
+    let mut attempt = Box::pin(compact(&store, &session, &provider, &config));
+    tokio::select! {
+        result = attempt.as_mut() => panic!("compaction finished before barrier: {result:?}"),
+        () = provider.started.notified() => {}
+    }
+    assert!(
+        path.is_file(),
+        "in-flight compaction must hold an activity lease"
+    );
+    drop(attempt);
+    assert!(
+        !path.exists(),
+        "cancelled compaction left a created control file"
+    );
+    compact(&store, &session, &summary_provider(), &config)
+        .await
+        .expect("a new compactor can claim the cancelled attempt's session");
+    assert!(
+        !path.exists(),
+        "successful compaction left a created control file"
+    );
+}
+
+#[tokio::test]
+async fn failed_compaction_releases_its_created_activity_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let path = store
+        .session_file(&session.session_id)
+        .with_file_name(format!(".{}.compact", session.session_id));
+    let failure = compact(
+        &store,
+        &session,
+        &MockProvider::partial_error(),
+        &CoreConfig::default(),
+    )
+    .await
+    .expect_err("summary provider error");
+    assert_eq!(failure.code(), "provider_error");
+    assert!(!path.exists(), "provider error left a created control file");
+    compact(
+        &store,
+        &session,
+        &summary_provider(),
+        &CoreConfig::default(),
+    )
+    .await
+    .expect("provider error released the activity lock");
+}
+
+#[test]
+fn missing_compaction_does_not_create_scope_or_register_location() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let id = ProviderSessionId::new();
+    let scope = store.session_file(&id).parent().unwrap().to_path_buf();
+    let index = temp
+        .path()
+        .join("sessions/.budget/00000000-0000-4000-8000-000000000000.json");
+    assert!(matches!(
+        store.acquire_compaction_lease(&id),
+        Err(SessionError::NotFound { .. })
+    ));
+    assert!(!scope.exists());
+    assert!(!index.exists());
+}
+
+#[test]
+fn compaction_cleanup_preserves_existing_or_replaced_control_inodes() {
+    for existing in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store(&temp);
+        let session = persisted(&store, 1);
+        let path = store
+            .session_file(&session.session_id)
+            .with_file_name(format!(".{}.compact", session.session_id));
+        if existing {
+            std::fs::write(&path, b"existing control").unwrap();
+        }
+        let guard = store.acquire_compaction_lease(&session.session_id).unwrap();
+        if !existing {
+            std::fs::rename(&path, path.with_extension("held")).unwrap();
+            std::fs::write(&path, b"replacement control").unwrap();
+        }
+        drop(guard);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            if existing {
+                b"existing control".as_slice()
+            } else {
+                b"replacement control".as_slice()
+            }
+        );
+    }
+}
+
+#[test]
+fn compaction_lease_accepts_qualified_legacy_without_scoped_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy = temp.path().join("sessions");
+    std::fs::create_dir(&legacy).unwrap();
+    let id = ProviderSessionId::new();
+    std::fs::write(
+        legacy.join(format!("{id}.json")),
+        serde_json::to_vec(&bulky_messages(1)).unwrap(),
+    )
+    .unwrap();
+    let store =
+        SessionStore::for_test_workspace(crate::config::DEFAULT_SESSION_PERSIST_DIR, temp.path())
+            .unwrap();
+    let control = store
+        .session_file(&id)
+        .with_file_name(format!(".{id}.compact"));
+    assert!(!control.parent().unwrap().exists());
+    let guard = store.acquire_compaction_lease(&id).unwrap();
+    assert!(control.is_file());
+    drop(guard);
+    assert!(!control.exists());
+    assert!(legacy.join(format!("{id}.json")).exists());
 }
 
 #[tokio::test]
@@ -237,7 +447,7 @@ impl ContentGenerator for ConflictingProvider {
         tools: &[crate::provider::ToolDeclaration],
         config: &crate::provider::GenerateConfig,
     ) -> Result<crate::provider::GenerateStream, String> {
-        let store = SessionStore::for_workspace(&self.persist_dir, &self.workspace)
+        let store = SessionStore::for_test_workspace(&self.persist_dir, &self.workspace)
             .expect("conflict store");
         let mut session = store.load(&self.session_id).expect("conflict load");
         session.messages.push(Message::user("concurrent turn"));

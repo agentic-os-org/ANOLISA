@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{BatchConfig, PeriodicStoragePolicy};
 
-/// SQL mirror of [`TokenRecord::billed_input_tokens`], as a `CASE` expression
-/// over the raw columns.
+/// SQL mirror of [`TokenRecord::billed_input_tokens`], accounting for legacy
+/// rows that stored provider-reported input separately from cache counters.
 ///
 /// Anthropic reports `cache_creation_tokens` / `cache_read_tokens` outside
 /// `input_tokens`, so they add to the billed input. OpenAI-compatible gateways
@@ -36,10 +36,8 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// cannot call the Rust helper, so the rule is restated here — keep the two in
 /// sync.
 ///
-/// Deriving totals from the raw columns instead of reading the stored
-/// `total_tokens` also corrects rows written before this rule existed, since
-/// `input_tokens` and the cache columns have always held what the provider
-/// reported.
+/// New rows store semantic input tokens (including cache tokens) and mark
+/// that representation. Older rows retain their provider-reported values.
 ///
 /// Expands to a string literal so callers assemble their query with `concat!`
 /// into a fixed `&'static str`, honouring the storage-layer rule that SQL is
@@ -49,9 +47,10 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// [`TokenRecord::billed_input_tokens`]: crate::analyzer::TokenRecord::billed_input_tokens
 macro_rules! billed_input_col {
     () => {
-        "CASE WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
-         THEN input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
-         ELSE input_tokens END"
+        "CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0) \
+         WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
+         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
+         ELSE COALESCE(input_tokens, 0) END"
     };
 }
 pub(crate) use billed_input_col;
@@ -170,13 +169,25 @@ impl GenAISqliteStore {
         let events: Vec<_> = pending.drain(..).collect();
         drop(pending); // release lock before writing
 
+        // Events whose insert failed (SQLITE_BUSY/LOCKED/IOERR, a constraint
+        // violation, or SQLITE_FULL after the prune retries) are re-queued at
+        // the front of the buffer so the next flush retries them instead of
+        // dropping up to `max_size` completed LLM calls.
+        let mut failed = Vec::new();
         let mut ok_count = 0usize;
-        for event in &events {
-            if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event in batch flush: {e}");
-            } else {
-                ok_count += 1;
+        for event in events {
+            match self.store_event(&event) {
+                Ok(()) => ok_count += 1,
+                Err(e) => {
+                    log::warn!("Failed to store GenAI event in batch flush: {e}");
+                    failed.push(event);
+                }
             }
+        }
+        if !failed.is_empty() {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            failed.append(&mut pending);
+            *pending = failed;
         }
         if ok_count > 0 {
             log::debug!("Batch-flushed {ok_count} GenAI events");

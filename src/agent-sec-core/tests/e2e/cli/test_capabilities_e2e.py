@@ -3,7 +3,6 @@
 import json
 import os
 import re
-from functools import lru_cache
 
 import pytest
 from cli.conftest import run_cli
@@ -39,6 +38,8 @@ _CAPABILITIES = (
     "skill-ledger",
     "observability",
 )
+_DEFAULT_L2_MODEL = "modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF"
+_SUPPORTED_L2_MODEL = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF"
 
 
 class _EnvPatch:
@@ -134,15 +135,7 @@ def test_capabilities_json_reads_observability_timeout_environment() -> None:
     }
 
 
-@lru_cache(maxsize=1)
-def _engine_l2_default() -> str:
-    """L2 default the CLI reports, or `""` when the extension is not built.
-
-    Probed through the CLI instead of importing the extension here: the
-    installed-artifact runs drive a binary whose interpreter is not the one
-    running pytest and cannot import the package at all, so an in-process
-    probe would report no engine while the CLI reports a real default.
-    """
+def test_capabilities_json_reports_the_v1_l2_default() -> None:
     with _EnvPatch(PROMPT_SCANNER_L2_MODEL=None):
         result = run_cli(
             "capabilities",
@@ -153,13 +146,16 @@ def _engine_l2_default() -> str:
         )
 
     assert result.returncode == 0, result.stderr
-    default = json.loads(result.stdout)[0]["env"]["PROMPT_SCANNER_L2_MODEL"]["default"]
-    assert isinstance(default, str), default
-    return default
+    for record in json.loads(result.stdout):
+        assert record["env"]["PROMPT_SCANNER_L2_MODEL"] == {
+            "effective": _DEFAULT_L2_MODEL,
+            "default": _DEFAULT_L2_MODEL,
+        }
+        assert record["diagnostics"] == []
 
 
 def test_capabilities_json_reports_prompt_scanner_l2_model() -> None:
-    model = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF"
+    model = _SUPPORTED_L2_MODEL
     with _EnvPatch(PROMPT_SCANNER_L2_MODEL=model):
         result = run_cli(
             "capabilities",
@@ -175,7 +171,7 @@ def test_capabilities_json_reports_prompt_scanner_l2_model() -> None:
     for record in payload:
         assert record["env"]["PROMPT_SCANNER_L2_MODEL"] == {
             "effective": model,
-            "default": _engine_l2_default(),
+            "default": _DEFAULT_L2_MODEL,
         }
         assert record["diagnostics"] == []
 
@@ -195,18 +191,10 @@ def test_capabilities_json_flags_unsupported_prompt_scanner_l2_model() -> None:
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    # The value is always reported; only the check needs the engine, so without
-    # the extension the same run must stay diagnostic-free.
-    expected_diagnostics = (
-        [
-            "PROMPT_SCANNER_L2_MODEL is not a supported L2 backend; "
-            "prompt scans will fail"
-        ]
-        if _engine_l2_default()
-        else []
-    )
     assert payload[0]["env"]["PROMPT_SCANNER_L2_MODEL"]["effective"] == model
-    assert payload[0]["diagnostics"] == expected_diagnostics
+    assert payload[0]["diagnostics"] == [
+        "PROMPT_SCANNER_L2_MODEL is not a supported L2 backend; prompt scans will fail"
+    ]
 
 
 def test_capabilities_rejects_noncanonical_capability_name() -> None:
@@ -475,6 +463,8 @@ def test_capabilities_help_documents_filters_and_environment_scope() -> None:
     ("data_home", "expected", "diagnosed"),
     [
         ("/srv/anolisa", "/srv/anolisa", False),
+        ("/data with spaces/用户", "/data with spaces/用户", False),
+        ("//srv//anolisa/", "//srv//anolisa/", False),
         ("/srv/../anolisa", "~/.local/share", True),
         ("/srv/./anolisa", "~/.local/share", True),
         ("relative/share", "~/.local/share", True),

@@ -169,18 +169,27 @@ fn read_with_token(agent: &ureq::Agent, url: &str, token: &str) -> Option<String
         .filter(|s| !s.is_empty())
 }
 
-/// Token endpoint path relative to the metadata base URL.
+/// Token endpoint path, relative to `/latest` — the parent of the
+/// `/latest/meta-data` base. It is *not* below the metadata base.
 const TOKEN_PATH: &str = "api/token";
+
+/// The IMDSv2 token endpoint for a given metadata base URL.
+///
+/// The token lives at `/latest/api/token`, one segment above
+/// `/latest/meta-data`, so the trailing `meta-data` segment is replaced rather
+/// than appended to. Joining `TOKEN_PATH` onto the *base* instead produced
+/// `<host>/latest/api/api/token`, which the service answers with 404 — the
+/// token fetch always failed and hardened-IMDS hosts looked like non-ECS ones.
+fn imdsv2_token_url(base_url: &str) -> String {
+    match base_url.strip_suffix("/meta-data") {
+        Some(prefix) => format!("{prefix}/{TOKEN_PATH}"),
+        None => format!("{base_url}/{TOKEN_PATH}"),
+    }
+}
 
 /// Obtain an IMDSv2 session token via PUT request.
 fn get_imdsv2_token(agent: &ureq::Agent, base_url: &str) -> Option<String> {
-    // The token endpoint lives under /latest/api/token, which is one level
-    // above /latest/meta-data.  Derive it from base_url by replacing the
-    // trailing `meta-data` segment.
-    let token_url = base_url
-        .strip_suffix("/meta-data")
-        .map(|prefix| format!("{prefix}/api/{TOKEN_PATH}"))
-        .unwrap_or_else(|| format!("{base_url}/{TOKEN_PATH}"));
+    let token_url = imdsv2_token_url(base_url);
 
     agent
         .put(&token_url)
@@ -296,17 +305,31 @@ mod tests {
                     }
 
                     let is_put = request_line.starts_with("PUT");
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
 
                     let body = if is_put {
-                        // PUT /latest/api/token → return a mock token
-                        "mock-token-abc".to_string()
+                        // The token endpoint is /latest/api/token — a sibling of
+                        // /latest/meta-data, not a child. Answering every PUT
+                        // masked a duplicated segment in the derived URL, so a
+                        // request to any other path is a miss here.
+                        if path == "/latest/api/token" {
+                            "mock-token-abc".to_string()
+                        } else {
+                            let not_found = "not-found";
+                            let response = format!(
+                                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{not_found}",
+                                not_found.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.flush();
+                            continue;
+                        }
                     } else {
                         // GET /latest/meta-data/<field>
-                        let path = request_line
-                            .split_whitespace()
-                            .nth(1)
-                            .unwrap_or("")
-                            .to_string();
                         fields
                             .iter()
                             .find(|(k, _)| path.ends_with(k))
@@ -356,6 +379,36 @@ mod tests {
         let agent = metadata_agent(Duration::from_millis(100));
         let val = read_plain(&agent, "http://127.0.0.1:1/latest/meta-data", "instance-id");
         assert_eq!(val, None);
+    }
+
+    #[test]
+    fn imdsv2_token_url_replaces_the_meta_data_segment() {
+        // The token is a sibling of /latest/meta-data, not a child: appending
+        // `api/token` to the base produced /latest/api/api/token.
+        assert_eq!(
+            imdsv2_token_url(METADATA_BASE),
+            "http://100.100.100.200/latest/api/token"
+        );
+        assert_eq!(
+            imdsv2_token_url("http://127.0.0.1:8080/latest/meta-data"),
+            "http://127.0.0.1:8080/latest/api/token"
+        );
+    }
+
+    #[test]
+    fn a_base_that_does_not_end_in_meta_data_keeps_its_own_path() {
+        let server = MockServer::bind();
+        // Not the documented `/…/meta-data` shape: there is no `meta-data`
+        // segment to replace, so the base is kept as given.
+        let base = format!("{}-extra", server.meta_base);
+        assert_eq!(imdsv2_token_url(&base), format!("{base}/api/token"));
+        server.serve_metadata(vec![("instance-id", "i-test123")]);
+
+        // The mock only answers `/latest/api/token`, so a base that derives any
+        // other path cannot get a token — the guard that catches a duplicated
+        // segment also has to catch this case.
+        let agent = metadata_agent(Duration::from_secs(2));
+        assert_eq!(get_imdsv2_token(&agent, &base), None);
     }
 
     #[test]

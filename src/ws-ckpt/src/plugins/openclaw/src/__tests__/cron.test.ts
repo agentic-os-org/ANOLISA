@@ -241,3 +241,20 @@ describe("CrontabManager.listInstalled", () => {
     expect(await CrontabManager.listInstalled("/ws")).toEqual([]);
   });
 });
+
+describe("cron line-break guard", () => {
+  it("sync fails closed on a newline workspace without touching the crontab", async () => {
+    const ok = await CrontabManager.sync(
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+      ["0 * * * *"],
+    );
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+
+  it("sync fails closed on a newline schedule without touching the crontab", async () => {
+    const ok = await CrontabManager.sync("/ws", ["*\n* * * * *"]);
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+});

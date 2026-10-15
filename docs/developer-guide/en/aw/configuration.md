@@ -8,7 +8,9 @@ workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw.
 
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
-between fields. Provider discovery and native capability checks remain planned.
+between fields. The local Host performs Provider discovery and admission; the
+selected Adapter verifies its supported native version before binding. For a
+working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
 
@@ -21,18 +23,19 @@ All fields below are inside `spec` unless stated otherwise.
 | Field | Contract |
 | --- | --- |
 | `metadata.name` (outside `spec`) | Configuration identity; 1 to 128 ASCII letters, digits, `.`, `_` or `-` |
-| `daemon.startup` | `on_demand` or `external`; lifecycle intent only, no process is started during validation |
-| `daemon.endpoint`, `daemon.state_dir` | Required nonempty strings; `auto` denotes a future product-selected local endpoint/directory; explicit deployment validity is checked by the future service |
+| `daemon.startup` | `on_demand` starts or reuses the matching service; `external` requires an existing service; validation starts neither |
+| `daemon.endpoint`, `daemon.state_dir` | Required nonempty strings; `auto` selects a private configuration-specific location; explicit paths must be absolute and agree on `aw.sock` |
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
-| `execution.default_event_budget_ms` | Required positive event budget; covers the future complete event path, not just each Provider |
-| `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; audit persistence is subsequent service work |
+| `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
+| `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
 | `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw` or `hermes`; recognition is not runtime certification |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
-| `providers.<id>.protocol` | Only `aw-provider/v1alpha1`; independent of configuration version |
-| `providers.<id>.transport` | `{type: stdio, location: agent, argv: [...]}`; describes a future one-shot process at the Agent execution location |
+| `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
+| `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
+| `providers.<id>.transport` | `{type: stdio, location: agent, argv: [...]}`; runs a one-shot process in the bound Agent context |
 | `providers.<id>.timeout_ms` | Positive per-invocation ceiling; runtime must also cap it by the event's remaining budget |
-| `providers.<id>.max_output_bytes` | Positive stdout ceiling; runtime enforcement is subsequent work |
-| `providers.<id>.config` | Required opaque JSON object, including Unicode keys and finite decimals; its Provider must validate its private schema later |
+| `providers.<id>.max_output_bytes` | Positive stdout ceiling enforced by the command executor |
+| `providers.<id>.config` | Required opaque JSON object for structured Providers; native Hooks require an empty object; boolean Hooks omit it or use an empty object |
 | `events.<name>.enabled` | Required boolean for a declared event; omitted events are disabled |
 | `events.<name>.required` | Defaults to `false`; a disabled event cannot be required |
 | `events.<name>.budget_ms` | Optional positive override of the default event budget; a nested guard also shares the parent remaining budget |
@@ -40,8 +43,11 @@ All fields below are inside `spec` unless stated otherwise.
 | `events.tool.before.match.tools`, `events.tool.after.match.tools` | Optional nonempty selector array; omitted means all native tools; `['*']` cannot be mixed with exact selectors |
 | `events.tool.before.guard` | Optional reference to a declared `security.violation` event, enabled when this before event is enabled |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
-| `steps[].provider`, `steps[].operation` | Declared Provider ID and nonempty operation name; whether the Provider implements the operation is checked later |
-| `steps[].effects` | Nonempty unique effect list; describes requested upper bounds, not a permission grant |
+| `steps[].provider` | Declared Provider ID whose protocol must match the step form |
+| `steps[].operation` | Defaults to `invoke` for boolean Hooks (the only supported value); structured Providers require an explicit operation checked against discovery |
+| `steps[].native` | Empty object selecting native callback execution; mutually exclusive with `operation` and `effects` |
+| `steps[].effects` | Required nonempty unique list; all requested on a boolean match, an admitted upper bound for structured Providers; omit for native steps |
+| `steps[].reason_code` | Optional match reason for boolean Hooks only; 1–128 ASCII letters, digits, `.`, `_` or `-` |
 | `steps[].on_error` | `report`, `block` or `withhold_result`, constrained by event timing |
 
 Agent/Provider IDs and step/operation names use the same syntax as
@@ -55,9 +61,43 @@ fields. Missing Provider references and duplicate step IDs are errors even in
 disabled steps, so enabling a step does not uncover a hidden reference typo.
 Defaults are documented behavior, not values inserted into the parsed document.
 
+## Default boolean hooks
+
+Omitting a Provider's `protocol` selects `aw-hook/v1alpha1`. Its step omits
+`operation` or declares `invoke`; the Host performs local admission and makes
+no `describe`/`validate_config` calls. The command receives only the normalized
+event and returns one JSON boolean with exit 0. AW projects the step's effects
+and optional reason code on true, and no effects on false, retaining request
+correlation internally. Nonzero exit, timeout, incomplete stdin, invalid or
+oversized output remains a failure governed by `on_error`. Stdout is capped at
+32 bytes as well as the configured output ceiling. Existing explicitly declared
+structured and native protocols keep their behavior. See the
+[boolean script example](../../../user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+
+## Native commands and runtime support
+
+Native steps use `native: {}` and a `native-hook/v1alpha1` Provider. They run
+without `describe` or `validate_config`, receive the exact native callback input
+and return byte output and exit status to the Adapter. They do not claim
+structured AW effects. Nonzero exits remain native results; `on_error` handles
+execution failures such as deadline or output-limit errors. A native command
+written for one framework is not automatically portable. Current Qoder callback
+input must remain identical across AW steps; sequential rewrite chains and
+approval flows are outside the accepted native combinations. Changed input is
+rejected and handled through the affected step's `on_error`.
+
+Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
+with `observe`, plus native steps at these points. Qoder CLI 1.1.64 maps them to
+`PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
+Other recognized events, exact selectors, guards, replacement effects and
+stronger execution guarantees are not runtime support. Qoder, OpenClaw, QwenPaw
+and Hermes have launch Adapters; their supported versions, entrypoints and
+after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
+
 ## Events, effects and tool selection
 
-The configuration recognizes these 16 names.
+The configuration recognizes these 16 names. Their descriptions define the
+vocabulary; runtime support is the narrower surface described above.
 
 | Event | Meaning |
 | --- | --- |
@@ -78,7 +118,8 @@ The configuration recognizes these 16 names.
 | `security.violation` | Provisional name for AW's active, final internal tool-before check |
 | `coverage.changed` | Change in observed integration coverage |
 
-`security.violation` only runs through the guard of an enabled `tool.before`.
+The reserved `security.violation` design runs through the guard of an enabled
+`tool.before`; the current runtime rejects guards.
 It inspects the final candidate and permits `observe`/`block`, without changing
 parameters. It is not a second native Hook or a promise to run after every
 third-party Hook. Parameter changes after the check require another check at
@@ -103,8 +144,8 @@ other than the single `*`. All-tools routing includes native custom tools and
 preserves their input; it does not make every Provider understand every tool.
 
 `required: false` cannot authorize dropping an active control effect or its
-failure action. Future runtime admission must check every enabled step against
-Provider declarations, implementation and native capabilities, and reject
+failure action. Runtime admission checks every enabled step against
+Provider declarations, implementation and native capabilities, and rejects
 unsupported required controls. Optional unavailable observation sources must be
 reported explicitly. Parsing alone does not perform that admission.
 

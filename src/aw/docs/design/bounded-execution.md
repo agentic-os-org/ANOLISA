@@ -3,8 +3,9 @@
 [中文版](bounded-execution_zh.md)
 
 `aw-exec` runs one command with byte limits, an absolute deadline and cancellation.
-It provides the process transport shared by native hook commands and a future
-Provider Host. It does not depend on `aw-config`, `aw-core` or `aw-provider`.
+It provides the process transport shared by native hook commands and the
+[local Provider Host](provider-host.md). It does not depend on `aw-config`,
+`aw-core` or `aw-provider`.
 
 ## API and ownership
 
@@ -51,21 +52,38 @@ OS calls and kernel-stuck processes do not have a hard realtime bound. The
 caller must not reap this library's children or configure automatic SIGCHLD
 reaping. Error PIDs are diagnostic identifiers and must not be used for later
 signals after the call returns. On unwinding, Drop attempts a group kill and a
-nonblocking reap; forced termination of the calling process cannot run cleanup.
+nonblocking reap. Linux also arms `PR_SET_PDEATHSIG(SIGKILL)` before exec and
+checks for parent death during setup, so a nested transport does not leave its
+immediate command running when its owning thread dies. Privilege-changing execs
+can clear this signal. Forced termination still prevents verified group cleanup
+and does not extend the signal to arbitrary descendants.
 
 Normal completion also terminates remaining members of the command group. This
 transport is for commands whose children share the invocation's bounded lifetime;
-it is not a service launcher. It does not change global signal handlers, create
-helper threads or reap unrelated children.
+it is not a service launcher. The bounded pipe API does not change global signal
+handlers, create helper threads or reap unrelated children.
+
+`run_foreground` separately runs an interactive Agent with inherited standard
+streams and the same owned process-group cleanup. It transfers a terminal only
+when the caller owns its foreground, restores that ownership on return, and
+forwards signals supplied by the caller. An interactive session has no command
+time limit; cancellation starts bounded shutdown. This API does not replace the
+separate daemon lifecycle owner.
+
+`run_foreground_observed` adds a one-shot callback after successful spawn and
+terminal handoff. It reports the owned leader PID (also its process-group ID)
+so callers can bind startup evidence to the actual Agent. The callback must
+return promptly and must not reap the child; executor cleanup ownership is unchanged.
 
 ## Native semantics and future enforcement
 
 The current delivery serves `tool.before` and `tool.after`. Scheduling remains
 with the native adapter: concurrent calls remain independent, sequential hooks
 remain sequential, and the library does not manufacture after events or approvals.
-Provider protocol integration, daemon/CLI wiring and four-framework adoption
-tests are separate increments. No new `aw.yaml` fields or Core profiles are needed
-for this library.
+`aw-host` composes this transport with structured Provider and native command
+execution. The service and Qoder launcher use it without moving native scheduling
+into the executor. The other three framework adapters remain subsequent work.
+This library does not parse `aw.yaml` or select Core profiles.
 
 The extension boundary separates transport, policy evaluation and effect
 application. Adapters report the actual native capabilities; a later OS backend

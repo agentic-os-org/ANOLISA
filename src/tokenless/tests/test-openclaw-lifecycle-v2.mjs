@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,42 +37,46 @@ writeFileSync(
     'const behavior = fs.existsSync(behaviorFile) ? fs.readFileSync(behaviorFile, "utf8") : "normal";',
     'if (behavior === "exit") process.exit(1);',
     'if (behavior === "malformed") { process.stdout.write("{bad"); process.exit(0); }',
-    'let result;',
+    'if (behavior === "timeout") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);',
+    "let result;",
     'if (request.operation === "pre_tool") {',
-    '  const command = request.input.arguments[request.input.command_field];',
+    "  const command = request.input.arguments[request.input.command_field];",
     '  if (command === "no-rewrite") {',
     '    result = { arguments: request.input.arguments, action: "passthrough", output_optimization: "none" };',
-    '  } else {',
-    '    result = {',
-    '      arguments: { ...request.input.arguments, [request.input.command_field]: `/mock/rtk ${command}` },',
+    "  } else {",
+    "    result = {",
+    "      arguments: { ...request.input.arguments, [request.input.command_field]: `/mock/rtk ${command}` },",
     '      action: "replace_arguments",',
     '      output_optimization: "rtk",',
-    '    };',
-    '  }',
+    "    };",
+    "  }",
     '} else if (request.operation === "post_tool") {',
-    '  const input = request.input;',
-    '  if (input.status === "error") {',
+    "  const input = request.input;",
+    '  if (behavior === "no-savings") {',
+    '    result = { output: input.content, disposition: "no_savings" };',
+    '  } else if (input.status === "error") {',
     '    result = { output: input.content, disposition: "tool_error", additional_context: "install the missing dependency" };',
     '  } else if (input.output_optimization === "rtk" || input.content_origin === "file_content") {',
     '    result = { output: input.content, disposition: "passthrough" };',
     '  } else if (input.content.includes("lossy")) {',
     '    result = { output: input.content, disposition: "recoverability_unavailable" };',
-    '  } else if (input.capabilities.replace_with_text) {',
+    "  } else if (input.capabilities.replace_with_text) {",
     '    result = { output: "compressed text", disposition: "applied" };',
-    '  } else {',
-    '    const parsed = JSON.parse(input.content);',
-    '    delete parsed.debug;',
+    "  } else {",
+    "    const parsed = JSON.parse(input.content);",
+    "    delete parsed.debug;",
     '    result = { output: JSON.stringify(parsed), disposition: "applied" };',
-    '  }',
-    '} else {',
-    '  process.exit(2);',
-    '}',
-    'process.stdout.write(JSON.stringify({',
-    '  protocol_version: 2,',
-    '  operation: request.operation,',
-    '  attribution: request.attribution,',
-    '  result,',
-    '}));',
+    "  }",
+    "} else {",
+    "  process.exit(2);",
+    "}",
+    'if (behavior === "invalid-output") result.output = 17;',
+    "process.stdout.write(JSON.stringify({",
+    '  protocol_version: behavior === "wrong-version" ? 1 : 2,',
+    "  operation: request.operation,",
+    "  attribution: request.attribution,",
+    "  result,",
+    "}));",
     "",
   ].join("\n"),
 );
@@ -80,7 +85,10 @@ chmodSync(fakeTokenless, 0o755);
 process.env.HOME = sandbox;
 process.env.PATH = `${fakeBinDir}:${originalPath || ""}`;
 
-const pluginPath = resolve(testDir, "../adapters/tokenless/openclaw/dist/index.js");
+const pluginPath = resolve(
+  testDir,
+  "../adapters/tokenless/openclaw/dist/index.js",
+);
 assert.equal(
   existsSync(pluginPath),
   true,
@@ -102,6 +110,10 @@ plugin.register({
     tool_ready_enabled: false,
     verbose: false,
   },
+  registerAgentToolResultMiddleware(handler, options) {
+    handlers.set("middleware", [handler]);
+    assert.deepEqual(options.runtimes, ["openclaw"]);
+  },
   on(name, handler) {
     const registered = handlers.get(name) || [];
     registered.push(handler);
@@ -115,7 +127,8 @@ const handler = (name) => {
   return registered[0];
 };
 const beforeToolCall = handler("before_tool_call");
-const toolResultPersist = handler("tool_result_persist");
+const toolResultMiddleware = handler("middleware");
+assert.equal(handlers.has("tool_result_persist"), false);
 const sessionStart = handler("session_start");
 const sessionEnd = handler("session_end");
 
@@ -136,10 +149,12 @@ function rewrite(command, context, extraParams = {}) {
   );
 }
 
-function persist(toolName, toolCallId, message, context = {}, extraEvent = {}) {
-  return toolResultPersist(
-    { toolName, toolCallId, message, ...extraEvent },
-    { toolName, toolCallId, ...context },
+function postTool(toolName, toolCallId, result, context = {}, extraEvent = {}) {
+  if (typeof result === "string")
+    result = { content: [{ type: "text", text: result }] };
+  return toolResultMiddleware(
+    { toolName, toolCallId, result, args: {}, ...extraEvent },
+    context,
   );
 }
 
@@ -158,7 +173,10 @@ after(() => {
 
 test("plugin manifest exposes only lifecycle policy switches", () => {
   const manifest = JSON.parse(
-    readFileSync(resolve(testDir, "../adapters/tokenless/openclaw/openclaw.plugin.json"), "utf8"),
+    readFileSync(
+      resolve(testDir, "../adapters/tokenless/openclaw/openclaw.plugin.json"),
+      "utf8",
+    ),
   );
   assert.deepEqual(Object.keys(manifest.configSchema.properties).sort(), [
     "post_tool_enabled",
@@ -166,6 +184,42 @@ test("plugin manifest exposes only lifecycle policy switches", () => {
     "tool_ready_enabled",
     "verbose",
   ]);
+  assert.deepEqual(manifest.contracts.agentToolResultMiddleware, ["openclaw"]);
+  const metadata = JSON.parse(
+    readFileSync(
+      resolve(testDir, "../adapters/tokenless/openclaw/package.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(metadata.openclaw.compat.pluginApi, ">=2026.6.6");
+});
+
+test("missing or rejected middleware disables PostTool while retaining PreTool", () => {
+  for (const registerMiddleware of [
+    undefined,
+    () => {
+      throw new Error("registration rejected");
+    },
+  ]) {
+    const hooks = new Map();
+    const warnings = [];
+    plugin.register({
+      pluginConfig: {
+        rtk_enabled: true,
+        post_tool_enabled: true,
+        tool_ready_enabled: false,
+      },
+      logger: { warn: (message) => warnings.push(message) },
+      registerAgentToolResultMiddleware: registerMiddleware,
+      on(name, hook) {
+        hooks.set(name, hook);
+      },
+    });
+    assert.equal(hooks.has("before_tool_call"), true);
+    assert.equal(hooks.has("tool_result_persist"), false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /PostTool disabled/);
+  }
 });
 
 test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
@@ -182,6 +236,9 @@ test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
       tool_ready_enabled: false,
       verbose: false,
     },
+    registerAgentToolResultMiddleware(hookHandler) {
+      disabledHandlers.set("middleware", [hookHandler]);
+    },
     on(name, hookHandler) {
       const registered = disabledHandlers.get(name) || [];
       registered.push(hookHandler);
@@ -189,7 +246,86 @@ test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
     },
   });
 
-  assert.deepEqual([...disabledHandlers.keys()].sort(), ["session_end", "session_start"]);
+  assert.deepEqual([...disabledHandlers.keys()].sort(), [
+    "session_end",
+    "session_start",
+  ]);
+});
+
+test("binary discovery skips searchable directories and follows executable symlinks", async () => {
+  const shadow = join(sandbox, "path-shadow");
+  const binaries = join(sandbox, "path-symlinks");
+  mkdirSync(join(shadow, "tokenless"), { recursive: true });
+  mkdirSync(binaries);
+  symlinkSync(fakeTokenless, join(binaries, "tokenless"));
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shadow}:${binaries}:${previousPath}`;
+    const freshUrl = pathToFileURL(pluginPath);
+    freshUrl.searchParams.set("binary-discovery", "directory-shadow");
+    const { default: freshPlugin } = await import(freshUrl.href);
+    const hooks = new Map();
+    freshPlugin.register({
+      pluginConfig: {
+        rtk_enabled: false,
+        post_tool_enabled: true,
+        tool_ready_enabled: false,
+      },
+      registerAgentToolResultMiddleware(hook) {
+        hooks.set("middleware", hook);
+      },
+      on(name, hook) {
+        hooks.set(name, hook);
+      },
+    });
+    const message = { content: [{ type: "text", text: "compress me" }] };
+    const result = hooks.get("middleware")(
+      {
+        toolName: "web_fetch",
+        toolCallId: "directory-shadow",
+        args: {},
+        result: message,
+      },
+      {
+        sessionId: "directory-shadow-session",
+        toolName: "web_fetch",
+        toolCallId: "directory-shadow",
+      },
+    );
+    assert.equal(result?.result.content[0].text, "compressed text");
+    assert.equal(requests().length, 1);
+    hooks.get("before_tool_call")(
+      {
+        toolName: "exec",
+        toolCallId: "directory-shadow-file",
+        params: { command: "cat page.html" },
+      },
+      {
+        sessionId: "directory-shadow-session",
+        toolName: "exec",
+        toolCallId: "directory-shadow-file",
+      },
+    );
+    hooks.get("middleware")(
+      {
+        toolName: "exec",
+        toolCallId: "directory-shadow-file",
+        args: {},
+        result: { content: [{ type: "text", text: "<html></html>" }] },
+      },
+      {
+        sessionId: "directory-shadow-session",
+        toolName: "exec",
+        toolCallId: "directory-shadow-file",
+      },
+    );
+    const fileRead = requests()[1].request.input;
+    assert.equal(fileRead.content_origin, "command_output");
+    assert.equal(fileRead.command, "cat page.html");
+    assert.equal(fileRead.output_optimization, "none");
+  } finally {
+    process.env.PATH = previousPath;
+  }
 });
 
 test("resumed non-exec tools retain UUID attribution when RTK is disabled", () => {
@@ -207,6 +343,9 @@ test("resumed non-exec tools retain UUID attribution when RTK is disabled", () =
       tool_ready_enabled: false,
       verbose: false,
     },
+    registerAgentToolResultMiddleware(hookHandler) {
+      postOnlyHandlers.set("middleware", [hookHandler]);
+    },
     on(name, hookHandler) {
       const registered = postOnlyHandlers.get(name) || [];
       registered.push(hookHandler);
@@ -215,9 +354,9 @@ test("resumed non-exec tools retain UUID attribution when RTK is disabled", () =
   });
 
   const beforeHandlers = postOnlyHandlers.get("before_tool_call") || [];
-  const persistHandlers = postOnlyHandlers.get("tool_result_persist") || [];
+  const middlewareHandlers = postOnlyHandlers.get("middleware") || [];
   assert.equal(beforeHandlers.length, 1);
-  assert.equal(persistHandlers.length, 1);
+  assert.equal(middlewareHandlers.length, 1);
 
   beforeHandlers[0](
     { toolName: "web_fetch", toolCallId: "call-resumed", params: {} },
@@ -228,8 +367,13 @@ test("resumed non-exec tools retain UUID attribution when RTK is disabled", () =
       sessionKey: "agent:main:resumed",
     },
   );
-  persistHandlers[0](
-    { toolName: "web_fetch", toolCallId: "call-resumed", message: "payload" },
+  middlewareHandlers[0](
+    {
+      toolName: "web_fetch",
+      toolCallId: "call-resumed",
+      args: {},
+      result: { content: [{ type: "text", text: "payload" }] },
+    },
     {
       toolName: "web_fetch",
       toolCallId: "call-resumed",
@@ -240,6 +384,31 @@ test("resumed non-exec tools retain UUID attribution when RTK is disabled", () =
   const request = requests()[0].request;
   assert.equal(request.attribution.session_id, "session-actual");
   assert.equal(request.input.output_optimization, "none");
+  assert.equal(request.input.command, undefined);
+
+  // Core classifies plain file prints as file_read from the shell command line,
+  // so the line is recorded before the call even when RTK is off.
+  beforeHandlers[0](
+    {
+      toolName: "exec",
+      toolCallId: "call-cat",
+      params: { command: "cat page.html" },
+    },
+    { toolName: "exec", toolCallId: "call-cat", sessionId: "session-actual" },
+  );
+  middlewareHandlers[0](
+    {
+      toolName: "exec",
+      toolCallId: "call-cat",
+      args: {},
+      result: { content: [{ type: "text", text: "<html></html>" }] },
+    },
+    { toolName: "exec", toolCallId: "call-cat", sessionId: "session-actual" },
+  );
+  const fileRead = requests()[1].request.input;
+  assert.equal(fileRead.content_origin, "command_output");
+  assert.equal(fileRead.command, "cat page.html");
+  assert.equal(fileRead.output_optimization, "none");
 });
 
 test("PreTool sends one Protocol v2 operation and applies all returned arguments", () => {
@@ -289,52 +458,62 @@ test("RTK output optimization is isolated and consumed once", () => {
   rewrite("second", { sessionId: "session-b", toolCallId: "call-b" });
 
   rmSync(requestLog, { force: true });
-  assert.equal(persist("exec", "call-other", "other", { sessionId: "session-a" }).message, "compressed text");
-  assert.equal(persist("exec", "call-a", "rtk output", { sessionId: "session-a" }), undefined);
-  assert.equal(persist("exec", "call-a", "next output", { sessionId: "session-a" }).message, "compressed text");
-  assert.equal(persist("exec", "call-b", "rtk output", { sessionId: "session-b" }), undefined);
+  assert.equal(
+    postTool("exec", "call-other", "other", { sessionId: "session-a" }).result
+      .content[0].text,
+    "compressed text",
+  );
+  assert.equal(
+    postTool("exec", "call-a", "rtk output", { sessionId: "session-a" }),
+    undefined,
+  );
+  assert.equal(
+    postTool("exec", "call-a", "next output", { sessionId: "session-a" }).result
+      .content[0].text,
+    "compressed text",
+  );
+  assert.equal(
+    postTool("exec", "call-b", "rtk output", { sessionId: "session-b" }),
+    undefined,
+  );
 
-  const optimizations = requests().map(({ request }) => request.input.output_optimization);
+  const optimizations = requests().map(
+    ({ request }) => request.input.output_optimization,
+  );
   assert.deepEqual(optimizations, ["none", "rtk", "none", "rtk"]);
 });
 
-test("synthetic results consume matching RTK state without invoking Core", () => {
-  rewrite("command", { sessionId: "session-synthetic", toolCallId: "call-synthetic" });
-  rmSync(requestLog, { force: true });
-
-  assert.equal(
-    persist(
-      "exec",
-      "call-synthetic",
-      "synthetic",
-      { sessionId: "session-synthetic" },
-      { isSynthetic: true },
-    ),
-    undefined,
-  );
-  assert.equal(requests().length, 0);
-  assert.equal(
-    persist("exec", "call-synthetic", "final", { sessionId: "session-synthetic" }).message,
-    "compressed text",
-  );
-  assert.equal(requests()[0].request.input.output_optimization, "none");
+test("PostTool has no transcript hook and does not reprocess persistence", () => {
+  assert.equal(handlers.has("tool_result_persist"), false);
+  postTool("web_fetch", "call-once", "payload", { sessionId: "session-once" });
+  assert.equal(requests().length, 1);
 });
 
 test("session mapping carries lifecycle attribution and session end clears state", () => {
   sessionStart({ sessionKey: "agent:main:one", sessionId: "session-mapped" });
-  rewrite("mapped", { sessionKey: "agent:main:one", toolCallId: "call-mapped" });
+  rewrite("mapped", {
+    sessionKey: "agent:main:one",
+    toolCallId: "call-mapped",
+  });
   rmSync(requestLog, { force: true });
 
-  persist("exec", "call-mapped", "mapped output", { sessionKey: "agent:main:one" });
+  postTool("exec", "call-mapped", "mapped output", {
+    sessionKey: "agent:main:one",
+  });
   let request = requests()[0].request;
   assert.equal(request.attribution.session_id, "session-mapped");
   assert.equal(request.input.output_optimization, "rtk");
 
-  rewrite("cleanup", { sessionKey: "agent:main:one", toolCallId: "call-cleanup" });
+  rewrite("cleanup", {
+    sessionKey: "agent:main:one",
+    toolCallId: "call-cleanup",
+  });
   sessionEnd({ sessionKey: "agent:main:one" });
   rmSync(requestLog, { force: true });
 
-  persist("exec", "call-cleanup", "after end", { sessionId: "session-mapped" });
+  postTool("exec", "call-cleanup", "after end", {
+    sessionId: "session-mapped",
+  });
   request = requests()[0].request;
   assert.equal(request.input.output_optimization, "none");
 });
@@ -347,36 +526,35 @@ test("resumed sessions retain PreTool identity when PostTool only has a session 
   });
   rmSync(requestLog, { force: true });
 
-  persist(
-    "exec",
-    "call-existing",
-    "rtk output",
-    { sessionKey: "agent:main:existing" },
-  );
+  postTool("exec", "call-existing", "rtk output", {
+    sessionKey: "agent:main:existing",
+  });
   const request = requests()[0].request;
   assert.equal(request.attribution.session_id, "session-existing");
   assert.equal(request.input.output_optimization, "rtk");
+  // The recorded line is the one that ran, not the one the model wrote.
+  assert.equal(request.input.command, "/mock/rtk resumed");
 });
 
-test("PostTool restores structured output and maps content origins", () => {
-  const structured = { records: [{ id: 1 }], debug: "drop" };
-  assert.deepEqual(
-    persist("web_fetch", "call-api", structured, { sessionId: "session-api" }),
-    { message: { records: [{ id: 1 }] } },
-  );
+test("PostTool maps API and file origins without authorized recovery", () => {
+  postTool("web_fetch", "call-api", "payload", { sessionId: "session-api" });
   assert.equal(requests()[0].request.input.content_origin, "api_response");
-  assert.equal(requests()[0].request.input.capabilities.replace_with_text, false);
-
+  assert.equal(
+    requests()[0].request.input.capabilities.replace_with_text,
+    true,
+  );
+  assert.equal(requests()[0].request.input.capabilities.recovery.kind, "none");
   rmSync(requestLog, { force: true });
   assert.equal(
-    persist("read", "call-read", "authoritative file", { sessionId: "session-read" }),
+    postTool("read", "call-read", "authoritative file", {
+      sessionId: "session-read",
+    }),
     undefined,
   );
   assert.equal(requests()[0].request.input.content_origin, "file_content");
-  assert.equal(requests()[0].request.input.capabilities.recovery.kind, "none");
 });
 
-test("PostTool preserves a text tool-result envelope", () => {
+test("PostTool replaces live text while preserving result metadata", () => {
   const message = {
     role: "toolResult",
     toolCallId: "call-envelope",
@@ -385,15 +563,12 @@ test("PostTool preserves a text tool-result envelope", () => {
     details: { source: "test" },
     timestamp: 42,
   };
-  const result = persist(
-    "web_fetch",
-    "call-envelope",
-    message,
-    { sessionId: "session-envelope" },
-  );
+  const result = postTool("web_fetch", "call-envelope", message, {
+    sessionId: "session-envelope",
+  });
 
   assert.deepEqual(result, {
-    message: {
+    result: {
       ...message,
       content: [{ type: "text", text: "compressed text", mime: "text/plain" }],
     },
@@ -413,10 +588,64 @@ test("PostTool passes through media and multi-block results without spawning", (
     ],
   };
 
-  assert.equal(persist("image", "call-media", media), undefined);
-  assert.equal(persist("web_fetch", "call-multiple", multiple), undefined);
+  assert.equal(postTool("image", "call-media", media), undefined);
+  assert.equal(postTool("web_fetch", "call-multiple", multiple), undefined);
   assert.equal(requests().length, 0);
 });
+
+for (const length of [100000, 150000]) {
+  test(`PostTool replaces only the supplied ${length}-character text`, () => {
+    // The adapter cannot distinguish a host-clipped prefix from complete text.
+    const source =
+      "x".repeat(150000 - "TAIL_SENTINEL".length) + "TAIL_SENTINEL";
+    const received = {
+      content: [
+        { type: "text", text: source.slice(0, length), mime: "text/plain" },
+      ],
+      details: { status: "completed", exitCode: 0, source: "host" },
+      timestamp: 42,
+    };
+    const snapshot = structuredClone(received);
+    const returned = postTool("exec", `long-${length}`, received);
+    const input = requests()[0].request.input;
+    assert.equal(input.content, received.content[0].text);
+    assert.deepEqual(input.capabilities.recovery, { kind: "none" });
+    assert.equal(returned.result.details, received.details);
+    assert.deepEqual(returned.result, {
+      ...received,
+      content: [{ ...received.content[0], text: "compressed text" }],
+    });
+    assert.deepEqual(received, snapshot);
+  });
+
+  test(`PostTool failures preserve the received ${length}-character result`, () => {
+    const received = {
+      content: [{ type: "text", text: "x".repeat(length) }],
+      details: { truncated: true },
+    };
+    const snapshot = structuredClone(received);
+    for (const behavior of [
+      "exit",
+      "malformed",
+      "wrong-version",
+      "no-savings",
+    ]) {
+      writeFileSync(behaviorFile, behavior);
+      assert.equal(postTool("exec", `failure-${length}`, received), undefined);
+      assert.deepEqual(received, snapshot);
+    }
+    assert.equal(requests().length, 4);
+    for (const { request } of requests()) {
+      assert.equal(request.input.content, received.content[0].text);
+    }
+    rmSync(behaviorFile);
+    assert.equal(
+      postTool("read", `passthrough-${length}`, received),
+      undefined,
+    );
+    assert.deepEqual(received, snapshot);
+  });
+}
 
 test("PostTool appends Core diagnostics without replacing the tool error", () => {
   const message = {
@@ -427,10 +656,16 @@ test("PostTool appends Core diagnostics without replacing the tool error", () =>
     content: [{ type: "text", text: "command not found" }],
     details: { exitCode: 127 },
   };
-  const result = persist("exec", "call-error", message, { sessionId: "session-error" });
+  const result = postTool(
+    "exec",
+    "call-error",
+    message,
+    { sessionId: "session-error" },
+    { isError: true },
+  );
 
   assert.deepEqual(result, {
-    message: {
+    result: {
       ...message,
       content: [
         { type: "text", text: "command not found" },
@@ -443,14 +678,80 @@ test("PostTool appends Core diagnostics without replacing the tool error", () =>
 });
 
 test("PostTool rejects lossy output without authorized recovery and fails open", () => {
-  assert.equal(persist("web_fetch", "call-lossy", "lossy payload"), undefined);
+  assert.equal(postTool("web_fetch", "call-lossy", "lossy payload"), undefined);
   assert.equal(requests()[0].request.input.capabilities.recovery.kind, "none");
 
   rmSync(requestLog, { force: true });
   writeFileSync(behaviorFile, "exit");
-  assert.equal(persist("web_fetch", "call-exit", "payload"), undefined);
+  assert.equal(postTool("web_fetch", "call-exit", "payload"), undefined);
   assert.equal(requests().length, 1);
 });
+
+test("PostTool propagates actual executed command and host failure metadata", () => {
+  rewrite("old", { sessionId: "actual", toolCallId: "actual-call" });
+  rmSync(requestLog, { force: true });
+  postTool(
+    "exec",
+    "actual-call",
+    "payload",
+    { sessionId: "actual" },
+    { args: { command: "cat actual.html" } },
+  );
+  assert.equal(requests()[0].request.input.command, "cat actual.html");
+
+  for (const details of [
+    { status: "failed" },
+    { status: "timed_out" },
+    { exitCode: 127 },
+    { ok: false },
+  ]) {
+    rmSync(requestLog, { force: true });
+    const original = { content: [{ type: "text", text: "failure" }], details };
+    const returned = postTool("exec", "metadata-error", original);
+    assert.equal(requests()[0].request.input.status, "error");
+    assert.equal(returned.result.details, details);
+    assert.equal(returned.result.content[0], original.content[0]);
+  }
+});
+
+test("PostTool passes through malformed input, unusable responses and no savings", () => {
+  for (const result of [
+    null,
+    [],
+    {},
+    { content: [null] },
+    { content: [{ type: "text", text: 12 }] },
+  ]) {
+    assert.equal(postTool("exec", "invalid-input", result), undefined);
+  }
+  assert.equal(requests().length, 0);
+  for (const behavior of [
+    "malformed",
+    "wrong-version",
+    "invalid-output",
+    "no-savings",
+  ]) {
+    writeFileSync(behaviorFile, behavior);
+    assert.equal(postTool("web_fetch", "response-error", "payload"), undefined);
+  }
+});
+
+test(
+  "PostTool timeout returns unchanged output instead of throwing into the host",
+  { timeout: 25000 },
+  () => {
+    writeFileSync(behaviorFile, "timeout");
+    for (const length of [100000, 150000]) {
+      const received = {
+        content: [{ type: "text", text: "x".repeat(length) }],
+        details: { source: "host" },
+      };
+      const snapshot = structuredClone(received);
+      assert.equal(postTool("web_fetch", "timeout", received), undefined);
+      assert.deepEqual(received, snapshot);
+    }
+  },
+);
 
 test("stale optimization state is pruned on the next rewrite", () => {
   const realNow = Date.now;
@@ -464,6 +765,6 @@ test("stale optimization state is pruned on the next rewrite", () => {
   }
 
   rmSync(requestLog, { force: true });
-  persist("exec", "call-old", "old output", { sessionId: "session-ttl" });
+  postTool("exec", "call-old", "old output", { sessionId: "session-ttl" });
   assert.equal(requests()[0].request.input.output_optimization, "none");
 });

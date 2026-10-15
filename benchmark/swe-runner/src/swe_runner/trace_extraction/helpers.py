@@ -72,7 +72,12 @@ def parse_time_value(value: str) -> int:
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return int(dt.timestamp() * 1e9)
+    # Integer arithmetic only: converting through a float second value
+    # (dt.timestamp() * 1e9) injects binary floating-point error into the
+    # nanosecond result and rounds the maximum supported datetime into the
+    # next year. timedelta components are exact for every supported date.
+    delta = dt - datetime(1970, 1, 1, tzinfo=UTC)
+    return ((delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1_000
 
 
 def parse_json_column(raw: str | None) -> list[Any]:

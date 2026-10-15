@@ -12,21 +12,26 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    update_input_mode, update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction,
+    update_locked_input_mode, write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
     UserPtyInputGeneration,
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
-use super::model::ShellEventView;
+use super::model::{retire_capture_for_representation, CaptureRepresentationReset, ShellEventView};
 use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_presentation::PromptPresentation;
 use super::prompt_replay::{prompt_replay_bytes, PromptReplayTracker};
 
+#[cfg(test)]
+use crate::raw_input::update_input_mode;
+
 mod activity;
+pub(crate) mod degraded;
 mod eof_shutdown;
 mod input_events;
 mod input_readiness;
 pub(super) mod interactive_sentinel;
+mod observer;
 mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
@@ -36,10 +41,18 @@ use activity::{
 };
 pub(super) use activity::{DriverCompletion, RawActionWatchdog};
 use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
-use input_events::{candidate_display_columns, drain_raw_input_events, write_no_wrap_overlay};
+use input_events::{
+    apply_prompt_boundary_evidence, candidate_display_columns, drain_raw_input_events,
+    publish_prompt_snapshot_if_drained, write_no_wrap_overlay,
+};
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
     emit_interactive_hint_if_waiting, InputWaitStatus, InteractiveHintKind, SentinelThrottle,
+};
+use observer::latest_capture_submission_generation;
+use observer::{
+    merge_pending_prompt_restore, observe_with_input_mode_lock, release_held_shell_output,
+    remember_pending_prompt_restore,
 };
 use pty_emit::resolve_pty_emit;
 #[cfg(test)]
@@ -52,12 +65,6 @@ use terminal_size::sync_outer_terminal_winsize;
 const SAVE_CURSOR: &str = "\x1b7";
 const RESTORE_CURSOR: &str = "\x1b8";
 const PTY_READ_BATCH_BYTES: usize = 256 * 1024;
-
-fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
-    if pty_drained {
-        parser.publish_quiescent_prompt_snapshot();
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
@@ -81,6 +88,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     bounded_bash_handoff: bool,
     watchdog: Option<&RawActionWatchdog>,
     input_wait_status: &InputWaitStatus,
+    reset: &CaptureRepresentationReset,
     hint_i18n: &crate::i18n::I18n,
     input_wait_timeout_secs: u64,
     hint_card_renderer: Option<&crate::shell_host::HintCardRenderer>,
@@ -92,6 +100,7 @@ where
     let mut display_start = parser.display_position();
     let mut native_candidate_echoed_len = 0;
     let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
+    let mut blocked_prompt_generation = None;
     let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
@@ -110,6 +119,7 @@ where
     output.flush()?;
     sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
     loop {
+        degraded::recover(reset, output, last_winsize.ws_row)?;
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
             parser,
@@ -126,6 +136,8 @@ where
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
             prompt_presentation,
+            Some(reset),
+            Some(input_mode),
         )? {
             request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
         }
@@ -137,7 +149,29 @@ where
             &mut driver_completed_at,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
-            observe_with_input_mode_lock(event_observer, parser, output, input_mode)?,
+            observe_with_input_mode_lock(
+                event_observer,
+                parser,
+                output,
+                input_mode,
+                reset,
+                &mut |parser, output| {
+                    if drain_raw_input_events(
+                        input_events,
+                        parser,
+                        output,
+                        prompt,
+                        &mut native_candidate_echoed_len,
+                        &mut prompt_replay,
+                        prompt_presentation,
+                        Some(reset),
+                        None,
+                    )? {
+                        request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
+                    }
+                    Ok(())
+                },
+            )?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -155,24 +189,29 @@ where
             recovery_request_file,
             handoff_request_file,
             bounded_bash_handoff,
+            reset.take_committed_emit(),
+            Some(reset),
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
+        degraded::update_input_mode_after_display(
+            reset,
             input_mode,
             &observer_action,
             latest_capture_submission_generation(&parser.events),
         );
         let mut hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display_position() > display_start {
-            write_pending_display_preserving_prompt_ghost(
-                parser,
-                output,
-                &mut display_start,
-                &mut prompt_replay,
-                prompt_presentation,
-                input_mode,
-            )?;
-            output.flush()?;
+            degraded::display(reset, output, input_mode, |output| {
+                write_pending_display_preserving_prompt_ghost(
+                    parser,
+                    output,
+                    &mut display_start,
+                    &mut prompt_replay,
+                    prompt_presentation,
+                    input_mode,
+                )?;
+                output.flush()
+            })?;
         }
         let mut batch_bytes = 0usize;
         let mut pty_drained = false;
@@ -202,6 +241,8 @@ where
                         &mut native_candidate_echoed_len,
                         &mut prompt_replay,
                         prompt_presentation,
+                        Some(reset),
+                        Some(input_mode),
                     )? {
                         request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
                     }
@@ -214,7 +255,11 @@ where
                         // just the prompt repaint replay dedup strips.
                         match cut_kind {
                             DisplayCutKind::PromptBoundary => {
-                                prompt_replay.observe_prompt_boundary();
+                                apply_prompt_boundary_evidence(
+                                    parser,
+                                    &mut prompt_replay,
+                                    &mut blocked_prompt_generation,
+                                );
                                 // #1932: the soft-newline upgrade submitted a
                                 // synthetic empty line for this boundary; its
                                 // accept echo is visually blank, so drop it
@@ -231,15 +276,19 @@ where
                             DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
                         }
                         if !hold_shell_output && cut > display_start {
-                            prompt_presentation.write_display_slice(
-                                parser,
-                                output,
-                                display_start,
-                                cut,
-                                &mut prompt_replay,
-                            )?;
-                            output.flush()?;
-                            display_start = cut;
+                            degraded::display(reset, output, input_mode, |output| {
+                                prompt_presentation.write_display_slice(
+                                    parser,
+                                    output,
+                                    display_start,
+                                    cut,
+                                    &mut prompt_replay,
+                                )?;
+                                output.flush()
+                            })?;
+                            if !reset.display_is_failed() {
+                                display_start = cut;
+                            }
                         }
                         observer_action = merge_pending_prompt_restore(
                             observe_with_input_mode_lock(
@@ -247,6 +296,28 @@ where
                                 parser,
                                 output,
                                 input_mode,
+                                reset,
+                                &mut |parser, output| {
+                                    if drain_raw_input_events(
+                                        input_events,
+                                        parser,
+                                        output,
+                                        prompt,
+                                        &mut native_candidate_echoed_len,
+                                        &mut prompt_replay,
+                                        prompt_presentation,
+                                        Some(reset),
+                                        None,
+                                    )? {
+                                        request_eof_shutdown(
+                                            master,
+                                            terminal,
+                                            child,
+                                            &mut eof_shutdown,
+                                        )?;
+                                    }
+                                    Ok(())
+                                },
                             )?,
                             &mut pending_prompt_restore,
                         );
@@ -265,27 +336,32 @@ where
                             recovery_request_file,
                             handoff_request_file,
                             bounded_bash_handoff,
+                            reset.take_committed_emit(),
+                            Some(reset),
                         )?;
                         remember_pending_prompt_restore(
                             &observer_action,
                             &mut pending_prompt_restore,
                         );
-                        update_input_mode(
+                        degraded::update_input_mode_after_display(
+                            reset,
                             input_mode,
                             &observer_action,
                             latest_capture_submission_generation(&parser.events),
                         );
                         hold_shell_output = observer_action.hold_shell_output();
                         if !hold_shell_output && parser.display_position() > display_start {
-                            write_pending_display_preserving_prompt_ghost(
-                                parser,
-                                output,
-                                &mut display_start,
-                                &mut prompt_replay,
-                                prompt_presentation,
-                                input_mode,
-                            )?;
-                            output.flush()?;
+                            degraded::display(reset, output, input_mode, |output| {
+                                write_pending_display_preserving_prompt_ghost(
+                                    parser,
+                                    output,
+                                    &mut display_start,
+                                    &mut prompt_replay,
+                                    prompt_presentation,
+                                    input_mode,
+                                )?;
+                                output.flush()
+                            })?;
                         }
                     }
                     // Ordinary display and passive runtime transitions are
@@ -335,18 +411,20 @@ where
             return Ok(eof_shutdown.is_some());
         }
         advance_eof_shutdown(&mut eof_shutdown)?;
-        emit_interactive_hint_if_waiting(
-            master.as_raw_fd(),
-            child.id() as i32,
-            parser,
-            output,
-            &mut sentinel_throttle,
-            &mut sentinel_shown,
-            input_wait_status,
-            hint_i18n,
-            input_wait_timeout_secs,
-            hint_card_renderer,
-        )?;
+        degraded::display(reset, output, input_mode, |output| {
+            emit_interactive_hint_if_waiting(
+                master.as_raw_fd(),
+                child.id() as i32,
+                parser,
+                output,
+                &mut sentinel_throttle,
+                &mut sentinel_shown,
+                input_wait_status,
+                hint_i18n,
+                input_wait_timeout_secs,
+                hint_card_renderer,
+            )
+        })?;
         if let Some(watchdog) = watchdog {
             if watchdog.expired(driver_completed_at) {
                 child.kill()?;
@@ -373,6 +451,8 @@ where
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
             prompt_presentation,
+            Some(reset),
+            Some(input_mode),
         )? {
             request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
         }
@@ -384,7 +464,29 @@ where
             &mut driver_completed_at,
         )?;
         observer_action = merge_pending_prompt_restore(
-            observe_with_input_mode_lock(event_observer, parser, output, input_mode)?,
+            observe_with_input_mode_lock(
+                event_observer,
+                parser,
+                output,
+                input_mode,
+                reset,
+                &mut |parser, output| {
+                    if drain_raw_input_events(
+                        input_events,
+                        parser,
+                        output,
+                        prompt,
+                        &mut native_candidate_echoed_len,
+                        &mut prompt_replay,
+                        prompt_presentation,
+                        Some(reset),
+                        None,
+                    )? {
+                        request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
+                    }
+                    Ok(())
+                },
+            )?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -402,9 +504,12 @@ where
             recovery_request_file,
             handoff_request_file,
             bounded_bash_handoff,
+            reset.take_committed_emit(),
+            Some(reset),
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-        update_input_mode(
+        degraded::update_input_mode_after_display(
+            reset,
             input_mode,
             &observer_action,
             latest_capture_submission_generation(&parser.events),
@@ -415,28 +520,35 @@ where
         );
         hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display_position() > display_start {
-            write_pending_display_preserving_prompt_ghost(
-                parser,
-                output,
-                &mut display_start,
-                &mut prompt_replay,
-                prompt_presentation,
-                input_mode,
-            )?;
-            output.flush()?;
+            degraded::display(reset, output, input_mode, |output| {
+                write_pending_display_preserving_prompt_ghost(
+                    parser,
+                    output,
+                    &mut display_start,
+                    &mut prompt_replay,
+                    prompt_presentation,
+                    input_mode,
+                )?;
+                output.flush()
+            })?;
         }
-        input_readiness.acknowledge_if_ready(output, input_mode)?;
+        degraded::display(reset, output, input_mode, |output| {
+            input_readiness.acknowledge_if_ready(output, input_mode)
+        })?;
         publish_prompt_snapshot_if_drained(parser, pty_drained);
-        // The PTY is drained (WouldBlock) at this point: write off
-        // submissions a foreground program consumed once the shell has
-        // painted a prompt after the last boundary and idles at it. A bare
-        // precmd is not enough — the user's PROMPT_COMMAND and PS1 paint run
-        // after the marker, so silence alone must never clear the ledger.
-        prompt_replay.reconcile_idle_at_prompt(
+        // A quiet painted prompt writes off counted submits consumed by a
+        // foreground program; occupancy held for unclassified input stays.
+        let reconciled_prompt_occupancy = prompt_replay.reconcile_idle_at_prompt(
             parser.has_active_foreground_command(),
             parser.has_prompt_painted_since_ready(),
             last_pty_output,
         );
+        if reconciled_prompt_occupancy {
+            let no_input_after_boundary = blocked_prompt_generation
+                .take()
+                .is_some_and(|generation| generation == prompt_replay.last_written_generation());
+            parser.push_reconciled_shell_prompt_state(no_input_after_boundary);
+        }
         let foreground_command_active = parser.has_active_foreground_command();
         let activity = wait_for_relay_activity(
             master.as_raw_fd(),
@@ -456,67 +568,10 @@ where
             ),
         )?;
         if activity.resize {
+            reset.notify_resize();
             sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         }
     }
-}
-
-fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
-    for event in events.iter().rev() {
-        let Some(capture) = event.capture.as_ref() else {
-            continue;
-        };
-        match capture.lifecycle {
-            crate::types::ShellCaptureLifecycle::Submitted => return Some(capture.generation),
-            crate::types::ShellCaptureLifecycle::Drained
-            | crate::types::ShellCaptureLifecycle::Expired
-            | crate::types::ShellCaptureLifecycle::Overflow
-            | crate::types::ShellCaptureLifecycle::InputRejected => return None,
-        }
-    }
-    None
-}
-fn observe_with_input_mode_lock<W: Write, F>(
-    event_observer: &mut F,
-    parser: &mut OscParser,
-    output: &mut W,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-) -> io::Result<RawObserverAction>
-where
-    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
-{
-    let Ok(mut mode) = input_mode.lock() else {
-        return parser.observe_events(output, event_observer);
-    };
-    let action = parser.observe_events(output, event_observer)?;
-    let acknowledged = latest_capture_submission_generation(&parser.events);
-    update_locked_input_mode(&mut mode, &action, acknowledged);
-    Ok(action)
-}
-
-fn release_held_shell_output<W: Write, F>(
-    event_observer: &mut F,
-    parser: &mut OscParser,
-    output: &mut W,
-    display_start: &mut usize,
-    prompt_replay: &mut PromptReplayTracker,
-    prompt_presentation: &mut PromptPresentation,
-) -> io::Result<()>
-where
-    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
-{
-    drain_observer_until_released(event_observer, parser, output)?;
-    if parser.display_position() > *display_start {
-        write_pending_display(
-            parser,
-            output,
-            display_start,
-            prompt_replay,
-            prompt_presentation,
-        )?;
-        output.flush()?;
-    }
-    Ok(())
 }
 
 fn write_pending_display<W: Write>(
@@ -574,26 +629,6 @@ fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> 
     write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{marker} {text}"))
 }
 
-fn drain_observer_until_released<W: Write, F>(
-    event_observer: &mut F,
-    parser: &mut OscParser,
-    output: &mut W,
-) -> io::Result<()>
-where
-    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
-{
-    for _ in 0..1_000 {
-        if !parser
-            .observe_events(output, event_observer)?
-            .hold_shell_output()
-        {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
-}
-
 fn clear_prompt_ghost_line<W: Write>(
     parser: &OscParser,
     output: &mut W,
@@ -638,32 +673,6 @@ fn shell_has_completed_foreground_command(events: &[ShellEvent]) -> bool {
             ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
         )
     })
-}
-
-fn merge_pending_prompt_restore(
-    observed: RawObserverAction,
-    pending: &mut Option<RawObserverAction>,
-) -> RawObserverAction {
-    match observed {
-        action @ RawObserverAction::RestorePrompt { .. } => {
-            pending.take();
-            action
-        }
-        action @ RawObserverAction::Continue => pending.take().unwrap_or(action),
-        action => {
-            pending.take();
-            action
-        }
-    }
-}
-
-fn remember_pending_prompt_restore(
-    action: &RawObserverAction,
-    pending: &mut Option<RawObserverAction>,
-) {
-    if matches!(action, RawObserverAction::RestorePrompt { .. }) {
-        *pending = Some(action.clone());
-    }
 }
 
 fn mark_pending_prompt_replayed(

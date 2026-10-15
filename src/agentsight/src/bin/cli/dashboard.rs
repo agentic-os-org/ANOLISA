@@ -1,13 +1,15 @@
 //! Dashboard subcommand — display dashboard URL, auth status, and ECS access guide
 
+use std::ffi::OsStr;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use agentsight::ecs_metadata::{EcsMetadata, probe_ecs_metadata};
 use agentsight::server::auth::DashboardAuth;
 use structopt::StructOpt;
 
-use super::{DEFAULT_CONFIG_PATH, load_server_auth_config};
+use super::{DEFAULT_CONFIG_PATH, load_server_config};
 
 /// Display the AgentSight dashboard URL and ECS access guide
 #[derive(Debug, StructOpt, Clone)]
@@ -40,7 +42,7 @@ pub struct DashboardCommand {
 impl DashboardCommand {
     pub fn execute(&self) {
         // Check if the server is running
-        if !check_server_running(self.port) {
+        if !check_server_running(&self.host, self.port) {
             eprintln!("AgentSight 服务未启动。请先运行 `agentsight serve`。");
             std::process::exit(1);
         }
@@ -73,19 +75,28 @@ impl DashboardCommand {
             probe_ecs_metadata()
         };
 
-        let storage_base = self
+        // `serve` keeps every store — and the dashboard credential — in the
+        // directory of the database it serves: `--db`, else
+        // `storage.genai_path()`. Reading the token from the compile-time
+        // default instead minted a *new* credential in the default directory
+        // whenever `storage.base_path` was configured, and the URLs printed
+        // here then carried a token the running server rejects. The config is
+        // parsed once and shared with the auth lookup below.
+        let server_config = load_server_config(&self.config);
+        let storage_path = self
             .db
             .as_ref()
             .map(std::path::PathBuf::from)
-            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
-            .unwrap_or_else(|| {
-                agentsight::storage::sqlite::GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .to_path_buf()
-            });
+            .unwrap_or_else(|| server_config.storage.genai_path());
+        // Mirrors `server::storage_data_dir`, including the bare relative
+        // `--db name.db` case, which means the current directory.
+        let storage_base = match storage_path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => std::path::PathBuf::from("."),
+            Some(parent) => parent.to_path_buf(),
+            None => std::path::PathBuf::from("/var/log/sysak/.agentsight"),
+        };
 
-        let auth_config = load_server_auth_config(&self.config);
+        let auth_config = server_config.server_auth;
         let auth = DashboardAuth::init(&auth_config, &storage_base);
         let token = auth.read_token_from_file();
 
@@ -171,20 +182,23 @@ struct DashboardOutput {
     sg_message: Option<String>,
 }
 
-/// Determine the display URL: ECS public IP > --host > LAN IP > localhost.
+/// Determine the display URL: --host > ECS public IP > LAN IP > localhost.
+///
+/// An explicit `--host` is an operator override and must beat the ECS-derived
+/// address; ECS metadata is only a discovery hint.
 fn resolve_display_url(
     ecs: &Option<EcsMetadata>,
     host_override: &Option<String>,
     local_url: &str,
     port: u16,
 ) -> String {
+    if let Some(h) = host_override {
+        return format!("http://{h}:{port}");
+    }
     if let Some(meta) = ecs
         && let Some(ip) = meta.public_ip()
     {
         return format!("http://{ip}:{port}");
-    }
-    if let Some(h) = host_override {
-        return format!("http://{h}:{port}");
     }
     local_addresses()
         .into_iter()
@@ -264,20 +278,35 @@ fn local_addresses() -> Vec<String> {
         .collect()
 }
 
-/// Quick TCP connect to check whether the server is listening.
-fn check_server_running(port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+/// Dial address for the running check.
+///
+/// A wildcard bind address is not a dialable destination on every platform,
+/// so it maps to loopback; any explicit `--host` must be dialled directly,
+/// otherwise a server bound to that specific address is reported as not
+/// running.
+fn effective_check_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
+    }
+}
+
+/// Quick TCP connect to check whether the server is listening on `host:port`.
+fn check_server_running(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+
+    let Ok(addrs) = (effective_check_host(host), port).to_socket_addrs() else {
+        return false;
+    };
+    addrs
+        .into_iter()
+        .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok())
 }
 
 /// Try to open a URL in the default browser.
 fn try_open_browser(url: &str) {
-    let opener = find_executable("xdg-open");
-    if let Some(bin) = opener {
-        let _ = std::process::Command::new(bin)
+    if let Some(bin) = find_executable("xdg-open") {
+        let _ = std::process::Command::new(&bin)
             .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -285,13 +314,32 @@ fn try_open_browser(url: &str) {
     }
 }
 
-/// Check whether an executable exists in `$PATH`.
-fn find_executable(name: &str) -> Option<String> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var
-        .split(':')
-        .map(|dir| format!("{dir}/{name}"))
-        .find(|full| std::path::Path::new(full).is_file())
+/// Check whether an executable named `name` exists in `$PATH`.
+fn find_executable(name: &str) -> Option<PathBuf> {
+    find_executable_in(name, std::env::var_os("PATH").as_deref())
+}
+
+/// Check whether an executable named `name` exists in one of the `path_var`
+/// directories.
+///
+/// Only a regular file with an execute bit counts. A same-named plain file
+/// passes a bare `is_file()` check, and `Command::new` on it fails with
+/// `EACCES`; the caller discards that error, so a shadowing non-executable
+/// `xdg-open` would silently keep the browser closed even though a runnable
+/// one sits later in `PATH`. The check mirrors the `PATH` lookup in
+/// `server/capabilities.rs`.
+fn find_executable_in(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let paths = path_var?;
+    std::env::split_paths(paths)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|full| {
+            std::fs::metadata(full)
+                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
 }
 
 #[cfg(test)]
@@ -305,16 +353,41 @@ mod tests {
         let result = find_executable("ls");
         assert!(result.is_some(), "ls should be found in PATH");
         let path = result.unwrap();
-        assert!(
-            std::path::Path::new(&path).is_file(),
-            "returned path should be a file: {path}"
-        );
+        assert!(path.is_file(), "returned path should be a file: {path:?}");
     }
 
     #[test]
     fn find_executable_returns_none_for_nonexistent_command() {
         let result = find_executable("__nonexistent_binary_xyz__");
         assert!(result.is_none(), "nonexistent command should return None");
+    }
+
+    #[test]
+    fn find_executable_skips_a_non_executable_file() {
+        // A plain file named `xdg-open` earlier in PATH must not shadow the
+        // runnable one: it is `is_file()`-true but not executable, so
+        // `Command::new` fails with EACCES and the caller discards that error
+        // — the browser would silently never open while a usable `xdg-open`
+        // sits later in PATH.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("as-dashboard-exec-{}", std::process::id()));
+        let shadowed = dir.join("shadowed");
+        let runnable = dir.join("bin");
+        std::fs::create_dir_all(&shadowed).expect("create shadowed dir");
+        std::fs::create_dir_all(&runnable).expect("create runnable dir");
+        // `fs::write` creates the file without any execute bit.
+        std::fs::write(shadowed.join("xdg-open"), "not a program").expect("write shadow");
+        let runnable_path = runnable.join("xdg-open");
+        std::fs::write(&runnable_path, "#!/bin/sh\n").expect("write runnable");
+        std::fs::set_permissions(&runnable_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod runnable");
+
+        let path_var = std::env::join_paths([&shadowed, &runnable]).expect("join PATH");
+        let found = find_executable_in("xdg-open", Some(path_var.as_os_str()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.as_deref(), Some(runnable_path.as_path()));
     }
 
     #[test]
@@ -332,7 +405,7 @@ mod tests {
     #[test]
     fn check_server_running_returns_false_when_no_listener() {
         // Pick a port that is almost certainly not in use
-        let result = check_server_running(1);
+        let result = check_server_running("127.0.0.1", 1);
         assert!(
             !result,
             "port 1 should not have a listener, so check should return false"
@@ -344,8 +417,56 @@ mod tests {
         // Bind a TCP listener on a random port
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
         let port = listener.local_addr().unwrap().port();
-        let result = check_server_running(port);
+        let result = check_server_running("127.0.0.1", port);
         assert!(result, "should detect the active listener on port {port}");
+        // A wildcard bind address is mapped to loopback for the dial.
+        assert!(check_server_running("0.0.0.0", port));
+    }
+
+    /// An explicit `--host` must be dialled rather than assumed to be
+    /// loopback, otherwise a server bound to a specific address is reported
+    /// as not running.
+    #[test]
+    fn check_server_running_dials_the_given_host() {
+        // 127.0.0.2 belongs to the loopback subnet on Linux, where the old
+        // fixed 127.0.0.1 dial missed listeners bound to any other loopback
+        // address. Fall back to 127.0.0.1 where the /8 is not routable so the
+        // test still exercises the host parameter.
+        let listener = TcpListener::bind("127.0.0.2:0")
+            .or_else(|_| TcpListener::bind("127.0.0.1:0"))
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+        let host = addr.ip().to_string();
+        assert!(
+            check_server_running(&host, addr.port()),
+            "listener on {host}:{} must be detected",
+            addr.port()
+        );
+        assert!(
+            !check_server_running(&host, 1),
+            "closed port must not be reported as running"
+        );
+        assert_eq!(effective_check_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(effective_check_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    /// An explicit `--host` is an operator override and must beat the
+    /// ECS-derived address; ECS metadata is only a discovery hint.
+    #[test]
+    fn resolve_display_url_host_override_beats_ecs_public_ip() {
+        let ecs = Some(EcsMetadata {
+            instance_id: "i-test".to_string(),
+            region_id: "cn-hangzhou".to_string(),
+            eip: "1.2.3.4".to_string(),
+            public_ipv4: String::new(),
+        });
+        let url = resolve_display_url(
+            &ecs,
+            &Some("8.8.8.8".to_string()),
+            "http://127.0.0.1:7396",
+            7396,
+        );
+        assert_eq!(url, "http://8.8.8.8:7396");
     }
 
     #[test]
@@ -455,6 +576,25 @@ mod tests {
         config_path.to_string_lossy().to_string()
     }
 
+    /// Write a temp config that also pins `storage.base_path`.
+    fn write_temp_config_with_storage_base(
+        auth_enabled: bool,
+        suffix: &str,
+        base_path: &str,
+    ) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("agentsight_test_{}_{}", std::process::id(), suffix));
+        std::fs::create_dir_all(&dir).ok();
+        let config_path = dir.join("config.json");
+        let content = serde_json::json!({
+            "schema_version": agentsight::config::CURRENT_SCHEMA_VERSION,
+            "server": {"auth": {"enabled": auth_enabled}},
+            "storage": {"base_path": base_path},
+        });
+        std::fs::write(&config_path, content.to_string()).unwrap();
+        config_path.to_string_lossy().to_string()
+    }
+
     /// Return a unique temp storage directory for a given suffix.
     fn temp_storage_dir(suffix: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -520,6 +660,42 @@ mod tests {
         assert!(output.lines.iter().any(|l| l.contains("无需认证")));
         // Should contain tip
         assert!(output.lines.iter().any(|l| l.contains("提示")));
+    }
+
+    #[test]
+    fn build_output_reads_the_token_from_the_configured_storage_base() {
+        // `serve` keeps `.dashboard_token` in the directory of the database it
+        // serves — `--db`, else `storage.genai_path()`. The dashboard looked
+        // only at `--db` or the compile-time default, so with a custom
+        // `storage.base_path` it minted a *new* token in the default directory
+        // and printed URLs the running server rejects.
+        let storage = temp_storage_dir("configured-base");
+        let seeded = "a".repeat(64);
+        std::fs::write(storage.join(".dashboard_token"), &seeded).unwrap();
+        let config = write_temp_config_with_storage_base(
+            true,
+            "configured-base",
+            &storage.to_string_lossy(),
+        );
+
+        let cmd = DashboardCommand {
+            db: None,
+            // A concrete host guarantees the network URL line, which is where
+            // the token is rendered.
+            host: "10.0.0.5".to_string(),
+            port: 7396,
+            no_open: true,
+            skip_sg_guide: true,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        assert!(
+            output.lines.iter().any(|line| line.contains(&seeded)),
+            "the printed token must be the one the server reads, got {:?}",
+            output.lines
+        );
     }
 
     #[test]

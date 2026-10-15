@@ -122,6 +122,8 @@ def _daemon_settings(socket_path: Path) -> tuple[Path, dict[str, str]]:
     environment = os.environ.copy()
     environment.setdefault("AGENT_SEC_DATA_DIR", str(socket_path.with_suffix(".audit")))
     environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
+    environment["AGENT_SEC_OLLAMA_MODEL"] = "agent-sec-core-e2e-unavailable"
+    environment["AGENT_SEC_MODEL_SERVICE_BASE_URL"] = "http://127.0.0.1:0"
     return config, environment
 
 
@@ -132,10 +134,17 @@ def daemon_settings() -> Callable[[Path], tuple[Path, dict[str, str]]]:
 
 
 def _start_daemon(
-    socket_path: Path, admin_uids: list[int], pii_rules: Path | None = None
+    socket_path: Path,
+    admin_uids: list[int],
+    pii_rules: Path | None = None,
+    skillsec_roots: list[Path] | None = None,
 ) -> subprocess.Popen:
     """Starts a foreground daemon and waits for a complete protocol response."""
     config, environment = _daemon_settings(socket_path)
+    if skillsec_roots is not None:
+        settings = json.loads(config.read_text())
+        settings["managedSkillDirs"] = [str(root) for root in skillsec_roots]
+        config.write_text(json.dumps(settings))
     argv = [
         _require(DAEMON_BIN),
         "--socket",
@@ -204,6 +213,12 @@ def daemon_bin() -> str:
 
 
 @pytest.fixture
+def health_probe() -> str:
+    """Resolve the installed native probe, failing if the package omits it."""
+    return _require("agent-sec-daemon-health")
+
+
+@pytest.fixture
 def start_daemon(tmp_path: Path):
     """Returns a factory that starts a daemon and tears it down after the test.
 
@@ -215,10 +230,11 @@ def start_daemon(tmp_path: Path):
         admin_uids: list[int] | None = None,
         name: str = "daemon.sock",
         pii_rules: Path | None = None,
+        skillsec_roots: list[Path] | None = None,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids, pii_rules)
+        process = _start_daemon(socket_path, uids, pii_rules, skillsec_roots)
         started.append(process)
         return DaemonHandle(process, socket_path)
 

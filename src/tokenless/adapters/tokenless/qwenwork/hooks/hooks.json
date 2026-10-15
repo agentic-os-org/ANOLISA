@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py --agent-id qwenwork",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" compress_response_hook.py --agent-id qwenwork",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

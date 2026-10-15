@@ -133,6 +133,9 @@ def main() -> int:
         except ValueError as exc:
             _emit({"id": None, "error": f"bad request: {exc}"})
             continue
+        if not isinstance(req, dict):
+            _emit({"id": None, "error": "bad request: not a JSON object"})
+            continue
         req_id = req.get("id")
         try:
             start = time.perf_counter()

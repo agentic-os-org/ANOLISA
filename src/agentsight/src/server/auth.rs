@@ -7,6 +7,9 @@
 //! 1. `Authorization: Bearer <token>` header
 //! 2. `?token=<token>` query parameter
 //! 3. `agentsight_session` cookie (set after a successful login)
+//!
+//! Every credential the request carries is verified, so a stale credential in
+//! one source does not veto a valid credential in another.
 
 use std::future::{Future, Ready, ready};
 use std::path::{Path, PathBuf};
@@ -121,12 +124,29 @@ fn generate_token() -> String {
 /// Default token file name (stored alongside the SQLite database).
 const TOKEN_FILE_NAME: &str = ".dashboard_token";
 
+/// Restrict the token file to its owner.
+///
+/// `OpenOptions::mode` is only applied when a file is created, so a token file
+/// that already exists — written by hand, restored from a backup, or left
+/// behind by an interrupted run — keeps whatever mode it has.  The user guide
+/// documents this credential file as root-only, so repair the mode whenever
+/// the file is used.  Best effort: a file we cannot chmod is still usable.
+#[cfg(unix)]
+fn restrict_token_file(token_file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(token_file, std::fs::Permissions::from_mode(0o600)) {
+        log::warn!("Failed to restrict dashboard token file {token_file:?}: {e}");
+    }
+}
+
 /// Read the token from a file, or generate and persist a new one.
 fn read_or_create_token(token_file: &Path) -> String {
     // Try reading existing token
     if let Ok(content) = std::fs::read_to_string(token_file) {
         let trimmed = content.trim();
         if !trimmed.is_empty() && trimmed.len() >= 32 {
+            #[cfg(unix)]
+            restrict_token_file(token_file);
             return trimmed.to_string();
         }
     }
@@ -154,6 +174,9 @@ fn read_or_create_token(token_file: &Path) -> String {
         {
             Ok(mut f) => {
                 use std::io::Write;
+                // `mode` above only took effect if this call created the file.
+                #[cfg(unix)]
+                restrict_token_file(token_file);
                 if let Err(e) = f.write_all(token.as_bytes()) {
                     log::warn!("Failed to write dashboard token to {token_file:?}: {e}");
                 } else {
@@ -362,7 +385,18 @@ fn normalize_path(mut path: String) -> String {
     path
 }
 
-fn is_enforcement_mutation_path(method: &actix_web::http::Method, path: &str) -> bool {
+/// Whether this request makes the root server act on the host.
+///
+/// Loopback is a network location, not an authorization boundary, so the
+/// endpoints that put the server's privileges or credentials to work require a
+/// credential of their own even from the local machine. That covers the
+/// kernel-policy mutations plus the two that are equally consequential and were
+/// missing: rewriting where the server sends its stored LLM credential
+/// (`POST /api/optimize/config`) and killing and re-execing an agent process as
+/// root (`POST /api/agent-health/{pid}/restart`). Data-plane writes (labels,
+/// triage, evaluations) stay on the loopback path: they change what the
+/// dashboard shows, not what the host does.
+fn is_privileged_mutation_path(method: &actix_web::http::Method, path: &str) -> bool {
     match *method {
         actix_web::http::Method::POST => {
             matches!(
@@ -370,11 +404,16 @@ fn is_enforcement_mutation_path(method: &actix_web::http::Method, path: &str) ->
                 "/api/enforcement/bindings"
                     | "/api/enforcement/file-bindings"
                     | "/api/enforcement/credential-bindings"
-            ) || ["/contain", "/review"].iter().any(|suffix| {
-                path.strip_prefix("/api/audit/cases/")
-                    .and_then(|case_id| case_id.strip_suffix(suffix))
-                    .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
-            })
+                    | "/api/optimize/config"
+            ) || path
+                .strip_prefix("/api/agent-health/")
+                .and_then(|rest| rest.strip_suffix("/restart"))
+                .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
+                || ["/contain", "/review"].iter().any(|suffix| {
+                    path.strip_prefix("/api/audit/cases/")
+                        .and_then(|case_id| case_id.strip_suffix(suffix))
+                        .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
+                })
         }
         actix_web::http::Method::DELETE => path
             .strip_prefix("/api/enforcement/bindings/")
@@ -468,17 +507,11 @@ where
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Kernel-policy mutations always require an explicit credential. Loopback is a
+        // Privileged mutations always require an explicit credential. Loopback is a
         // network location, not an authorization boundary: unprivileged local processes
         // must not be able to use the root server as a confused deputy.
-        if path.matches(|value| is_enforcement_mutation_path(req.method(), value)) {
-            let authenticated = self.auth.enabled
-                && extract_token(&req)
-                    .map(|candidate| {
-                        self.auth.verify_token(&candidate)
-                            || self.auth.verify_session_cookie(&candidate)
-                    })
-                    .unwrap_or(false);
+        if path.matches(|value| is_privileged_mutation_path(req.method(), value)) {
+            let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
                 let fut = self.service.call(req);
                 return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
@@ -509,13 +542,8 @@ where
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Try to extract and verify the token or session cookie.
-        let authenticated = extract_token(&req)
-            .map(|candidate| {
-                // Try raw token match first, then session cookie verification.
-                self.auth.verify_token(&candidate) || self.auth.verify_session_cookie(&candidate)
-            })
-            .unwrap_or(false);
+        // Try every credential the request carries.
+        let authenticated = is_authenticated(&self.auth, &req);
 
         if authenticated {
             let fut = self.service.call(req);
@@ -540,20 +568,25 @@ where
     }
 }
 
-/// Extract a candidate token from the request.
+/// Credential candidates carried by the request.
 ///
 /// Checks in order:
 /// 1. `Authorization: Bearer <token>` header
 /// 2. `token` query parameter
 /// 3. `agentsight_session` cookie
-fn extract_token(req: &ServiceRequest) -> Option<String> {
+///
+/// Every non-empty source is offered, so a stale credential in one source
+/// cannot veto a valid credential in another.
+fn credential_candidates(req: &ServiceRequest) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(3);
+
     // 1. Authorization header
     if let Some(auth_header) = req.headers().get("Authorization") {
         if let Ok(value) = auth_header.to_str() {
             if let Some(token) = value.strip_prefix("Bearer ") {
                 let trimmed = token.trim();
                 if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
+                    candidates.push(trimmed.to_string());
                 }
             }
         }
@@ -563,7 +596,7 @@ fn extract_token(req: &ServiceRequest) -> Option<String> {
     let query_string = req.query_string();
     if let Some(token_param) = extract_query_param(query_string, "token") {
         if !token_param.is_empty() {
-            return Some(token_param);
+            candidates.push(token_param);
         }
     }
 
@@ -571,11 +604,21 @@ fn extract_token(req: &ServiceRequest) -> Option<String> {
     if let Some(cookie) = req.cookie("agentsight_session") {
         let value = cookie.value();
         if !value.is_empty() {
-            return Some(value.to_string());
+            candidates.push(value.to_string());
         }
     }
 
-    None
+    candidates
+}
+
+/// Whether the request carries any verifiable credential.
+///
+/// Every candidate is verified as a raw token and as a session cookie: a stale
+/// credential in one source must not veto a valid credential in another.
+fn is_authenticated(auth: &DashboardAuth, req: &ServiceRequest) -> bool {
+    credential_candidates(req)
+        .iter()
+        .any(|candidate| auth.verify_token(candidate) || auth.verify_session_cookie(candidate))
 }
 
 /// Extract a query parameter value from a query string without full parsing.
@@ -829,6 +872,50 @@ mod tests {
         let token = read_or_create_token(&token_file);
         assert_eq!(token.len(), 64);
         assert_ne!(token, "short");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `OpenOptions::mode` only applies when the file is created, so a token
+    /// file that already exists with a wider mode used to keep it even though
+    /// the user guide documents this credential file as root-only.
+    #[cfg(unix)]
+    #[test]
+    fn read_or_create_token_repairs_the_mode_of_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("auth_test_repair_existing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let token_file = dir.join(".dashboard_token");
+        let existing = "existing-token-value-1234567890abcdef";
+        std::fs::write(&token_file, existing).ok();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).ok();
+
+        let token = read_or_create_token(&token_file);
+        assert_eq!(token, existing);
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regeneration path rewrites an existing file, and `mode(0o600)` is
+    /// ignored for an existing file: the rewrite used to leave the old mode.
+    #[cfg(unix)]
+    #[test]
+    fn read_or_create_token_tightens_an_existing_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("auth_test_tighten_rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let token_file = dir.join(".dashboard_token");
+        std::fs::write(&token_file, "short").ok();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).ok();
+
+        let token = read_or_create_token(&token_file);
+        assert_eq!(token.len(), 64);
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1248,6 +1335,46 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn middleware_accepts_a_valid_cookie_when_the_bearer_is_stale() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_stale_bearer");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let cookie_value = auth.create_session_cookie(3600);
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                12345,
+            ))
+            .insert_header(("Authorization", "Bearer stale-token"))
+            .cookie(actix_web::cookie::Cookie::new(
+                "agentsight_session",
+                cookie_value,
+            ))
+            .to_request();
+
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "a valid session cookie must not be vetoed by a stale bearer"
+        );
+    }
+
+    #[actix_web::test]
     async fn middleware_rejects_invalid_bearer_token() {
         let dir = std::env::temp_dir().join("auth_mw_reject");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1293,29 +1420,27 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
-    // ─── extract_token unit tests ────────────────────────────────────────────
+    // ─── credential_candidates unit tests ────────────────────────────────────
 
     #[actix_web::test]
-    async fn extract_token_from_bearer_header() {
+    async fn credential_candidates_read_the_bearer_header() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .insert_header(("Authorization", "Bearer abc123"))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("abc123".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["abc123".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_from_query_param() {
+    async fn credential_candidates_read_the_query_param() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test?token=query-tok")
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("query-tok".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["query-tok".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_from_cookie() {
+    async fn credential_candidates_read_the_cookie() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .cookie(actix_web::cookie::Cookie::new(
@@ -1323,12 +1448,11 @@ mod tests {
                 "cookie-val",
             ))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("cookie-val".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["cookie-val".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_prefers_bearer_over_query_and_cookie() {
+    async fn credential_candidates_keep_the_documented_order() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test?token=query-tok")
             .insert_header(("Authorization", "Bearer bearer-tok"))
@@ -1337,17 +1461,22 @@ mod tests {
                 "cookie-val",
             ))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("bearer-tok".to_string()));
+        assert_eq!(
+            credential_candidates(&req),
+            vec![
+                "bearer-tok".to_string(),
+                "query-tok".to_string(),
+                "cookie-val".to_string()
+            ]
+        );
     }
 
     #[actix_web::test]
-    async fn extract_token_returns_none_when_no_credentials() {
+    async fn credential_candidates_skip_empty_sources() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, None);
+        assert!(credential_candidates(&req).is_empty());
     }
 }
 

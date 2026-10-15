@@ -648,9 +648,14 @@ def test_qwen_skill_ledger_hook_uses_qwen_home_and_blocks_managed_drift(
         and event["session_id"] == "qwen-skill-session"
         and event["tool_call_id"] == "qwen-skill-call"
     ]
-    assert len(correlated) == 1
-    assert correlated[0]["details"]["request"]["command"] == "show"
-    assert correlated[0]["details"]["result"]["latest_status"] == "drifted"
+    assert [event["details"]["request"]["command"] for event in correlated] == [
+        "init",
+        "show",
+    ]
+    init_result = correlated[0]["details"]["result"]
+    assert init_result["baseline"] is False
+    assert init_result["key_created"] is False
+    assert correlated[1]["details"]["result"]["latest_status"] == "drifted"
 
 
 def test_qwen_disabled_skill_skips_ledger_show_under_block_policy(tmp_path) -> None:

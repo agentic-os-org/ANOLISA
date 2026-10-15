@@ -10,8 +10,8 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import chdir
 from pathlib import Path
+from typing import Union
 from unittest.mock import patch
 
 AW = Path(__file__).resolve().parents[1]
@@ -20,13 +20,15 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
-class GateTests(unittest.TestCase):
+class GateFixture(unittest.TestCase):
     def setUp(self) -> None:
         (AW / "target").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
+
+class ScopeTests(GateFixture):
     def git(self, *args: str) -> str:
         return subprocess.check_output(
             ["git", *args], cwd=self.root, text=True, stderr=subprocess.PIPE, timeout=10
@@ -46,7 +48,7 @@ class GateTests(unittest.TestCase):
         self.git("config", "user.email", "fixture@example.invalid")
         return self.commit("README.md", "base")
 
-    def test_scope_uses_full_pr_and_base_advancement(self) -> None:
+    def test_scope_uses_full_pr_without_base_only_changes(self) -> None:
         base = self.init_git()
         self.git("checkout", "-qb", "feature")
         self.commit("src/aw/schema with spaces.json", "{}")
@@ -61,7 +63,7 @@ class GateTests(unittest.TestCase):
         self.git("merge", "--no-edit", "unrelated")
         candidate = self.git("rev-parse", "HEAD")
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": head}}
-        self.assertTrue(gate.scope("pull_request", event, candidate, self.root))
+        self.assertFalse(gate.scope("pull_request", event, candidate, self.root))
 
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
@@ -72,8 +74,7 @@ class GateTests(unittest.TestCase):
         self.git("commit", "-qm", "move out of AW")
         after = self.git("rev-parse", "HEAD")
         self.assertTrue(gate.scope("push", {"before": before, "after": after}, after, self.root))
-        for event in ("workflow_dispatch", "merge_group"):
-            self.assertTrue(gate.scope(event, {}, after, self.root))
+        self.assertTrue(gate.scope("workflow_dispatch", {}, after, self.root))
         self.assertTrue(gate.scope("push", {"before": "0" * 40, "after": after}, after, self.root))
         forced = {"before": "1" * 40, "after": after, "forced": True}
         self.assertTrue(gate.scope("push", forced, after, self.root))
@@ -93,6 +94,44 @@ class GateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.sha(invalid)
 
+    def test_merge_group_selects_only_aw_changes(self) -> None:
+        base = self.init_git()
+        head = self.commit("src/tokenless/unrelated.txt", "unrelated")
+        event = {"merge_group": {"base_sha": base, "head_sha": head}}
+        self.assertFalse(gate.scope("merge_group", event, head, self.root))
+        head = self.commit(".github/workflows/aw-ci.yml", "gate change")
+        event["merge_group"]["head_sha"] = head
+        self.assertTrue(gate.scope("merge_group", event, head, self.root))
+        with self.assertRaises(ValueError):
+            gate.scope("merge_group", event, base, self.root)
+
+    def test_required_result_truth_table(self) -> None:
+        sha = "a" * 40
+        valid = {
+            "GITHUB_SHA": sha,
+            "SCOPE_RESULT": "success",
+            "CHECKS_RESULT": "success",
+            "SELECTED": "true",
+            "CANDIDATE_SHA": sha,
+            "TESTED_SHA": sha,
+        }
+        gate.required(valid)
+        gate.required({**valid, "SELECTED": "false", "CHECKS_RESULT": "skipped", "TESTED_SHA": ""})
+        failures = [{key: ""} for key in valid]
+        failures += [{"CHECKS_RESULT": value} for value in ("failure", "cancelled", "skipped")]
+        failures += [
+            {"SCOPE_RESULT": "failure"},
+            {"SELECTED": "false"},
+            {"TESTED_SHA": "b" * 40},
+            {"CANDIDATE_SHA": "b" * 40},
+            {"SELECTED": "unknown"},
+        ]
+        for changes in failures:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                gate.required({**valid, **changes})
+
+
+class GateTests(GateFixture):
     def test_inventory_rejects_empty_ignored_and_missing_targets(self) -> None:
         cargo = self.root / "cargo"
         cargo.write_text(
@@ -103,6 +142,12 @@ class GateTests(unittest.TestCase):
             "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
             "if mode == 'executor-empty':\n"
             "    mode = 'empty' if 'aw-exec' in sys.argv else 'valid'\n"
+            "if mode == 'host-empty':\n"
+            "    mode = 'empty' if 'aw-host' in sys.argv else 'valid'\n"
+            "if mode == 'service-empty':\n"
+            "    mode = 'empty' if 'aw-service' in sys.argv else 'valid'\n"
+            "if mode == 'sec-core-empty':\n"
+            "    mode = 'empty' if 'aw-provider-sec-core' in sys.argv else 'valid'\n"
             "if mode.startswith('contract-empty-'):\n"
             "    target = mode.removeprefix('contract-empty-')\n"
             "    mode = 'empty' if target in sys.argv else 'valid'\n"
@@ -114,10 +159,11 @@ class GateTests(unittest.TestCase):
         )
         cargo.chmod(0o755)
         for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty",
+            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty", "service-empty", "sec-core-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
             "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
+            "contract-empty-qwenpaw",
         ):
             with self.subTest(mode=mode), patch.dict(
                 os.environ,
@@ -141,6 +187,8 @@ class GateTests(unittest.TestCase):
                 gate.inventory(malformed)
 
     def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
+        from contextlib import chdir
+
         core = self.root / "crates/aw-core"
         packages = []
         for name, directory, dependencies in (
@@ -157,6 +205,22 @@ class GateTests(unittest.TestCase):
                 ["aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"],
             ),
             ("aw-exec", self.root / "crates/aw-exec", ["libc", "thiserror"]),
+            (
+                "aw-host", self.root / "crates/aw-host",
+                ["aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"],
+            ),
+            (
+                "aw-service", self.root / "crates/aw-service",
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
+            ),
+            (
+                "aw-provider-sec-core", self.root / "crates/aw-provider-sec-core",
+                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"],
+            ),
+            (
+                "aw-package", self.root / "crates/aw-package",
+                ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -171,9 +235,9 @@ class GateTests(unittest.TestCase):
                             "name": dependency,
                             "path": (
                                 str(self.root) if dependency == "aw-contracts" else
-                                str(self.root / "crates/aw-config") if dependency == "aw-config" else None
+                                str(self.root / "crates" / dependency) if dependency.startswith("aw-") else None
                             ),
-                            "source": None if dependency in {"aw-contracts", "aw-config"} else "registry+fixture",
+                            "source": None if dependency.startswith("aw-") else "registry+fixture",
                         }
                         for dependency in dependencies
                     ],
@@ -184,6 +248,9 @@ class GateTests(unittest.TestCase):
         for package, dependency in (
             (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
+            (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
+            (6, "aw-contracts"), (6, "tokio"),
+            (7, "asc-daemon-client"), (7, "aw-core"),
         ):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})
@@ -203,6 +270,12 @@ class GateTests(unittest.TestCase):
         invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
+        for dependency in ("aw-config", "aw-exec", "aw-provider"):
+            invalid = json.loads(json.dumps(metadata))
+            local = next(d for d in invalid["packages"][5]["dependencies"] if d["name"] == dependency)
+            local["path"] = str(self.root / "other-local-crate")
+            with self.subTest(dependency=dependency), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
         with self.assertRaises(ValueError):
             gate.structure({**metadata, "workspace_members": ["aw-contracts"]}, self.root)
         invalid = json.loads(json.dumps(metadata))
@@ -264,25 +337,67 @@ class GateTests(unittest.TestCase):
         tests = self.root / "tests"
         tests.mkdir()
         module = tests / "test_ci_checks.py"
-        with patch.object(gate, "AW", self.root):
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text("# Empty test module\n", encoding="utf-8")
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text(
-                "import unittest\n@unittest.skip('fixture')\nclass Fixture(unittest.TestCase):\n"
-                "    def test_skipped(self): self.fail('must not run')\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(subprocess.CalledProcessError):
-                gate.selftest()
-            module.write_text(
-                "import unittest\nclass Fixture(unittest.TestCase):\n"
-                "    def test_present(self): self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-            gate.selftest()
+        for scope_only in (False, True):
+            with self.subTest(scope_only=scope_only), patch.object(gate, "AW", self.root):
+                module.unlink(missing_ok=True)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                module.write_text("# Empty test module\n", encoding="utf-8")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                name = "ScopeTests" if scope_only else "Fixture"
+                module.write_text(
+                    f"import unittest\nclass {name}(unittest.TestCase): pass\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                module.write_text(
+                    f"import unittest\n@unittest.skip('fixture')\nclass {name}(unittest.TestCase):\n"
+                    "    def test_skipped(self): self.fail('must not run')\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(subprocess.CalledProcessError):
+                    gate.selftest(scope_only=scope_only)
+                if scope_only:
+                    module.write_text(
+                        "import unittest\nclass UnrelatedTests(unittest.TestCase):\n"
+                        "    def test_present(self): self.assertTrue(True)\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        gate.selftest(scope_only=True)
+                module.write_text(
+                    f"import unittest\nclass {name}(unittest.TestCase):\n"
+                    "    def test_present(self): self.assertTrue(True)\n",
+                    encoding="utf-8",
+                )
+                gate.selftest(scope_only=scope_only)
+
+    def test_scope_selftests_run_with_sparse_files_and_no_node(self) -> None:
+        sparse = self.root / "sparse"
+        (sparse / "scripts").mkdir(parents=True)
+        (sparse / "tests").mkdir()
+        shutil.copyfile(AW / "scripts/check.py", sparse / "scripts/check.py")
+        module = sparse / "tests/test_ci_checks.py"
+        source = Path(__file__).read_text(encoding="utf-8")
+        # A mistaken full discovery must fail immediately, without recursively
+        # launching this integration fixture again.
+        module.write_text(
+            source + "\nclass GateTests(unittest.TestCase):\n"
+            "    def test_full_gate_must_not_run(self):\n"
+            "        self.fail('full gate selected for sparse scope checkout')\n",
+            encoding="utf-8",
+        )
+        tools = self.root / "bin"
+        tools.mkdir()
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "scope fixtures require Git")
+        (tools / "git").symlink_to(git)
+        self.assertIsNone(shutil.which("node", path=str(tools)))
+        self.assertFalse((sparse / "tests/fixtures").exists())
+        with patch.dict(os.environ, {"PATH": str(tools)}), patch.object(gate, "AW", sparse):
+            gate.selftest(scope_only=True)
 
     def test_timeout_stops_an_ignoring_descendant(self) -> None:
         pid_file = self.root / "child.pid"
@@ -303,12 +418,66 @@ class GateTests(unittest.TestCase):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status = Path(f"/proc/{pid}/stat")
-            if not status.exists() or status.read_text().split()[2] == "Z":
+            try:
+                state = status.read_text().split()[2]
+            except (FileNotFoundError, ProcessLookupError):
+                # Reaping can remove the process during open or the subsequent read.
+                break
+            if state == "Z":
                 break
             time.sleep(0.02)
         else:
             os.kill(pid, signal.SIGKILL)
             self.fail("owned descendant remained running after timeout")
+
+    def _simulate_descendant_status(self, status: Union[str, OSError]) -> None:
+        original_read_text = Path.read_text
+        pid = 424242
+
+        def read_text(path: Path, *args: object, **kwargs: object) -> str:
+            if path == self.root / "child.pid":
+                return str(pid)
+            if path == Path(f"/proc/{pid}/stat"):
+                if isinstance(status, OSError):
+                    raise status
+                return f"{pid} (fixture) {status}"
+            return original_read_text(path, *args, **kwargs)
+
+        with (
+            patch.object(gate, "run", side_effect=subprocess.TimeoutExpired("fixture", 1)),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", read_text),
+            patch.object(time, "monotonic", side_effect=[0.0, 0.1, 2.1]),
+            patch.object(time, "sleep"),
+            patch.object(os, "kill") as kill,
+        ):
+            try:
+                self.test_timeout_stops_an_ignoring_descendant()
+            finally:
+                if status == "S":
+                    kill.assert_called_once_with(pid, signal.SIGKILL)
+                else:
+                    kill.assert_not_called()
+
+    def test_descendant_disappearing_during_stat_read_is_stopped(self) -> None:
+        for error in (
+            FileNotFoundError("reaped before open"),
+            ProcessLookupError("reaped during read"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self._simulate_descendant_status(error)
+
+    def test_descendant_zombie_is_stopped(self) -> None:
+        self._simulate_descendant_status("Z")
+
+    def test_descendant_read_failure_remains_an_error(self) -> None:
+        for error in (PermissionError("cannot inspect process"), OSError("read failed")):
+            with self.subTest(error=type(error).__name__), self.assertRaises(type(error)):
+                self._simulate_descendant_status(error)
+
+    def test_descendant_still_running_remains_a_failure(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "owned descendant remained running"):
+            self._simulate_descendant_status("S")
 
     def test_canonical_vectors_fail_even_with_python_optimization(self) -> None:
         script = self.root / "check_canonical.py"
@@ -331,31 +500,6 @@ class GateTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, valid, result.stderr)
                     if vector == damaged:
                         self.assertIn("Python canonical digest differs", result.stderr)
-
-    def test_required_result_truth_table(self) -> None:
-        sha = "a" * 40
-        valid = {
-            "GITHUB_SHA": sha,
-            "SCOPE_RESULT": "success",
-            "CHECKS_RESULT": "success",
-            "SELECTED": "true",
-            "CANDIDATE_SHA": sha,
-            "TESTED_SHA": sha,
-        }
-        gate.required(valid)
-        gate.required({**valid, "SELECTED": "false", "CHECKS_RESULT": "skipped", "TESTED_SHA": ""})
-        failures = [{key: ""} for key in valid]
-        failures += [{"CHECKS_RESULT": value} for value in ("failure", "cancelled", "skipped")]
-        failures += [
-            {"SCOPE_RESULT": "failure"},
-            {"SELECTED": "false"},
-            {"TESTED_SHA": "b" * 40},
-            {"CANDIDATE_SHA": "b" * 40},
-            {"SELECTED": "unknown"},
-        ]
-        for changes in failures:
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                gate.required({**valid, **changes})
 
 
 if __name__ == "__main__":

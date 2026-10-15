@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -103,6 +106,57 @@ describe("McpStdioClient", () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
   });
+
+  for (const ignoreEof of [false, true]) {
+    it(`stop() waits for ${ignoreEof ? "SIGKILL" : "stdin EOF"} before returning`, {
+      timeout: 10_000,
+    }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-stop-test-"));
+      const binaryPath = join(directory, "mcp-server");
+      const eofPath = join(directory, "eof");
+      let childPid: number | undefined;
+      context.after(async () => {
+        if (childPid !== undefined) {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
+      });
+      await writeFile(binaryPath, `#!${process.execPath}
+const readline = require("node:readline");
+const fs = require("node:fs");
+setInterval(() => {}, 1000);
+process.on("SIGTERM", () => {});
+process.stdin.on("end", () => {
+  if (${ignoreEof}) return;
+  fs.writeFileSync(${JSON.stringify(eofPath)}, "eof");
+  process.exit(0);
+});
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === "initialize" ? {} : {
+    content: [{ type: "text", text: String(process.pid) }],
+  };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o700 });
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      childPid = Number(await client.callTool("memory_get_context", {}));
+      assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
+
+      await client.stop();
+
+      assert.throws(() => process.kill(childPid!, 0), { code: "ESRCH" });
+      if (!ignoreEof) {
+        assert.equal(await readFile(eofPath, "utf8"), "eof");
+      }
+      await client.stop();
+    });
+  }
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);

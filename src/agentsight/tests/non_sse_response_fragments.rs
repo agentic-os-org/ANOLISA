@@ -183,6 +183,86 @@ fn compressed_response_is_decoded_after_framing() {
     check(&bytes.chunks(17).collect::<Vec<_>>());
 }
 
+/// A chunked, **compressed** SSE body whose terminator shares the final read.
+///
+/// The parser turns a read that ends in `0\r\n\r\n` into SSE events for the
+/// bytes before the terminator. For a compressed body those bytes are the last
+/// compressed chunk, not SSE text, so they yielded no events and were dropped
+/// instead of reaching the aggregator's compressed buffer. `dechunk_body` then
+/// saw a truncated frame, `decompress_body` fell back to the still-compressed
+/// bytes, and the whole response decoded to zero events — no output text, no
+/// tool calls, no token usage.
+#[test]
+fn compressed_chunked_sse_keeps_the_final_chunk() {
+    let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n\
+                data: {\"choices\":[{\"delta\":{\"content\":\"two\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let compressed = zstd::encode_all(&sse[..], 3).expect("fixture compresses");
+    let mid = compressed.len() / 2;
+    assert!(mid > 0, "precondition: a frame to split");
+
+    let mut framed = format!("{mid:x}\r\n").into_bytes();
+    framed.extend_from_slice(&compressed[..mid]);
+    framed.extend_from_slice(b"\r\n");
+    framed.extend_from_slice(format!("{:x}\r\n", compressed.len() - mid).as_bytes());
+    framed.extend_from_slice(&compressed[mid..]);
+    framed.extend_from_slice(b"\r\n0\r\n\r\n");
+
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: zstd\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let mut stream = headers.to_vec();
+    stream.extend_from_slice(&framed);
+    // The final read carries the last compressed chunk *and* the terminator,
+    // which is the shape the parser's own comment calls the common one.
+    let split = headers.len() + format!("{mid:x}\r\n").len() + mid + 2;
+
+    let mut aggregator = Aggregator::new();
+    assert!(
+        feed(
+            &mut aggregator,
+            1,
+            &common::make_openai_request_bytes("test-model", "hello", true),
+            1
+        )
+        .is_empty()
+    );
+    assert!(
+        feed(&mut aggregator, 0, &stream[..split], 100).is_empty(),
+        "the response cannot complete before its terminator"
+    );
+
+    let completed = feed(&mut aggregator, 0, &stream[split..], 200);
+
+    assert_eq!(
+        completed.len(),
+        1,
+        "the terminator must complete the stream"
+    );
+    let pair = match &completed[0] {
+        AggregatedResult::SseComplete(pair) | AggregatedResult::HttpComplete(pair) => pair,
+        other => panic!("expected a completed pair, got {other:?}"),
+    };
+    let bodies: Vec<&[u8]> = pair
+        .response
+        .sse_events
+        .iter()
+        .filter(|event| !event.is_done())
+        .map(|event| event.data())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.windows(3).any(|w| w == b"one")),
+        "the first event must survive, got {:?}",
+        bodies.len()
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.windows(3).any(|w| w == b"two")),
+        "the event carried by the final chunk must survive, got {:?}",
+        bodies.len()
+    );
+}
+
 #[test]
 fn body_bytes_that_look_like_protocol_are_not_reparsed() {
     let mut aggregator = Aggregator::new();

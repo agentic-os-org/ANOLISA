@@ -30,7 +30,6 @@
 /src/agent-sec-core/*.spec.in           @yangdao479                 # auto-label: component:sec-core
 /src/os-skills/                         @Ziqi002                    # auto-label: component:skill
 /src/ws-ckpt/                           @yummypeng                  # auto-label: component:ckpt
-/src/blaze/                             @casparant                  # auto-label: component:blaze
 /src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
 /src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
 /src/agent-memory/                      @ikunkun-sys                # auto-label: component:memory
@@ -52,3 +51,8 @@
 # SkillFS is listed after generic Markdown scope rules so all files under
 # src/skillfs request the default SkillFS reviewers.
 /src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs
+/src/aw/                                @kongche-jbw                # auto-label: component:aw
+
+# ws-ckpt prebuilt build and packaging ownership
+/.github/actions/build-ws-ckpt-prebuilt/ @yummypeng
+/.github/workflows/ws-ckpt-prebuilt-ci.yaml @yummypeng

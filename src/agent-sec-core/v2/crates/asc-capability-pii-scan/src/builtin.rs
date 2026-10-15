@@ -50,6 +50,7 @@ const RESERVED: &[&str] = &[
     "localhost",
     "test",
 ];
+const EMAIL_SENTENCE_DELIMITERS: &str = "\"')]}>,;:!?，。；：！？、）］｝】〕》〉」』”’";
 
 pub(crate) struct BuiltinDetector {
     patterns: BTreeMap<String, Regex>,
@@ -164,7 +165,21 @@ impl BuiltinDetector {
                 let pattern = match id.as_str() {
                     "_JWT_RE" => r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{8,}".into(),
                     "_API_KEY_RE" => {
-                        r"(?:sk|pk|rk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_=-]{16}".into()
+                        // Canonical CI/CD and cloud token prefixes alongside the
+                        // generic sk/pk/rk shapes: GitHub fine-grained personal
+                        // access tokens, GitLab personal access tokens, PyPI
+                        // upload tokens, npm tokens and AWS access key ids.
+                        // The api_key matcher extends every candidate to the
+                        // token's word boundary, so the {16} floors are
+                        // minima, not exact lengths. The github_pat_ tail is
+                        // bounded above as well: a rejected candidate advances
+                        // the scan only to prefix.start()+1, so an unbounded
+                        // greedy tail would re-scan the remaining word once
+                        // per embedded prefix (quadratic work); the bound caps
+                        // each attempt while the extension still covers the
+                        // full accepted token.
+                        r"(?:sk|pk|rk|gh[pousr]|xox[baprs]|glpat|npm|pypi)[-_][A-Za-z0-9_=-]{16}|github_pat_[A-Za-z0-9_]{16,64}|AKIA[0-9A-Z]{16}"
+                            .into()
                     }
                     "_EMAIL_RE" => r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}".into(),
                     _ => python_pattern(&pattern),
@@ -324,6 +339,15 @@ mod resource_tests {
         ));
         assert!(matches.next().is_none());
     }
+
+    #[test]
+    fn email_sentence_period_scan_checks_deadline() {
+        let input = format!("alice@company.cn{} ", ".".repeat(8193));
+        assert!(matches!(
+            email_right_boundary(&input, "alice@company.cn".len(), Some(Instant::now())),
+            Err(ScanError::DeadlineExceeded)
+        ));
+    }
 }
 
 fn candidate<'a>(
@@ -375,7 +399,13 @@ fn basic<'a>(
     let matched = captures
         .get(usize::from(id == "_BEARER_RE"))
         .ok_or(ScanError::Matching)?;
-    let value = matched.as_str();
+    // The cursor consumes the whole numeric expression; only trailing punctuation
+    // lies outside the card's evidence and redaction span.
+    let value = if id == "_CREDIT_CARD_RE" {
+        matched.as_str().trim_end_matches([' ', '-'])
+    } else {
+        matched.as_str()
+    };
     let mut metadata = BTreeMap::new();
     let (kind, base, validator) = match id {
         "_PRIVATE_KEY_RE" => ("private_key", 1.0, Some("pem_private_key")),
@@ -387,7 +417,7 @@ fn basic<'a>(
         "_JWT_RE" if jwt_boundaries(text.input, matched) && validators::jwt(value) => {
             ("jwt", 0.94, Some("jwt_structure"))
         }
-        "_CREDIT_CARD_RE" if validators::luhn(value) => ("credit_card", 0.92, Some("luhn")),
+        "_CREDIT_CARD_RE" if validators::credit_card(value) => ("credit_card", 0.92, Some("luhn")),
         "_CN_ID_RE" if validators::cn_id(value) => ("cn_id", 0.93, Some("cn_id_checksum")),
         "_PHONE_CN_RE" => ("phone_cn", 0.78, None),
         _ => return Ok(None),
@@ -395,7 +425,13 @@ fn basic<'a>(
     if let Some(validator) = validator {
         metadata.insert("validator".into(), json!(validator));
     }
-    Ok(Some(candidate(text, matched.range(), kind, base, metadata)))
+    Ok(Some(candidate(
+        text,
+        matched.start()..matched.start() + value.len(),
+        kind,
+        base,
+        metadata,
+    )))
 }
 
 fn word(c: char) -> bool {
@@ -474,7 +510,10 @@ fn secret<'a>(
     text: &Text<'a>,
     captures: &Captures<'_>,
 ) -> Result<Option<Candidate<'a>>, ScanError> {
-    let field = captures.name("name").ok_or(ScanError::Matching)?.as_str();
+    let field = captures
+        .name("full_name")
+        .ok_or(ScanError::Matching)?
+        .as_str();
     let value = captures
         .name("double_value")
         .or_else(|| captures.name("single_value"))
@@ -487,7 +526,7 @@ fn secret<'a>(
     }
     let matched = captures.name("quoted_value").ok_or(ScanError::Matching)?;
     let mut metadata = BTreeMap::new();
-    metadata.insert("field".into(), json!(field));
+    metadata.insert("field".into(), json!(field_label(captures)?));
     let normalized = field.to_lowercase().replace(['-', '_'], "");
     let kind = match normalized.as_str() {
         "accesskeysecret" => "aliyun_access_key_secret",
@@ -495,6 +534,21 @@ fn secret<'a>(
         _ => "generic_secret_field",
     };
     Ok(Some(candidate(text, matched.range(), kind, 0.82, metadata)))
+}
+
+// The client report retains metadata.field verbatim, so the label must stay
+// inside the fixed keyword vocabulary. A compound prefix is input-derived and
+// can itself embed a live credential (sk_live_..._PASSWORD) or an adversarial
+// megabyte run; only the matched keyword is labeled, behind an elision marker.
+fn field_label(captures: &Captures<'_>) -> Result<String, ScanError> {
+    if let Some(name) = captures.name("name") {
+        return Ok(name.as_str().to_owned());
+    }
+    let keyword = captures
+        .name("keyword")
+        .ok_or(ScanError::Matching)?
+        .as_str();
+    Ok(format!("..._{keyword}"))
 }
 
 fn email<'a>(
@@ -551,9 +605,8 @@ fn next_email<'a>(
         check_deadline(deadline)?;
         cursor.position = whole.start() + 1;
         let before = text.input[..whole.start()].chars().next_back();
-        let after = text.input[whole.end()..].chars().next();
         if before.is_some_and(|c| word(c) || matches!(c, '.' | '+' | '-'))
-            || after.is_some_and(|c| word(c) || matches!(c, '.' | '-'))
+            || !email_right_boundary(text.input, whole.end(), deadline)?
         {
             continue;
         }
@@ -573,6 +626,31 @@ fn next_email<'a>(
         }
     }
     Ok(None)
+}
+
+fn email_right_boundary(
+    input: &str,
+    mut end: usize,
+    deadline: Option<Instant>,
+) -> Result<bool, ScanError> {
+    let Some(after) = input[end..].chars().next() else {
+        return Ok(true);
+    };
+    if after != '.' {
+        return Ok(!word(after) && after != '-');
+    }
+    // A period run is punctuation only when it cannot continue the domain.
+    let start = end;
+    while input.as_bytes().get(end) == Some(&b'.') {
+        if (end - start).is_multiple_of(4096) {
+            check_deadline(deadline)?;
+        }
+        end += 1;
+    }
+    Ok(input[end..]
+        .chars()
+        .next()
+        .is_none_or(|c| space(c) || EMAIL_SENTENCE_DELIMITERS.contains(c)))
 }
 
 fn space(c: char) -> bool {

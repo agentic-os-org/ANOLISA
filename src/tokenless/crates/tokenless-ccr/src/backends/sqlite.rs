@@ -12,6 +12,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::key::compute_key;
 use crate::store::{MAX_GENERATION, StashError, StashStore, StashWrite};
+use crate::warn_soft;
 
 /// Default time-to-live for an entry: 1 hour. A retrieve window of an hour
 /// comfortably covers a typical agent session's compress→retrieve round trip.
@@ -136,9 +137,9 @@ impl SqliteStore {
     /// the fail-soft policy in `tokenless-stats::recorder::StatsRecorder`.
     fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|poisoned| {
-            eprintln!(
+            warn_soft(&format!(
                 "[tokenless-ccr] WARNING: sqlite mutex poisoned by a previous panic; recovering: {poisoned}"
-            );
+            ));
             self.conn.clear_poison();
             poisoned.into_inner()
         })
@@ -188,6 +189,9 @@ impl SqliteStore {
             .ok_or_else(|| StashError::Backend("stash expiry overflow".to_string()))?;
         let mut conn = self.lock_conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Compression can write indefinitely without retrieving. Reclaim
+        // expired payloads here as well, under the same write transaction.
+        tx.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])?;
         let previous_generation: Option<u64> = match tx.query_row(
             "SELECT generation FROM stash WHERE hash = ? AND expires_at >= ?",
             rusqlite::params![key, now as i64],
@@ -255,7 +259,9 @@ impl StashStore for SqliteStore {
         // `SqliteCcrStore::get`. Best-effort — a purge failure must not block
         // the lookup; it falls through to the SELECT below.
         if let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
-            eprintln!("[tokenless-ccr] WARNING: stash lazy-purge failed: {e}");
+            warn_soft(&format!(
+                "[tokenless-ccr] WARNING: stash lazy-purge failed: {e}"
+            ));
         }
         match conn.query_row(
             "SELECT payload FROM stash WHERE hash = ? AND expires_at >= ?",
@@ -485,6 +491,95 @@ mod tests {
     }
 
     #[test]
+    fn write_only_sessions_reclaim_expired_payloads() {
+        let (store, dir) = tmp_store(60, 3);
+        let live = store.stash("still needed").unwrap();
+        let path = dir.path().join("stash.db");
+
+        for session in 0..3 {
+            let expired = store.stash(&format!("old session {session}")).unwrap();
+            store
+                .lock_conn()
+                .execute(
+                    "UPDATE stash SET expires_at = 0 WHERE hash = ?",
+                    [&expired.key],
+                )
+                .unwrap();
+
+            // Each hook opens a new connection. Check physical rows before
+            // any retrieve, which would otherwise hide write-only growth.
+            let writer = SqliteStore::with_limits(&path, 60, 3).unwrap();
+            let current = writer.stash("current session").unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let rows: usize = conn
+                .query_row("SELECT COUNT(*) FROM stash", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 2, "expired payload survived session {session}");
+            let retained: Vec<String> = conn
+                .prepare("SELECT payload FROM stash ORDER BY payload")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(retained, ["current session", "still needed"]);
+            assert!(!writer.delete(&expired.key, expired.generation).unwrap());
+            assert_eq!(writer.len(), 2);
+            assert_ne!(current.key, live.key);
+        }
+    }
+
+    #[test]
+    fn write_cleanup_recreation_preserves_generation_ownership() {
+        let (store, dir) = tmp_store(60, 3);
+        let first = store.stash("payload").unwrap();
+        store
+            .lock_conn()
+            .execute("UPDATE stash SET expires_at = 0", [])
+            .unwrap();
+
+        let writer = SqliteStore::with_limits(dir.path().join("stash.db"), 60, 3).unwrap();
+        writer.stash("new session").unwrap();
+        let second = writer.stash("payload").unwrap();
+        assert!(second.created);
+        assert_eq!(second.previous_generation, None);
+        assert!(second.generation > first.generation);
+        assert!(!store.delete(&first.key, first.generation).unwrap());
+        assert_eq!(
+            writer.retrieve(&second.key).unwrap(),
+            Some("payload".into())
+        );
+    }
+
+    #[test]
+    fn failed_stash_rolls_back_expired_cleanup() {
+        let (store, _dir) = tmp_store(60, 3);
+        let expired = store.stash("expired").unwrap();
+        store
+            .lock_conn()
+            .execute("UPDATE stash SET expires_at = 0", [])
+            .unwrap();
+        store
+            .lock_conn()
+            .execute(
+                "UPDATE stash_metadata SET last_generation = ? WHERE singleton = 1",
+                [MAX_GENERATION as i64],
+            )
+            .unwrap();
+
+        assert!(store.stash("new session").is_err());
+        let retained: String = store
+            .lock_conn()
+            .query_row(
+                "SELECT payload FROM stash WHERE hash = ?",
+                [&expired.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, "expired");
+    }
+
+    #[test]
     fn lazy_purge_recreate_never_reuses_generation() {
         let (store, dir) = tmp_store(60, 100);
         let first = store.stash("payload").unwrap();
@@ -661,5 +756,39 @@ mod tests {
             store_b.retrieve(&second.key).unwrap(),
             Some("payload".into())
         );
+    }
+
+    /// A stash warning must not be able to fail the command when stderr
+    /// itself cannot be written (a full filesystem behind redirected
+    /// logs, a closed descriptor). `eprintln!` panics on that shape,
+    /// turning the fail-soft warning into a process failure while the
+    /// compression result is fine; `warn_soft` must survive it. Redirect
+    /// fd 2 to /dev/full, call the helper, restore, and assert the call
+    /// returned — a panicking write makes this test fail.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn warn_soft_survives_an_unwritable_stderr() {
+        use std::os::unix::io::AsRawFd;
+
+        let dev_full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full");
+        let saved = unsafe { libc::dup(2) };
+        assert!(saved >= 0, "dup stderr");
+        unsafe {
+            libc::dup2(dev_full.as_raw_fd(), 2);
+        }
+        // The helper's whole contract: no panic, the write error is
+        // discarded.
+        warn_soft("[tokenless-ccr] WARNING: simulated stderr failure");
+        // Restore before any assert can print.
+        let restored = unsafe { libc::dup2(saved, 2) };
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        assert!(restored >= 0, "restore stderr");
+        unsafe {
+            libc::close(saved);
+        }
+        drop(dev_full);
     }
 }

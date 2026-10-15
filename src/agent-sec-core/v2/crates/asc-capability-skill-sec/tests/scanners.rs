@@ -74,6 +74,16 @@ fn normalize(value: &mut Value) {
                 metadata.remove("error");
             }
             map.values_mut().for_each(normalize);
+            // The workspace builds serde_json with `preserve_order` (the
+            // prompt-scan output contract relies on insertion order), so actual
+            // findings serialize in construction order while fixtures keep their
+            // document order. Canonicalize both to key-sorted order so the
+            // `to_string`-keyed array sort in `sorted` stays comparison-stable.
+            let canonical: BTreeMap<String, Value> = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            *map = canonical.into_iter().collect();
         }
         _ => {}
     }
@@ -317,6 +327,25 @@ fn yaml_merge_keys_preserve_network_findings_and_verdicts() {
 }
 
 #[test]
+fn missing_manifest_takes_priority_over_directory_limits() {
+    let (_temporary, root) = skill();
+    fs::remove_file(root.join("SKILL.md")).unwrap();
+    // Coverage limits must not mask the missing-manifest input error.
+    let nested = (0..33).fold(root.clone(), |path, _| path.join("d"));
+    fs::create_dir_all(nested).unwrap();
+    let result = analyze(&root, deadline()).unwrap();
+    assert_eq!(result.exit_code, 2);
+    assert_eq!(result.data["errors"][0]["code"], "skill-manifest-missing");
+
+    fs::write(root.join("SKILL.md"), MANIFEST).unwrap();
+    let result = analyze(&root, deadline()).unwrap();
+    assert_eq!(result.exit_code, 1);
+    assert_eq!(result.data["errors"][0]["code"], "directory-depth-limit");
+}
+
+// macOS filesystems reject non-UTF-8 names before scanner traversal can be tested.
+#[cfg(target_os = "linux")]
+#[test]
 fn missing_manifest_is_rejected_before_directory_enumeration() {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -357,6 +386,119 @@ fn analyze_redacts_physical_root_from_nested_evidence() {
             .contains(root.to_str().unwrap())
     );
 }
+#[test]
+fn scan_only_skip_directories_emit_a_scope_warning() {
+    let (_temporary, root) = skill();
+    fs::write(root.join("main.sh"), "echo safe\n").unwrap();
+    fs::create_dir(root.join("build")).unwrap();
+    fs::write(root.join("build/main.sh"), "rm -rf /\n").unwrap();
+    fs::create_dir(root.join("node_modules")).unwrap();
+    fs::write(root.join("node_modules/x.js"), "eval('bad')\n").unwrap();
+    let scans = ScannerRegistry::default()
+        .scan(&root, None, deadline())
+        .unwrap();
+    let scope = scans
+        .iter()
+        .flat_map(|scan| scan.findings.iter())
+        .find(|finding| finding.rule == "scan-scope-skip")
+        .expect("scan-only skips must produce a coverage finding");
+    assert_eq!(scope.level, ScanStatus::Warn);
+    let directories = scope.metadata["directories"].as_array().unwrap();
+    assert!(directories.contains(&json!("build")));
+    assert!(directories.contains(&json!("node_modules")));
+    // The payload inside the skipped directory is genuinely unscanned: the
+    // same rm -rf / that denies at the skill root produces no finding here.
+    assert!(
+        !scans
+            .iter()
+            .flat_map(|scan| scan.findings.iter())
+            .any(|finding| finding.file.as_deref() == Some("build/main.sh"))
+    );
+    // ...while the content pipeline still includes it: signed-but-unscanned.
+    assert!(
+        hash_tree(&root, false)
+            .unwrap()
+            .contains_key("build/main.sh")
+    );
+}
+
+#[test]
+fn consistent_exclusions_do_not_warn() {
+    let (_temporary, root) = skill();
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join(".git/unsafe.py"), "eval('bad')\n").unwrap();
+    fs::create_dir(root.join(".skill-meta")).unwrap();
+    fs::write(root.join(".skill-meta/state.json"), "{}\n").unwrap();
+    let scans = ScannerRegistry::default()
+        .scan(&root, None, deadline())
+        .unwrap();
+    assert!(
+        !scans
+            .iter()
+            .flat_map(|scan| scan.findings.iter())
+            .any(|finding| finding.rule == "scan-scope-skip"),
+        "exclusions shared with content capture are not a trust gap"
+    );
+    assert!(
+        !hash_tree(&root, false)
+            .unwrap()
+            .contains_key(".git/unsafe.py")
+    );
+}
+
+#[test]
+fn scan_scope_skip_caps_and_sorts_directories() {
+    let (_temporary, root) = skill();
+    for index in 0..80 {
+        let directory = root.join(format!("pkg-{index:03}/build"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("artifact.txt"), "x\n").unwrap();
+    }
+    let scans = ScannerRegistry::default()
+        .scan(&root, None, deadline())
+        .unwrap();
+    let scope = scans
+        .iter()
+        .flat_map(|scan| scan.findings.iter())
+        .find(|finding| finding.rule == "scan-scope-skip")
+        .unwrap();
+    let directories: Vec<&str> = scope.metadata["directories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(directories.len(), 16);
+    let mut sorted = directories.clone();
+    sorted.sort_unstable();
+    assert_eq!(directories, sorted);
+    assert_eq!(directories.first(), Some(&"pkg-000/build"));
+    // 64 recorded (MAX_SKIPPED_DIRS), 16 listed, the rest summarized.
+    assert_eq!(scope.metadata["additional_directories"], json!(48));
+}
+
+#[test]
+fn analyze_reports_warn_for_scope_skips() {
+    let (_temporary, root) = skill();
+    fs::create_dir(root.join("dist")).unwrap();
+    fs::write(root.join("dist/bundle.js"), "eval('bad')\n").unwrap();
+    let result = analyze(&root, deadline()).unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.data["status"], "warn");
+    assert_eq!(result.data["coverage_complete"], true);
+    let static_scanner = &result.data["scanners"][1];
+    assert_eq!(static_scanner["name"], "static-scanner");
+    assert_eq!(static_scanner["status"], "warn");
+    assert_eq!(static_scanner["coverage_complete"], true);
+    assert!(
+        static_scanner["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["rule"] == "scan-scope-skip")
+    );
+}
+
 #[test]
 fn metadata_alias_expansion_is_bounded() {
     let (_temporary, root) = skill();

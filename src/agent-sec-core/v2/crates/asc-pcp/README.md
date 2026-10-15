@@ -89,9 +89,11 @@ cargo test -p asc-pcp -p asc-policy-runtime --locked --offline
 
 The [acceptance standard](../../fixtures/reconciliation/ACCEPTANCE.md) covers
 complete serialized records, dependency inputs/results and ordered traces. Tests
-also compose real PAP/memory and actual Adapter/Client/Ureq with a loopback mock.
-Storage is process-local memory. Full CLI/daemon E2E is a separate PR; SQL,
-crash/restart error injection and live PEP/kernel enforcement are separate gates.
+also compose real PAP/SQLite and actual Adapter/Client/Ureq with a loopback mock.
+Production and tests use `asc-policy-repository-sqlite`; tests own isolated temporary
+on-disk databases. SQL crash/restart recovery has its own
+[acceptance evidence](../../../docs/design/POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md#9-实施分期与验收).
+Core tests do not establish full CLI/daemon E2E or live PEP/kernel enforcement.
 
 The Runtime holds AttemptSchedule only while the queue entry exists. Automatic
 retries preserve its attempt count and deadline; a new explicit Pending request

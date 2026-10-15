@@ -13,6 +13,7 @@ use super::events::ShellEventSnapshot;
 use super::terminal::CrLfWriter;
 
 mod bootstrap;
+mod failopen;
 mod input_wait;
 
 use input_wait::input_wait_timeout_recovery_action;
@@ -28,12 +29,93 @@ fn render_raw_inline_event_view<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    inline_state
+        .approval_slice
+        .capture_representation_reset
+        .take_committed_emit();
     let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
+    inline_state.approval_slice.observer_event_end = snapshot.cursor().position();
+    inline_state.approval_slice.observed_focus = snapshot
+        .batch_since(inline_state.control.event_cursor())
+        .events
+        .iter()
+        .filter_map(|event| {
+            crate::approval::panel::approval_focus_from_event(
+                event,
+                &inline_state.approvals.requests,
+            )
+            .or_else(|| {
+                let command = approval_command_from_event(event)?;
+                (event.component.as_deref() == Some("card")
+                    && command.kind == ApprovalCommandKind::Details)
+                    .then_some((command.id, ApprovalPanelAction::Details))
+            })
+        })
+        .rfind(|(id, _)| crate::approval::panel::approval_is_pending(inline_state, id));
     if let Some(audit) = inline_state.audit.as_mut() {
-        let batch = snapshot.batch_since(inline_state.control.event_cursor());
+        let batch = snapshot.batch_since(inline_state.approval_slice.audit_event_cursor);
         audit.observe_shell_event_batch(batch.events);
+        inline_state.approval_slice.audit_event_cursor = batch.to;
     }
-    let mut terminal_output = CrLfWriter::new(output);
+    let reset = inline_state
+        .approval_slice
+        .capture_representation_reset
+        .clone();
+    if let Some(token) = reset.display_handoff_token() {
+        if inline_state
+            .control
+            .shell_handoff()
+            .pending_front()
+            .is_some_and(|handoff| handoff.request().token == token)
+        {
+            inline_state
+                .control
+                .observe_shell_command_activity(view.events());
+            let ledger = build_command_blocks(view.events());
+            crate::activity::runtime::record_approved_shell_handoff_blocks(
+                inline_state,
+                &ledger.blocks,
+            );
+            crate::activity::runtime::close_untracked_shell_handoffs_with_history_base(
+                inline_state,
+                view.events(),
+                view.base(),
+            );
+        }
+        if reset.display_is_failed() {
+            crate::approval::slice_present::invalidate_representation(inline_state);
+            if let Some(session) = inline_state.approval_slice.session.as_mut() {
+                session.relinquish_untrusted();
+            }
+            inline_state.approval_slice.session = None;
+            inline_state.approval_slice.disabled = true;
+            let mut physical = crate::shell_host::PhysicalDisplayWriter(output);
+            if inline_state.control.shell_busy()
+                || inline_state
+                    .control
+                    .shell_handoff()
+                    .pending_front()
+                    .is_some()
+            {
+                if let Some(action) = shell_handoff_timeout_recovery_action(
+                    inline_state,
+                    inline_state.control.shell_busy(),
+                    &mut physical,
+                )? {
+                    return Ok(action);
+                }
+            }
+            return Ok(RawObserverAction::HoldShellOutput);
+        }
+    }
+    let mut physical = crate::shell_host::PhysicalDisplayWriter(output);
+    let mut terminal_output = CrLfWriter::new(&mut physical);
+    // A recovered worker must not publish at coordinates invalidated by resize.
+    crate::approval::slice_present::repaint_worker_slice_if_viewport_changed(
+        inline_state,
+        &mut terminal_output,
+    )?;
+    crate::approval::slice_present::pump_worker_slice(inline_state, &mut terminal_output)?;
     if inline_state.questions.active_panel_id.is_some() {
         redraw_active_question_if_width_changed(
             inline_state,
@@ -41,19 +123,45 @@ fn render_raw_inline_event_view<W: Write>(
             RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
         )?;
     }
-    let actions = RuntimeDispatcher::dispatch_inline_batch(
+    let dispatch_result = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
         adapter,
         shell_label,
         inline_state,
         &mut terminal_output,
-    )?;
-    RuntimeDispatcher::apply_actions(actions, inline_state);
+    );
+    match dispatch_result {
+        Ok(actions) => RuntimeDispatcher::apply_actions(actions, inline_state),
+        Err(error) => {
+            let committed = inline_state
+                .control
+                .shell_handoff()
+                .ready_front()
+                .is_some_and(|request| committed_slice_handoff(inline_state, request));
+            if !committed || !crate::shell_host::physical_error(&error) {
+                return Err(error);
+            }
+            reset.mark_committed_display_failure();
+            tracing::warn!(error = ?error, "committed approval presentation failed");
+            crate::approval::slice_present::invalidate_representation(inline_state);
+            if let Some(session) = inline_state.approval_slice.session.as_mut() {
+                session.relinquish_untrusted();
+            }
+            inline_state.approval_slice.session = None;
+            inline_state.approval_slice.disabled = true;
+        }
+    }
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
         .emit_next_approved(snapshot.cursor().position())
     {
+        if committed_slice_handoff(inline_state, &request) {
+            inline_state
+                .approval_slice
+                .capture_representation_reset
+                .permit_committed_emit();
+        }
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;
@@ -62,6 +170,15 @@ fn render_raw_inline_event_view<W: Write>(
             return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
         }
         return Ok(RawObserverAction::EmitToPty(request));
+    }
+    if reset.display_handoff_token().is_some()
+        && inline_state
+            .control
+            .shell_handoff()
+            .pending_front()
+            .is_none()
+    {
+        reset.end_display_handoff();
     }
     if let Some(capture) = pending_card_capture(inline_state) {
         return Ok(RawObserverAction::CaptureInput(capture));
@@ -103,8 +220,17 @@ fn render_raw_inline_event_view<W: Write>(
     }
 }
 
+fn committed_slice_handoff(state: &InlineState, request: &ShellHandoffRequest) -> bool {
+    state.approval_slice.activation.is_some()
+        && state.approvals.requests.iter().any(|approval| {
+            approval.id == request.approval_id
+                && approval.run_id == request.run_id
+                && approval.status == ApprovalRequestStatus::Approved
+        })
+}
+
 #[cfg(test)]
-fn render_raw_inline_events<W: Write>(
+pub(crate) fn render_raw_inline_events<W: Write>(
     events: &[ShellEvent],
     output: &mut W,
     adapter: &AdapterInstance,
@@ -335,352 +461,4 @@ pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool
 mod hook_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::run::ActiveAgentRun;
-    use std::time::Instant;
-
-    #[test]
-    fn active_foreground_command_keeps_raw_passthrough_even_when_agent_running() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        state.agent_run.active = Some(test_active_run());
-        let events = vec![ShellEvent::command_started(
-            "session-1",
-            "cmd-1",
-            "sudo df -h",
-            "/tmp",
-            10,
-        )];
-        let mut output = Vec::new();
-
-        let action = render_raw_inline_events(&events, &mut output, &adapter, "zsh", &mut state)
-            .expect("render raw inline events");
-
-        assert_eq!(action, RawObserverAction::RawPassthrough);
-    }
-
-    #[test]
-    fn completed_agent_run_restores_prompt_through_the_pty_owner() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        state.agent_run.needs_prompt_after_run = true;
-        let mut output = Vec::new();
-
-        let action = render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state)
-            .expect("restore prompt after agent run");
-
-        assert_eq!(
-            action,
-            RawObserverAction::RestorePrompt {
-                ghost_text: None,
-                ghost_route: Default::default(),
-            }
-        );
-        assert!(
-            output.is_empty(),
-            "runtime must not write a bare PS1 outside PromptPresentation"
-        );
-        assert!(!state.agent_run.needs_prompt_after_run);
-    }
-
-    #[test]
-    fn pending_shell_handoff_keeps_raw_passthrough_before_preexec() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        state.agent_run.active = Some(test_active_run());
-        let request = ShellHandoffRequest::new(
-            "echo approved",
-            "$ echo approved",
-            "approved_provider_shell_tool",
-            "user",
-            "req-approved",
-            "run-approved",
-            1,
-        )
-        .expect("handoff request");
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(request.clone());
-        let mut first_output = Vec::new();
-
-        let first_action =
-            render_raw_inline_events(&[], &mut first_output, &adapter, "zsh", &mut state)
-                .expect("emit handoff");
-
-        assert_eq!(first_action, RawObserverAction::EmitToPty(request));
-
-        let mut second_output = Vec::new();
-        let second_action =
-            render_raw_inline_events(&[], &mut second_output, &adapter, "zsh", &mut state)
-                .expect("keep handoff foreground protected");
-
-        assert_eq!(second_action, RawObserverAction::RawPassthrough);
-    }
-
-    #[test]
-    fn pending_shell_handoff_serializes_approved_requests() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        state.agent_run.active = Some(test_active_run());
-        let first = ShellHandoffRequest::new(
-            "echo first",
-            "$ echo first",
-            "approved_provider_shell_tool",
-            "user",
-            "req-first",
-            "run-approved",
-            1,
-        )
-        .expect("first handoff request");
-        let second = ShellHandoffRequest::new(
-            "echo second",
-            "$ echo second",
-            "approved_provider_shell_tool",
-            "user",
-            "req-second",
-            "run-approved",
-            1,
-        )
-        .expect("second handoff request");
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(first.clone());
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(second.clone());
-
-        let first_action =
-            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
-                .expect("emit first handoff");
-        assert_eq!(first_action, RawObserverAction::EmitToPty(first));
-
-        let second_action =
-            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
-                .expect("hold second handoff until the first closes");
-
-        assert_eq!(second_action, RawObserverAction::RawPassthrough);
-
-        state
-            .control
-            .shell_handoff_mut()
-            .pop_pending()
-            .expect("close first handoff");
-        let third_action =
-            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
-                .expect("emit second handoff after the first closes");
-
-        assert_eq!(third_action, RawObserverAction::EmitToPty(second));
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn pending_shell_handoff_restores_prompt_with_first_emit() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        state.trigger_pty_prompt = true;
-        let request = ShellHandoffRequest::new(
-            "echo approved",
-            "$ echo approved",
-            "approved_provider_shell_tool",
-            "user",
-            "req-approved",
-            "run-approved",
-            1,
-        )
-        .expect("handoff request");
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(request.clone());
-        let mut output = Vec::new();
-
-        let action = render_raw_inline_events(&[], &mut output, &adapter, "zsh", &mut state)
-            .expect("emit handoff with prompt restore");
-
-        assert_eq!(
-            action,
-            RawObserverAction::EmitToPtyWithPromptRestore(request)
-        );
-    }
-
-    #[test]
-    fn pending_shell_handoff_timeout_interrupts_before_preexec_without_notice() {
-        let mut state = InlineState::default();
-        let request = ShellHandoffRequest::new(
-            "sleep 10",
-            "$ sleep 10",
-            "approved_provider_shell_tool",
-            "user",
-            "req-timeout-before-preexec",
-            "run-timeout-before-preexec",
-            1,
-        )
-        .expect("handoff request");
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(request);
-        state
-            .control
-            .shell_handoff_mut()
-            .emit_next_approved(0)
-            .expect("emit handoff");
-        state
-            .control
-            .shell_handoff_mut()
-            .backdate_pending_emit_for_test(Duration::from_secs(2));
-        let mut output = Vec::new();
-
-        let action = shell_handoff_timeout_recovery_action_with_timeout(
-            &mut state,
-            false,
-            &mut output,
-            Some(Duration::from_secs(1)),
-        )
-        .expect("timeout action");
-
-        assert_eq!(action, Some(RawObserverAction::InterruptForeground));
-        assert!(output.is_empty(), "{}", String::from_utf8_lossy(&output));
-    }
-
-    #[test]
-    fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
-        let mut state = InlineState::default();
-        let request = ShellHandoffRequest::new(
-            "sleep 10",
-            "$ sleep 10",
-            "approved_provider_shell_tool",
-            "user",
-            "req-timeout",
-            "run-timeout",
-            1,
-        )
-        .expect("handoff request");
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(request);
-        state
-            .control
-            .shell_handoff_mut()
-            .emit_next_approved(0)
-            .expect("emit handoff");
-        state
-            .control
-            .shell_handoff_mut()
-            .backdate_pending_emit_for_test(Duration::from_secs(2));
-        let mut busy_output = Vec::new();
-
-        let action = shell_handoff_timeout_recovery_action_with_timeout(
-            &mut state,
-            true,
-            &mut busy_output,
-            Some(Duration::from_secs(1)),
-        )
-        .expect("timeout action");
-
-        assert_eq!(action, Some(RawObserverAction::InterruptForeground));
-        assert!(
-            busy_output.is_empty(),
-            "{}",
-            String::from_utf8_lossy(&busy_output)
-        );
-
-        state
-            .control
-            .shell_handoff_mut()
-            .pop_pending()
-            .expect("handoff finished");
-        let mut idle_output = Vec::new();
-        let action = shell_handoff_timeout_recovery_action_with_timeout(
-            &mut state,
-            false,
-            &mut idle_output,
-            Some(Duration::from_secs(1)),
-        )
-        .expect("timeout notice");
-        let idle_text = String::from_utf8_lossy(&idle_output);
-
-        assert_eq!(action, None);
-        assert!(
-            idle_text.contains("Command exceeded configured shell handoff timeout (1s)."),
-            "{idle_text}"
-        );
-        assert!(
-            idle_text.contains("Sent interrupt to foreground PTY; waiting for shell evidence."),
-            "{idle_text}"
-        );
-    }
-
-    fn test_active_run() -> ActiveAgentRun {
-        let request = test_agent_request("active");
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Recommend);
-        let renderer = RatatuiInlineRenderer::for_terminal();
-        ActiveAgentRun {
-            request,
-            origin: AgentRunOrigin::Standard,
-            handle,
-            provider_name: "fake",
-            language: Language::EnUs,
-            renderer: renderer.clone(),
-            status_animation: renderer.status_animation(),
-            markdown_stream: renderer.stream_markdown_agent(),
-            governed_events: Vec::new(),
-            deferred_events: Vec::new(),
-            held_events: Vec::new(),
-            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
-            pending_cosh_requests: Vec::new(),
-            pending_cosh_request_audits: Vec::new(),
-            rendered_governed_event_count: 0,
-            selectable_after_event_index: None,
-            started_at: Instant::now(),
-            last_activity_at: Instant::now(),
-            last_heartbeat_at: Instant::now(),
-            current_phase: String::new(),
-            current_message: String::new(),
-            has_visible_text_delta: false,
-            completed: false,
-            host_completed_tool_ids: Vec::new(),
-            pending_hook_notifications: Vec::new(),
-        }
-    }
-
-    fn test_agent_request(id: &str) -> AgentRequest {
-        AgentRequest {
-            id: id.to_string(),
-            session_id: "session-1".to_string(),
-            command_block: CommandBlock {
-                id: "agent-cmd-1".to_string(),
-                session_id: "session-1".to_string(),
-                command: "echo test".to_string(),
-                origin: Default::default(),
-                cwd: "/tmp".to_string(),
-                end_cwd: "/tmp".to_string(),
-                started_at_ms: 0,
-                ended_at_ms: 1,
-                duration_ms: 1,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-                shell_environment_generation: None,
-                audit_identity: None,
-            },
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("test".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        }
-    }
-}
+mod tests;

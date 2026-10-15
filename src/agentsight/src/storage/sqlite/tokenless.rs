@@ -197,28 +197,65 @@ impl TokenlessStatsStore {
         let start_secs = start_ns.div_euclid(1_000_000_000);
         let end_secs = end_ns.div_euclid(1_000_000_000);
 
-        let sql = "SELECT COUNT(*), \
-                          COALESCE(SUM(before_tokens), 0), \
-                          COALESCE(SUM(after_tokens), 0) \
+        // The second range is only a prefilter, widened by a second on each side
+        // because `strftime('%s', …)` truncates every row to its enclosing
+        // second. The documented bounds are nanoseconds and inclusive, so each
+        // candidate row is compared against them exactly below — without that
+        // second pass a record written just before the start (or just after the
+        // end) inside the same second was counted, silently growing the window.
+        let sql = "SELECT timestamp, before_tokens, after_tokens \
                    FROM stats \
                    WHERE CAST(strftime('%s', timestamp) AS INTEGER) BETWEEN ?1 AND ?2";
 
-        let result = self.conn.query_row(sql, [start_secs, end_secs], |row| {
-            Ok(TokenlessWindowSummary {
-                records: row.get(0)?,
-                before_tokens: row.get(1)?,
-                after_tokens: row.get(2)?,
-            })
-        });
-
-        match result {
-            Ok(summary) => summary,
+        let mut statement = match self.conn.prepare(sql) {
+            Ok(statement) => statement,
+            Err(e) => {
+                log::warn!("Failed to prepare tokenless window summary: {e}");
+                return TokenlessWindowSummary::default();
+            }
+        };
+        let rows = match statement.query_map(
+            [start_secs.saturating_sub(1), end_secs.saturating_add(1)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        ) {
+            Ok(rows) => rows,
             Err(e) => {
                 log::warn!("Failed to aggregate tokenless window summary: {e}");
-                TokenlessWindowSummary::default()
+                return TokenlessWindowSummary::default();
             }
+        };
+
+        let mut summary = TokenlessWindowSummary::default();
+        for (timestamp, before_tokens, after_tokens) in rows.flatten() {
+            // Rows whose timestamp is not parseable stay excluded, as the
+            // module documents.
+            if !tokenless_timestamp_in_window(&timestamp, start_ns, end_ns) {
+                continue;
+            }
+            summary.records += 1;
+            summary.before_tokens += before_tokens;
+            summary.after_tokens += after_tokens;
         }
+        summary
     }
+}
+
+/// Whether a `stats.timestamp` value falls inside `[start_ns, end_ns]`.
+///
+/// The recorder writes RFC3339 with whatever offset it ran under, so the value
+/// is resolved to an instant rather than compared as text; an unparseable value
+/// is simply not in the window.
+fn tokenless_timestamp_in_window(timestamp: &str, start_ns: i64, end_ns: i64) -> bool {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .and_then(|parsed| parsed.timestamp_nanos_opt())
+        .is_some_and(|ns| ns >= start_ns && ns <= end_ns)
 }
 
 /// Aggregated tokenless token savings over a time window.
@@ -316,6 +353,43 @@ mod tests {
         assert_eq!(summary.after_tokens, 300);
         assert_eq!(summary.saved_tokens(), 1200);
         assert_eq!(summary.saved_percent(), 80.0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The documented window is `[start_ns, end_ns]`, inclusive and in
+    /// nanoseconds, but the aggregate compared whole seconds: every row inside
+    /// the window's second was counted, including ones written before the start
+    /// and after the end.
+    #[test]
+    fn summary_in_window_honours_the_exact_nanosecond_bounds() {
+        let base_secs: i64 = 1_700_000_000;
+        let row = |ms: u32, before: i64, after: i64| {
+            (
+                Utc.timestamp_opt(base_secs, ms * 1_000_000)
+                    .unwrap()
+                    .to_rfc3339(),
+                before,
+                after,
+            )
+        };
+        let (store, path) = store_with_rows(&[
+            (&row(0, 100, 10).0, 100, 10),
+            (&row(500, 200, 20).0, 200, 20),
+            (&row(900, 400, 40).0, 400, 40),
+        ]);
+
+        // Window: [base + 200 ms, base + 700 ms] — a single row qualifies.
+        let start_ns = base_secs * 1_000_000_000 + 200_000_000;
+        let end_ns = base_secs * 1_000_000_000 + 700_000_000;
+        let summary = store.summary_in_window(start_ns, end_ns);
+
+        assert_eq!(
+            summary.records, 1,
+            "only the row inside the window may count"
+        );
+        assert_eq!(summary.before_tokens, 200);
+        assert_eq!(summary.after_tokens, 20);
 
         let _ = std::fs::remove_file(&path);
     }

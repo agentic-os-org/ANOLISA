@@ -24,7 +24,9 @@ pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, Kerne
         let uri = format!("file:{}?mode=ro", encode_uri_path(path));
         Connection::open_with_flags(
             uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?
     } else {
         Connection::open(path)?
@@ -95,6 +97,20 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         open_connection(&dir.path().join("absent.db"), true)
             .expect_err("mode=ro must not create the database");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_rejects_a_symlinked_database() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("target.db");
+        open_connection(&target, false).expect("create target");
+        let link = dir.path().join("linked.db");
+        symlink(&target, &link).expect("symlink");
+
+        assert!(open_connection(&link, true).is_err());
     }
 
     #[test]

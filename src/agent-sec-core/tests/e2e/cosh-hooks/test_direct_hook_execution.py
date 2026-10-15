@@ -131,6 +131,72 @@ def _run_pii_checker_hook(
     return proc, capture
 
 
+def test_cosh_skill_ledger_slow_init_and_show_fit_manifest_timeout(
+    tmp_path: Path,
+) -> None:
+    extension = _extension_dir()
+    manifest = json.loads((extension / "cosh-extension.json").read_text())
+    hook = next(
+        hook
+        for group in manifest["hooks"]["PreToolUse"]
+        for hook in group["hooks"]
+        if hook.get("name") == "skill-ledger"
+    )
+    skill = tmp_path / ".copilot-shell" / "skills" / "example"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("Safe fixture content\n")
+    cli = tmp_path / "bin" / "agent-sec-cli"
+    cli.parent.mkdir()
+    cli.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
+            import json
+            import os
+            import sys
+            import time
+
+            operation = sys.argv[sys.argv.index("skill-ledger") + 1]
+            with open(os.environ["_MOCK_CLI_CAPTURE"], "a", encoding="utf-8") as capture:
+                capture.write(operation + "\\n")
+            # Each operation fits its own deadline, but their sum exceeds five seconds.
+            time.sleep(2 if operation == "init" else 3.4)
+            print(json.dumps({"latestStatus": "warn", "message": "Review this Skill"}))
+            """))
+    cli.chmod(0o755)
+    capture = tmp_path / "calls.txt"
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "XDG_DATA_HOME": str(tmp_path / ".local" / "share"),
+        "PATH": str(cli.parent) + os.pathsep + os.environ.get("PATH", ""),
+        "_MOCK_CLI_CAPTURE": str(capture),
+        "SKILL_LEDGER_HOOK_ENABLED": "true",
+        "SKILL_LEDGER_MODE": "ask",
+    }
+    proc = subprocess.run(
+        shlex.split(hook["command"].replace("${extensionPath}", str(extension))),
+        input=json.dumps(
+            {
+                "tool_name": "skill",
+                "tool_input": {"action": "invoke", "name": "example"},
+                "cwd": str(tmp_path),
+                "skill_context": {
+                    "skill_name": "example",
+                    "file_path": str(skill / "SKILL.md"),
+                },
+            }
+        ),
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+        timeout=hook["timeout"] / 1000,
+    )
+    assert proc.returncode == 0, proc.stderr
+    output = json.loads(proc.stdout)
+    assert output["decision"] == "ask"
+    assert "Review this Skill" in output["reason"]
+    assert capture.read_text().splitlines() == ["init", "show"]
+
+
 def test_cosh_code_scanner_hook_enabled_false_allows_without_scan(
     tmp_path: Path,
 ) -> None:

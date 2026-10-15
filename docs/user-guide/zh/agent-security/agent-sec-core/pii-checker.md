@@ -42,7 +42,7 @@ V2 保留原有顶层结果字段，在 `summary` 中增加证据元数据：
 | `coverage.reasons` | 输入截断、规则无效、匹配受限或扫描失败的安全错误码 |
 | `input_sha256` | 检测器收到文本的 SHA-256，不代表未收到的原始内容 |
 | `scanned_input_sha256`、`scanned_bytes` | 实际扫描前缀的摘要及字节数 |
-| `scanner_version` | 检测语义版本；V2 当前为 `2.0.0` |
+| `scanner_version` | 检测语义版本；V2 当前为 `2.0.1` |
 | `ruleset_id` | scanner 版本及不可变内置/自定义规则配置的标识 |
 
 `bytes_scanned` 保留 V1 前缀计数，可能包含被 `scanned_bytes` 排除的不完整 UTF-8 尾部。
@@ -73,7 +73,7 @@ coverage `unavailable`，CLI 退出 `1`。单次正则调用受引擎回溯上�
 ## 检测语义版本
 
 `summary.scanner_version` 标识检测行为，独立于 AgentSecCore 包版本和 RPC schema。
-V2 的成功/失败扫描报告及审计结果均记录 `2.0.0`；内置 finding 的 engine 为 `regex_v2`，
+V2 的成功/失败扫描报告及审计结果均记录 `2.0.1`；内置 finding 的 engine 为 `regex_v2`，
 自定义 finding 为 `fancy_regex`。`ruleset_id` 包含此版本、内置模式及自定义配置，
 即使 YAML 内容不变，引擎行为变化仍可追溯。CI 的 commit SHA 标识被测构建，不是检测语义版本。
 
@@ -84,13 +84,42 @@ V2 的成功/失败扫描报告及审计结果均记录 `2.0.0`；内置 finding
   检测不验证签名真实性，也不授权 Token 的使用。
 - 中国身份证的日期和校验位统一转换 decimal 数字，包括全角日期、数字校验位及 `Ｘ`/`ｘ`，
   同时保留原文和字符位置。
-- 银行卡检测排除能通过 Luhn 的全零占位符；其他长度/校验和检查保留。命中不代表号码已经发行。
+- 银行卡检测排除能通过 Luhn 的全零占位符；命中不代表号码已经发行。2.0.1 增加下述结构校验。
 - 自定义模式使用下述原生方言。与 Python 的行为不同，本身不会使有效 V2 规则变成 invalid，
   也不会因此将 coverage 标记为 partial。
 
 保留的 V1 语料验证不变行为，独立的正反例和资源限制用例定义 V2 变化。这些检查覆盖支持的格式，
 不代表对任意数据零误报漏报。短密钥、无标签密钥、11 类之外的格式和上下文歧义，
 仍需结合业务规则及有代表性的样本评估。
+
+### 支持的银行卡格式
+
+2.0.1 及保留的 Python 检测器依次要求完整数字格式、受支持网络的前缀与长度组合、Luhn 校验。
+前缀与长度采用[固定版本的卡组织定义](https://github.com/braintree/credit-card-type/blob/c50db7708ce3945a1cf00aca4220ee2356d2a580/src/lib/card-types.ts)：
+
+| 卡组织 | 支持的数字位数 |
+|---|---|
+| Visa | 16、18、19 |
+| Mastercard | 16 |
+| American Express | 15 |
+| Diners Club | 14、16、19 |
+| Discover | 16、19 |
+| JCB | 16、17、18、19 |
+| UnionPay | 14、15、16、17、18、19 |
+
+支持连续数字。分组形式只接受统一的单个 ASCII 空格或连字符：Amex 为 `4-6-5`，
+14 位 Diners 为 `4-6-4`，其他支持的组合从左每四位一组、末组保留余数，如 `4-4-4-4-3`。
+重复或混用分隔符、非常规分组均拒绝。保留现有 Unicode 十进制数字归一化与字符 span。
+所有网络均要求 Luhn；全零值在网络前缀校验时拒绝。
+
+检测器校验数字、空格、连字符构成的完整表达式，不从不合法表达式内部重新匹配：
+`1-4111111111111111` 被拒绝，`card-4111111111111111` 和
+`/cards/4111111111111111/` 仍可检出。末尾没有后续数字的空格、连字符不进入 finding。
+逗号和换行分隔表达式；仅用空格连接的两个卡号构成一个被拒绝的表达式。
+同一规则消除版本/时间戳路径误报，不对路径设置豁免。
+
+这是明确限定的格式和网络集合，不查询卡号是否真实发行。集合外的格式可能漏检，
+无关数字标识也仍可能满足全部条件。severity、置信度计算和 Host 策略行为不变。
 
 ## 使用随包 Skill
 
@@ -147,6 +176,11 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 置信度，`example`、`dummy`、`test`、`sample` 等测试标记可能降低置信度。低于默认 `0.5` 阈值的
 finding 会被忽略，除非使用 `--include-low-confidence`。
 
+邮箱检测支持句末 ASCII 句号及连续句号组成的省略号；连续句号后必须是输入结束、空白或支持的
+句末标点、闭合分隔符。例如，`alice@company.co.uk.` 的 finding 仅包含 `alice@company.co.uk`，
+句号保留在 finding span 和脱敏替换范围之外。`.123`、`.c`、`.-bad`、`._bad` 和 `..evil` 等
+非法域名后缀会被拒绝，不会截取较短邮箱作为 finding。保留域名和远程身份仍沿用原有的低置信度处理。
+
 ## Verdict 与脱敏
 
 Scanner 将 findings 聚合为一个 verdict：
@@ -197,10 +231,12 @@ scanner verdict `deny` 描述扫描风险，hook policy `block` 决定 adapter �
 
 ### OpenClaw 输入保护
 
-在正式版 OpenClaw `>=2026.5.12` 上，PII Checker 使用 `before_agent_run` 扫描
-`prompt`、`systemPrompt` 和 hook 提供的会话消息文本，包括工具参数和结果，
-记录为 `source=model_input`；不扫描媒体载荷或消息元数据。检查对象是运行入口可见的文本，
-不覆盖运行中的每一次模型请求或宿主独立的辅助模型调用（例如会话标题生成），也不保证能读取用户原始输入。
+在正式版 OpenClaw `>=2026.5.12` 上，PII Checker 使用 `before_agent_run`，
+只扫描 `prompt` 中的本轮用户输入，不扫描 system prompt、会话历史、媒体载荷或消息元数据。
+`prompt` 缺失、不是字符串或仅含空白时跳过扫描，不回退读取其他字段。
+仍记录为 `source=model_input`，用于标识模型运行入口 hook，不代表覆盖完整上下文。
+检查对象是 OpenClaw 在运行入口提供的本轮输入，不覆盖运行中的每一次模型请求，
+也不覆盖宿主独立的辅助模型调用（例如会话标题生成），不保证能读取用户原始输入。
 
 较旧的受支持版本（`>=2026.4.14`）、预发布版以及无法识别的版本，使用
 `before_dispatch` 和 `source=user_input`，只扫描 OpenClaw 提供的入站文本。

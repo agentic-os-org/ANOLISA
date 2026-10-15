@@ -25,6 +25,10 @@ pub enum ParseError {
 /// This function **never** returns `Err` — it always produces a `SkillEntry`
 /// with an appropriate `ParseStatus`.
 pub fn parse_skill_md(content: &str, dir_name: &str) -> SkillEntry {
+    // A UTF-8 BOM (emitted by some editors) must not defeat fence
+    // detection: strip it before any content inspection.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
     // Handle empty content
     if content.trim().is_empty() {
         let metadata = SkillMetadata {
@@ -52,7 +56,7 @@ pub fn parse_skill_md(content: &str, dir_name: &str) -> SkillEntry {
     let metadata = parse_frontmatter(&yaml_str, &body, dir_name, &mut issues);
 
     // Phase 3: Section splitting
-    let sections = split_sections(&body);
+    let sections = split_sections(&body, &mut issues);
 
     // Phase 4: Structured extraction
     let parameters = parse_parameters(sections.get("Parameters"), &mut issues);
@@ -80,7 +84,7 @@ pub fn parse_skill_md(content: &str, dir_name: &str) -> SkillEntry {
 
 /// Parse a SKILL.md file from a filesystem path.
 pub fn parse_skill_file(path: &Path) -> Result<SkillEntry, ParseError> {
-    parse_skill_file_with_limit(path, 1_048_576)
+    parse_skill_file_with_limit(path, crate::DEFAULT_MAX_SKILL_SIZE)
 }
 
 /// Parse from file with explicit size limit.
@@ -115,32 +119,61 @@ pub fn parse_skill_file_with_limit(path: &Path, max_size: usize) -> Result<Skill
 // ---------------------------------------------------------------------------
 
 fn extract_frontmatter(content: &str) -> (String, String) {
-    if !content.starts_with("---") {
+    // The opening fence must be the entire first line: `---` plus at most
+    // trailing whitespace (a `\r` from CRLF files, or spaces an editor
+    // left behind). A longer dash run (`----`, `-----`) is a Markdown
+    // thematic break and `---text` is ordinary content — neither opens
+    // frontmatter. This mirrors the sec-core scanner's
+    // `line.trim() == "---"` rule so both components agree on what a
+    // fence is; the previous prefix match treated a file opening with a
+    // thematic break as frontmatter and silently dropped everything
+    // between it and the next `---`-prefixed line out of the body.
+    let (first_line, rest) = match content.split_once('\n') {
+        Some((first, rest)) => (first, rest),
+        None => (content, ""),
+    };
+    if first_line.trim_end() != "---" {
         return (String::new(), content.to_string());
     }
 
-    // Find the closing "---" after the opening one
-    let after_open = &content[3..];
-    // Skip the newline after opening ---
-    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
-
-    if let Some(close_pos) = after_open.find("\n---") {
-        let yaml = after_open[..close_pos].to_string();
-        let rest_start = close_pos + 4; // skip "\n---"
-        let body = if rest_start < after_open.len() {
-            let rest = &after_open[rest_start..];
-            rest.strip_prefix('\n').unwrap_or(rest).to_string()
-        } else {
-            String::new()
-        };
-        (yaml, body)
-    } else if after_open.ends_with("---") && !after_open.contains('\n') {
-        // Edge case: "---\n---" with no content
-        (String::new(), String::new())
-    } else {
-        // No closing ---, treat entire content as body
-        (String::new(), content.to_string())
+    // Find the first line of `rest` that closes the frontmatter: a run of
+    // three or more dashes and nothing else (trailing whitespace
+    // tolerated, leading whitespace not — an indented `---` is content).
+    // The exact `---` closer is the canonical form; a longer all-dash run
+    // (`----`, `-----` — a Markdown thematic break) also closes when the
+    // opener was an exact `---`, which legacy authors used and which the
+    // exact-line rule silently degraded (the yaml block fell into the
+    // body and the first-paragraph description fallback smeared it into
+    // the served description). A line that merely *starts* with dashes
+    // (`---text`) is content and never closes — that is the mid-line leak
+    // the exact-line rule fixed, and an all-dash run can never leak one.
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let bare = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = bare.trim_end();
+        if trimmed.len() >= 3 && trimmed.chars().all(|c| c == '-') {
+            // yaml spans from the start of `rest` to this line, minus the
+            // newline that terminates the last yaml line (byte-compatible
+            // with the previous `after_open[len..close_pos]` region).
+            let yaml = rest[..offset]
+                .strip_suffix('\n')
+                .map(|s| s.strip_suffix('\r').unwrap_or(s))
+                .unwrap_or(&rest[..offset])
+                .to_string();
+            // The body starts after the closer line's own newline; when
+            // the closer is the last line there is no body.
+            return (yaml, rest[offset + line.len()..].to_string());
+        }
+        offset += line.len();
     }
+
+    // No closing fence: treat the entire content as body, a bare opener
+    // included (`"---"`, `"--- \n"`, `"---\r\n"` — the pre-rewrite code's
+    // `after_open.ends_with("---")` arm never matched an empty remainder,
+    // so these inputs always fell through to whole-content). The sec-core
+    // scanner reports this shape as an unclosed-fence finding; skillfs
+    // degrades to "missing frontmatter".
+    (String::new(), content.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -193,58 +226,109 @@ fn parse_frontmatter(
     }
 }
 
-fn validate_name(name: &str, issues: &mut Vec<String>) {
+pub(crate) fn validate_name(name: &str, issues: &mut Vec<String>) {
     if name.len() > 64 {
         issues.push("name too long (max 64 chars)".to_string());
     }
-    // kebab-case: lowercase letters, digits, hyphens; must not start/end with hyphen
-    let is_kebab = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !name.starts_with('-')
-        && !name.ends_with('-');
-    if !is_kebab {
+    if !is_kebab_case(name) {
         issues.push("name not kebab-case".to_string());
     }
 }
 
+/// Non-empty kebab-case identifier (`[a-z0-9-]`, no leading/trailing
+/// hyphen). Length is enforced separately by [`validate_name`]; this is
+/// the single grammar definition, shared with the store's
+/// directory-name adoption check.
+pub(crate) fn is_kebab_case(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+/// CommonMark ATX heading: at most three spaces of indentation, then
+/// 1–6 `#`s, followed by a space/tab or the end of the line. Anything
+/// else that merely starts with `#` — `#hashtag`, seven or more `#`s, or
+/// a deeper-indented line — is ordinary content, not a heading.
+fn is_atx_heading(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    match rest[hashes..].chars().next() {
+        None => true,
+        Some(c) => c == ' ' || c == '\t',
+    }
+}
+
 fn extract_first_paragraph(body: &str) -> String {
-    let trimmed = body.trim_start();
-    // Skip leading heading
-    let content = if trimmed.starts_with('#') {
-        trimmed
-            .find('\n')
-            .map(|pos| trimmed[pos + 1..].trim_start())
-            .unwrap_or("")
-    } else {
-        trimmed
-    };
-    // Take first non-empty paragraph
-    content
-        .split("\n\n")
-        .find(|p| !p.trim().is_empty())
-        .unwrap_or("")
-        .lines()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
+    // Take the first non-empty paragraph. A paragraph ends at a blank
+    // line; `lines()` strips the terminator of either convention, so a
+    // CRLF file yields the same paragraph as an LF one. Leading heading
+    // lines are not paragraphs: skip every one of them before the
+    // paragraph starts, otherwise a document whose body begins with a
+    // title plus a subtitle reports the subtitle's markup ("## Subtitle")
+    // as the description. The heading check runs on the raw line, before
+    // any trim discards indentation, so `#`-led ordinary text keeps its
+    // place as the description.
+    let mut paragraph = String::new();
+    for line in body.lines() {
+        if paragraph.is_empty() && is_atx_heading(line) {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(line);
+    }
+    paragraph
 }
 
 // ---------------------------------------------------------------------------
 // Phase 3: Section Splitting
 // ---------------------------------------------------------------------------
 
-fn split_sections(body: &str) -> std::collections::HashMap<String, String> {
+fn split_sections(
+    body: &str,
+    issues: &mut Vec<String>,
+) -> std::collections::HashMap<String, String> {
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<String> = None;
     let mut current_content = String::new();
+    // Fenced code blocks are examples, not contract text: a `## Parameters`
+    // heading (or a parameter-shaped bullet) inside a fence must neither open
+    // a section nor feed structured extraction. Track the open fence so its
+    // lines stay out of `sections` until the matching closing fence.
+    let mut open_fence: Option<(char, usize)> = None;
 
     for line in body.lines() {
+        if let Some((fence_char, fence_len)) = open_fence {
+            if is_fence_close(line, fence_char, fence_len) {
+                open_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence) = fence_open(line) {
+            open_fence = Some(fence);
+            continue;
+        }
         if let Some(heading) = line.strip_prefix("## ") {
             if let Some(name) = current_name.take() {
-                sections.insert(name, current_content.trim().to_string());
+                record_section(&mut sections, name, current_content, issues);
             }
             current_name = Some(heading.trim().to_string());
             current_content = String::new();
@@ -255,10 +339,81 @@ fn split_sections(body: &str) -> std::collections::HashMap<String, String> {
     }
 
     if let Some(name) = current_name {
-        sections.insert(name, current_content.trim().to_string());
+        record_section(&mut sections, name, current_content, issues);
     }
 
     sections
+}
+
+/// Opening fence of a markdown code block: three or more backticks or
+/// tildes, indented by at most three spaces (CommonMark), optionally
+/// followed by an info string. Returns the fence character and length so
+/// the matching closing fence can be recognized. Per CommonMark the info
+/// string of a backtick fence may not contain a backtick — such a line is
+/// inline code, not a fence — while a tilde fence's info string may.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let fence_char = rest.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let fence_len = rest.chars().take_while(|c| *c == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    if fence_char == '`' && rest[fence_len..].contains('`') {
+        return None;
+    }
+    Some((fence_char, fence_len))
+}
+
+/// Closing fence: indented by at most three spaces, the same character
+/// repeated at least as many times as the opening fence, followed only by
+/// whitespace (CommonMark).
+fn is_fence_close(line: &str, fence_char: char, fence_len: usize) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let count = rest.chars().take_while(|c| *c == fence_char).count();
+    count >= fence_len && rest[count..].trim().is_empty()
+}
+
+/// Section names that feed structured extraction. Only these form the
+/// skill's contract; only they are checked for duplication.
+const CONTRACT_SECTIONS: [&str; 2] = ["Parameters", "Returns"];
+
+/// Insert one section, appending in encounter order when the heading
+/// repeats. Only a repeated contract heading (`Parameters` / `Returns`)
+/// is flagged as a parse issue (degrading the entry): structured
+/// extraction consumes just those names, while a same-name H2 under a
+/// different H1 parent is a layout real skills already use, not a
+/// contract violation. The earlier content is always kept, so nothing
+/// the author wrote is silently dropped.
+fn record_section(
+    sections: &mut std::collections::HashMap<String, String>,
+    name: String,
+    content: String,
+    issues: &mut Vec<String>,
+) {
+    let content = content.trim().to_string();
+    match sections.get_mut(&name) {
+        Some(existing) => {
+            if CONTRACT_SECTIONS.contains(&name.as_str()) {
+                issues.push(format!("duplicate section heading: {name}"));
+            }
+            existing.push('\n');
+            existing.push_str(&content);
+        }
+        None => {
+            sections.insert(name, content);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +463,7 @@ fn parse_typed_list(section: &str, issues: &mut Vec<String>) -> Vec<Parameter> {
     let re = &*TYPED_LIST_RE;
 
     let mut result = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in section.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with("- ") {
@@ -322,6 +478,9 @@ fn parse_typed_list(section: &str, issues: &mut Vec<String>) -> Vec<Parameter> {
             match ParamType::from_str_opt(type_str) {
                 Some(param_type) => {
                     let required = required_str == Some("required");
+                    if !seen.insert(name.clone()) {
+                        issues.push(format!("duplicate parameter name: {name}"));
+                    }
                     result.push(Parameter {
                         name,
                         param_type,
@@ -434,6 +593,25 @@ Search the web for current information.
     }
 
     #[test]
+    fn test_parse_bom_prefixed_frontmatter() {
+        let content =
+            "\u{feff}---\nname: web-search\ndescription: Search the web\n---\n\n# Web Search\n";
+
+        let entry = parse_skill_md(content, "fallback-dir");
+
+        assert_eq!(
+            entry.metadata.name, "web-search",
+            "frontmatter after a BOM must be honored, not discarded"
+        );
+        assert_eq!(entry.metadata.description, "Search the web");
+        assert!(
+            entry.parse_status.is_ok(),
+            "BOM-prefixed skill must parse cleanly, got {:?}",
+            entry.parse_status
+        );
+    }
+
+    #[test]
     fn test_parse_empty_frontmatter() {
         let content = r#"---
 ---
@@ -447,6 +625,140 @@ Search the web.
 
         assert_eq!(entry.metadata.name, "web-search"); // from dir_name
         assert!(entry.parse_status.is_degraded());
+    }
+
+    #[test]
+    fn test_parse_empty_frontmatter_does_not_leak_fences() {
+        let content = "---\n---\n\n# Web Search\n\nSearch the web.\n";
+
+        let entry = parse_skill_md(content, "web-search");
+
+        assert!(
+            !entry.body.contains("---"),
+            "frontmatter fences must not leak into the body: {:?}",
+            entry.body
+        );
+        assert_eq!(entry.metadata.description, "Search the web.");
+        assert!(entry.parse_status.is_degraded()); // still missing frontmatter
+    }
+
+    #[test]
+    fn test_parse_non_ascii_after_frontmatter_opener() {
+        // `---é` is not a fence line under the exact-line rule (mirroring
+        // the sec-core scanner's `line.trim() == "---"`), so the whole
+        // file is ordinary content: the body keeps every line instead of
+        // being truncated after the `---`-prefixed one. The rewrite uses
+        // no fixed-index byte slicing (split_once / split_inclusive /
+        // strip_suffix are char-boundary safe), so multi-byte characters
+        // right after a dash run cannot panic.
+        let content = "---é\n---\nbody";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert_eq!(entry.metadata.name, "demo");
+        assert_eq!(entry.body, "---é\n---\nbody");
+        assert!(entry.parse_status.is_degraded()); // no usable frontmatter
+    }
+
+    #[test]
+    fn test_parse_crlf_frontmatter_metadata_extracted() {
+        // Regression: strip_prefix('\n') after the opening fence returned
+        // None for CRLF files, emptying the whole YAML so a valid skill
+        // degraded to directory-name metadata (worked at merge-base).
+        let content = "---\r\nname: web-search\r\ndescription: Search the web\r\n---\r\nBody\r\n";
+
+        let entry = parse_skill_md(content, "dir-name");
+
+        assert_eq!(entry.metadata.name, "web-search");
+        assert_eq!(entry.metadata.description, "Search the web");
+        assert!(!entry.body.contains("---"));
+        assert!(entry.parse_status.is_ok());
+    }
+
+    #[test]
+    fn test_parse_thematic_break_closes_exact_opener() {
+        // A longer all-dash run (`----`, `-----`) is a valid Markdown
+        // thematic break, and legacy authors closed frontmatter with it.
+        // The exact-closer rule silently degraded those files into the
+        // body (the yaml block then smeared into the description
+        // fallback), so the closer accepts any all-dash run of >= 3
+        // dashes — while the opener stays exact and a `---text` line
+        // still never closes.
+        let content = "---\nname: legacy\ndescription: ok\n----\nBody.\n";
+        let entry = parse_skill_md(content, "dir-name");
+        assert_eq!(entry.metadata.name, "legacy");
+        assert_eq!(entry.metadata.description, "ok");
+        assert_eq!(entry.body, "Body.\n");
+        assert!(entry.parse_status.is_ok());
+
+        // Five dashes with CRLF and a trailing space behave the same.
+        let crlf = "---\r\nname: five\r\ndescription: ok\r\n----- \r\nBody\r\n";
+        let entry = parse_skill_md(crlf, "dir-name");
+        assert_eq!(entry.metadata.description, "ok");
+        assert_eq!(entry.body, "Body\r\n");
+        assert!(entry.parse_status.is_ok());
+
+        // A thematic-break OPENER still never opens frontmatter (the
+        // yaml inside the body is not honored).
+        let opener = parse_skill_md("----\n---\nname: never\n---\nBody\n", "dir-name");
+        assert!(opener.parse_status.is_degraded());
+        assert_ne!(opener.metadata.name, "never");
+
+        // `---text` is content, not a closer: bare-opener shape.
+        let text = parse_skill_md("---\nname: x\n---text\nBody\n", "dir-name");
+        assert!(text.parse_status.is_degraded());
+        assert_ne!(text.metadata.name, "x");
+    }
+
+    #[test]
+    fn test_parse_crlf_empty_frontmatter_does_not_leak_fences() {
+        let content = "---\r\n---\r\nBody";
+
+        let entry = parse_skill_md(content, "web-search");
+
+        assert!(
+            !entry.body.contains("---"),
+            "frontmatter fences must not leak into the body: {:?}",
+            entry.body
+        );
+        assert_eq!(entry.body, "Body");
+        assert_eq!(entry.metadata.name, "web-search"); // from dir_name
+        assert!(entry.parse_status.is_degraded()); // still missing frontmatter
+    }
+
+    #[test]
+    fn test_parse_crlf_description_stops_at_the_blank_line() {
+        // Regression: the paragraph fallback split on "\n\n", which never
+        // matches CRLF text, so a Windows-authored skill without a
+        // frontmatter description got its whole body back as the
+        // description instead of the first paragraph.
+        let content = "---\r\nname: web-search\r\n---\r\n# Web Search\r\n\r\nSearch the web for dogs.\r\n\r\nMore content here.\r\n";
+
+        let entry = parse_skill_md(content, "web-search");
+
+        assert_eq!(
+            entry.metadata.description, "Search the web for dogs.",
+            "CRLF paragraph must end at the blank line"
+        );
+        assert!(entry.parse_status.is_degraded()); // still missing description
+
+        // The LF twin defines the contract: the same first paragraph.
+        let lf = "---\nname: web-search\n---\n# Web Search\n\nSearch the web for dogs.\n\nMore content here.\n";
+        assert_eq!(
+            parse_skill_md(lf, "web-search").metadata.description,
+            entry.metadata.description
+        );
+    }
+
+    #[test]
+    fn test_parse_crlf_without_frontmatter_uses_the_first_paragraph() {
+        // The no-frontmatter fallback takes the same description path.
+        let content = "# Web Search\r\n\r\nSearch the web for dogs.\r\n\r\nMore content here.\r\n";
+
+        let entry = parse_skill_md(content, "web-search");
+
+        assert_eq!(entry.metadata.description, "Search the web for dogs.");
+        assert!(entry.parse_status.is_degraded()); // missing frontmatter
     }
 
     #[test]
@@ -619,6 +931,36 @@ description: Test skill
     }
 
     #[test]
+    fn test_parse_parameters_duplicate_name_is_degraded() {
+        let content = r#"---
+name: test
+description: Test skill
+---
+
+## Parameters
+
+- `query` (string, required): The search query
+- `query` (boolean, optional): A conflicting redefinition
+"#;
+
+        let entry = parse_skill_md(content, "test");
+
+        assert_eq!(entry.parameters.len(), 2); // both entries stay visible
+        assert!(
+            entry.parse_status.is_degraded(),
+            "duplicate parameter name must degrade the entry, got {:?}",
+            entry.parse_status
+        );
+        match &entry.parse_status {
+            ParseStatus::Degraded(msg) => assert!(
+                msg.contains("duplicate parameter name: query"),
+                "issue must name the duplicate, got: {msg}"
+            ),
+            other => panic!("expected degraded status, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_parameters_missing_required_optional() {
         let content = r#"---
 name: test
@@ -674,6 +1016,69 @@ No returns section here.
 
         assert!(entry.returns.is_empty());
         assert!(entry.parse_status.is_ok());
+    }
+
+    #[test]
+    fn test_parse_duplicate_parameters_sections_degrade_and_keep_both() {
+        let content = r#"---
+name: test
+description: Test skill
+---
+
+## Parameters
+
+- `first` (string, required): From the first section
+
+## Parameters
+
+- `second` (boolean, optional): From the second section
+"#;
+
+        let entry = parse_skill_md(content, "test");
+
+        assert!(
+            entry.parse_status.is_degraded(),
+            "duplicate ## Parameters heading must degrade the entry, got {:?}",
+            entry.parse_status
+        );
+        let names: Vec<&str> = entry.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["first", "second"],
+            "the first section's parameters must not be silently lost"
+        );
+    }
+
+    #[test]
+    fn test_same_h2_under_different_h1_parents_is_ok() {
+        // Same-name H2s scoped under different H1 parents are a normal
+        // layout, not a duplicate contract section.
+        let content = r#"---
+name: agentsight
+description: Query the agentsight dashboard
+---
+
+# Token query
+
+## Common commands
+
+- `tokens` (string, required): list tokens
+
+# Audit query
+
+## Common commands
+
+- `events` (string, required): list events
+"#;
+
+        let entry = parse_skill_md(content, "agentsight");
+
+        assert!(
+            entry.parse_status.is_ok(),
+            "same-name H2 under different H1 parents must parse Ok, got {:?}",
+            entry.parse_status
+        );
+        assert!(entry.parameters.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -741,5 +1146,144 @@ Body.
         let entry = parse_skill_md(content, "test");
 
         assert_eq!(entry.metadata.name, "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // Fence Exactness Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_thematic_break_opener_is_not_frontmatter() {
+        // A 4-dash horizontal rule is a valid Markdown construct, not a
+        // frontmatter fence (the fence is exactly three dashes on their
+        // own line, per CommonMark/Jekyll/Hugo and the sec-core scanner).
+        // The old prefix match treated it as an opener and dropped
+        // everything up to the next `---`-prefixed line out of the body.
+        let content = "----\n# My Skill\n\nIntro paragraph.\n\n---\n\nDetails.\n";
+
+        let entry = parse_skill_md(content, "my-skill");
+
+        assert!(entry.parse_status.is_degraded()); // no usable frontmatter
+        assert!(
+            entry.body.contains("# My Skill")
+                && entry.body.contains("Intro paragraph.")
+                && entry.body.contains("Details."),
+            "a thematic-break opener must not truncate the body: {:?}",
+            entry.body
+        );
+        // The description fallback is derived from the full body now; the
+        // old code computed it from the truncated body, whose first
+        // paragraph was "Details." (everything before the `---` line had
+        // been dropped).
+        assert_ne!(
+            entry.metadata.description, "Details.",
+            "the description fallback must not come from a truncated body"
+        );
+    }
+
+    #[test]
+    fn test_longer_dash_opener_is_not_frontmatter() {
+        let content = "-----\nA\n---\nB\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_degraded());
+        assert!(
+            entry.body.contains('A') && entry.body.contains('B'),
+            "body must keep content on both sides of the `---` line: {:?}",
+            entry.body
+        );
+    }
+
+    #[test]
+    fn test_closer_accepts_dash_run_after_exact_opener() {
+        // A longer all-dash closer (`----`, `-----`) is a Markdown
+        // thematic break legacy authors used to close frontmatter; the
+        // exact-line rule silently degraded those files into the body
+        // (the yaml block then smeared into the description fallback),
+        // so the closer accepts any all-dash run. The mid-line leak the
+        // old prefix match allowed stays fixed: a `---text` line never
+        // closes (pinned in test_parse_thematic_break_closes_exact_opener).
+        let content = "---\nname: demo\ndescription: d\n----\n\n# Body\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(
+            entry.parse_status.is_ok(),
+            "a thematic-break closer after an exact opener closes: {:?}",
+            entry.parse_status
+        );
+        assert_eq!(
+            entry.body, "\n# Body\n",
+            "the closer line itself must not leak into the body: {:?}",
+            entry.body
+        );
+        assert_eq!(entry.metadata.description, "d");
+    }
+
+    #[test]
+    fn test_closer_with_trailing_space_still_closes() {
+        // Trailing whitespace after a fence is an editor artifact, not
+        // content: it must not leak into the body.
+        let content = "---\nname: demo\ndescription: d\n--- \n\nbody\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(
+            entry.body, "\nbody\n",
+            "the trailing space must not leak into the body"
+        );
+    }
+
+    #[test]
+    fn test_opener_with_trailing_space_still_opens() {
+        let content = "--- \nname: demo\ndescription: d\n---\n\nbody\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(
+            entry.body, "\nbody\n",
+            "the opener's trailing space must not push the file into the no-frontmatter path"
+        );
+    }
+
+    #[test]
+    fn bare_opener_without_closer_preserves_the_whole_content() {
+        // Review regression: a fence-shaped opener with NO closing fence
+        // keeps the entire content as the body — including the opener
+        // line itself — exactly like the pre-rewrite code (its
+        // `after_open.ends_with("---")` arm never matched an empty
+        // remainder, so these shapes always fell through to
+        // whole-content). Trailing whitespace on the opener and either
+        // line ending are covered.
+        for content in ["---", "--- \n", "---\r\n"] {
+            let entry = parse_skill_md(content, "demo");
+            assert!(
+                entry.parse_status.is_degraded(),
+                "{content:?}: no usable frontmatter"
+            );
+            assert_eq!(
+                entry.body, content,
+                "{content:?}: the whole input must stay in the body"
+            );
+        }
+    }
+
+    #[test]
+    fn test_body_thematic_break_after_frontmatter_is_preserved() {
+        // The closer search stops at the FIRST exact fence line; thematic
+        // breaks later in the body are body content and must survive.
+        let content = "---\nname: demo\ndescription: d\n---\n\nA\n\n----\n\nB\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert!(
+            entry.body.contains("----"),
+            "a body thematic break must be preserved: {:?}",
+            entry.body
+        );
     }
 }

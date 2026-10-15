@@ -54,7 +54,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 LABEL org.opencontainers.image.title="ANOLISA Agentic OS" \
       org.opencontainers.image.description="AI-native OS with Copilot Shell, Agent Security, AgentSight, and OS Skills" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.source="https://github.com/alibaba/anolisa" \
+      org.opencontainers.image.source="https://github.com/agentic-os-org/ANOLISA" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 ENTRYPOINT ["docker-entrypoint.sh"]

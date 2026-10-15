@@ -128,7 +128,7 @@ fn v2_written_lines_are_exported_for_the_v1_side() {
     let obs = ObservabilityWriter::new(&obs_path);
     for line in V1_OBSERVABILITY_LINES {
         let record: ObservabilityRecord = serde_json::from_str(line).expect("parsable");
-        obs.write(&record).expect("write");
+        obs.write(&record, 1000).expect("write");
     }
 
     // A record built from scratch exercises the default-filling constructors
@@ -147,7 +147,7 @@ fn v2_written_lines_are_exported_for_the_v1_side() {
         metrics,
     )
     .expect("valid record");
-    obs.write(&fresh_record).expect("write");
+    obs.write(&fresh_record, 1000).expect("write");
 
     for (source, name) in [
         (&sec_path, "security-events.jsonl"),

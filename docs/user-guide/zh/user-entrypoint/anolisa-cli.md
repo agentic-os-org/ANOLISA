@@ -196,9 +196,25 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
-对于 OpenClaw 插件，执行 `adapter enable` 即同意插件声明的能力。ANOLISA
-仅在安装器 help 列出 `--accept-capabilities` 时添加该参数，dry-run 计划也
-遵循相同规则。Capability consent 不授予 `--allow-unsafe-plugin-install`
+对于 OpenClaw 插件，`adapter enable` 默认同意插件声明的能力。ANOLISA 仅在
+对应命令的 help 列出 `--accept-capabilities` 时，将该参数添加到安装和激活
+命令。可通过以下选项拒绝自动授予同意：
+
+```bash
+anolisa adapter enable tokenless openclaw --no-accept-capabilities
+anolisa --dry-run adapter enable tokenless openclaw --no-accept-capabilities
+```
+
+dry-run 计划中的两条命令均不带同意参数。此选项仅适用于 OpenClaw 插件
+adapter；其他框架和仅含 skill 的 adapter 会拒绝它。它不撤销 OpenClaw 中
+已经授予的能力，未提供同意参数的宿主仍按自身策略处理。
+`ANOLISA_ACCEPT_CAPABILITIES` 或 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 等环境
+设置不控制 `adapter enable`；此入口须使用 CLI 选项。
+
+若 OpenClaw 需要新的授权，其拒绝仍作为执行失败报告（`EXECUTION_FAILED`，
+退出码 1），adapter 收据会保留，可通过
+`anolisa adapter disable tokenless openclaw` 清理。在另行授权前，请审阅宿主
+报告的能力要求。Capability consent 不授予 `--allow-unsafe-plugin-install`
 权限；同意被拒绝时会单独诊断，不归为插件安全扫描拒绝。
 
 对于 OpenCode，可用以下命令管理已安装的 Tokenless 插件：
@@ -233,6 +249,21 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 `unknown`；链接存在不代表运行中的 OpenCode 已加载插件。`--dry-run` 仅预览操作，
 不修改插件文件或 receipt。
 
+#### 千问办公 QwenWorkCN（macOS 本地模式）
+
+```bash
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
+anolisa adapter disable tokenless qwenwork
+```
+
+driver 旁加载 receipt 归属文件，不修改桌面应用的激活状态。enable/disable 后重启千问办公，
+开启新的本地会话。status 将加载和激活状态报告为 `unknown`，文件存在不代表已激活。
+后续操作保持相同的 `TOKENLESS_QWENWORK_HOME`；`TOKENLESS_QWENWORK_APP` 可覆盖检测到的
+应用 Bundle。已有脚本安装需先用原卸载器移除，再通过 CLI 启用。修改过的文件和无关文件
+会保留。依赖、迁移及 1.2.5 验证范围详见[千问办公集成](../token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+
 ### logs 与 bug report
 
 查看组件日志或生成诊断包：
@@ -241,10 +272,19 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 anolisa logs <component>
 anolisa logs <component> --limit 50
 anolisa logs <component> --severity warn
+anolisa logs <component> --since '2026-10-01T00:30:00Z'
 anolisa bug
 ```
 
 `--level` 是 `--severity` 的别名。
+
+`--since` 接受包含边界的 RFC3339 起始时间，按实际时间比较时区偏移和小数秒。
+例如，`2026-10-01T08:30:00+08:00` 和 `2026-10-01T00:30:00Z` 选择相同的时间窗口。
+`--limit` 按追加顺序保留最近的匹配记录。
+
+无效的 `--since` 值返回 `INVALID_ARGUMENT`。启用时间筛选时，`started_at` 无法
+解析为 RFC3339 的记录不匹配；省略 `--since` 可查看这些记录。格式错误的 JSON
+仍会导致查询报错。查询不会修改日志文件。
 
 使用 `--component cosh-ng` 时，`anolisa bug` 还会调用已安装的
 `cosh-shell` 二进制，将脱敏诊断包导出到全新的私有路径（`0600`，绝不

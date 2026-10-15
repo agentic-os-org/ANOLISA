@@ -39,24 +39,32 @@ impl AuditAnalyzer {
 
     /// Extract audit record from HttpRecord
     ///
-    /// Only creates llm_call for SSE responses, which are LLM streaming API calls.
-    /// Non-SSE requests (like npm package queries) are filtered out.
-    /// This method works for both HTTP/1.1 and HTTP/2 uniformly.
+    /// Creates llm_call for LLM API paths (streaming or not), and for streams
+    /// on unrecognized paths that carry parsed provider/usage evidence.
+    /// Everything else (npm package queries, MCP HTTP+SSE transport, metrics
+    /// streams) is filtered out. Works for both HTTP/1.1 and HTTP/2 uniformly.
     pub fn analyze_http(
         &self,
         http_record: &HttpRecord,
         token_record: Option<&TokenRecord>,
     ) -> Option<AuditRecord> {
-        // Create llm_call audit records for SSE responses AND non-streaming
-        // LLM API calls (identified by path). Without this, non-streaming
-        // completions (stream:false) are invisible in audit --type llm.
-        let is_llm_path = http_record.path.contains("/chat/completions")
-            || http_record.path.contains("/v1/messages")
-            || http_record.path.contains("/v1/completions")
-            || http_record
-                .path
-                .contains("/api/v1/copilot/generate_copilot");
-        if !http_record.is_sse && !is_llm_path {
+        // Create llm_call audit records for LLM API calls identified by path,
+        // and for streaming calls whose parsed events yielded provider/usage
+        // evidence. `is_sse` alone must not decide: MCP's legacy HTTP+SSE
+        // transport and metrics event streams are SSE but never LLM calls, so
+        // admitting every SSE response creates empty llm_call rows.
+        //
+        // Use the shared parser-layer path set that decides whether the
+        // GenAI pipeline creates a row at all: a private copy here
+        // drifted from it, and /v1/responses (plus the DashScope native
+        // endpoints) were parsed into trajectories yet never audited.
+        let is_llm_path = crate::parser::llm::is_llm_api_path(&http_record.path);
+        let has_usage_evidence = token_record.is_some_and(|record| {
+            record.input_tokens > 0
+                || record.output_tokens > 0
+                || (!record.provider.is_empty() && record.provider != "unknown")
+        });
+        if !is_llm_path && !has_usage_evidence {
             return None;
         }
 
@@ -67,10 +75,25 @@ impl AuditAnalyzer {
             .as_ref()
             .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
 
-        // Extract model from request body if available
+        // Extract model. The request body is the primary source (the name the
+        // caller asked for), but not every protocol puts it there: Gemini
+        // embeds the model in the URL path (`/models/{model}:generateContent`)
+        // and its request body carries contents/generationConfig only. When
+        // the body never arrived (truncated capture), the paired token record
+        // still holds the model the server reported — the provider resolution
+        // below already treats it as a source.
         let model = request_json
             .as_ref()
-            .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));
+            .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()))
+            .or_else(|| {
+                crate::analyzer::message::MessageParser::gemini_model_from_path(&http_record.path)
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                token_record
+                    .and_then(|t| t.model.clone())
+                    .filter(|m| !m.is_empty())
+            });
 
         // Provider resolution: the parsed token usage is authoritative; fall
         // back to the endpoint path (compatible-mode completion paths still
@@ -298,6 +321,57 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_nonllm_path_no_audit_without_usage_evidence() {
+        // MCP's legacy HTTP+SSE transport and metrics event streams are SSE
+        // too, so `is_sse` alone does not prove an LLM call. Without parsed
+        // usage evidence the stream must not create an llm_call audit row.
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/mcp/sse", true, Some("event: message\ndata: {}\n\n"));
+        let result = analyzer.analyze_http(&record, None);
+        assert!(
+            result.is_none(),
+            "non-LLM SSE path must NOT produce an audit record without usage evidence"
+        );
+    }
+
+    #[test]
+    fn test_sse_nonllm_path_with_usage_evidence_still_audited() {
+        // A real streaming call served from a gateway path outside the shared
+        // LLM path set still carries provider/usage evidence and must stay in
+        // the audit; the path gate is not allowed to drop it.
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/custom/gateway/stream", true, None);
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 100, 20);
+        let result = analyzer.analyze_http(&record, Some(&token));
+        assert!(
+            result.is_some(),
+            "SSE with parsed usage evidence must still produce an audit record"
+        );
+    }
+
+    #[test]
+    fn test_nonsse_responses_and_dashscope_paths_produce_audit() {
+        // Both endpoints are parsed into trajectories by the GenAI pipeline
+        // (is_llm_api_path), so a non-streaming call must not vanish from
+        // audit --type llm.
+        let analyzer = AuditAnalyzer::new();
+        for path in &[
+            "/v1/responses",
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            "/proxy/chat/completions",
+        ] {
+            let record = make_http_record(path, false, None);
+            let result = analyzer.analyze_http(&record, None);
+            assert!(result.is_some(), "{path} must produce an audit record");
+        }
+
+        // Token counting is not an inference call and stays out of the audit.
+        let record = make_http_record("/v1/messages/count_tokens", false, None);
+        assert!(analyzer.analyze_http(&record, None).is_none());
+    }
+
+    #[test]
     fn test_sse_path_produces_audit_with_sse_true() {
         let analyzer = AuditAnalyzer::new();
         let record = make_http_record("/v1/chat/completions", true, None);
@@ -358,5 +432,75 @@ mod tests {
         let record = make_http_record("/v1/messages", true, None);
         let audit = analyzer.analyze_http(&record, None).unwrap();
         assert_eq!(audit.session_id, None);
+    }
+
+    #[test]
+    fn test_analyze_http_labels_gemini_streams_from_the_path() {
+        // A Gemini streamGenerateContent call: the model rides in the URL
+        // path and the request body carries contents/generationConfig only,
+        // so neither the body `model` read nor the three-parser path set can
+        // label the row.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            true,
+            None,
+        );
+        record.request_body = Some(
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{}}"#
+                .to_string(),
+        );
+        let audit = analyzer.analyze_http(&record, None).unwrap();
+        if let AuditExtra::LlmCall {
+            provider, model, ..
+        } = &audit.extra
+        {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_gemini_model_prefers_the_requested_name() {
+        // The token record carries the server-reported `modelVersion`
+        // snapshot; the audit row describes the call the client made, so the
+        // requested name from the path wins.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+            true,
+            None,
+        );
+        record.request_body =
+            Some(r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#.to_string());
+        let token = TokenRecord::new(1, "test".into(), "gemini".into(), 120, 34)
+            .with_model("gemini-2.5-pro-002");
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { model, .. } = &audit.extra {
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_model_falls_back_to_the_token_record() {
+        // The request body never arrived (truncated capture) but the response
+        // chunks carried `model`; the paired token record is the only
+        // remaining model source, and the provider resolution in this very
+        // function already trusts it.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record("/v1/chat/completions", true, None);
+        record.request_body = None;
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 10, 5)
+            .with_model("qwen3-coder-plus");
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { model, .. } = &audit.extra {
+            assert_eq!(model.as_deref(), Some("qwen3-coder-plus"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
     }
 }

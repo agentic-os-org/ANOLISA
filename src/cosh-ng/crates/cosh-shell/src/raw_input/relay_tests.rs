@@ -2190,6 +2190,7 @@ fn zsh_native_slash_tab_is_handed_to_shell_immediately() {
             RawInputEvent::PtyUserWrite {
                 generation,
                 line_submits,
+                ..
             } => Some((*generation, *line_submits)),
             _ => None,
         })
@@ -4455,3 +4456,6 @@ fn native_hint_prefix_slash_keeps_rust_intercept_when_routed() {
     assert!(main_prompt_gate.is_at_prompt());
     fs::remove_file(path).ok();
 }
+
+#[path = "relay_tests/routing_recovery.rs"]
+mod routing_recovery;

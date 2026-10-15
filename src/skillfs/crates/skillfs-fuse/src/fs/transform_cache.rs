@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::{File, Metadata};
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,15 +105,18 @@ impl TransformCache {
         path: &Path,
         target: Option<&ActiveTarget>,
         pipeline: [u8; 32],
+        max_skill_size: u64,
         transform: impl FnOnce(&str) -> String,
     ) -> io::Result<(Arc<str>, Metadata)> {
         // Open before checking the key: atomic replacement must select a new inode.
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
         let metadata = file.metadata()?;
         // Timestamps can collide even at nanosecond API precision. Read and
         // hash the selected bytes before reuse, rather than trusting stat alone.
-        let mut raw = String::new();
-        file.read_to_string(&mut raw)?;
+        // The read is capped at the mount's `max_skill_size`, as on the
+        // uncached path, so a file that grows after the stat is never
+        // buffered whole.
+        let raw = super::read_resolution::read_skill_md_limited(&file, &metadata, max_skill_size)?;
         let key = Key {
             skill: skill.into(),
             path: path.into(),
@@ -180,6 +183,8 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    const LIMIT: u64 = skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64;
+
     #[test]
     fn exact_reuse_and_every_key_dimension() {
         let tmp = tempfile::tempdir().unwrap();
@@ -191,17 +196,25 @@ mod tests {
             calls.set(calls.get() + 1);
             raw.to_uppercase()
         };
-        let original = cache.load("web", &path, None, [1; 32], run).unwrap().0;
-        let again = cache.load("web", &path, None, [1; 32], run).unwrap().0;
+        let original = cache
+            .load("web", &path, None, [1; 32], LIMIT, run)
+            .unwrap()
+            .0;
+        let again = cache
+            .load("web", &path, None, [1; 32], LIMIT, run)
+            .unwrap()
+            .0;
         assert!(Arc::ptr_eq(&original, &again));
         assert_eq!(calls.get(), 1);
-        cache.load("other", &path, None, [1; 32], run).unwrap();
-        cache.load("web", &path, None, [2; 32], run).unwrap();
+        cache
+            .load("other", &path, None, [1; 32], LIMIT, run)
+            .unwrap();
+        cache.load("web", &path, None, [2; 32], LIMIT, run).unwrap();
         let current = ActiveTarget::Current {
             source_dir: tmp.path().into(),
         };
         cache
-            .load("web", &path, Some(&current), [1; 32], run)
+            .load("web", &path, Some(&current), [1; 32], LIMIT, run)
             .unwrap();
         for version in ["v1", "v2"] {
             let target = ActiveTarget::Snapshot {
@@ -209,12 +222,14 @@ mod tests {
                 version: version.into(),
             };
             cache
-                .load("web", &path, Some(&target), [1; 32], run)
+                .load("web", &path, Some(&target), [1; 32], LIMIT, run)
                 .unwrap();
         }
         let alias = tmp.path().join("alias");
         std::fs::hard_link(&path, &alias).unwrap();
-        cache.load("web", &alias, None, [1; 32], run).unwrap();
+        cache
+            .load("web", &alias, None, [1; 32], LIMIT, run)
+            .unwrap();
         assert_eq!(calls.get(), 7);
         assert_eq!(&*original, "ORIGINAL");
         let state = cache.state.lock();
@@ -234,17 +249,26 @@ mod tests {
             calls.set(calls.get() + 1);
             raw.to_uppercase()
         };
-        let old = cache.load("web", &path, None, [1; 32], run).unwrap().0;
+        let old = cache
+            .load("web", &path, None, [1; 32], LIMIT, run)
+            .unwrap()
+            .0;
         std::fs::write(&path, "new").unwrap();
         // Model the timestamp collision observed on CI deterministically,
         // without depending on the host filesystem's timestamp resolution.
         cache.state.lock().entries[0].key.source =
             SourceIdentity::from(&std::fs::metadata(&path).unwrap());
-        let new = cache.load("web", &path, None, [1; 32], run).unwrap().0;
+        let new = cache
+            .load("web", &path, None, [1; 32], LIMIT, run)
+            .unwrap()
+            .0;
         assert_eq!(&*old, "OLD");
         assert_eq!(&*new, "NEW");
         assert_eq!(calls.get(), 2);
-        let again = cache.load("web", &path, None, [1; 32], run).unwrap().0;
+        let again = cache
+            .load("web", &path, None, [1; 32], LIMIT, run)
+            .unwrap()
+            .0;
         assert!(Arc::ptr_eq(&new, &again));
         assert_eq!(calls.get(), 2);
     }
@@ -257,7 +281,7 @@ mod tests {
         let cache = TransformCache::default();
         let read = || {
             cache
-                .load("web", &path, None, [1; 32], str::to_owned)
+                .load("web", &path, None, [1; 32], LIMIT, str::to_owned)
                 .unwrap()
                 .0
         };
@@ -283,7 +307,7 @@ mod tests {
         for atomic in [false, true] {
             let raced = TransformCache::default();
             let captured = raced
-                .load("web", &path, None, [1; 32], |raw| {
+                .load("web", &path, None, [1; 32], LIMIT, |raw| {
                     if atomic {
                         std::fs::write(&next, "atomic").unwrap();
                         std::fs::rename(&next, &path).unwrap();
@@ -297,7 +321,7 @@ mod tests {
             assert!(raced.state.lock().entries.is_empty());
             assert_eq!(raced.state.lock().events[2], 1);
             let fresh = raced
-                .load("web", &path, None, [1; 32], str::to_owned)
+                .load("web", &path, None, [1; 32], LIMIT, str::to_owned)
                 .unwrap()
                 .0;
             assert_ne!(captured, fresh);
@@ -305,7 +329,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(
             cache
-                .load("web", &path, None, [1; 32], str::to_owned)
+                .load("web", &path, None, [1; 32], LIMIT, str::to_owned)
                 .is_err()
         );
     }
@@ -319,7 +343,7 @@ mod tests {
             let cache = TransformCache::new(entries, bytes);
             let get = |id| {
                 cache
-                    .load(id, &path, None, [0; 32], str::to_owned)
+                    .load(id, &path, None, [0; 32], LIMIT, str::to_owned)
                     .unwrap()
                     .0
             };
@@ -349,7 +373,7 @@ mod tests {
         for (entries, bytes) in [(0, 8), (2, 0), (2, 3)] {
             let cache = TransformCache::new(entries, bytes);
             let result = cache
-                .load("a", &path, None, [0; 32], str::to_owned)
+                .load("a", &path, None, [0; 32], LIMIT, str::to_owned)
                 .unwrap()
                 .0;
             assert_eq!(&*result, "1234");
@@ -357,7 +381,7 @@ mod tests {
         }
         let cache = TransformCache::default();
         let content = cache
-            .load("a", &path, None, [0; 32], str::to_owned)
+            .load("a", &path, None, [0; 32], LIMIT, str::to_owned)
             .unwrap()
             .0;
         let weak = Arc::downgrade(&content);
@@ -379,7 +403,7 @@ mod tests {
             for _ in 0..8 {
                 workers.push(scope.spawn(|| {
                     cache
-                        .load("shared", &path, None, [0; 32], |raw| {
+                        .load("shared", &path, None, [0; 32], LIMIT, |raw| {
                             barrier.wait();
                             raw.to_owned()
                         })
@@ -397,7 +421,14 @@ mod tests {
                 scope.spawn(move || {
                     for i in 0..20 {
                         cache
-                            .load(&format!("{worker}/{i}"), path, None, [0; 32], str::to_owned)
+                            .load(
+                                &format!("{worker}/{i}"),
+                                path,
+                                None,
+                                [0; 32],
+                                LIMIT,
+                                str::to_owned,
+                            )
                             .unwrap();
                         let state = cache.state.lock();
                         assert!(state.entries.len() <= 3 && state.bytes <= 12);

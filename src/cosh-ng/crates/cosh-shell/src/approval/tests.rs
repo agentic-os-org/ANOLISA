@@ -2,7 +2,8 @@ use super::*;
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::approval::handoff::{
     approval_shell_handoff_validation_message, command_matches_trust_key,
-    fallback_bash_execution_path, trust_key_from_command, ApprovedBashExecutionPath,
+    fallback_bash_execution_path, raw_bash_command, trust_key_from_command,
+    trusted_command_from_request, ApprovedBashExecutionPath,
 };
 use crate::approval::requests::{approval_request_from_governed_event, record_approval_requests};
 use crate::approval::resolution::{
@@ -17,32 +18,116 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 #[test]
-fn trust_key_from_command_normalizes_full_command() {
+fn trust_key_from_command_keeps_the_approved_content_intact() {
     assert_eq!(
         trust_key_from_command("git status").as_deref(),
         Some("git status")
     );
-    assert_eq!(
-        trust_key_from_command("npm   test").as_deref(),
-        Some("npm test")
-    );
     assert_eq!(trust_key_from_command("ls").as_deref(), Some("ls"));
     assert_eq!(trust_key_from_command("git -v").as_deref(), Some("git -v"));
+    // Only the `$ ` display prefix is parsed away, and only by
+    // `raw_bash_command`; nothing is trimmed. Interior whitespace is part of
+    // the command - collapsing it made two different commands share one
+    // approval - and edge bytes are part of it too, because bash does not
+    // ignore all of them (an escaped trailing space, CR, VT and FF are argument
+    // data). A cosmetic mismatch therefore costs one extra approval instead of
+    // widening an earlier one.
+    assert_eq!(
+        trust_key_from_command("  git status  ").as_deref(),
+        Some("  git status  ")
+    );
+    assert_ne!(
+        trust_key_from_command("npm   test").as_deref(),
+        trust_key_from_command("npm test").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("touch a\ntouch b").as_deref(),
+        trust_key_from_command("touch a touch b").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("touch a\ttouch b").as_deref(),
+        trust_key_from_command("touch a touch b").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command(r#"sed -i "s/a  b/X/" f"#).as_deref(),
+        trust_key_from_command(r#"sed -i "s/a b/X/" f"#).as_deref()
+    );
+    // Shell metas need no surrounding spaces, so the spaced and unspaced forms
+    // are different text and must not share a key either.
+    assert_ne!(
+        trust_key_from_command("echo a; touch /tmp/x").as_deref(),
+        trust_key_from_command("echo a;touch /tmp/x").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("echo a | wc -l").as_deref(),
+        trust_key_from_command("echo a|wc -l").as_deref()
+    );
 }
 
 #[test]
-fn trust_key_from_command_strips_dollar_prefix() {
+fn trust_key_keeps_a_dollar_prefixed_command_distinct() {
+    // The `$ ` display prefix is stripped exactly once, by `raw_bash_command`,
+    // at the single place a preview is turned back into a command. Stripping
+    // inside the key as well let a proposal whose raw text starts with `$ `
+    // reuse the key of the command without it and auto-approve a different
+    // program.
     assert_eq!(
-        trust_key_from_command("$ git status").as_deref(),
-        Some("git status")
+        trust_key_from_command("$ echo hi").as_deref(),
+        Some("$ echo hi")
     );
     assert_eq!(
-        trust_key_from_command("$ npm test").as_deref(),
-        Some("npm test")
+        trust_key_from_command("  $ echo hi  ").as_deref(),
+        Some("  $ echo hi  ")
+    );
+    assert_ne!(
+        trust_key_from_command("$ echo hi").as_deref(),
+        trust_key_from_command("echo hi").as_deref()
+    );
+    // The preview round-trip is the single strip: preview `$ $ echo hi`
+    // derives the raw command `$ echo hi`, whose key keeps the prefix, while
+    // preview `$ echo hi` derives `echo hi`.
+    assert_eq!(
+        trust_key_from_command(raw_bash_command("$ $ echo hi")).as_deref(),
+        Some("$ echo hi")
     );
     assert_eq!(
-        trust_key_from_command("$ ls -la").as_deref(),
-        Some("ls -la")
+        trust_key_from_command(raw_bash_command("$ echo hi")).as_deref(),
+        Some("echo hi")
+    );
+}
+
+#[test]
+fn trust_key_keeps_unicode_edge_whitespace_that_bash_treats_as_data() {
+    // U+00A0 and friends are ordinary filename characters in bash, so a key
+    // that dropped them would let `touch /tmp/staged` approve a proposal for
+    // `touch /tmp/staged\u{00a0}` - a different path on disk. No edge
+    // whitespace is normalized away, ASCII or otherwise.
+    let with_nbsp = "touch /tmp/staged\u{00a0}";
+    assert_eq!(
+        trust_key_from_command(with_nbsp).as_deref(),
+        Some(with_nbsp)
+    );
+    assert_ne!(
+        trust_key_from_command(with_nbsp).as_deref(),
+        trust_key_from_command("touch /tmp/staged").as_deref()
+    );
+    // Leading Unicode whitespace is part of the first word in bash, so it
+    // stays in the key as well.
+    assert_eq!(
+        trust_key_from_command("\u{00a0}touch /tmp/staged").as_deref(),
+        Some("\u{00a0}touch /tmp/staged")
+    );
+    // No edge normalization at all remains in the authorization path: even
+    // ASCII edge whitespace stays in the key, because a trim heuristic cannot
+    // tell ignorable edges from escaped or control-byte edges. Tolerating
+    // pasted or configured edge whitespace is a non-authorization concern.
+    assert_eq!(
+        trust_key_from_command("  touch /tmp/staged\t\n").as_deref(),
+        Some("  touch /tmp/staged\t\n")
+    );
+    assert_eq!(
+        trust_key_from_command(raw_bash_command("$ touch /tmp/staged\u{00a0}")).as_deref(),
+        Some(with_nbsp)
     );
 }
 
@@ -1123,6 +1208,15 @@ fn governed_shell_tool_call(command: &str) -> GovernedEvent {
 }
 
 #[test]
+fn trust_key_rejects_blank_commands_without_changing_valid_bytes() {
+    for command in ["", " ", "\t\n", "\r\u{000b}\u{000c}", "\u{00a0}"] {
+        assert_eq!(trust_key_from_command(command), None, "{command:?}");
+    }
+    let command = "  echo byte-exact\\ ";
+    assert_eq!(trust_key_from_command(command).as_deref(), Some(command));
+}
+
+#[test]
 fn trust_key_from_command_empty_input() {
     assert_eq!(trust_key_from_command(""), None);
 }
@@ -1237,6 +1331,139 @@ fn run_batch_consent_covers_is_fail_closed() {
         .grant_run_batch_consent("run-1".to_string());
     state.control.trust.clear_run_batch_consent();
     assert_eq!(state.control.trust.run_batch_consent(), None);
+}
+
+/// The sweep's block lookup keys by the command a handoff actually executes and
+/// fails closed when no executable command can be derived. A `{"cmd": ...}`
+/// input displays the serialized object as its preview while executing the `cmd`
+/// value, so a preview-derived key would miss the block and let turn consent
+/// replay a command whose earlier attempt left the effect uncertain. Requests
+/// with no derivable command never reach the sweep through the bridge (they are
+/// classified high risk), which is why this branch is pinned here rather than
+/// end to end.
+#[test]
+fn turn_consent_block_lookup_uses_the_executable_command() {
+    let mut state = InlineState::default();
+    let command = "touch /tmp/cosh-e05-cmdshape";
+    let key = crate::approval::handoff::trust_key_from_command(command).expect("trust key");
+    state
+        .control
+        .trust
+        .block_command_for_turn_consent("run-1", &key);
+
+    let cmd_shaped = provider_tool_request("Bash", Some(serde_json::json!({ "cmd": command })));
+    assert_ne!(
+        cmd_shaped.preview,
+        format!("$ {command}"),
+        "precondition: the card shows the serialized object, not the command"
+    );
+    assert!(
+        super::blocked_from_turn_consent(&state, &cmd_shaped, &HashSet::new()),
+        "the blocked key comes from the executed command, not the preview"
+    );
+
+    let other = provider_tool_request("Bash", Some(serde_json::json!({ "cmd": "df -h" })));
+    assert!(
+        !super::blocked_from_turn_consent(&state, &other, &HashSet::new()),
+        "an unblocked command is still swept, so the lookup is not blanket-true"
+    );
+
+    let opaque = provider_tool_request("Bash", Some(serde_json::json!({ "arguments": command })));
+    assert!(crate::approval::handoff::shell_handoff_command_from_request(&opaque).is_err());
+    assert!(
+        super::blocked_from_turn_consent(&state, &opaque, &HashSet::new()),
+        "no derivable command means no proof it is unblocked"
+    );
+
+    let no_input = provider_tool_request("Bash", None);
+    assert!(crate::approval::handoff::shell_handoff_command_from_request(&no_input).is_err());
+    assert!(super::blocked_from_turn_consent(
+        &state,
+        &no_input,
+        &HashSet::new()
+    ));
+}
+
+/// Session trust is keyed by the command a handoff executes, so mint, match and
+/// the uncertain-effect revocation all name the same text. A `{"cmd": ...}`
+/// request displays the serialized object and executes the `cmd` value; keying
+/// trust by that preview would leave a key no revocation can reach.
+#[test]
+fn trusted_command_is_the_executed_command_not_the_display_preview() {
+    let cmd_shaped =
+        provider_tool_request("Bash", Some(serde_json::json!({ "cmd": "touch /tmp/t" })));
+    assert_eq!(
+        trusted_command_from_request(&cmd_shaped).as_deref(),
+        Some("touch /tmp/t")
+    );
+    // This fixture's preview is a stand-in, not the serialized object
+    // `presentation_bash` really produces for a `cmd` input; the bridge
+    // regression pins that real shape. What is asserted here is that the
+    // derived command is the `cmd` value and not the preview text.
+    assert_ne!(cmd_shaped.preview, "$ touch /tmp/t");
+
+    let command_shaped =
+        provider_tool_request("Bash", Some(serde_json::json!({ "command": "df -h" })));
+    assert_eq!(
+        trusted_command_from_request(&command_shaped).as_deref(),
+        Some("df -h")
+    );
+
+    let opaque = provider_tool_request("Bash", Some(serde_json::json!({ "arguments": "df -h" })));
+    assert_eq!(trusted_command_from_request(&opaque), None);
+    assert_eq!(
+        trusted_command_from_request(&provider_tool_request("Bash", None)),
+        None
+    );
+}
+
+/// AlwaysTrust mints the executed command's key. A request that cannot produce
+/// an executable command resolves Blocked, and a Blocked resolution never mints,
+/// so no lasting trust can come out of it either; the `None` side of the
+/// derivation itself is pinned by the test above.
+#[test]
+fn always_trust_mints_the_executed_command_key() {
+    let mut opaque_state = InlineState::default();
+    opaque_state.approvals.requests.push(provider_tool_request(
+        "Bash",
+        Some(serde_json::json!({ "arguments": "touch /tmp/opaque" })),
+    ));
+    assert_eq!(opaque_state.approvals.requests[0].risk, "medium");
+
+    let opaque_decision =
+        apply_approval_decision(&mut opaque_state, 0, ApprovalCommandKind::AlwaysTrust)
+            .expect("approval decision");
+    assert_eq!(
+        opaque_decision.request.status,
+        ApprovalRequestStatus::Blocked,
+        "a request with no executable command cannot be handed off"
+    );
+    assert!(
+        opaque_state
+            .control
+            .trust
+            .session_trusted_commands()
+            .is_empty(),
+        "no lasting trust survives a resolution that never executes"
+    );
+
+    let mut cmd_state = InlineState::default();
+    cmd_state.approvals.requests.push(provider_tool_request(
+        "Bash",
+        Some(serde_json::json!({ "cmd": "touch /tmp/minted" })),
+    ));
+    apply_approval_decision(&mut cmd_state, 0, ApprovalCommandKind::AlwaysTrust)
+        .expect("approval decision");
+    let executed_key = trust_key_from_command("touch /tmp/minted").expect("trust key");
+    assert!(
+        cmd_state
+            .control
+            .trust
+            .session_trusted_commands()
+            .contains(&executed_key),
+        "the minted key is the executed command's: {:?}",
+        cmd_state.control.trust.session_trusted_commands()
+    );
 }
 
 /// Blocked turn decisions keep the blocked title and never grant consent.
@@ -1617,4 +1844,533 @@ fn classifier_verdict_wires_irrecoverable_panel_flag() {
     assert!(!assessment_is_irrecoverable(&runtime_assessment_summary(
         &benign
     )));
+}
+
+#[test]
+fn trust_key_preserves_escaped_and_control_edge_bytes() {
+    // Edge bytes are not always separators bash ignores: a trailing space
+    // escaped by a backslash is part of the filename, and CR/VT/FF are not in
+    // bash's IFS, so trimming them - Unicode or ASCII alike - would let
+    // `touch /tmp/x\` and `touch /tmp/x\ ` share a key while executing
+    // different arguments. The authorization key keeps raw bytes;
+    // edge-whitespace tolerance belongs to a non-authorization layer.
+    let backslash = "touch /tmp/x\\";
+    let escaped_space = "touch /tmp/x\\ ";
+    assert_eq!(
+        trust_key_from_command(backslash).as_deref(),
+        Some(backslash)
+    );
+    assert_eq!(
+        trust_key_from_command(escaped_space).as_deref(),
+        Some(escaped_space)
+    );
+    assert_ne!(
+        trust_key_from_command(backslash).as_deref(),
+        trust_key_from_command(escaped_space).as_deref()
+    );
+    for control in ['\r', '\x0b', '\x0c'] {
+        let suffixed = format!("touch /tmp/x{control}");
+        assert_eq!(
+            trust_key_from_command(&suffixed).as_deref(),
+            Some(suffixed.as_str()),
+            "edge control byte U+{:04X} must stay in the key",
+            control as u32
+        );
+        assert_ne!(
+            trust_key_from_command(&suffixed).as_deref(),
+            trust_key_from_command("touch /tmp/x").as_deref()
+        );
+    }
+    // The single `$ ` display-prefix parse is the only normalization left.
+    assert_eq!(
+        trust_key_from_command(raw_bash_command("$ touch /tmp/x\\ ")).as_deref(),
+        Some(escaped_space)
+    );
+}
+
+#[test]
+fn captured_turn_sweep_keeps_unknown_effect_retries_pending_after_owner_stops() {
+    let adapter = AdapterInstance::QwenCli(crate::adapter::QwenCliAdapter::default());
+    for native_first in [false, true] {
+        for status in [
+            "failed",
+            "interrupted",
+            "timed_out",
+            crate::types::SHELL_HANDOFF_UNTRACKED_STATUS,
+            "completed",
+        ] {
+            let (mut state, approval_rx) = state_with_active_control_run("run-1");
+            let command = "touch /tmp/captured-unknown-effect";
+            let handoff = ShellHandoffRequest::new(
+                command,
+                format!("$ {command}"),
+                "provider-tool-call",
+                "agent",
+                "attempt",
+                "run-1",
+                10,
+            )
+            .expect("handoff");
+            let mut block = state
+                .agent_run
+                .active
+                .as_ref()
+                .expect("owner")
+                .request
+                .command_block
+                .clone();
+            block.command = command.to_string();
+            block.exit_code = if status == "completed" { 0 } else { 1 };
+            crate::runtime::evidence_delivery::record_shell_handoff_completion(
+                &mut state, &handoff, &block, status,
+            );
+            for (id, text) in [
+                ("grant", "touch /tmp/captured-grant"),
+                ("other", "touch /tmp/captured-other"),
+                ("retry", command),
+                ("after", "touch /tmp/captured-after"),
+            ] {
+                let mut request = turn_request(id, "run-1", text, "medium");
+                request.request_id = Some(format!("ctrl-{id}"));
+                request.tool_use_id = Some(format!("tool-{id}"));
+                if native_first && id == "grant" {
+                    request.subject = "Read".to_string();
+                    request.tool_input = Some(serde_json::json!({ "file_path": "Cargo.toml" }));
+                    request.preview = "Cargo.toml".to_string();
+                }
+                let mut governed =
+                    governed_provider_tool_permission(&format!("ctrl-{id}"), &format!("tool-{id}"));
+                if let AgentEvent::ToolPermissionRequest {
+                    tool_name,
+                    tool_input,
+                    ..
+                } = &mut governed.event
+                {
+                    *tool_name = request.subject.clone();
+                    *tool_input = request.tool_input.clone().expect("input");
+                }
+                state
+                    .agent_run
+                    .active
+                    .as_mut()
+                    .expect("owner")
+                    .governed_events
+                    .push(governed);
+                state.approvals.requests.push(request);
+            }
+            let mut approve = ShellEvent::user_input_intercepted("session-1", "grant");
+            approve.component = Some("card".to_string());
+            approve.message = Some("approve_turn".to_string());
+            render_approval_actions(&[approve], &[], &adapter, &mut state, &mut Vec::new(), 700)
+                .expect("approve turn and deliver");
+            if native_first {
+                assert!(approval_rx.try_iter().any(|message| matches!(message,
+                    crate::adapter::ApprovalChannelMessage::Response(response)
+                        if response.request_id == "ctrl-grant" && matches!(response.decision, ApprovalDecision::Allow)
+                )), "the first delivery must respond natively before the sweep stops the owner");
+            }
+            assert!(
+                state.agent_run.active.is_none(),
+                "delivery must stop the owner"
+            );
+            assert_eq!(state.control.trust.run_batch_consent(), None);
+            let expected = if status == "completed" {
+                ApprovalRequestStatus::Approved
+            } else {
+                ApprovalRequestStatus::Pending
+            };
+            assert_eq!(
+                state.approvals.requests[2].status, expected,
+                "{status}, native_first={native_first}"
+            );
+            for index in [0, 1, 3] {
+                assert_eq!(
+                    state.approvals.requests[index].status,
+                    ApprovalRequestStatus::Approved
+                );
+            }
+            let mut queued = Vec::new();
+            while let Some(request) = state.control.shell_handoff_mut().emit_next_approved(701) {
+                queued.push(request.command);
+                state.control.shell_handoff_mut().pop_pending();
+            }
+            assert_eq!(
+                queued.iter().any(|text| text == command),
+                status == "completed"
+            );
+            assert!(queued
+                .iter()
+                .any(|text| text == "touch /tmp/captured-after"));
+        }
+    }
+}
+
+#[test]
+fn turn_consent_blocks_do_not_cover_a_foreign_run() {
+    let mut state = InlineState::default();
+    let command = "touch /tmp/run-bound-effect";
+    let key = trust_key_from_command(command).expect("key");
+    state
+        .control
+        .trust
+        .block_command_for_turn_consent("run-1", &key);
+    let request = turn_request("foreign", "run-2", command, "medium");
+    assert!(!super::blocked_from_turn_consent(
+        &state,
+        &request,
+        &HashSet::new()
+    ));
+    state.approvals.requests.push(request);
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-2".to_string());
+    let adapter = AdapterInstance::QwenCli(crate::adapter::QwenCliAdapter::default());
+    super::sweep_batch_consented_requests("run-2", None, &adapter, &mut state, &mut Vec::new())
+        .expect("foreign run sweep");
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    let queued = state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(702)
+        .expect("foreign command queued");
+    assert_eq!(queued.command, command);
+    assert!(state
+        .control
+        .trust
+        .is_blocked_for_turn_consent("run-1", &key));
+}
+
+#[test]
+fn invalidated_queued_approval_actions_preserve_shell_events_and_accept_fresh_input() {
+    use crate::runtime::dispatcher::RuntimeDispatcher;
+    use crate::runtime::events::ShellEventSnapshot;
+
+    let (mut state, _approval_rx) = state_with_active_control_run("run-1");
+    state.approvals.requests.push(provider_tool_request(
+        "Bash",
+        Some(serde_json::json!({ "command": "echo fresh-approval" })),
+    ));
+    let mut events = vec![ShellEvent::command_started(
+        "sess-1",
+        "cmd-1",
+        "echo shell-history",
+        "/tmp",
+        1,
+    )];
+    events.push(ShellEvent::command_finished(
+        ShellEventKind::CommandCompleted,
+        "sess-1",
+        "cmd-1",
+        0,
+        2,
+        "/tmp/shell-history-output",
+    ));
+    for (message, input) in [
+        ("focus", "req-1:1"),
+        ("details", "req-1"),
+        ("approve", "req-1"),
+        ("approve_turn", "req-1"),
+        ("always_trust", "req-1"),
+        ("deny", "req-1"),
+        ("cancel", "req-1"),
+        ("send_to_shell", "req-1"),
+    ] {
+        let mut event = ShellEvent::user_input_intercepted("sess-1", input);
+        event.component = Some("card".to_string());
+        event.message = Some(message.to_string());
+        events.push(event);
+    }
+    let base = 4096;
+    state.approval_slice.observer_event_end = base + events.len();
+    let mut output = Vec::new();
+    crate::approval::slice_present::relinquish_untrusted_and_render_inline(&mut state, &mut output)
+        .expect("invalidate before queued event dispatch");
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let snapshot = ShellEventSnapshot::with_base(base, &events);
+    let actions = RuntimeDispatcher::dispatch_inline_batch(
+        &snapshot,
+        &adapter,
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .expect("dispatch invalidated queued actions");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    assert!(state.approvals.journal.is_empty());
+    assert!(!state.approvals.focus.contains_key("req-1"));
+    assert!(!state.approvals.expanded_cards.contains("req-1"));
+    assert!(state.shell_command_activity_observed);
+    assert!(state
+        .session_blocks
+        .iter()
+        .any(|block| block.command == "echo shell-history"));
+    assert_eq!(state.control.event_cursor().position(), base + events.len());
+
+    let mut fresh = ShellEvent::user_input_intercepted("sess-1", "req-1");
+    fresh.component = Some("card".to_string());
+    fresh.message = Some("approve".to_string());
+    events.push(fresh);
+    let snapshot = ShellEventSnapshot::with_base(base, &events);
+    let actions = RuntimeDispatcher::dispatch_inline_batch(
+        &snapshot,
+        &adapter,
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .expect("fresh event exactly at invalidation fence");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    assert_eq!(state.approvals.journal.len(), 1);
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(base + events.len())
+        .is_some());
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(base + events.len())
+        .is_none());
+    let actions = RuntimeDispatcher::dispatch_inline_batch(
+        &snapshot,
+        &adapter,
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .expect("repeated snapshot does not repeat decision");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+    assert_eq!(state.approvals.journal.len(), 1);
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(base + events.len())
+        .is_none());
+}
+
+struct FailedApprovalPresentation {
+    fail_write: bool,
+}
+
+impl std::io::Write for FailedApprovalPresentation {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.fail_write {
+            Err(std::io::Error::other("approval receipt write failed"))
+        } else {
+            Ok(bytes.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("approval receipt flush failed"))
+    }
+}
+
+fn activate_approval_slice(state: &mut InlineState) {
+    state.approval_slice.activation = Some(crate::runtime::approval_ui::ApprovalSliceActivation {
+        worker_path: "/tmp/cosh-ui-worker".into(),
+        limits: crate::ui::worker_protocol::ProtocolLimits {
+            max_payload_bytes: 1_048_576,
+            max_draw_ops: 4096,
+            max_text_bytes: 16_384,
+        },
+        max_surface_rows: 24,
+        columns: 40,
+        handshake_timeout: Duration::from_millis(100),
+        render_timeout: Duration::from_millis(100),
+        heartbeat_interval: Duration::from_millis(10),
+        heartbeat_timeout: Duration::from_millis(100),
+        backpressure_timeout: Duration::from_millis(100),
+        shutdown_timeout: Duration::from_millis(100),
+        failure_limit: 1,
+    });
+}
+
+#[test]
+fn committed_slice_approval_emits_once_despite_receipt_write_or_flush_failure() {
+    for fail_write in [true, false] {
+        let (mut state, _approval_rx) = state_with_active_control_run("run-1");
+        activate_approval_slice(&mut state);
+        state.approvals.requests.push(provider_tool_request(
+            "Bash",
+            Some(serde_json::json!({ "command": "printf committed-effect" })),
+        ));
+        let mut event = ShellEvent::user_input_intercepted("sess-1", "req-1");
+        event.component = Some("card".into());
+        event.message = Some("approve".into());
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let result = crate::runtime::controller::render_raw_inline_events(
+            &[event.clone()],
+            &mut FailedApprovalPresentation { fail_write },
+            &adapter,
+            "bash",
+            &mut state,
+        );
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Approved
+        );
+        assert_eq!(state.approvals.journal.len(), 1);
+        let action = result.expect("receipt failure must not abandon committed execution");
+        assert!(matches!(
+            action,
+            RawObserverAction::EmitToPty(_) | RawObserverAction::EmitToPtyWithPromptRestore(_)
+        ));
+        assert!(
+            state
+                .approval_slice
+                .capture_representation_reset
+                .display_is_failed(),
+            "known receipt failure must hold input before the actual PTY staging/write"
+        );
+        assert!(state
+            .approval_slice
+            .capture_representation_reset
+            .take_committed_emit());
+        assert!(state.control.shell_handoff().ready_front().is_none());
+        assert!(state
+            .control
+            .shell_handoff_mut()
+            .emit_next_approved(1)
+            .is_none());
+        let repeated = crate::runtime::controller::render_raw_inline_events(
+            &[event],
+            &mut Vec::new(),
+            &adapter,
+            "bash",
+            &mut state,
+        );
+        assert!(!matches!(
+            repeated,
+            Ok(RawObserverAction::EmitToPty(_) | RawObserverAction::EmitToPtyWithPromptRestore(_))
+        ));
+        assert!(!state
+            .approval_slice
+            .capture_representation_reset
+            .take_committed_emit());
+        assert_eq!(state.approvals.journal.len(), 1);
+    }
+}
+
+#[test]
+fn managed_focus_publication_keeps_its_final_viewport_binding() {
+    use crate::runtime::dispatcher::RuntimeDispatcher;
+    use crate::runtime::events::ShellEventSnapshot;
+
+    struct RestoreViewport(Option<(u16, u16)>);
+    impl Drop for RestoreViewport {
+        fn drop(&mut self) {
+            crate::approval::slice_present::set_test_viewport(self.0);
+        }
+    }
+    struct Output {
+        flushes: usize,
+        fault: u8,
+    }
+    impl std::io::Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 2 {
+                if self.fault == 1 {
+                    crate::approval::slice_present::set_test_viewport(Some((24, 39)));
+                } else if self.fault == 2 {
+                    return Err(std::io::Error::other("post-publication flush failed"));
+                }
+            }
+            Ok(())
+        }
+    }
+    let _restore = RestoreViewport(crate::approval::slice_present::set_test_viewport(Some((
+        24, 47,
+    ))));
+    let mut failures = Vec::new();
+    for fault in [0, 1, 2] {
+        crate::approval::slice_present::set_test_viewport(Some((24, 47)));
+        let mut state = InlineState::default();
+        activate_approval_slice(&mut state);
+        state.approval_slice.disabled = true;
+        state.approvals.requests.push(provider_tool_request(
+            "Bash",
+            Some(serde_json::json!({ "command": "echo focus" })),
+        ));
+        state.approvals.requests[0].risk = "high";
+        render_current_approval_request(&mut state, &mut Vec::new()).unwrap();
+        let mut event = ShellEvent::user_input_intercepted("sess-1", "req-1:1");
+        event.component = Some("card".into());
+        event.message = Some("focus".into());
+        let events = [event];
+        let result = RuntimeDispatcher::dispatch_inline_batch(
+            &ShellEventSnapshot::new(&events),
+            &AdapterInstance::Fake(FakeAgentAdapter),
+            "bash",
+            &mut state,
+            &mut Output { flushes: 0, fault },
+        );
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Pending
+        );
+        assert_eq!(
+            state.approvals.focus.get("req-1"),
+            Some(&ApprovalPanelAction::Deny)
+        );
+        if result.is_err() {
+            if state.approvals.active_panel_id.is_some()
+                || !state.approval_slice.capture_representation_reset.consume()
+            {
+                failures.push(format!(
+                    "fault {fault}: failed publication kept capture claim"
+                ));
+            }
+        } else if state.approval_slice.inline_geometry
+            != Some(crate::approval::slice_present::current_viewport().unwrap())
+        {
+            failures.push(format!(
+                "fault {fault}: capture claim kept an obsolete viewport"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+    for owner in ["legacy", "inline", "worker"] {
+        let mut state = InlineState::default();
+        if owner == "inline" {
+            state.approval_slice.inline_geometry = Some((24, 47));
+        } else if owner == "worker" {
+            activate_approval_slice(&mut state);
+            state.approval_slice.session = Some(Box::new(
+                crate::approval::surface_session::TtyApprovalSurfaceSession::idle_closed_tty_for_test(
+                    state.approval_slice.activation.clone().unwrap(),
+                    crate::approval::slice::ApprovalActionKey {
+                        shell_session_id: "sess-1".into(),
+                        run_id: "run-1".into(),
+                        approval_id: "req-1".into(),
+                        request_id: "ctrl-1".into(),
+                        tool_use_id: "toolu-1".into(),
+                    },
+                ),
+            ));
+        }
+        let mut output = Output {
+            flushes: 0,
+            fault: 0,
+        };
+        super::flush_legacy_approval_panel(&state, &mut output).unwrap();
+        assert_eq!(output.flushes, usize::from(owner == "legacy"), "{owner}");
+    }
 }

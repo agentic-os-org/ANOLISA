@@ -220,14 +220,16 @@ fn build_request_preserves_user_provided_secrets() {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        is_sts: false,
+        refresh_from_ecs_metadata: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     };
     let secret = "short-provider-secret";
     let messages = vec![Message::user(&format!("api_key={secret}"))];
 
-    let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+    let body = provider
+        .build_request_body(&messages, &[], &GenerateConfig::default())
+        .expect("build request body");
     let payload = body.to_string();
 
     assert!(payload.contains(secret), "{payload}");
@@ -242,7 +244,7 @@ fn test_provider() -> SysomProvider {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        is_sts: false,
+        refresh_from_ecs_metadata: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     }
@@ -273,7 +275,11 @@ fn extra_params_cannot_raise_the_wire_output_cap() {
         ..GenerateConfig::default()
     };
 
-    let inner = wire_inner(&provider.build_request_body(&[], &[], &config));
+    let inner = wire_inner(
+        &provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body"),
+    );
 
     assert_eq!(inner["max_tokens"], 16_384);
     assert_eq!(inner["max_completion_tokens"], 16_384);
@@ -289,9 +295,66 @@ fn extra_params_may_still_lower_the_wire_output_cap() {
         ..GenerateConfig::default()
     };
 
-    let inner = wire_inner(&provider.build_request_body(&[], &[], &config));
+    let inner = wire_inner(
+        &provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body"),
+    );
 
     assert_eq!(inner["max_tokens"], 512);
+}
+
+/// D02: the SysOM builder owns its envelope and protocol control fields, so
+/// `extra_params` must not replace them. `tool_choice` and `instance_id` are
+/// constructed here (unlike the generic OpenAI-compatible builder), which is
+/// why the rejected set is enumerated per provider instead of shared.
+#[test]
+fn extra_params_cannot_override_program_owned_request_fields() {
+    let provider = test_provider();
+    for field in [
+        "messages",
+        "model",
+        "stream",
+        "use_dashscope",
+        "version",
+        "tools",
+        "tool_choice",
+        "instance_id",
+    ] {
+        let config = GenerateConfig {
+            extra_params: Some(serde_json::json!({ field: "attacker-controlled" })),
+            ..GenerateConfig::default()
+        };
+        let error = provider
+            .build_request_body(&[], &[], &config)
+            .expect_err("program-owned field must be rejected, not merged");
+        assert!(error.contains(field), "{field}: {error}");
+        assert!(error.contains("extra_params"), "{field}: {error}");
+    }
+}
+
+#[test]
+fn extra_params_keeps_legitimate_model_parameters() {
+    let provider = test_provider();
+    let config = GenerateConfig {
+        max_tokens: 4096,
+        extra_params: Some(serde_json::json!({
+            "enable_thinking": true,
+            "top_p": 0.5,
+        })),
+        ..GenerateConfig::default()
+    };
+
+    let inner = wire_inner(
+        &provider
+            .build_request_body(&[], &[], &config)
+            .expect("build request body"),
+    );
+
+    assert_eq!(inner["enable_thinking"], true);
+    assert_eq!(inner["top_p"], 0.5);
+    assert_eq!(inner["use_dashscope"], true);
+    assert_eq!(inner["version"], 2);
 }
 
 fn ecs_metadata_now() -> chrono::DateTime<Utc> {

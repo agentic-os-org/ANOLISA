@@ -739,8 +739,9 @@ async fn recover_workspace_inner(
     // Intentionally no cwd guard: recover is a terminal "tear out" operation
     // gated by CLI ConfirmationRequired. The CLI prompt is the contract.
 
-    // 3. call backend recover
-    state
+    // 3. call backend recover; the temp-snapshot paths it could not
+    //    delete join the response as a cleanup warning.
+    let temp_leftovers = state
         .backend
         .recover_workspace(&ws_id, &original_path)
         .await?;
@@ -760,26 +761,41 @@ async fn recover_workspace_inner(
 
     // 5. return
     let backup = crate::backends::btrfs_common::backup_path_for(&original_path);
-    let warning = match archive_recovered_backup(&backup).await {
-        Ok(Some(archive)) => Some(format!(
+    let mut warnings: Vec<String> = Vec::new();
+    if !temp_leftovers.is_empty() {
+        let listed = temp_leftovers
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        warnings.push(format!(
+            "Workspace recovered, but the following internal temp snapshots could not \
+             be deleted and may still occupy backend storage:\n{listed}\n\n\
+             The workspace files were restored and these leftovers do not affect \
+             usage; they are retried on the next bootstrap or diff"
+        ));
+    }
+    match archive_recovered_backup(&backup).await {
+        Ok(Some(archive)) => warnings.push(format!(
             "Pre-init backup archived at {:?}; inspect it before removal. You can run init again.",
             archive
         )),
-        Ok(None) => None,
-        Err(error) => Some(format!(
+        Ok(None) => {}
+        Err(error) => warnings.push(format!(
             "Workspace recovered, but pre-init backup {:?} could not be archived: {error:#}. \
              Inspect and move this backup to another location before running init again",
             backup
         )),
-    };
-    Ok(match warning {
-        Some(warning) => Response::RecoverWithWarning {
+    }
+    Ok(if warnings.is_empty() {
+        Response::RecoverOk {
             workspace: original_path,
-            warning,
-        },
-        None => Response::RecoverOk {
+        }
+    } else {
+        Response::RecoverWithWarning {
             workspace: original_path,
-        },
+            warning: warnings.join("\n\n"),
+        }
     })
 }
 
@@ -2409,6 +2425,61 @@ mod tests {
         assert!(!dir.exists(), "recover must wipe stale per-ws index dir");
     }
 
+    /// Temp snapshots the backend could not delete during recover must reach
+    /// the caller: the response carries the leftover paths with the
+    /// does-not-affect-usage note instead of a plain success (#6198).
+    #[tokio::test]
+    async fn recover_reports_temp_snapshot_leftovers_as_warning() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecorderStubBackend {
+            recover_leftovers: vec![
+                "/data/.diff-tmp/ws-warn/a1b2c3".to_string(),
+                "/data/.diff-tmp/ws-warn/deadbeef".to_string(),
+            ],
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            state_tmp.path().to_path_buf(),
+        ));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let canon = tokio::fs::canonicalize(ws_tmp.path()).await.unwrap();
+        state
+            .register_workspace(
+                "ws-warn".into(),
+                canon.clone(),
+                SnapshotIndex::new(canon.clone()),
+            )
+            .unwrap();
+
+        let Response::RecoverWithWarning { warning, .. } =
+            recover_workspace(&state, &canon.to_string_lossy())
+                .await
+                .unwrap()
+        else {
+            panic!("leftover temp snapshots must produce a warning response");
+        };
+        assert!(
+            warning.contains("could not be deleted"),
+            "warning explains the failure: {warning}"
+        );
+        assert!(
+            warning.contains("- /data/.diff-tmp/ws-warn/a1b2c3")
+                && warning.contains("- /data/.diff-tmp/ws-warn/deadbeef"),
+            "warning lists every leftover path: {warning}"
+        );
+        assert!(
+            warning.contains("do not affect usage"),
+            "warning keeps the workspace usable: {warning}"
+        );
+        assert_eq!(
+            backend.recover_call_count(),
+            1,
+            "backend.recover_workspace must run once"
+        );
+    }
+
     #[tokio::test]
     async fn confirmed_recovery_rechecks_deletion_scope_and_pins_identity() {
         let temp = tempfile::tempdir().unwrap();
@@ -2568,6 +2639,7 @@ mod tests {
         init_calls: std::sync::atomic::AtomicUsize,
         pause_migration: bool,
         restore_live_directory: bool,
+        recover_leftovers: Vec<String>,
         init_progress: tokio::sync::Semaphore,
         init_continue: tokio::sync::Semaphore,
     }
@@ -2581,6 +2653,7 @@ mod tests {
                 init_calls: std::sync::atomic::AtomicUsize::new(0),
                 pause_migration: false,
                 restore_live_directory: false,
+                recover_leftovers: Vec::new(),
                 init_progress: tokio::sync::Semaphore::new(0),
                 init_continue: tokio::sync::Semaphore::new(0),
             }
@@ -2601,14 +2674,18 @@ mod tests {
         fn snapshots_root(&self) -> &std::path::Path {
             &self.snapshots_root_path
         }
-        async fn recover_workspace(&self, ws_id: &str, original: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(
+            &self,
+            ws_id: &str,
+            original: &str,
+        ) -> anyhow::Result<Vec<String>> {
             self.recover_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.restore_live_directory {
                 tokio::fs::remove_file(original).await?;
                 tokio::fs::rename(self.data_root().join(ws_id), original).await?;
             }
-            Ok(())
+            Ok(self.recover_leftovers.clone())
         }
         async fn init_workspace(
             &self,

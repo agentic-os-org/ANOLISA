@@ -569,6 +569,9 @@ pub enum ClaimResourceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverPayload {
+    /// QwenWork macOS local-mode sideload.
+    #[serde(rename = "qwenwork")]
+    QwenWork(QwenWorkClaim),
     /// OpenCode local-plugin payload; the spelling is the persisted discriminator.
     #[serde(rename = "opencode")]
     OpenCode(OpenCodeClaim),
@@ -601,6 +604,18 @@ pub enum DriverPayload {
     Dsh(DshClaim),
 }
 
+/// QwenWork copy ownership, including an interrupted upgrade's previous revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenWorkClaim {
+    /// Resource id of the plugin directory, never an unchecked absolute path.
+    pub plugin_resource: String,
+    /// Persisted before the first copy; false receipts never authorize existing files.
+    pub installation_started: bool,
+    /// Previous managed bytes retained until all replacement copies succeed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_files: Vec<MaterializedFile>,
+}
+
 /// OpenCode ownership refers to a validated symlink resource, never a second path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenCodeClaim {
@@ -626,6 +641,18 @@ pub struct OpenClawClaim {
     /// Resource ids of applied config key/value pairs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_resources: Vec<String>,
+    /// Whether an install preflight rejected an attempt before mutation.
+    /// Re-enable carries this fact forward until a later install succeeds.
+    #[serde(default)]
+    pub install_rejected_before_mutation: bool,
+    /// Whether this receipt still owns or may own a plugin installation.
+    /// Missing legacy values default to true so re-enable remains conservative.
+    #[serde(default = "default_plugin_cleanup_required")]
+    pub plugin_cleanup_required: bool,
+}
+
+fn default_plugin_cleanup_required() -> bool {
+    true
 }
 
 /// Hermes driver payload. Holds only [`ClaimResource::id`] references.
@@ -866,6 +893,25 @@ pub enum ClaimValidationError {
 
 fn validate_integrity_entries(claim: &AdapterClaim) -> Result<(), ClaimValidationError> {
     let fail = |reason: String| Err(ClaimValidationError::IntegrityRecord { reason });
+    if let DriverPayload::QwenWork(payload) = &claim.driver_payload {
+        for file in &payload.previous_files {
+            if file.resource_id != payload.plugin_resource
+                || !claim.resources.iter().any(|resource| {
+                    resource.id == file.resource_id
+                        && matches!(resource.kind, ClaimResourceKind::ExternalPath { .. })
+                })
+                || file.kind != ManagedFileKind::File
+            {
+                return fail("invalid QwenWork previous file resource".into());
+            }
+            validate_integrity_file(
+                &file.relative_path,
+                file.kind,
+                file.sha256.as_deref(),
+                file.symlink_target.as_deref(),
+            )?;
+        }
+    }
     if let Some(revision) = &claim.source_revision {
         if !revision.source_root.is_absolute() {
             return fail("source root is not absolute".into());
@@ -1380,6 +1426,8 @@ mod tests {
                 plugin_resource: "openclaw_plugin".to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         }
     }
@@ -1410,6 +1458,24 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize JSON");
         let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse JSON");
         assert_eq!(claim, parsed);
+    }
+
+    #[test]
+    fn legacy_openclaw_receipt_requires_plugin_cleanup_by_default() {
+        let mut value = serde_json::to_value(sample_claim()).expect("serialize claim");
+        let payload = value["driver_payload"]["openclaw"]
+            .as_object_mut()
+            .expect("OpenClaw payload");
+        payload.remove("install_rejected_before_mutation");
+        payload.remove("plugin_cleanup_required");
+
+        let loaded: AdapterClaim =
+            serde_json::from_value(value).expect("deserialize legacy receipt");
+        let DriverPayload::OpenClaw(payload) = loaded.driver_payload else {
+            panic!("expected OpenClaw payload");
+        };
+        assert!(!payload.install_rejected_before_mutation);
+        assert!(payload.plugin_cleanup_required);
     }
 
     #[test]
@@ -1813,6 +1879,8 @@ mod tests {
                 plugin_resource: "plugin".to_string(),
                 skill_resources: vec!["skill_sec_audit".to_string()],
                 config_resources: vec!["config_enabled".to_string()],
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         };
         let json = serde_json::to_string(&claim).expect("serialize");

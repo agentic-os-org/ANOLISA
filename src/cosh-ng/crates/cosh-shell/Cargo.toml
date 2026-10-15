@@ -1,5 +1,6 @@
 [package]
 name = "cosh-shell"
+default-run = "cosh-shell"
 version.workspace = true
 edition.workspace = true
 description = "Shell-first interactive Agent shell for cosh-ng"
@@ -13,10 +14,15 @@ categories = ["command-line-utilities", "development-tools"]
 name = "cosh-shell"
 path = "src/main.rs"
 
+[[bin]]
+name = "cosh-ui-worker"
+path = "src/bin/cosh-ui-worker.rs"
+
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde"] }
 nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
 ratatui = "0.28"
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

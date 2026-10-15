@@ -4,6 +4,12 @@
 
 需要理解架构、扩展功能、补充测试或参与贡献时，从这里开始。
 
+## AW
+
+- [构建、配置与组件接入](./aw/integration.md)
+- [配置参考](./aw/configuration.md)
+- [四框架使用与运行维护](../../user-guide/zh/user-entrypoint/aw.md)
+
 ## Copilot Shell
 
 - [架构](./copilot-shell/architecture.md)

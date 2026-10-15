@@ -39,8 +39,10 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
+| [AW](user-entrypoint/aw.md) | aw | Shared policy configuration and native tool Hooks for Qoder, OpenClaw, QwenPaw and Hermes; Linux Preview |
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | AI-native Linux terminal with an integrated Agent runtime |
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI terminal assistant and command gateway |
+| [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-tuning engine with JSON recommendations and safe rollback |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
 
 ### Agent Observability (`agent-observability/`)
@@ -91,7 +93,6 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [Blaze Sandbox Runtime](runtime/blaze.md) | blaze | Opt-in VM networking and periodic storage artifact synchronization for managed sandboxes |
 | [Workspace Checkpoints](runtime/ws-ckpt.md) | ws-ckpt | Workspace checkpoint/rollback via btrfs COW |
 | [Skill Filesystem](runtime/skillfs.md) | skillfs | FUSE virtual views with progressive disclosure |
 | [SkillFS Kubernetes Sidecar](runtime/skillfs-kubernetes-sidecar.md) | skillfs | Running SkillFS as a FUSE sidecar in Kubernetes |

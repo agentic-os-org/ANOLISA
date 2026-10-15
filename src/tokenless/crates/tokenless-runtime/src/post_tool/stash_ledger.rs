@@ -12,6 +12,19 @@ pub(super) struct StashLedger {
 }
 
 impl StashLedger {
+    /// Register one tentative write.
+    ///
+    /// The ownership chain and its rollback/commit consequences:
+    /// - `created` rows are owned by this run: rollback and commit-time
+    ///   orphan cleanup may delete them (at their generation).
+    /// - A refresh whose `previous_generation` matches the generation this
+    ///   ledger last recorded for the key is an in-session refresh:
+    ///   ownership follows to the new generation, so rollback deletes the
+    ///   live row.
+    /// - A refresh with any other `previous_generation` means a foreign
+    ///   writer refreshed in between (and may have emitted a marker):
+    ///   ownership is dropped, so neither rollback nor orphan cleanup can
+    ///   delete the row.
     pub(super) fn record(&mut self, write: StashWrite) {
         if !self.keys.contains(&write.key) {
             self.keys.push(write.key.clone());
@@ -39,6 +52,16 @@ impl StashLedger {
         }
     }
 
+    /// Finish the run against the output that reached the model.
+    ///
+    /// Orphan-cleanup contract: recorded keys whose retrieval marker is
+    /// visible in `output` for the caller's actual recovery method (matched
+    /// case-insensitively, like `retrieve`) are committed and returned. Every
+    /// other recorded key is an orphan — its marker never reached the model,
+    /// so `tokenless retrieve` can no longer reach the row — and a row still
+    /// owned by this run (see [`Self::record`]) is deleted at its recorded
+    /// generation. A foreign-refreshed row is not owned and survives, because
+    /// the run that refreshed it may still hold a marker for it.
     pub(super) fn commit(
         &mut self,
         output: &str,
@@ -157,6 +180,117 @@ mod tests {
             assert_eq!(store.retrieve(&key).unwrap().as_deref(), Some("原文\n"));
             assert!(store.retrieve(&orphan_key).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn in_session_refresh_keeps_ownership_and_rolls_back_the_refreshed_generation() {
+        // create (g1) then an in-session refresh (g2, prev=g1): ownership
+        // follows, so rollback deletes the LIVE g2 row.
+        let store = InMemoryStore::new();
+        let created = store.stash("payload").unwrap();
+        assert!(created.created);
+        let refreshed = store.stash("payload").unwrap();
+        assert!(!refreshed.created);
+        let key = created.key.clone();
+
+        let mut ledger = StashLedger::default();
+        ledger.record(created);
+        ledger.record(refreshed);
+        ledger.rollback(Some(&store));
+
+        assert!(
+            store.retrieve(&key).unwrap().is_none(),
+            "the refreshed live row must be rolled back"
+        );
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn foreign_refresh_drops_ownership_and_rollback_keeps_the_live_row() {
+        // create g1 recorded by us; a FOREIGN writer refreshes to g2 (not
+        // recorded); our next stash is g3 with prev=g2 — ownership is
+        // dropped, rollback must keep the live row.
+        let store = InMemoryStore::new();
+        let created = store.stash("payload").unwrap();
+        let key = created.key.clone();
+        let mut ledger = StashLedger::default();
+        ledger.record(created);
+
+        // Foreign refresh, unseen by the ledger.
+        let _foreign = store.stash("payload").unwrap();
+        // Our next write observes the foreign generation.
+        let ours = store.stash("payload").unwrap();
+        assert!(!ours.created);
+        assert_eq!(ours.previous_generation, Some(_foreign.generation));
+
+        ledger.record(ours);
+        ledger.rollback(Some(&store));
+
+        assert!(
+            store.retrieve(&key).unwrap().is_some(),
+            "a foreign-refreshed row must survive our rollback"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn commit_keeps_a_foreign_refreshed_row_when_its_marker_is_visible() {
+        // Same foreign-refresh setup, but the output contains the marker:
+        // commit must keep the row (the foreign run may still reference it).
+        let store = InMemoryStore::new();
+        let created = store.stash("payload").unwrap();
+        let key = created.key.clone();
+        let mut ledger = StashLedger::default();
+        ledger.record(created);
+        let _foreign = store.stash("payload").unwrap();
+        let ours = store.stash("payload").unwrap();
+        ledger.record(ours);
+
+        let output = serde_json::json!({
+            "text": tokenless_ccr::recovery_instruction(&key, &RecoveryMethod::Shell),
+        })
+        .to_string();
+        let kept = ledger.commit(&output, Some(&store), &RecoveryMethod::Shell);
+        assert_eq!(kept, vec![key.clone()]);
+        assert!(store.retrieve(&key).unwrap().is_some());
+    }
+
+    #[test]
+    fn commit_normalizes_uppercase_markers_to_lowercase_keys() {
+        // LLMs quote markers back in random case; retrieve() normalizes and
+        // commit() must too (recovery_hashes lowercases before matching).
+        let store = InMemoryStore::new();
+        let write = store.stash("payload").unwrap();
+        let key = write.key.clone();
+        let mut ledger = StashLedger::default();
+        ledger.record(write);
+
+        let upper_key = key.to_ascii_uppercase();
+        let output = tokenless_ccr::recovery_instruction(&upper_key, &RecoveryMethod::Shell);
+        let kept = ledger.commit(&output, Some(&store), &RecoveryMethod::Shell);
+        assert_eq!(kept, vec![key.clone()]);
+        assert!(store.retrieve(&key).unwrap().is_some());
+    }
+
+    #[test]
+    fn record_deduplicates_keys_across_create_and_refresh() {
+        // create + in-session refresh recorded; commit reports the key once.
+        let store = InMemoryStore::new();
+        let created = store.stash("payload").unwrap();
+        let refreshed = store.stash("payload").unwrap();
+        let key = created.key.clone();
+        let mut ledger = StashLedger::default();
+        ledger.record(created);
+        ledger.record(refreshed);
+
+        let output = serde_json::json!({
+            "text": tokenless_ccr::recovery_instruction(&key, &RecoveryMethod::Shell),
+        })
+        .to_string();
+        let kept = ledger.commit(&output, Some(&store), &RecoveryMethod::Shell);
+        assert_eq!(kept.len(), 1, "the key may appear once: {kept:?}");
+        assert_eq!(kept[0], key);
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

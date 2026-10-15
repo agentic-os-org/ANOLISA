@@ -899,7 +899,7 @@ mod tests {
         let service = Arc::new(
             SkillSecService::new(
                 crate::SkillSecConfig {
-                    state_dir: directory.path().into(),
+                    state_dir: directory.path().canonicalize().unwrap(),
                     managed_skill_dirs: Vec::new(),
                 },
                 crate::scanner::ScannerRegistry::default(),

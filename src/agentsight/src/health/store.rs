@@ -5,7 +5,7 @@
 //! health checker thread and the API handler via `Arc<RwLock<...>>`.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -158,18 +158,40 @@ impl HealthStore {
         self.agents.remove(&pid).is_some()
     }
 
-    /// Return a snapshot of all agent health statuses
+    /// Return a snapshot of all agent health statuses.
+    ///
+    /// Ordered by agent name and then pid. The store is keyed by pid and a
+    /// `HashMap`'s iteration order is arbitrary, so the snapshot used to come
+    /// back in whatever order the map happened to hold — and
+    /// `/api/agent-process-health` serialises it straight into an array that the
+    /// dashboard renders as cards, stably sorted by status rank. Every agent with
+    /// the same status therefore kept the map's order, which changed between two
+    /// `serve` runs over the same agents and whenever the map grew.
     pub fn all_agents(&self) -> Vec<AgentHealthStatus> {
-        self.agents.values().cloned().collect()
+        let mut agents: Vec<AgentHealthStatus> = self.agents.values().cloned().collect();
+        agents.sort_by(|a, b| {
+            a.agent_name
+                .cmp(&b.agent_name)
+                .then_with(|| a.pid.cmp(&b.pid))
+        });
+        agents
     }
 }
 
-/// Current time in Unix milliseconds
+/// Current time in Unix milliseconds; 0 if the clock is before the epoch.
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    now_ms_at(SystemTime::now())
+}
+
+/// Milliseconds since the Unix epoch at `at`, 0 when the clock reads before it.
+///
+/// Split from `now_ms` so the pre-epoch boundary is exercisable directly. A
+/// host whose realtime clock reads before 1970-01-01 (a failed RTC battery, a
+/// VM restored from a stale snapshot) makes `duration_since` fail while the
+/// health checker calls this on every scan; it degrades to 0 like the
+/// `utils::epoch_nanos` family instead of taking the scan down.
+fn now_ms_at(at: SystemTime) -> u64 {
+    crate::utils::epoch_nanos(at) / 1_000_000
 }
 
 #[cfg(test)]
@@ -194,6 +216,42 @@ mod tests {
             parent_pid: None,
             has_crash,
         }
+    }
+
+    /// The snapshot is what `/api/agent-process-health` returns, and the
+    /// dashboard sorts it stably by status rank — so agents with the same status
+    /// kept the map's arbitrary order and their cards moved between runs.
+    #[test]
+    fn all_agents_is_ordered_by_agent_then_pid() {
+        let mut store = HealthStore::new();
+        for (pid, name) in [
+            (30, "zeta"),
+            (10, "alpha"),
+            (22, "zeta"),
+            (11, "alpha"),
+            (40, "beta"),
+        ] {
+            let mut agent = make_agent(pid, AgentHealthState::Healthy, false);
+            agent.agent_name = name.to_string();
+            store.update(pid, agent);
+        }
+
+        let ordered: Vec<(String, u32)> = store
+            .all_agents()
+            .into_iter()
+            .map(|agent| (agent.agent_name, agent.pid))
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("alpha".to_string(), 10),
+                ("alpha".to_string(), 11),
+                ("beta".to_string(), 40),
+                ("zeta".to_string(), 22),
+                ("zeta".to_string(), 30),
+            ]
+        );
     }
 
     #[test]
@@ -338,5 +396,24 @@ mod tests {
         let store = HealthStore::default();
         assert_eq!(store.all_agents().len(), 0);
         assert_eq!(store.last_scan_time, 0);
+    }
+
+    /// A host whose realtime clock reads before 1970-01-01 (a failed RTC
+    /// battery, a VM restored from a stale snapshot) makes `duration_since`
+    /// fail; the health checker calls `now_ms` on every scan, so this must
+    /// degrade to 0 like the `utils::epoch_nanos` family instead of panicking.
+    #[test]
+    fn now_ms_maps_a_pre_epoch_clock_to_zero_without_panicking() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(now_ms_at(UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(now_ms_at(UNIX_EPOCH - Duration::from_secs(1_000_000)), 0);
+        assert_eq!(now_ms_at(UNIX_EPOCH), 0);
+    }
+
+    #[test]
+    fn now_ms_counts_forward_from_the_epoch() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(now_ms_at(UNIX_EPOCH + Duration::from_secs(1)), 1_000);
+        assert_eq!(now_ms_at(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }

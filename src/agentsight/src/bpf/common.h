@@ -38,6 +38,28 @@ struct
     __uint(max_entries, RING_BUFFER_SIZE);
 } rb SEC(".maps");
 
+enum internal_metric_key {
+    RING_BUFFER_DROPPED = 0,
+};
+
+// Shared per-CPU counters avoid contention in probe hot paths. User space
+// sums every CPU value when exporting the runtime metrics snapshot.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} internal_metrics SEC(".maps");
+
+static __always_inline void record_ring_buffer_drop(void)
+{
+    u32 key = RING_BUFFER_DROPPED;
+    u64 *count = bpf_map_lookup_elem(&internal_metrics, &key);
+    if (count)
+        *count += 1;
+}
+
 #ifndef NO_TRACED_PROCESSES_MAP
 // Shared traced_processes map - used by all BPF programs for process filtering
 struct

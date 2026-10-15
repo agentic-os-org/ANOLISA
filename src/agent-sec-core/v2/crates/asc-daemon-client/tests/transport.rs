@@ -132,6 +132,31 @@ fn read_request(stream: UnixStream) -> (BufReader<UnixStream>, Vec<u8>) {
 const RESPONSE: &[u8] =
     b"{\"requestId\":\"request-1\",\"result\":{\"status\":\"PENDING_APPLY\"}}\n";
 
+#[cfg(target_os = "linux")]
+#[test]
+fn untrusted_server_is_rejected_before_request_bytes_are_sent() {
+    let uid = rustix::process::geteuid().as_raw();
+    if uid == 0 {
+        // Root runs the cross-UID fake-server fixture in the installed E2E suite.
+        return;
+    }
+    let endpoint = Endpoint::new();
+    let error = endpoint
+        .exchange(&request(), Duration::from_secs(1), |endpoint| {
+            let mut stream = endpoint.accept();
+            assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+        })
+        .unwrap_err();
+    let ClientError::ServerIdentity(error) = error else {
+        panic!("expected server identity failure, got {error}");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("expected daemon UID 0, got {uid}")
+    );
+}
+
 #[test]
 fn fragmented_lf_response_returns_without_waiting_for_eof() {
     let endpoint = Endpoint::new();

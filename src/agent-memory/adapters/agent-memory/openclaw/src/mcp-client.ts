@@ -466,34 +466,35 @@ export class McpStdioClient {
 
   /** Gracefully shut down the child process. */
   async stop(): Promise<void> {
+    const child = this.proc;
+    if (!child) {
+      return;
+    }
     this.initialized = false;
     this.deliberateStop = true;
 
-    if (!this.proc) {
-      return;
-    }
-
-    // Attempt graceful shutdown: send SIGTERM, then wait briefly.
-    try {
-      this.proc.kill("SIGTERM");
-    } catch {
-      // Ignore — process may already be dead.
-    }
-
-    // Give the process 2 seconds to exit gracefully.
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        if (this.proc && !this.proc.killed) {
-          this.proc.kill("SIGKILL");
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
         }
-        resolve();
       }, 2000);
       timeout.unref();
 
-      this.proc!.once("exit", () => {
+      const onExit = () => {
         clearTimeout(timeout);
+        child.removeListener("error", onError);
         resolve();
-      });
+      };
+      const onError = (error: Error) => {
+        clearTimeout(timeout);
+        child.removeListener("exit", onExit);
+        reject(error);
+      };
+      child.once("exit", onExit);
+      child.once("error", onError);
+      child.kill("SIGTERM");
+      child.stdin?.end();
     });
 
     this.proc = null;

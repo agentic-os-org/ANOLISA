@@ -295,9 +295,14 @@ v1 用**两种不同机制**完成 1→3，v2 都保留：
 文件记录上次时间、`<db>.maintenance.lock` 做跨进程互斥，默认间隔一天。标记损坏、标记
 时间在未来、间隔非正数都有明确行为（分别是「视为不存在」「视为过期」「总是执行」）。
 
-**闸门只在维护回调返回成功时前进。** 但 writer 的 `run_maintenance` 有意吞掉裁剪错误，
-所以「裁剪失败」在闸门看来仍是成功，标记照常写入——这与 v1 相同（v1 的 prune 也是内部
-catch）。差别只在失败后是否 dispose 连接，见 §10.3。
+**闸门只在维护回调返回成功时前进。** 自 #6602 起，writer 的 `run_maintenance` 传播裁剪
+错误：裁剪失败的 pass 不写标记，下一次维护机会直接重试而不是等满一个窗口。gate 自身的
+失败同样以结构化结果透出（`MaintenanceOutcome`：`NotDue`/`Contended`/`Ran`/`Failed`，
+覆盖 lock 文件打开/加锁失败与 marker 写/改名失败），不再与「未到期」混淆；持有 `Contended`
+表示他进程持锁。checkpoint 保持 v1 的 best-effort 语义（`repository.rs` 默认实现吞错），
+不计入 `Failed`。与 v1 相同的差别只在失败后是否 dispose 连接，见 §10.3。长驻 daemon 的
+周期触发、admission 排序与 shutdown 生命周期契约见
+`DAEMON_JOB_CONTRACT_zh.md` §11.5。
 
 ## 6. 去重与抽象
 
@@ -379,8 +384,9 @@ writer/reader`），因为两条流的表契约、故障策略和迁移机制都
 ### 10.1 无 `atexit`
 
 v1 靠 `atexit` 注册 writer 的 `close`，进程退出时自动跑维护。Rust 没有等价物，因此
-`asc-event-sink` 暴露显式的 `shutdown_sinks()`。**composition root 必须调它**，否则
-裁剪与 checkpoint 永远不会发生（§11.2）。
+host 必须显式关闭 writer。进程全局安全事件 sinks 通过 `shutdown_sinks()` 关闭；
+daemon 持有的 configured sinks 由 composition root 在 drain 后调用 `close()`。
+可观测采集仅使用 `ConfiguredObservabilitySinks`，不再提供全局 accessor/record API。
 
 ### 10.2 `format_summary_at` 的存在理由
 
@@ -534,7 +540,7 @@ pytest 默认串行，所以 v1 用 `autouse` fixture 改 `AGENT_SEC_DATA_DIR` �
 
 ### 13.2 必须串行的用例
 
-只有 `asc-event-sink` 有进程级全局状态（四个 `OnceLock` sink slot），它的 15 个有状态
+`asc-event-sink` 的安全事件路径保留进程级全局状态（三个 `RwLock` slot），其有状态
 用例统一取 `test_support::serial()`（进程内 `Mutex`）。**没有任何地方需要
 `--test-threads=1`**。清单见 `TEST_MIGRATION.md` §Serial cases。
 

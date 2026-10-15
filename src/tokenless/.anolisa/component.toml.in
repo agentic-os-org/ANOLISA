@@ -141,6 +141,17 @@ dest = "{datadir}/adapters/{component}/qoder/"
 # driver never invokes them — enable/disable behavior is built into Rust.
 entry = ".qoder-plugin/plugin.json"
 
+# QwenWorkCN macOS local-mode sideloading is managed by the built-in driver.
+[[adapters]]
+framework = "qwenwork"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qwenwork"
+dest = "{datadir}/adapters/{component}/qwenwork/"
+
+[adapters.bundle]
+entry = ".qoder-plugin/plugin.json"
+
 [[adapters]]
 framework = "claude-code"
 adapter_type = "plugin"

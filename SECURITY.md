@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in this project, please report it responsibly through [GitHub Security Advisories](https://github.com/alibaba/anolisa/security/advisories/new).
+If you discover a security vulnerability in this project, please report it responsibly through [GitHub Security Advisories](https://github.com/agentic-os-org/ANOLISA/security/advisories/new).
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 

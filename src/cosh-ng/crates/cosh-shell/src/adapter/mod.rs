@@ -196,6 +196,24 @@ impl AgentRunHandle {
         handle
     }
 
+    /// A test handle whose provider announced it can accept a host-executed
+    /// shell tool result.
+    ///
+    /// The default capabilities are all-false, so without this a fixture can
+    /// only exercise the rejection path; the approval slice's handoff is a
+    /// promise the provider has to be able to keep.
+    #[cfg(test)]
+    pub(crate) fn test_with_host_executed_shell_result(
+        approval_sender: mpsc::Sender<ApprovalChannelMessage>,
+    ) -> Self {
+        let mut handle = Self::test_with_approval_sender(approval_sender);
+        handle.control_capabilities = Arc::new(Mutex::new(ControlProtocolCapabilities {
+            can_handle_host_executed_shell_tool_result: true,
+            ..ControlProtocolCapabilities::default()
+        }));
+        handle
+    }
+
     pub fn cancel(&self) {
         (self.cancel)();
     }

@@ -8,7 +8,11 @@ use std::thread::JoinHandle;
 use rustix::fs::{flock, FlockOperation};
 use serde_json::{json, Value};
 
+#[path = "session_recovery/activity.rs"]
+mod activity;
 mod common;
+#[path = "session_recovery/quota.rs"]
+mod quota;
 
 fn binary_path() -> PathBuf {
     let mut path = std::env::current_exe()
@@ -782,6 +786,7 @@ fn management_clear_rejects_cross_workspace_scoped_directory_symlink() {
     let mut scoped_directories = fs::read_dir(&store)
         .expect("session root")
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
     scoped_directories.sort();
@@ -1180,9 +1185,9 @@ fn management_list_skips_unreadable_entry_without_hiding_healthy_session() {
         .expect("healthy session id");
     let scope_dir = fs::read_dir(&store)
         .expect("session store")
-        .next()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .expect("workspace store")
-        .expect("workspace entry")
         .path();
     fs::create_dir(scope_dir.join("11111111-1111-4111-8111-111111111111.json"))
         .expect("unreadable summary entry");
@@ -1252,9 +1257,9 @@ fn management_summaries_bound_oversized_model_metadata_on_wire() {
         .expect("persisted session ID");
     let scoped_dir = fs::read_dir(&store)
         .expect("read store root")
-        .next()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .expect("workspace store directory")
-        .expect("workspace store entry")
         .path();
     let session_path = scoped_dir.join(format!("{session_id}.json"));
     let mut envelope: Value =
@@ -1403,3 +1408,9 @@ fn session_control_bytes_output(home: &Path, request: &[u8]) -> Output {
     drop(stdin);
     child.wait_with_output().expect("wait management mode")
 }
+
+#[path = "session_recovery/resume_absence.rs"]
+mod resume_absence;
+
+#[path = "session_recovery/redaction_boundaries.rs"]
+mod redaction_boundaries;

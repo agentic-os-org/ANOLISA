@@ -29,8 +29,6 @@ use super::tcpsniff::TcpSniff;
 use super::udpdns::{RawUdpDnsEvent, UdpDns};
 use crate::config::TcpTarget;
 
-const POLL_TIMEOUT_MS: u64 = 100;
-
 /// Snapshot of the probe event channel's byte accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelWatermarks {
@@ -56,7 +54,8 @@ pub struct ChannelWatermarks {
 struct ChannelBudget {
     max_bytes: usize,
     in_flight: Arc<AtomicUsize>,
-    dropped: Arc<AtomicUsize>,
+    dropped_over_budget: Arc<AtomicUsize>,
+    dropped_total: Arc<AtomicUsize>,
 }
 
 impl ChannelBudget {
@@ -64,7 +63,8 @@ impl ChannelBudget {
         Self {
             max_bytes,
             in_flight: Arc::new(AtomicUsize::new(0)),
-            dropped: Arc::new(AtomicUsize::new(0)),
+            dropped_over_budget: Arc::new(AtomicUsize::new(0)),
+            dropped_total: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -86,7 +86,8 @@ impl ChannelBudget {
             })
             .is_ok();
         if !admitted {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.dropped_over_budget.fetch_add(1, Ordering::Relaxed);
+            self.dropped_total.fetch_add(1, Ordering::Relaxed);
         }
         admitted
     }
@@ -94,6 +95,12 @@ impl ChannelBudget {
     /// Give back a reservation whose event never reached the channel.
     fn refund(&self, bytes: usize) {
         self.give_back(bytes);
+    }
+
+    /// Count an event rejected after byte admission, such as a full slot queue
+    /// or an intentional sampling decision.
+    fn record_drop(&self) {
+        self.dropped_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Give back a reservation once the event has been delivered to the consumer.
@@ -115,8 +122,12 @@ impl ChannelBudget {
         ChannelWatermarks {
             in_flight_bytes: self.in_flight.load(Ordering::Relaxed),
             budget_bytes: self.max_bytes,
-            dropped_over_budget: self.dropped.load(Ordering::Relaxed),
+            dropped_over_budget: self.dropped_over_budget.load(Ordering::Relaxed),
         }
+    }
+
+    fn dropped_total(&self) -> usize {
+        self.dropped_total.load(Ordering::Relaxed)
     }
 }
 
@@ -235,6 +246,11 @@ impl Probes {
         // off, each probe loads its own private (unused) cgroup_filter map so we
         // never burn an extra fd in the steady state.
         let mut shared = SharedMaps::new(proctrace.rb_handle().context("failed to get rb handle")?)
+            .with_internal_metrics(
+                proctrace
+                    .internal_metrics_handle()
+                    .context("failed to get internal_metrics handle")?,
+            )
             .with_traced_processes(
                 proctrace
                     .traced_processes_handle()
@@ -373,7 +389,7 @@ impl Probes {
         let event_tx = self.event_tx.clone();
         let event_policy = self.event_channel_policy;
         let budget = self.budget.clone();
-        let drop_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sample_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
 
@@ -464,6 +480,7 @@ impl Probes {
                         ChannelPolicy::Backpressure => {
                             if event_tx.send(e).is_err() {
                                 log::warn!("Probes event channel closed");
+                                budget.record_drop();
                                 false
                             } else {
                                 true
@@ -475,24 +492,27 @@ impl Probes {
                                     "Probes event channel full (capacity={}); dropping event",
                                     event_tx.capacity().unwrap_or(0)
                                 );
+                                budget.record_drop();
                                 false
                             } else {
                                 true
                             }
                         }
                         ChannelPolicy::Sample(n) => {
-                            let idx = drop_counter.fetch_add(1, Ordering::Relaxed);
+                            let idx = sample_counter.fetch_add(1, Ordering::Relaxed);
                             if idx.is_multiple_of(n) {
                                 if event_tx.try_send(e).is_err() {
                                     log::warn!(
                                         "Probes event channel full (capacity={}); dropping sampled event",
                                         event_tx.capacity().unwrap_or(0)
                                     );
+                                    budget.record_drop();
                                     false
                                 } else {
                                     true
                                 }
                             } else {
+                                budget.record_drop();
                                 false
                             }
                         }
@@ -509,22 +529,26 @@ impl Probes {
             .context("failed to add shared ring buffer")?;
         let rb = rb_builder.build().context("failed to build ring buffer")?;
 
+        // Read the configured poll timeout on this thread before spawning so
+        // the poller observes exactly the value `AgentSight::new` published
+        // (crate::config::set_poll_timeout_ms), not whatever the global holds
+        // when the thread happens to get scheduled.
+        let poll_timeout = Duration::from_millis(crate::config::poll_timeout_ms());
+
         let handle = thread::Builder::new()
             .name("probes-poll".into())
             .spawn(move || {
-                let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
-                loop {
-                    if stop_flag_inner.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match rb.poll(timeout) {
-                        Ok(_) => {}
-                        Err(e) if e.kind() == libbpf_rs::ErrorKind::Interrupted => break,
-                        Err(e) => {
-                            eprintln!("probes poll error: {e:#}");
-                            break;
-                        }
-                    }
+                let timeout = poll_timeout;
+                let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
+                    rb.poll(timeout)
+                        .map(|_| ())
+                        .map_err(|error| match error.kind() {
+                            libbpf_rs::ErrorKind::Interrupted => super::PollFailure::Interrupted,
+                            _ => super::PollFailure::Fatal(format!("{error:#}")),
+                        })
+                });
+                if let super::PollEnd::Failed(message) = outcome {
+                    eprintln!("probes poll error: {message}");
                 }
             })
             .context("failed to spawn poll thread")?;
@@ -552,6 +576,22 @@ impl Probes {
     /// Current byte accounting of the probe event channel.
     pub fn channel_watermarks(&self) -> ChannelWatermarks {
         self.budget.watermarks()
+    }
+
+    /// Number of events currently waiting in the userspace event channel.
+    pub fn channel_length(&self) -> usize {
+        self.event_rx.len()
+    }
+
+    /// Total userspace-channel events rejected by byte admission, slot
+    /// pressure, or sampling policy.
+    pub fn channel_dropped(&self) -> usize {
+        self.budget.dropped_total()
+    }
+
+    /// Total ring-buffer reservations rejected by the kernel probes.
+    pub fn ring_buffer_dropped(&self) -> Result<u64> {
+        self.proctrace.ring_buffer_dropped()
     }
 
     /// Add a PID to the traced_processes map at runtime
@@ -643,6 +683,7 @@ mod tests {
         let marks = budget.watermarks();
         assert_eq!(marks.in_flight_bytes, 1024);
         assert_eq!(marks.dropped_over_budget, 1);
+        assert_eq!(budget.dropped_total(), 1);
     }
 
     #[test]
@@ -674,6 +715,18 @@ mod tests {
     }
 
     #[test]
+    fn post_admission_drop_is_counted_and_refunded_independently() {
+        let budget = ChannelBudget::new(1024);
+        assert!(budget.reserve(512));
+        budget.record_drop();
+        budget.refund(512);
+        let marks = budget.watermarks();
+        assert_eq!(marks.in_flight_bytes, 0);
+        assert_eq!(marks.dropped_over_budget, 0);
+        assert_eq!(budget.dropped_total(), 1);
+    }
+
+    #[test]
     fn zero_budget_means_unlimited_but_still_accounts() {
         // Operators read 0 as "no limit" from retention_days / max_db_size_mb;
         // treating it as a 1-byte budget would silently drop every event. The
@@ -684,6 +737,7 @@ mod tests {
         let marks = budget.watermarks();
         assert_eq!(marks.in_flight_bytes, 8 * 1024 * 1024);
         assert_eq!(marks.dropped_over_budget, 0);
+        assert_eq!(budget.dropped_total(), 0);
         assert_eq!(marks.budget_bytes, 0);
     }
 
@@ -695,6 +749,32 @@ mod tests {
         assert!(budget.reserve(8));
         budget.release(usize::MAX);
         budget.release(usize::MAX);
+        assert_eq!(budget.watermarks().in_flight_bytes, 0);
+    }
+
+    #[test]
+    fn sustained_load_never_exceeds_byte_budget() {
+        const BUDGET: usize = 64 * 1024;
+        const EVENT_BYTES: usize = 4096;
+        const ATTEMPTS: usize = 100_000;
+
+        let budget = ChannelBudget::new(BUDGET);
+        let mut admitted = 0;
+        for _ in 0..ATTEMPTS {
+            if budget.reserve(EVENT_BYTES) {
+                admitted += 1;
+            }
+        }
+
+        let marks = budget.watermarks();
+        assert!(marks.in_flight_bytes <= BUDGET);
+        assert_eq!(admitted, BUDGET / EVENT_BYTES);
+        assert_eq!(marks.dropped_over_budget, ATTEMPTS - admitted);
+        assert_eq!(budget.dropped_total(), ATTEMPTS - admitted);
+
+        for _ in 0..admitted {
+            budget.release(EVENT_BYTES);
+        }
         assert_eq!(budget.watermarks().in_flight_bytes, 0);
     }
 
@@ -744,6 +824,7 @@ mod tests {
             "every reservation must be released once the channel is drained"
         );
         assert_eq!(marks.dropped_over_budget, 0);
+        assert_eq!(budget.dropped_total(), 0);
 
         // The budget is fully reusable, i.e. no reservation leaked.
         assert!(budget.reserve(EVENTS * BYTES));

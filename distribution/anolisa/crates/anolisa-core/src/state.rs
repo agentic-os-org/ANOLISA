@@ -3,6 +3,7 @@
 //! Current state access uses [`crate::state_store::StateStore`]; legacy
 //! records remain readable at its migration boundary.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -546,7 +547,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)?;
+        create_install_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
     let mut f = open_excl_nofollow(&tmp)?;

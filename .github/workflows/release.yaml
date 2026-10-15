@@ -169,6 +169,28 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build ws-ckpt precompiled package
+        id: ws-ckpt-prebuilt
+        if: matrix.component == 'ws-ckpt'
+        uses: ./.github/actions/build-ws-ckpt-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build skillfs precompiled package
+        id: skillfs-prebuilt
+        if: matrix.component == 'skillfs'
+        uses: ./.github/actions/build-skillfs-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Build ANOLISA CLI precompiled package
         id: anolisa-prebuilt
         if: matrix.component == 'anolisa'
@@ -188,11 +210,15 @@ jobs:
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+          WS_CKPT_DIRECTORY: ${{ steps.ws-ckpt-prebuilt.outputs.artifact-directory }}
+          SKILLFS_DIRECTORY: ${{ steps.skillfs-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            ws-ckpt) ARTIFACT_DIRECTORY="$WS_CKPT_DIRECTORY" ;;
+            skillfs) ARTIFACT_DIRECTORY="$SKILLFS_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
           esac
           if [ -z "$ARTIFACT_DIRECTORY" ]; then
@@ -334,14 +360,12 @@ jobs:
             anolisa)        PREFIX="anolisa/v" ;;
           esac
 
-          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
-          if [ -z "$PREV_TAG" ]; then
-            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
-          else
-            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
-          fi
-
-          NOTES="## ${COMPONENT} v${VERSION}\n\n<!-- Add release notes here -->\n\n## What's Changed\n\n<!-- List the key changes in this release -->\n\n**Full Changelog**: ${COMPARE_URL}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          COMPARE_URL=$(python3 .github/scripts/generate_release_notes.py \
+            --tag "$TAG" \
+            --prefix "$PREFIX" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$NOTES_FILE")
 
           # Collect all assets to upload
           ASSETS=("$ARCHIVE")
@@ -375,7 +399,7 @@ jobs:
 
           gh release create "$TAG" \
             --title "${COMPONENT} v${VERSION}" \
-            --notes "$(printf '%b' "${NOTES}")" \
+            --notes-file "$NOTES_FILE" \
             --target "$(git rev-list -n 1 $TAG)" \
             "${ASSETS[@]}"
 

@@ -89,6 +89,12 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             timeout=self._timeout,
             trace_context=trace_context(kwargs),
         )
+        if result.exit_code != 0:
+            self._diagnostic(
+                "[agent-sec-core] skill-ledger show failed, fail-open exit_code=%s",
+                result.exit_code,
+            )
+            return None
         if not result.stdout.strip():
             self._diagnostic(
                 "[agent-sec-core] skill-ledger empty CLI output, fail-open skill_dir=%s exit_code=%s",
@@ -114,7 +120,28 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             )
             return None
 
-        message = summary.get("message")
+        if summary.get("status") == "error":
+            self._diagnostic("[agent-sec-core] skill-ledger show returned an error")
+            return None
+        if summary.get("managed") is False:
+            return None
+        status = summary.get("latestStatus")
+        if (
+            summary.get("managed") is not None
+            and summary["managed"] is not True
+            or not isinstance(status, str)
+            or status not in {"pass", "none", "drifted", "warn", "deny", "tampered"}
+            or "message" not in summary
+            or (
+                summary["message"] is not None
+                and not isinstance(summary["message"], str)
+            )
+        ):
+            self._diagnostic(
+                "[agent-sec-core] skill-ledger invalid show summary, fail-open"
+            )
+            return None
+        message = summary["message"]
         if not isinstance(message, str) or not message.strip():
             return None
 

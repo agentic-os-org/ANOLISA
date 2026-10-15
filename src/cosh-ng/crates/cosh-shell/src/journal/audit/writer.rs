@@ -19,6 +19,10 @@ const MAX_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) struct AuditSegmentWriter {
     root: PathBuf,
     active: Option<ActiveSegment>,
+    #[cfg(test)]
+    failing_syncs: u32,
+    #[cfg(test)]
+    failing_stages: u32,
 }
 
 struct ActiveSegment {
@@ -57,11 +61,29 @@ impl AuditSegmentWriter {
         Ok(Self {
             root: root.to_path_buf(),
             active: None,
+            #[cfg(test)]
+            failing_syncs: 0,
+            #[cfg(test)]
+            failing_stages: 0,
         })
     }
 
     pub(super) fn append(&mut self, event: &mut AuditEventV1, durable: bool) -> Result<(), String> {
+        self.stage(event)?;
+        self.commit(durable)
+    }
+
+    /// Buffers one record in the active segment without flushing it.
+    ///
+    /// On error the record has not entered the segment, unless it is at
+    /// least as large as the segment buffer and its direct write tore.
+    pub(super) fn stage(&mut self, event: &mut AuditEventV1) -> Result<(), String> {
         event.validate()?;
+        #[cfg(test)]
+        if self.failing_stages > 0 {
+            self.failing_stages -= 1;
+            return Err("audit I/O failed: injected stage failure".to_string());
+        }
         self.ensure_active(Utc::now())?;
         let now = Utc::now();
         let sequence = self.active.as_ref().map_or(0, |active| active.sequence);
@@ -92,8 +114,25 @@ impl AuditSegmentWriter {
         active.file.write_all(&bytes).map_err(safe_io_error)?;
         active.bytes = active.bytes.saturating_add(bytes.len() as u64);
         active.sequence = active.sequence.saturating_add(1);
+        Ok(())
+    }
+
+    /// Flushes staged records and, when `durable`, syncs the active segment.
+    ///
+    /// Staged records stay in the segment when this fails, so a caller
+    /// retries this step rather than staging the same record again.
+    pub(super) fn commit(&mut self, durable: bool) -> Result<(), String> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or_else(|| "audit segment unavailable".to_string())?;
         active.file.flush().map_err(safe_io_error)?;
         if durable {
+            #[cfg(test)]
+            if self.failing_syncs > 0 {
+                self.failing_syncs -= 1;
+                return Err("audit I/O failed: injected sync failure".to_string());
+            }
             active.file.get_ref().0.sync_data().map_err(safe_io_error)?;
         }
         Ok(())
@@ -127,11 +166,14 @@ impl AuditSegmentWriter {
     }
 
     pub(super) fn close(&mut self) -> Result<(), String> {
-        let Some(mut active) = self.active.take() else {
+        if self.active.is_none() {
             return Ok(());
-        };
-        active.file.flush().map_err(safe_io_error)?;
-        active.file.get_ref().0.sync_data().map_err(safe_io_error)?;
+        }
+        self.commit(true)?;
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| "audit segment unavailable".to_string())?;
         let basename = active
             .path
             .file_name()
@@ -140,13 +182,25 @@ impl AuditSegmentWriter {
             .ok_or_else(|| "invalid active audit segment name".to_string())?;
         let closed = active.path.with_file_name(basename);
         no_replace_close(&active.path, &closed).map_err(safe_io_error)?;
-        drop(active);
+        self.active = None;
         Ok(())
     }
 
     #[cfg(test)]
     pub(super) fn active_path(&self) -> Option<&Path> {
         self.active.as_ref().map(|active| active.path.as_path())
+    }
+
+    /// Fails the next `count` syncs after their records were flushed.
+    #[cfg(test)]
+    pub(super) fn fail_next_syncs(&mut self, count: u32) {
+        self.failing_syncs = count;
+    }
+
+    /// Fails the next `count` stages before any record bytes enter the segment.
+    #[cfg(test)]
+    pub(super) fn fail_next_stages(&mut self, count: u32) {
+        self.failing_stages = count;
     }
 }
 

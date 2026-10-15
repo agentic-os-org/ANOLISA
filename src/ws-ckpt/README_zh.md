@@ -55,6 +55,8 @@ cd src
 cargo build --release
 ```
 
+[维护者说明：Raw 打包与 GitHub 构建](../../docs/developer-guide/zh/ws-ckpt/packaging.md)
+
 ### 安装（RPM）
 
 ```bash

@@ -47,6 +47,10 @@ pub struct ExtraColumn {
 pub struct TableSpec {
     /// Table name.
     pub name: &'static str,
+    /// Enforces native strict column types; legacy event tables leave this disabled.
+    pub strict: bool,
+    /// Table-level constraints, appended after columns in declaration order.
+    pub constraints: &'static [&'static str],
     /// Columns in `CREATE TABLE` order.
     pub columns: &'static [ColumnSpec],
     /// Indexes to converge.
@@ -63,9 +67,15 @@ impl TableSpec {
             .columns
             .iter()
             .map(|column| format!("{} {}", column.name, column.definition))
+            .chain(
+                self.constraints
+                    .iter()
+                    .map(|constraint| (*constraint).to_owned()),
+            )
             .collect::<Vec<_>>()
             .join(", ");
-        format!("CREATE TABLE IF NOT EXISTS {} ({body})", self.name)
+        let suffix = if self.strict { " STRICT" } else { "" };
+        format!("CREATE TABLE IF NOT EXISTS {} ({body}){suffix}", self.name)
     }
 
     /// Renders the `CREATE INDEX IF NOT EXISTS` statement for `index`.
@@ -367,6 +377,8 @@ mod tests {
 
     const TEST_TABLE: TableSpec = TableSpec {
         name: "widgets",
+        strict: false,
+        constraints: &[],
         columns: &[
             ColumnSpec {
                 name: "id",
@@ -408,6 +420,35 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS idx_multi ON widgets \
              (session_id, run_id, timestamp_epoch)"
         );
+    }
+
+    #[test]
+    fn strict_tables_enforce_types_and_table_constraints() {
+        let table = TableSpec {
+            strict: true,
+            constraints: &["CHECK (id != label)", "UNIQUE (label)"],
+            ..TEST_TABLE
+        };
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(&table.create_table_sql())
+            .expect("schema");
+        connection
+            .execute("INSERT INTO widgets VALUES ('a', 'b')", [])
+            .expect("valid row");
+        for sql in [
+            "INSERT INTO widgets VALUES ('c', x'ff')",
+            "INSERT INTO widgets VALUES ('c', 'c')",
+            "INSERT INTO widgets VALUES ('c', 'b')",
+        ] {
+            let error = connection
+                .execute(sql, [])
+                .expect_err("constraint violation");
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
     }
 
     /// `auto_vacuum` stays at `NONE`, and that is the v1-equivalent outcome.

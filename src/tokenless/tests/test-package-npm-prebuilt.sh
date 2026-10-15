@@ -9,8 +9,21 @@ BACKUP="$TMP/npm-prebuilt.backup"
 TEST_TOOLS="$TMP/tools"
 LEGACY_AGENTSCOPE="$ROOT/adapters/tokenless/agentscope"
 LEGACY_AGENTSCOPE_BACKUP="$TMP/legacy-agentscope.backup"
+CACHE_FIXTURE=""
+QWENWORK_PLUGIN="$ROOT/adapters/tokenless/qwenwork/.qoder-plugin/plugin.json"
+STALE_PLUGIN_SEEDED=0
 
 cleanup() {
+    if [[ -n "$CACHE_FIXTURE" ]]; then
+        rm -rf "$CACHE_FIXTURE"
+    fi
+    if [[ "$STALE_PLUGIN_SEEDED" = 1 ]]; then
+        if [[ -f "$TMP/qwenwork-plugin.json" ]]; then
+            mv "$TMP/qwenwork-plugin.json" "$QWENWORK_PLUGIN"
+        else
+            rm -f "$QWENWORK_PLUGIN"
+        fi
+    fi
     rm -rf "$PREBUILT"
     rm -rf "$LEGACY_AGENTSCOPE"
     if [[ -e "$BACKUP" ]]; then
@@ -39,6 +52,14 @@ printf 'legacy build output\n' \
     > "$LEGACY_AGENTSCOPE/build/lib/tokenless_agentscope/middleware.py"
 printf 'Name: anolisa-tokenless-agentscope\n' \
     > "$LEGACY_AGENTSCOPE/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
+
+# Exercise cache exclusion through both common/ and the dereferenced shared/.
+# Keep unrelated developer bytecode intact when restoring the source tree.
+CACHE_FIXTURE="$(mktemp -d "$ROOT/adapters/tokenless/common/hooks/.package-cache-test.XXXXXX")"
+mkdir -p "$CACHE_FIXTURE/__pycache__"
+printf 'stale bytecode\n' > "$CACHE_FIXTURE/__pycache__/hook.cpython-312.pyc"
+printf 'stale bytecode\n' > "$CACHE_FIXTURE/legacy.pyc"
+printf 'stale bytecode\n' > "$CACHE_FIXTURE/legacy.pyo"
 
 mkdir -p "$TEST_TOOLS"
 cat >"$TEST_TOOLS/readelf" <<'SH'
@@ -119,6 +140,12 @@ check_selector arm64 'linux-arm64, darwin-arm64'
 check_selector linux 'linux-x64, linux-arm64'
 check_selector aarch64-apple-darwin 'darwin-arm64'
 
+# A newer generated file must not bypass template stamping in the npm copy.
+if [[ -f "$QWENWORK_PLUGIN" ]]; then
+    cp -p "$QWENWORK_PLUGIN" "$TMP/qwenwork-plugin.json"
+fi
+STALE_PLUGIN_SEEDED=1
+printf '{"name":"tokenless","version":"0.0.0-stale"}\n' > "$QWENWORK_PLUGIN"
 node "$ROOT/npm/scripts/package-npm.js" --all
 test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
@@ -134,6 +161,51 @@ for agent in claude-code qwencode; do
     test "$(stat -c '%a' "$dispatcher")" = 755
     bash -n "$dispatcher"
 done
+
+python3 - "$ROOT" "$ROOT/npm/dist/tokenless" "$TMP/npm-root/package" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+root, *packages = map(Path, sys.argv[1:])
+version = re.search(
+    r'(?ms)^\[workspace\.package\]\s*$.*?^version\s*=\s*"([^"]+)"',
+    (root / "Cargo.toml").read_text(),
+).group(1)
+source = root / "adapters/tokenless"
+manifest = json.loads((source / "manifest.json.in").read_text().replace("@VERSION@", version))
+assert "qwenwork" in manifest["targets"]
+contract = (root / ".anolisa/component.toml.in").read_text()
+assert set(manifest["targets"]) == set(re.findall(r'^framework\s*=\s*"([^"]+)"', contract, re.M))
+plugin = json.loads(
+    (source / "qwenwork/.qoder-plugin/plugin.json.in").read_text().replace("@VERSION@", version)
+)
+required = (
+    ".qoder-plugin/plugin.json", "hooks/hooks.json", "hooks/run-hook.sh",
+    "scripts/detect.sh", "scripts/install.sh", "scripts/uninstall.sh", "scripts/lifecycle.py",
+    "hooks/shared/hook_utils.py", "hooks/shared/rewrite_hook.py",
+    "hooks/shared/compress_response_hook.py", "hooks/shared/tool_categories.json",
+)
+for package in packages:
+    adapters = package / "adapters/tokenless"
+    assert json.loads((adapters / "manifest.json").read_text()) == manifest
+    assert json.loads((adapters / "qwenwork/.qoder-plugin/plugin.json").read_text()) == plugin
+    assert (adapters / "qwenwork/hooks/shared").is_dir()
+    for path in adapters.rglob("*"):
+        assert not path.is_symlink(), path
+        assert "__pycache__" not in path.parts, path
+        assert path.suffix not in (".pyc", ".pyo", ".in"), path
+    for relative in required:
+        path = adapters / "qwenwork" / relative
+        assert path.is_file(), path
+        if path.suffix in (".sh", ".py"):
+            assert path.stat().st_mode & 0o777 == 0o755, path
+    for common in (source / "common/hooks").iterdir():
+        if common.is_file() and common.suffix in (".py", ".sh", ".json"):
+            shared = adapters / "qwenwork/hooks/shared" / common.name
+            assert shared.read_bytes() == common.read_bytes(), shared
+PY
 
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"

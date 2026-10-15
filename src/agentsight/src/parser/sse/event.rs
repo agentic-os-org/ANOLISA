@@ -143,6 +143,23 @@ impl ParsedSseEvent {
                 if Self::is_dashscope_native_done(&v) {
                     return true;
                 }
+                // Gemini style: no sentinel frame — the terminal chunk is the
+                // one whose candidates carry a non-empty finishReason. Middle
+                // chunks omit the field or send an explicit null, both of
+                // which must keep the stream open.
+                if v.get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate
+                                .get("finishReason")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|reason| !reason.is_empty())
+                        })
+                    })
+                {
+                    return true;
+                }
             }
         }
         false
@@ -182,6 +199,10 @@ impl ParsedSseEvent {
     /// Get data length
     pub fn data_len(&self) -> usize {
         self.data_len
+    }
+
+    pub(crate) fn data_offset(&self) -> usize {
+        self.data_offset
     }
 
     /// Get reference to source SslEvent
@@ -438,9 +459,17 @@ impl SSEEvent {
         // Build args with SSE information
         let mut args = serde_json::Map::new();
 
-        // Add data (truncated for display if very long)
+        // Add data (truncated for display if very long). The cut must land on
+        // a character boundary: `data` is the decoded SSE body and a
+        // multi-byte character straddling byte 500 panicked the whole
+        // conversion (the aggregator turns every parsed event into a trace
+        // event).
         let data_preview = if self.data.len() > 500 {
-            format!("{}... ({} bytes total)", &self.data[..500], self.data.len())
+            format!(
+                "{}... ({} bytes total)",
+                preview_on_char_boundary(&self.data, 500),
+                self.data.len()
+            )
         } else {
             self.data.clone()
         };
@@ -478,6 +507,19 @@ impl SSEEvent {
     }
 }
 
+/// Shorten a display preview to at most `max_bytes`, cutting on a character
+/// boundary so multi-byte SSE payloads are never split mid-character.
+fn preview_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +539,43 @@ mod tests {
             is_handshake: false,
             ssl_ptr: 0x1,
         })
+    }
+
+    #[test]
+    fn sse_trace_preview_cuts_on_char_boundary() {
+        // 499 ASCII bytes then multi-byte characters straddling offset 500:
+        // the byte-index slice panicked here, aborting the trace conversion.
+        let mut data = "a".repeat(499);
+        data.push_str("中中中");
+        let event = SSEEvent {
+            id: None,
+            event: None,
+            data,
+            retry: None,
+        };
+        let trace = event.to_chrome_trace_event(1, 1, 0);
+        let preview = trace
+            .args
+            .as_ref()
+            .and_then(|args| args.get("data"))
+            .and_then(|v| v.as_str())
+            .expect("data preview");
+        assert!(preview.starts_with(&"a".repeat(499)));
+        assert!(
+            preview.contains("(508 bytes total)"),
+            "preview must report the full byte length: {preview}"
+        );
+        assert_eq!(trace.args.as_ref().unwrap()["data_length"], 508);
+
+        // Short data is untouched.
+        let short = SSEEvent {
+            id: None,
+            event: None,
+            data: "hello".to_string(),
+            retry: None,
+        };
+        let short_trace = short.to_chrome_trace_event(1, 1, 0);
+        assert_eq!(short_trace.args.as_ref().unwrap()["data"], "hello");
     }
 
     #[test]
@@ -826,6 +905,35 @@ mod tests {
         container.events.push(SSEEvent::new("e2"));
         let traces = container.to_chrome_trace_events(1, 1, 0);
         assert_eq!(traces.len(), 2);
+    }
+
+    #[test]
+    fn test_is_done_gemini_terminal_finish_reason() {
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            parsed.is_done(),
+            "a chunk whose candidate carries a non-empty finishReason is the Gemini terminator"
+        );
+    }
+
+    #[test]
+    fn test_is_done_gemini_middle_chunks_keep_stream_open() {
+        // No finishReason field at all.
+        let data =
+            br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(!parsed.is_done());
+        // An explicit null finishReason is a middle chunk, not a terminator.
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"finishReason":null,"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            !parsed.is_done(),
+            "explicit null finishReason must keep the stream open"
+        );
     }
 
     #[test]

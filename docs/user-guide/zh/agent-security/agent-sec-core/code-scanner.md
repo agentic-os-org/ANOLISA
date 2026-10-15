@@ -33,10 +33,21 @@ agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-V2 scanner 当前只支持内嵌的 regex 规则。`--mode llm` 为兼容性保留，但会返回可解析的
-`LLM model not available` error result，不会连接 Ollama。V2 尚未支持
-`--trace-context` 或写入 code-scan telemetry；依赖这些能力的 Agent hook 会在完成迁移前
-保持延期状态。
+V2 默认引擎使用内嵌 regex 规则。`--mode llm` 会将扫描发送到 daemon 的本地
+Ollama 兼容模型服务。V2 尚未支持 `--trace-context` 或写入 code-scan telemetry；依赖
+这些能力的 Agent hook 会在完成迁移前保持延期状态。
+
+## LLM 模式
+
+Daemon 读取 `AGENT_SEC_OLLAMA_MODEL`（默认 `warden`）及共享的
+`AGENT_SEC_MODEL_SERVICE_BACKEND`、`AGENT_SEC_MODEL_SERVICE_BASE_URL` 和
+`AGENT_SEC_MODEL_SERVICE_TIMEOUT` 配置。base URL 必须解析为 loopback host。单请求
+ timeout 接受 1–300 秒；daemon 为模型可用性、chat 和一次 retry 预留
+`3 * timeout + 1` 秒。CLI 默认等待合法 daemon 预算的最大值；显式
+`--timeout-ms` 可以主动缩短 client deadline。
+
+模型缺失、推理失败或输出不可解析时，会返回可解析的 `error` 结果并使 CLI 以非零状态退出。
+模型返回 `DENY` 时，扫描成功并返回带有 `llm-judge` finding 的 `warn` 结果。
 
 ## 环境变量
 
@@ -100,4 +111,4 @@ Hermes 和 OpenClaw 保留现有 self-protect findings；当工具调用尝试�
 
 ## Hook MODE 与扫描引擎
 
-`CODE_SCANNER_MODE` 控制宿主 hook 响应，不选择扫描引擎。V2 当前只运行内嵌 regex 规则；`--mode llm` 为兼容性保留，会返回 `LLM model not available`。
+`CODE_SCANNER_MODE` 控制宿主 hook 响应，不选择扫描引擎。V2 默认使用内嵌 regex 规则；调用方选择 `--mode llm` 时使用 daemon 支持的本地模型服务。

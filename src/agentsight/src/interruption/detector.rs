@@ -16,14 +16,35 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// `pause_turn` (Anthropic) means a long-running turn was paused by the server
 /// and will be resumed by the client; the SSE stream itself completed normally,
 /// so it must not be treated as truncation.
+///
+/// `refusal` (Anthropic) is the stop reason a safety classifier reports for a
+/// declined answer; the API documents it as a normal `200` completion, not an
+/// error, so the stream is complete and nothing was truncated.
+///
+/// `function_call` (OpenAI legacy function calling) is the predecessor of
+/// `tool_calls`: the model finished its turn by emitting a function call and
+/// the client executes it before asking again, so the stream completed
+/// normally and must not be treated as truncation.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     matches!(
         reason,
-        Some("stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence" | "pause_turn")
+        Some(
+            "stop"
+                | "tool_calls"
+                | "function_call"
+                | "end_turn"
+                | "tool_use"
+                | "stop_sequence"
+                | "pause_turn"
+                | "refusal"
+        )
     )
 }
 
-/// Whether the finish reason indicates a token-limit stop (handled by rules 9/10).
+/// Whether the finish reason indicates a token-limit stop (handled by rule 9).
+///
+/// Both spellings are in use: OpenAI and the DashScope native protocol report
+/// `length`, Anthropic reports `max_tokens`.
 fn is_token_limit_finish(reason: Option<&str>) -> bool {
     matches!(reason, Some("length" | "max_tokens"))
 }
@@ -128,7 +149,7 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
-        || lower.contains("exit code")
+        || mentions_failing_exit_code(&lower)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
@@ -136,6 +157,27 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("eperm")
         || lower.contains("\"status\": \"error\"")
         || lower.contains("\"status\":") && lower.contains("\"error\"")
+}
+
+/// Whether any `exit code N` mention carries a non-zero status.
+///
+/// `exit code 0` is the success spelling a passing command's output routinely
+/// carries ("60 passing (exit code 0)"), and Anthropic's `is_error` is
+/// optional while `content` may be a plain string, so that success spelling
+/// reaches the bare-text scan with no explicit flag to vouch for it — the
+/// bare `exit code` substring flagged it. Only a non-zero status is a failure
+/// signal; the status may be separated by spaces, a colon, or an equals sign.
+fn mentions_failing_exit_code(lower: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(found) = lower[search_from..].find("exit code") {
+        let after = &lower[search_from + found + "exit code".len()..];
+        let status = after.trim_start_matches([' ', ':', '=']);
+        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+            return true;
+        }
+        search_from += found + "exit code".len();
+    }
+    false
 }
 
 fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
@@ -158,6 +200,33 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
         }
         serde_json::Value::Array(items) => items.iter().find_map(tool_response_failure_text),
         serde_json::Value::Object(map) => {
+            let status_is_error = map
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
+            // An explicit success flag settles the question. The content of a
+            // successful result is free-form output that may legitimately
+            // mention an exit code, a traceback or a missing path, so it must
+            // not be read as a failure. Only an error status can contradict
+            // the flag.
+            let explicit_success = map
+                .get("is_error")
+                .or_else(|| map.get("isError"))
+                .and_then(|value| value.as_bool())
+                .is_some_and(|is_error| !is_error)
+                || map
+                    .get("success")
+                    .and_then(|value| value.as_bool())
+                    .is_some_and(|success| success);
+            if explicit_success {
+                return if status_is_error {
+                    Some(value.to_string())
+                } else {
+                    None
+                };
+            }
+
             let explicit_error = map
                 .get("is_error")
                 .or_else(|| map.get("isError"))
@@ -167,10 +236,7 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
                     .get("success")
                     .and_then(|value| value.as_bool())
                     .is_some_and(|success| !success)
-                || map
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+                || status_is_error;
 
             let nested_error = ["error", "message", "content", "response", "details"]
                 .iter()
@@ -322,6 +388,15 @@ impl InterruptionDetector {
         };
         let combined_error = format!("{error_text} {response_error_body}").to_ascii_lowercase();
 
+        // Bound here rather than at the safety-filter rule below: the
+        // context-overflow rule needs it too, and it has to run before the
+        // stream rules that read the same value.
+        let finish_reason = call
+            .response
+            .messages
+            .first()
+            .and_then(|m| m.finish_reason.as_deref());
+
         let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")
             || combined_error.contains("context window")
@@ -332,6 +407,11 @@ impl InterruptionDetector {
             || combined_error.contains("tokens_limit_reached")
             || combined_error.contains("context limit")
             || combined_error.contains("exceeds the model")
+            // Anthropic reports a generation that filled the context window as
+            // a terminal stop reason of its own ("treat the response as
+            // truncated"): the answer was cut at the window boundary, not by
+            // the stream, so it is a context overflow and not `sse_truncated`.
+            || finish_reason == Some("model_context_window_exceeded")
             // HTTP 413 from some gateways
             || status_code == 413;
 
@@ -362,11 +442,20 @@ impl InterruptionDetector {
             return events;
         }
 
+        // OpenAI and Azure OpenAI report a hard quota exhaustion as HTTP 429
+        // with `insufficient_quota`. That is a billing limit rather than a
+        // per-minute one, so rule 5.5 owns the wording and rule 2 must not
+        // answer first.
+        let is_hard_quota_exhaustion = combined_error.contains("insufficient_quota")
+            || combined_error.contains("insufficient quota")
+            || combined_error.contains("exceeded your current quota");
+
         // ── 2. RateLimit (429 / rate_limit) ────────────────────────────────────
-        if status_code == 429
-            || combined_error.contains("rate_limit")
-            || combined_error.contains("rate limit")
-            || combined_error.contains("too many requests")
+        if !is_hard_quota_exhaustion
+            && (status_code == 429
+                || combined_error.contains("rate_limit")
+                || combined_error.contains("rate limit")
+                || combined_error.contains("too many requests"))
         {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -499,11 +588,6 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        let finish_reason = call
-            .response
-            .messages
-            .first()
-            .and_then(|m| m.finish_reason.as_deref());
         if finish_reason == Some("content_filter") {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -578,8 +662,10 @@ impl InterruptionDetector {
 
         // ── 8. SSE truncated ──────────────────────────────────────────────────
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
-        // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence/pause_turn
-        // token-limit (length/max_tokens) 由 rule 9/10 单独处理
+        // 正常终止标志：finish_reason 为
+        // stop/tool_calls/function_call/end_turn/tool_use/stop_sequence/pause_turn/refusal
+        // token-limit (length/max_tokens) 由 rule 9 单独处理（rule 10 只处理
+        // `length` 下的输入溢出启发式）
         if is_sse
             && !is_normal_finish(finish_reason)
             && !is_token_limit_finish(finish_reason)
@@ -604,7 +690,7 @@ impl InterruptionDetector {
         }
 
         // ── 9. Token limit (output capped by max_tokens) ──────────────────────
-        if finish_reason == Some("length") {
+        if is_token_limit_finish(finish_reason) {
             if let Some(max_tokens) = call.request.max_tokens {
                 if let Some(usage) = &call.token_usage {
                     let ratio = usage.output_tokens as f64 / max_tokens as f64;
@@ -639,7 +725,10 @@ impl InterruptionDetector {
                 if let Some(max_tokens) = call.request.max_tokens {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
-                    if usage.input_tokens > max_tokens * 4 {
+                    // Widen before multiplying: a large (but legal) max_tokens
+                    // overflows u32, and the wrap can make any input look
+                    // oversized (or hide a real overflow).
+                    if u64::from(usage.input_tokens) > u64::from(max_tokens) * 4 {
                         let detail = serde_json::json!({
                             "model": call.model,
                             "input_tokens": usage.input_tokens,
@@ -953,6 +1042,53 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    /// Anthropic reports a generation that filled the context window as a
+    /// terminal `stop_reason` of its own. The stream completed — the answer was
+    /// cut at the window boundary — so it is a context overflow, not a
+    /// truncated stream, and before this it was the only stop reason in neither
+    /// list: rule 8 reported SseTruncated (High) and the real type was lost.
+    #[test]
+    fn test_model_context_window_exceeded_is_context_overflow() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 5_000_000_000; // > 1 second min
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("model_context_window_exceeded".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
+    }
+
+    /// The same stop reason on a call that did not stream reaches the same
+    /// classification, and in particular never reads as a truncated stream.
+    #[test]
+    fn test_context_window_exceeded_is_not_stream_truncation() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.duration_ns = 5_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("model_context_window_exceeded".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
+    }
+
     #[test]
     fn test_detect_token_limit() {
         let detector = InterruptionDetector::default();
@@ -974,6 +1110,36 @@ mod tests {
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::TokenLimit);
+    }
+
+    #[test]
+    fn test_detect_token_limit_for_anthropic_spelling() {
+        // Anthropic reports the same cap with `stop_reason: "max_tokens"`.
+        // Rule 8 intentionally excludes token-limit stops, so with rule 9
+        // matching only `length` the call produced no interruption at all.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(4096);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 3900, // 3900/4096 = 0.952 >= 0.95
+            total_tokens: 4900,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("max_tokens".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "an Anthropic max_tokens stop must report TokenLimit"
+        );
     }
 
     #[test]
@@ -1022,6 +1188,37 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::ContextOverflow)
+        );
+    }
+
+    #[test]
+    fn test_finish_reason_overflow_check_does_not_wrap_on_large_max_tokens() {
+        // max_tokens is a u32 parsed straight from the request body. Multiplying
+        // it by 4 in u32 wraps: 1_500_000_000 * 4 == 1_705_032_704, which is
+        // larger than the tiny input below, so the wrap fabricates a
+        // ContextOverflow for a request whose input is nowhere near the cap.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(1_500_000_000);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            total_tokens: 110,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "input 100 is far below the 6e9-token cap; the wrap must not flag overflow"
         );
     }
 
@@ -1485,6 +1682,55 @@ mod tests {
     }
 
     #[test]
+    fn test_refusal_sse_not_reported_as_truncated() {
+        // SSE + finish_reason="refusal"（Anthropic 安全分类器拒绝回答，官方文档
+        // 说明它是正常的 200 完成）→ 流是完整的，不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("refusal".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "a refusal is a normal completion and must not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_function_call_sse_not_reported_as_truncated() {
+        // SSE + finish_reason="function_call"（旧版 function-calling 协议：
+        // 模型以发起一次函数调用正常结束回合，客户端执行后发起新请求，
+        // "tool_calls" 的前身）→ 流是完整的，不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("function_call".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "a legacy function_call finish is a normal completion and must not trigger SseTruncated"
+        );
+    }
+
+    #[test]
     fn test_sse_unknown_finish_reason_still_truncated() {
         // 守护 #1023 原行为：SSE + 非白名单 finish_reason（None 场景由
         // test_detect_sse_truncated 覆盖，这里覆盖 Some(未知值)）仍报 SseTruncated
@@ -1666,6 +1912,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_successful_tool_result_is_not_a_failure() {
+        // A result that declares success keeps its content, and command
+        // output legitimately mentions an exit code.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-bash".to_string()),
+                response: serde_json::json!({
+                    "type": "tool_result",
+                    "is_error": false,
+                    "content": "command finished with exit code 0"
+                }),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "done".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert!(events.is_empty(), "unexpected events: {events:?}");
+
+        // The failure flag still wins over the same content.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-bash".to_string()),
+            response: serde_json::json!({
+                "type": "tool_result",
+                "is_error": true,
+                "content": "command finished with exit code 1"
+            }),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+
+    #[test]
+    fn an_unflagged_exit_code_zero_output_is_not_a_tool_failure() {
+        // Anthropic's `is_error` is optional (it defaults to false) and a
+        // tool_result may carry its output as a plain string, so a successful
+        // command's result reaches the detector with neither an explicit flag
+        // nor an object shape: just `Value::String("... exit code 0")`. The
+        // bare `exit code` substring flagged exactly that success spelling.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-tests".to_string()),
+                response: serde_json::json!("npm test\n\n60 passing (exit code 0)"),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "all green".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "a successful command's exit code 0 output is not a failure: {events:?}"
+        );
+
+        // The same shape nested under `content` (a tool_result whose payload
+        // was wrapped as an object but still reports no explicit outcome)
+        // must stay clean too.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-tests".to_string()),
+            response: serde_json::json!({"content": "make check\n(exit code 0)"}),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "an object-wrapped exit code 0 output is not a failure: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_exit_code_still_signals_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-build".to_string()),
+                response: serde_json::json!("make build\nexit code 2"),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "checking".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+
+        // 127 (command not found by exit status) and a trailing success
+        // mention after an earlier failure both keep the signal: only the
+        // zero status itself is the success spelling.
+        for payload in [
+            "sh -c missing-tool\nexit code 127",
+            "first run: exit code 1, rerun: exit code 0",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-build".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "a non-zero exit status must keep the failure signal: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
     // ── Rule 11: EmptyResponse ─────────────────────────────────────────────────
 
     #[test]
@@ -1833,6 +2213,44 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::ResourceExhaustion
         );
+    }
+
+    #[test]
+    fn test_detect_insufficient_quota_at_429() {
+        // OpenAI and Azure OpenAI report a hard quota exhaustion as HTTP 429
+        // with `insufficient_quota`; that is a billing limit, not a per-minute
+        // rate limit, and rule 2 used to classify it as one.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
+        call.response.raw_body = Some(
+            r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#
+                .to_string(),
+        );
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn test_detect_plain_429_stays_a_rate_limit() {
+        // A retryable per-minute limit that merely mentions quota must keep
+        // its own type: only the hard exhaustion wording is reclassified.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
+        call.response.raw_body = Some(
+            r#"{"error":{"message":"Rate limit reached for gpt-4 in organization org-x on requests per min. Quota exceeded for quota metric 'requests'.","type":"rate_limit_exceeded"}}"#
+                .to_string(),
+        );
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::RateLimit);
     }
 
     // ── Rule 6.5: StateMachineError ─────────────────────────────────────────

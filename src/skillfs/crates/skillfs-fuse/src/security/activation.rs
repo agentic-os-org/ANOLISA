@@ -618,7 +618,13 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
         Err(_) => return leaves,
     };
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+        // A non-UTF-8 name has no resolvable skill id: the resolver rejects a
+        // non-UTF-8 path component (`invalid_canonical_path`), so enumerating
+        // one would register an id the mount can never serve. Two distinct
+        // names would also collapse onto the same replacement character.
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         if is_hermes_management_path(&name) || name.starts_with('.') {
             continue;
         }
@@ -643,7 +649,9 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
             Err(_) => continue,
         };
         for child in cat_entries.flatten() {
-            let child_name = child.file_name().to_string_lossy().to_string();
+            let Ok(child_name) = child.file_name().into_string() else {
+                continue;
+            };
             // No-follow: a symlinked nested entry is never a managed skill.
             if !child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
@@ -671,7 +679,13 @@ pub fn enumerate_hermes_top_level_skills(source_root: &Path) -> Vec<String> {
         Err(_) => return skills,
     };
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+        // A non-UTF-8 name has no resolvable skill id: the resolver rejects a
+        // non-UTF-8 path component (`invalid_canonical_path`), so enumerating
+        // one would register an id the mount can never serve. Two distinct
+        // names would also collapse onto the same replacement character.
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         if is_hermes_management_path(&name) || name.starts_with('.') {
             continue;
         }
@@ -1151,6 +1165,71 @@ mod tests {
             !ids.iter()
                 .any(|i| i == "linktop" || i == "linkcat/child" || i == "cat/linknested"),
             "no symlinked category/nested/top-level id may appear, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn enumerate_hermes_skips_non_utf8_names() {
+        // A non-UTF-8 directory name has no resolvable skill id: the canonical
+        // resolver rejects a non-UTF-8 path component, so enumeration must not
+        // report one the mount can never serve. Two such names would also
+        // collapse onto the same replacement character.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // UTF-8 skills that must stay enumerated.
+        let real_top = root.join("realtop");
+        std::fs::create_dir_all(&real_top).unwrap();
+        std::fs::write(real_top.join("SKILL.md"), "---\nname: rt\n---\n").unwrap();
+
+        let real_nested = root.join("cat/realnested");
+        std::fs::create_dir_all(&real_nested).unwrap();
+        std::fs::write(real_nested.join("SKILL.md"), "---\nname: rn\n---\n").unwrap();
+
+        // Top-level skill whose name is not valid UTF-8.
+        let bad_top = root.join(OsStr::from_bytes(b"badtop\xff"));
+        std::fs::create_dir_all(&bad_top).unwrap();
+        std::fs::write(bad_top.join("SKILL.md"), "---\nname: bt\n---\n").unwrap();
+
+        // Two nested skills under one category whose names differ only in the
+        // invalid byte, so a lossy name maps both onto the same id.
+        let bad_nested_a = root.join("cat").join(OsStr::from_bytes(b"bad\xff"));
+        let bad_nested_b = root.join("cat").join(OsStr::from_bytes(b"bad\xfe"));
+        std::fs::create_dir_all(&bad_nested_a).unwrap();
+        std::fs::create_dir_all(&bad_nested_b).unwrap();
+        std::fs::write(bad_nested_a.join("SKILL.md"), "---\nname: a\n---\n").unwrap();
+        std::fs::write(bad_nested_b.join("SKILL.md"), "---\nname: b\n---\n").unwrap();
+
+        // Category whose own name is not valid UTF-8.
+        let bad_cat = root.join(OsStr::from_bytes(b"badcat\xfd")).join("child");
+        std::fs::create_dir_all(&bad_cat).unwrap();
+        std::fs::write(bad_cat.join("SKILL.md"), "---\nname: bc\n---\n").unwrap();
+
+        let mut leaves = enumerate_hermes_skill_leaves(root);
+        leaves.sort();
+        assert_eq!(
+            leaves,
+            vec!["cat/realnested"],
+            "a non-UTF-8 category or nested name must not be enumerated, got: {leaves:?}"
+        );
+
+        let mut top = enumerate_hermes_top_level_skills(root);
+        top.sort();
+        assert_eq!(
+            top,
+            vec!["realtop"],
+            "a non-UTF-8 top-level name must not be enumerated, got: {top:?}"
+        );
+
+        let mut ids = enumerate_hermes_skill_ids(root);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["cat/realnested", "realtop"],
+            "only resolvable ids may be enumerated, got: {ids:?}"
         );
     }
 

@@ -5,14 +5,17 @@
 Tokenless 通过 Plugin、Hook 和 Extension 接入具体 Agent 产品。本文只说明产品 Adapter。
 Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) 下。
 
+当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行清理和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
+
 ## Agent Adapter 支持矩阵
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
 | cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
-| OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
+| OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 在模型消费前替换单文本工具结果 | Core 为可替换文本选择 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
+| 千问办公（macOS 本地模式） | `qwenwork` | — | 替换 Bash 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
@@ -32,7 +35,7 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 ## Adapter 处理规则
 
-共享 Cosh-NG、Qoder、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
+共享 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
 解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；否则 Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
@@ -77,6 +80,69 @@ Common Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用。H
 Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
+
+### 千问办公（macOS 本地模式）
+
+`qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。
+已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 改写、完整 MCP 响应替换、
+JSON 转 TOON 输出及 Read 透传。不支持安全工作区／Linux VM，Hook 会在非 macOS
+环境直接透传。
+
+PreToolUse **仅匹配 Bash**，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
+符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
+仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
+被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
+文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
+不注册 Tool Ready 或 Schema Hook。
+
+先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
+和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。
+确保桌面会话能够找到这些二进制，而不只是交互式终端能够找到。
+
+安装或升级前退出千问办公，然后执行：
+
+```bash
+anolisa adapter scan
+anolisa --dry-run adapter enable tokenless qwenwork
+anolisa adapter enable tokenless qwenwork
+anolisa adapter status tokenless
+```
+
+CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
+完成后重启千问办公、开启新的**本地**会话，并在应用内检查插件激活状态。
+`status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。已验证版本为 1.2.5，
+其他版本会显示兼容性未验证的警告。
+
+`TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。
+默认在 `/Applications` 和 `~/Applications` 查找应用，数据目录为 `~/.qwenworkcn`。
+使用绝对路径（支持开头的 `~`）。status、disable 和重新 enable 时保持同一数据目录；
+需要迁移时，先使用原配置 disable。不要指向 Qoder CLI 或 Qwen Code 的配置目录。
+
+CLI 不接管没有自身 receipt 的已有安装。若此前使用随包脚本或 `make qwenwork-install`，
+先用原脚本卸载，再通过 CLI 启用（按实际安装位置调整资源路径）：
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/qwenwork/scripts/uninstall.sh
+anolisa adapter enable tokenless qwenwork
+```
+
+CLI 管理的副本使用以下命令卸载：
+
+```bash
+anolisa --dry-run adapter disable tokenless qwenwork
+anolisa adapter disable tokenless qwenwork
+```
+
+卸载不依赖应用、源 Bundle 或 Hook 运行依赖仍然存在。只移除未修改的 receipt 归属文件及
+空插件目录，无关文件保留。修改过的文件会被保留，同时保留清理失败的 receipt：
+恢复或移除报告的冲突后重试。重新 enable 拒绝覆盖用户修改；复制中断会保留 receipt，
+供重试或清理。卸载后同样需要重启应用。
+
+随包脚本及源码 Checkout 的 `make qwenwork-install` / `make qwenwork-uninstall`
+仍是独立的备选方式。CLI 副本不包含这些生命周期脚本及其归属标记。两种方式均不调用
+内嵌 Qoder CLI 或未公开的桌面 API。需要恢复独立脚本管理时，先 disable CLI 管理的
+Adapter，再使用独立安装器。
 
 ### DeepSeek Harness 原生处理路径
 
@@ -291,7 +357,43 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 
 ### OpenClaw
 
-安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写，默认关闭 TOON。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+要求 OpenClaw 2026.6.6 或更高版本，并显式启用 Tokenless 插件。插件通过声明的工具结果
+middleware，在同轮模型请求之前替换支持的文本结果；不另外压缩持久化副本。
+
+安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写；Core 会选择符合条件的无损 TOON 候选。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+
+Tokenless 只处理 OpenClaw 交付的结果。2026.8.2 等旧版宿主只要注册了适用的结果
+middleware，就会在回调前将每个文本块裁剪到 100,000 个 UTF-16 Code Unit，即使
+middleware 不返回替换内容也是如此。过大的 `details` 也可能被截断，丢失退出状态等
+字段。Fail-open 保留的是收到的结果，无法恢复宿主已经移除的文本或元数据。因此，被
+截断的 JSON 可能直接透传而不压缩。这些宿主仍在该限制内受支持。
+
+如需在此边界接收完整的原生文本结果，建议使用包含
+[上游提交 `2f620b970a04`](https://github.com/openclaw/openclaw/commit/2f620b970a0458531588d6c8067540164197580e)
+的 OpenClaw 构建。已验证构建和此前发布版均报告 `2026.10.2`，仅凭版本字符串不能
+确认修复是否存在。旧式嵌套 `toolResult` 归一化、工具自身和下游模型上下文预算仍可能
+限制输出。Tokenless 不会自动读取保存完整输出的文件，也不能恢复已丢弃的尾部。
+设置 `post_tool_enabled: false` 可停止 Tokenless 注册该 middleware；其他插件仍可能
+注册自己的 middleware。
+
+可选的 `selective-claw` 上下文引擎在 `plugins.entries.selective-claw.config` 中配置，
+与响应压缩适配器的配置相互独立：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "selective-claw": {
+        "config": { "enabled": true, "freshTailTurns": 3, "dbPath": "~/.openclaw/selective-claw.db" }
+      }
+    }
+  }
+}
+```
+
+`~/` 会展开为当前用户的主目录。未设置 `dbPath` 时，归档为 `OPENCLAW_STATE_DIR` 下的
+`selective-claw.db`；该环境变量未设置时使用 `~/.openclaw`。将插件的 `enabled` 选项设为
+`false` 时，不打开数据库，也不注册上下文引擎或召回工具。
 
 ### Hermes
 
@@ -319,6 +421,9 @@ Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证
 receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 ### OpenCode
+
+Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
+仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
 
 OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 

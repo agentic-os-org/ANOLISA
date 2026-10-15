@@ -20,10 +20,14 @@ pub const MAX_FRAME_BYTES: usize = asc_daemon_protocol::BUSINESS_FRAME_BYTES;
 /// never retries, including after failures whose execution outcome is unknown.
 /// The caller's thread blocks until completion; no async runtime is needed.
 /// Encoding precedes the I/O deadline, and decoding follows receipt of the frame.
+/// The connected server must belong to UID 0 before any request bytes are sent.
+/// Test builds may opt out through the `testing` feature and
+/// `AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`.
 ///
 /// # Errors
 /// Returns local encoding/limit failures, connection failures, a call deadline,
-/// I/O failures, or malformed/oversized responses. Daemon errors remain responses.
+/// server identity failures, I/O failures, or malformed/oversized responses.
+/// Daemon errors remain responses.
 pub fn call(
     socket: &Path,
     request: &DaemonRequest,
@@ -117,6 +121,7 @@ fn call_wire(
     // connection. Writable readiness alone does not prove that it connected.
     socket.peer_addr().map_err(ClientError::Connect)?;
     let mut stream = UnixStream::from(OwnedFd::from(socket));
+    verify_server(&stream).map_err(ClientError::ServerIdentity)?;
     let mut write_started = false;
     let mut pending = payload.as_slice();
     while !pending.is_empty() {
@@ -133,6 +138,33 @@ fn call_wire(
         }
     }
     read_response(&mut stream, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_server(stream: &UnixStream) -> io::Result<()> {
+    // Authenticate this connection rather than a path that could be replaced.
+    let uid = rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw();
+    if uid != 0 {
+        #[cfg(feature = "testing")]
+        if std::env::var_os("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            return Ok(());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("expected daemon UID 0, got {uid}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_server(_stream: &UnixStream) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "daemon server identity verification requires Linux",
+    ))
 }
 
 fn remaining(deadline: Instant, request_may_have_executed: bool) -> Result<Duration, ClientError> {
@@ -223,6 +255,9 @@ pub enum ClientError {
     /// No connection was established.
     #[error("daemon connection unavailable; request not sent: {0}")]
     Connect(io::Error),
+    /// Kernel peer credentials could not establish the trusted root service.
+    #[error("daemon server identity verification failed; request not sent: {0}")]
+    ServerIdentity(io::Error),
     /// A single call deadline elapsed, without replaying the request.
     #[error(
         "daemon call timed out (request may have executed: {request_may_have_executed}); not retried"

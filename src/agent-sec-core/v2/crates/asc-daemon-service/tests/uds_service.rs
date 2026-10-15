@@ -158,10 +158,13 @@ fn config() -> ServiceConfig {
         max_request_frame_bytes: 64,
         max_response_frame_bytes: 64,
         max_connections: 4,
+        reserved_administrator_connections: 0,
+        max_connections_per_uid: 4,
         max_rejection_connections: 2,
         rejection_encode_timeout: Duration::from_millis(100),
         request_read_timeout: Duration::from_millis(250),
         dispatch_timeout: Duration::from_millis(250),
+        max_dispatch_timeout: Duration::from_secs(1),
         response_write_timeout: Duration::from_millis(250),
         drain_timeout: Duration::from_millis(500),
         accept_error_backoff: Duration::from_millis(10),
@@ -289,10 +292,31 @@ async fn idle_client_does_not_block_a_healthy_request_and_receives_one_deadline(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_read_timeout_releases_the_uid_quota() {
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut limits = config();
+    limits.max_connections_per_uid = 1;
+    let service = start_service("uid-timeout", limits, dispatcher);
+    let mut idle = UnixStream::connect(&service.socket_path).await.unwrap();
+    assert_eq!(
+        request(&service.socket_path, b"busy\n", false).await,
+        b"reject:busy\n"
+    );
+    let mut response = Vec::new();
+    idle.read_to_end(&mut response).await.unwrap();
+    assert_eq!(response, b"reject:timeout\n");
+    assert_eq!(
+        request(&service.socket_path, b"after\n", false).await,
+        b"ok:after\n"
+    );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let mut limits = config();
-    limits.max_connections = 1;
+    limits.max_connections_per_uid = 1;
     let service = start_service("busy", limits, dispatcher.clone());
     let held_path = service.socket_path.clone();
     let held = tokio::spawn(async move { request(&held_path, b"hold\n", false).await });
@@ -380,6 +404,7 @@ async fn dispatch_deadline_cancels_lifetime_and_releases_connection_capacity() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let mut limits = config();
     limits.max_connections = 1;
+    limits.max_connections_per_uid = 1;
     limits.dispatch_timeout = Duration::from_millis(50);
     let service = start_service("dispatch-timeout", limits, dispatcher.clone());
     let held_path = service.socket_path.clone();
@@ -408,6 +433,7 @@ async fn dispatch_deadline_cancels_lifetime_and_releases_connection_capacity() {
 async fn request_and_response_frame_failures_are_bounded_and_connection_local() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let mut limits = config();
+    limits.max_connections_per_uid = 1;
     limits.max_request_frame_bytes = 8;
     limits.max_response_frame_bytes = 32;
     let service = start_service("bounds", limits, dispatcher);

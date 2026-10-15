@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite, extract_hash};
 
@@ -23,6 +24,38 @@ impl StashStore for AlwaysFail {
 
     fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
         Ok(false)
+    }
+}
+
+/// Stash store whose first write succeeds and every later write fails,
+/// simulating a backend that breaks mid-run (disk full, lock lost).
+struct FailAfterFirst {
+    inner: InMemoryStore,
+    calls: AtomicUsize,
+}
+
+impl StashStore for FailAfterFirst {
+    fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) > 0 {
+            return Err(StashError::Backend("simulated mid-run failure".to_owned()));
+        }
+        self.inner.stash(payload)
+    }
+
+    fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+        self.inner.retrieve(hash)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn evict_expired(&self) -> Result<usize, StashError> {
+        self.inner.evict_expired()
+    }
+
+    fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+        self.inner.delete(hash, generation)
     }
 }
 
@@ -294,6 +327,67 @@ fn stash_failure_is_reported_without_emitting_a_marker() {
     assert!(outcome.operations.is_empty());
     assert_eq!(outcome.metrics.stash_errors, 1);
     assert!(outcome.stash_writes.is_empty());
+}
+
+#[test]
+fn partial_stash_failure_returns_tentative_writes_with_lossless_output() {
+    // First omission block stashes, the second fails mid-run: the candidate
+    // must fall back to the lossless log without a marker, while the one
+    // tentative write is still returned so the runtime ledger can delete the
+    // orphaned row.
+    let mut input = cargo_log(30);
+    let position = input.find("Compiling package-015").unwrap();
+    input.insert_str(
+        position,
+        "error[E0308]: mismatched types\n  --> src/main.rs:3:4\n",
+    );
+    let store = FailAfterFirst {
+        inner: InMemoryStore::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+    assert_eq!(outcome.output, input);
+    assert!(!outcome.output.contains("lines omitted"));
+    assert_eq!(outcome.metrics.stash_errors, 1);
+    assert_eq!(outcome.stash_writes.len(), 1);
+    assert!(outcome.stash_writes[0].created);
+    assert_eq!(store.len(), 1);
+}
+
+#[test]
+fn duplicate_omission_payloads_share_one_key_across_markers() {
+    // Two omission blocks with identical payloads: the first stash creates
+    // the row, the second refreshes it, and both markers carry the same key —
+    // one retrievable row backs two markers.
+    let mut input = "$ cargo build\n".to_owned();
+    for group in 0..2 {
+        for _ in 0..12 {
+            input.push_str(
+                "Compiling shared-package v0.1.0 with a deliberately long progress suffix\n",
+            );
+        }
+        input.push_str(&format!("phase boundary {group}\n"));
+    }
+    input.push_str("Finished `dev` profile [unoptimized] target(s) in 2.1s\n");
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert_eq!(outcome.stash_writes.len(), 2);
+    let (first, second) = (&outcome.stash_writes[0], &outcome.stash_writes[1]);
+    assert!(first.created);
+    assert!(!second.created);
+    assert_eq!(first.key, second.key);
+    assert_eq!(second.previous_generation, Some(first.generation));
+    assert_eq!(store.len(), 1, "one row backs both markers");
+    let markers = outcome
+        .output
+        .matches(&recovery_instruction(&first.key, &RecoveryMethod::Shell))
+        .count();
+    assert_eq!(markers, 2);
 }
 
 #[test]

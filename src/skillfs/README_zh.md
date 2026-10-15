@@ -95,6 +95,20 @@ SkillFS 是一个混合文件系统：虚拟目录视图 + 物理写透传。
 
 ## 快速开始
 
+### 预编译包
+
+Release CI 构建 Linux x86_64 和 aarch64 预编译包，glibc 基线为 2.28。
+每个架构产出 `skillfs-{version}-linux-{arch}.tar.gz` 及其 `.sha256`、
+CycloneDX `.tar.gz.cdx.json` SBOM 及 SBOM 的 `.sha256`。
+压缩包包含 `bin/skillfs`、系统安装契约、内置 Skill 和许可证。
+目标系统需要 FUSE 3（包含共享库）；挂载还需要访问 `/dev/fuse`。
+
+发布前，在 GitHub Actions 中运行 **Release / Preview**，选择分支和 `skillfs`，
+填写 `Cargo.toml` 中的版本号（不带 `v` 前缀）。校验成功后下载两种架构的
+`skillfs-prebuilt-{version}-linux-{arch}` artifact。Preview 产物保留 14 天，
+不会创建 GitHub Release。正式发布使用 `skillfs/v{version}` tag，沿用现有
+release environment 审批流程。
+
 ### 构建
 
 ```bash
@@ -184,7 +198,8 @@ skills = ["apple-notes", "blogwatcher"]
 
 挂载后：
 
-- `/skills` 显示 default view 中的 skills。
+- `/skills` 显示 default view 中的 skills，以及尚未分配到任何 view 的 skills。
+- 挂载不改写 `skillfs-views.toml`；需持久化分配时显式编辑配置，修改视图配置后重挂载生效。
 - `skill-discover/SKILL.md` 列出 secondary views 中的 skills 及其
   可读 `source_path`。
 
@@ -224,7 +239,9 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
-- `pip install` -> `uv pip install`
+- 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
+  `python -m pip` 调用。独立调用使用保守的命令位置启发式判断，
+  不是完整的 shell 语法解析。
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 

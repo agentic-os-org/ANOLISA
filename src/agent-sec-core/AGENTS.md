@@ -347,6 +347,12 @@ authorization, query scope, data-directory, or diagnostic-log changes must updat
 treat systemd `active` as daemon readiness, and do not use local-only sidecar or
 healthcheck files that are absent from main as CURRENT/PRESERVE evidence.
 
+Before adding a runtime entrypoint, identify its production caller or an explicit
+requirement for direct use. Before reporting completion, verify that call path;
+build, installation, documentation, and tests alone do not establish integration.
+When an approach changes, remove code, dependencies, packaging, tests, and
+documentation that no longer serve the final behavior.
+
 1. V2 product runtime code is Rust, including `asc-cli`, `asc-daemon`, security
    capabilities, Policy Engine, JobSupervisor, state migration, and delivery
    entrypoints. V1 Python code is an oracle and migration input, not a V2

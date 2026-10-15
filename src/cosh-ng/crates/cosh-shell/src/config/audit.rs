@@ -18,8 +18,9 @@ impl Default for AuditSettings {
     fn default() -> Self {
         Self {
             mode: AuditMode::BestEffort,
+            // Mirrors the approved per-user audit budget in cosh-types.
             retention_days: 30,
-            max_disk_bytes: 1024 * 1024 * 1024,
+            max_disk_bytes: 100 * 1024 * 1024,
         }
     }
 }
@@ -161,6 +162,6 @@ mod tests {
         .unwrap();
         assert_eq!(settings.mode, AuditMode::Required);
         assert_eq!(settings.retention_days, 30);
-        assert_eq!(settings.max_disk_bytes, 1024 * 1024 * 1024);
+        assert_eq!(settings.max_disk_bytes, 100 * 1024 * 1024);
     }
 }

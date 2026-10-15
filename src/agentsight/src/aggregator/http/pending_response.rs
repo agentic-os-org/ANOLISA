@@ -11,6 +11,14 @@ use std::rc::Rc;
 
 const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
 
+/// Interim 1xx statuses that do not finalize the request they answer.
+///
+/// 101 is excluded: it switches protocols and the response state machine
+/// treats it as a final response.
+pub(super) fn is_informational(status: u16) -> bool {
+    (100..200).contains(&status) && status != 101
+}
+
 impl ConnectionState {
     /// Request evidence shared by idle, process-exit and dead-PID persistence.
     pub(crate) fn pending_request(&self) -> Option<&ParsedRequest> {
@@ -119,6 +127,14 @@ impl Framing {
 }
 
 impl PendingResponse {
+    /// Bytes retained while response framing is incomplete.
+    pub(super) fn buffered_bytes(&self) -> usize {
+        match self {
+            Self::Headers(event) => event.buf.len(),
+            Self::Body { response, .. } => response.source_event.buf.len(),
+        }
+    }
+
     /// Select message framing without decoding the response body.
     pub(super) fn body(response: ParsedResponse, method: Option<&str>) -> Result<Self> {
         let framing = Framing::new(&response, method)?;
@@ -167,7 +183,11 @@ impl PendingResponse {
     }
 
     /// Parse a bounded complete header block, preserving its first timestamp.
-    pub(super) fn parsed_headers(&self) -> Result<Option<ParsedResponse>> {
+    ///
+    /// `max_headers` is the caller's configured HTTP/1 header cap
+    /// (`AgentsightConfig::max_headers`) so assembled responses are held to
+    /// the same cap as the ones the parser accepted whole.
+    pub(super) fn parsed_headers(&self, max_headers: usize) -> Result<Option<ParsedResponse>> {
         let Self::Headers(event) = self else {
             return Ok(None);
         };
@@ -180,7 +200,7 @@ impl PendingResponse {
         if end + 4 > MAX_RESPONSE_HEADERS {
             bail!("response headers exceed {MAX_RESPONSE_HEADERS} bytes");
         }
-        match HttpParser::new().parse(Rc::clone(event))? {
+        match HttpParser::with_max_headers(max_headers).parse(Rc::clone(event))? {
             ParsedHttpMessage::Response(response) => Ok(Some(response)),
             _ => bail!("invalid response headers"),
         }
@@ -308,21 +328,40 @@ impl HttpConnectionAggregator {
             ),
             ConnectionState::RequestBodyPending {
                 mut request,
+                expected_body_len,
                 body_buffer,
-                ..
             } => {
+                let assembly = PendingResponse::Headers(Rc::new(event.clone()));
+                // An interim 1xx response (`100 Continue`) does not answer the
+                // request: a client that sent `Expect: 100-continue` writes the
+                // body only after receiving it. Collapsing to RequestPending
+                // here would expose `reassembled_body` as the empty partial
+                // body and every body continuation afterwards would hit the
+                // no-op fallback of `process_raw_body_data`, silently dropping
+                // the prompt. Keep the pending body state instead.
+                if matches!(
+                    assembly.parsed_headers(self.max_headers),
+                    Ok(Some(ref response)) if is_informational(response.status_code)
+                ) {
+                    self.insert(
+                        id,
+                        ConnectionState::RequestBodyPending {
+                            request,
+                            expected_body_len,
+                            body_buffer,
+                        },
+                    );
+                    return None;
+                }
                 request.reassembled_body = Some(body_buffer);
-                (
-                    Some(request),
-                    PendingResponse::Headers(Rc::new(event.clone())),
-                )
+                (Some(request), assembly)
             }
             other => {
                 self.insert(id, other);
                 return None;
             }
         };
-        match assembly.parsed_headers() {
+        match assembly.parsed_headers(self.max_headers) {
             Ok(Some(response)) => {
                 drop(assembly);
                 if let Some(request) = request {

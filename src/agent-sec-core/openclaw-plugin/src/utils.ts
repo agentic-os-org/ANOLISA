@@ -8,6 +8,15 @@ const HOOK_POLICY_ALIASES: Record<string, HookPolicy> = {
   deny: "block",
 };
 
+/** Keep approval text within its UTF-16 budget without splitting a surrogate pair. */
+export function truncateApprovalText(text: string, maxLength = 256): string {
+  if (text.length <= maxLength) return text;
+  let end = maxLength - 1;
+  const lastUnit = text.charCodeAt(end - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+  return text.slice(0, end) + "…";
+}
+
 export function envFlagEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name];
   if (value === undefined) {
@@ -38,6 +47,27 @@ export function isHookPolicyValue(value: unknown): boolean {
 
 export function envHookPolicy(name: string, defaultValue: HookPolicy): HookPolicy {
   return normalizeHookPolicy(process.env[name], defaultValue);
+}
+
+/**
+ * True when the host runtime exposes the model-entry gate (`before_agent_run`).
+ * Stable OpenClaw >=2026.5.12 moved inbound text there; prereleases and
+ * unrecognized builds keep the legacy `before_dispatch` inbound event.
+ *
+ * Suffix semantics: `+<...>` is semver build metadata (stable); `-<digits>`
+ * is a package revision of a stable release (e.g. 2026.7.1-2, the deployed
+ * packaging scheme); any other `-` suffix marks a prerelease, which stays on
+ * the legacy path — misclassifying a prerelease as stable would register a
+ * hook the host never fires.
+ */
+export function supportsModelInputGate(version: unknown): boolean {
+  if (typeof version !== "string") return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+|-\d+)?$/.exec(version);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1, 4).map(Number);
+  return (
+    year > 2026 || (year === 2026 && (month > 5 || (month === 5 && day >= 12)))
+  );
 }
 
 export type CliResult = {

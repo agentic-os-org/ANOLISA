@@ -64,3 +64,77 @@ fn large_overlapping_custom_matches_do_not_clone_raw_input() {
     }
     assert_eq!(report.redacted_text.as_deref(), Some("[CUSTOM_0_REDACTED]"));
 }
+
+#[test]
+fn email_sentence_long_period_runs_keep_complete_coverage() {
+    let input = format!(
+        "alice@company.cn{} bob@securecorp.cn.",
+        ".".repeat(1_048_577)
+    );
+    let report = PiiScanner::new()
+        .unwrap()
+        .scan(
+            &input,
+            &PiiScanOptions {
+                raw_evidence: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(report.verdict, Verdict::Warn);
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+    assert_eq!(report.findings.len(), 2);
+    assert_eq!(
+        report.findings[0].raw_evidence.as_deref(),
+        Some("alice@company.cn")
+    );
+    assert_eq!(
+        report.findings[1].raw_evidence.as_deref(),
+        Some("bob@securecorp.cn")
+    );
+    assert_eq!(report.findings[1].span.end, input.len() - 1);
+}
+
+#[test]
+fn email_sentence_dense_findings_keep_tail_deny() {
+    let input = format!("{} password=abcdefghijklmnop", "a@b.cn. ".repeat(20_000));
+    let report = PiiScanner::new()
+        .unwrap()
+        .scan(&input, &PiiScanOptions::default())
+        .unwrap();
+    assert_eq!(report.verdict, Verdict::Deny);
+    assert_eq!(report.summary.total, 20_001);
+    assert_eq!(report.summary.by_type["email"], 20_000);
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+}
+
+#[test]
+fn email_sentence_truncated_period_run_retains_partial_coverage() {
+    let input = "alice@company.cn...evil";
+    let scanner = PiiScanner::new().unwrap();
+    assert!(
+        scanner
+            .scan(input, &PiiScanOptions::default())
+            .unwrap()
+            .findings
+            .is_empty()
+    );
+    let report = scanner
+        .scan(
+            input,
+            &PiiScanOptions {
+                max_bytes: Some("alice@company.cn.".len()),
+                redact_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(report.verdict, Verdict::Warn);
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Partial);
+    assert_eq!(report.summary.coverage.reasons, ["input_truncated"]);
+    assert_ne!(
+        report.summary.input_sha256,
+        report.summary.scanned_input_sha256
+    );
+    assert_eq!(report.redacted_text.as_deref(), Some("a***@company.cn."));
+}

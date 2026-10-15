@@ -329,8 +329,17 @@ regex rules 当前可能只产生 pass/warn，但 deny 是 custom/LLM rule 的�
 | error verdict | false | 1 | `CodeScanError` |
 | unsupported language | false | 1 | `ErrUnsupportedLang`，data 为空 |
 
-stdout 是 data 的 JSON。`AGENT_SEC_OLLAMA_MODEL` 选择 LLM model（默认 `warden`）；模型
-service backend/base URL/timeout 使用共享 model-service 配置。
+stdout 是 data 的 JSON。`AGENT_SEC_OLLAMA_MODEL` 选择 LLM model（未设置时默认 `warden`）；模型
+service backend/base URL/timeout 使用共享 model-service 配置。LLM mode 的 daemon 与 CLI deadline
+按照该请求 timeout 预留一次模型检查、一次 chat 及一次 chat 重试的完整预算，不能以固定短
+期限截断已配置的本地推理。
+
+`llm` 模式先按与 regex 相同的规则拒绝空/纯空白 `code`，不会因模型可用性改变该
+结果。其后检查本地模型并以 `temperature=0`、`seed=42` 请求 JSON chat；模型输出只接受
+`PASS` 或 `DENY`（JSON 或仅含一个 verdict token 的文本）。`DENY` 映射为成功的 `warn`
+结果和 `llm-judge` finding；无法判定的输出产生 `error` verdict，summary 保留最多 120
+个字符的原始输出上下文。模型不可用或请求失败同样是 `error` verdict，不是 daemon
+protocol error。
 
 ## 8. `prompt_scan`
 
@@ -487,6 +496,18 @@ ActionResult 同时设置 error/error_type，stdout 不含 traceback。
 业务调用方可以显式请求 raw evidence，但 SecurityEvent 永远删除原文、raw evidence 和
 redacted text；只保存 text length/SHA-256、扫描选项和 sanitized finding。Rust backend
 必须在 lifecycle 前使用相同 sanitizer。
+
+### 9.5 邮箱句末边界
+
+Python V1 和 Rust V2 使用相同的句末边界规则：邮箱候选后的连续 ASCII `.` 只有在其后为输入结束、
+空白或固定分隔符时才作为句末标点。固定分隔符为 ASCII 双引号、单引号、`)]}>,;:!?` 和
+`，。；：！？、）］｝】〕》〉」』”’`。没有紧随句号的候选保持原有边界行为；word 字符和 `-`
+仍不能直接作为邮箱右边界。
+
+候选仍须通过完整邮箱语法和长度校验。合法多级域名必须完整匹配；`.123`、`.c`、`.-bad`、
+`._bad` 和 `..evil` 等非法后缀不能通过截取较短域名产生 finding。句末标点不进入 span 或脱敏
+替换范围。置信度计算、保留域名、远程身份、severity、Host policy、截断及 deadline 语义不变。
+该检测修复不改变 CLI/RPC 参数、结果 schema 或扫描器版本标识。
 
 ## 10. `skill_ledger`
 
@@ -689,10 +710,13 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
 100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
 与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
-检测语义版本 `scanner_version=2.0.0` 纳入规则标识，成功/失败报告及审计均保留；
-内置 engine 为 regex_v2，自定义为 fancy_regex。此版本修复空 claims JWT 的候选漏报，
+检测语义版本 `scanner_version=2.0.1` 纳入规则标识，成功/失败报告及审计均保留；
+内置 engine 为 regex_v2，自定义为 fancy_regex。2.0.0 修复空 claims JWT 的候选漏报，
 接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
-其他格式、置信度、位置和脱敏契约保留，变化由独立质量用例定义。
+2.0.1 与保留的 Python 检测器同步要求完整卡号表达式、支持网络的前缀/长度组合及 Luhn；
+非常规分组及不合法表达式内部的局部匹配被拒绝。格式范围和边界见
+[PII 用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md#支持的银行卡格式)。
+其他检测类型、置信度和脱敏格式保留，变化由共享卡号语料及独立质量用例定义。
 
 差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 142 个
 V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见

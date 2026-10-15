@@ -76,7 +76,8 @@ fn walk(
                 .map_err(|e| io_error(root.join(&rel), e))?,
         );
         let before = file.metadata().map_err(|e| io_error(root.join(&rel), e))?;
-        if before.ino() != stat.st_ino || before.dev() != stat.st_dev {
+        let identity = rustix::fs::fstat(&file).map_err(|e| io_error(root.join(&rel), e))?;
+        if identity.st_ino != stat.st_ino || identity.st_dev != stat.st_dev {
             return Err(SkillSecError::Integrity(format!(
                 "content changed while opening: {rel}"
             )));

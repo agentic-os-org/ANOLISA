@@ -440,6 +440,7 @@ STATIC_DEFAULT_TIMEOUTS = {
     ("cosh", "code-scan"): "10",
     ("cosh", "prompt-scan"): "10",
     ("cosh", "pii-check"): "10",
+    # The show subprocess budget; the Cosh host allows 10 s for init plus show.
     ("cosh", "skill-ledger"): "5",
     ("openclaw", "code-scan"): "10",
     ("openclaw", "prompt-scan"): "10",

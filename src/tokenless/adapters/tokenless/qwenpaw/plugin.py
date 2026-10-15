@@ -207,10 +207,31 @@ class TokenlessMiddleware(MiddlewareBase):
         attribution = Attribution(AGENT_ID, agent.state.session_id, source.id)
         optimization = OutputOptimization.NONE
         forwarded = source
+        command = None
         if command_field is not None:
-            arguments = json.loads(source.input)
-            if not isinstance(arguments, dict):
-                raise TypeError(f"{source.name} arguments must be a JSON object")
+            try:
+                arguments = json.loads(source.input)
+                if not isinstance(arguments, dict):
+                    raise TypeError(f"{source.name} arguments must be a JSON object")
+            except (json.JSONDecodeError, TypeError):
+                # The host (agentscope 2.x) repairs malformed tool
+                # arguments upstream, but the raw string still reaches the
+                # middleware; raising here kills the whole agent reply.
+                # Fail open: forward the call untransformed and keep
+                # lossless-only output handling.
+                async for item in next_handler(**input_kwargs):
+                    if isinstance(item, ToolResponse):
+                        yield await self._after_response(
+                            item,
+                            source.name,
+                            origin,
+                            optimization,
+                            attribution,
+                            None,
+                        )
+                    else:
+                        yield item
+                return
             transformed = await self.sdk.pre_tool(
                 PreToolRequest(
                     tool_name=source.name,
@@ -236,10 +257,16 @@ class TokenlessMiddleware(MiddlewareBase):
                     )
                 }
             )
+            command = transformed.arguments.get(command_field)
         async for item in next_handler(**{**input_kwargs, "tool_call": forwarded}):
             if isinstance(item, ToolResponse):
                 yield await self._after_response(
-                    item, source.name, origin, optimization, attribution
+                    item,
+                    source.name,
+                    origin,
+                    optimization,
+                    attribution,
+                    command if isinstance(command, str) else None,
                 )
             else:
                 yield item
@@ -251,6 +278,7 @@ class TokenlessMiddleware(MiddlewareBase):
         origin: str,
         optimization: Any,
         attribution: Any,
+        command: str | None,
     ) -> ToolResponse:
         from anolisa_tokenless import (
             ContentOrigin,
@@ -295,6 +323,7 @@ class TokenlessMiddleware(MiddlewareBase):
                         replace_with_text=True,
                     ),
                     attribution=attribution,
+                    command=command,
                 )
             )
             extra_context = extra_context or transformed.additional_context

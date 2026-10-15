@@ -249,3 +249,186 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
         }
     }
 }
+
+/// Minimal ChatML tokenizer (WordLevel + Whitespace) so the drain fallback's
+/// chat-template path runs without the network or the real Qwen tokenizer,
+/// which is not vendored in the repository.
+const DRAIN_TOKENIZER_JSON: &str = r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {"id": 0, "content": "<|im_start|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 1, "content": "<|im_end|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 2, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {"type": "Whitespace"},
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<|im_start|>": 0,
+      "<|im_end|>": 1,
+      "[UNK]": 2,
+      "system": 3,
+      "user": 4,
+      "assistant": 5
+    },
+    "unk_token": "[UNK]"
+  }
+}"#;
+
+/// ChatML template in the shape the Qwen models use; the `+` concatenation of
+/// `role` and `content` fails on a non-string `content` exactly like the real
+/// template does.
+const DRAIN_TOKENIZER_CONFIG_JSON: &str = r#"{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "chat_template": "{% if tools %}{{ '<|tools|>' + (tools | tojson) + '<|/tools|>' }}{% endif %}{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "bos_token": "<|im_start|>",
+  "eos_token": "<|im_end|>",
+  "unk_token": "[UNK]",
+  "model_max_length": 32768
+}"#;
+
+fn drain_fixture_tokenizer() -> LlmTokenizer {
+    let dir = super::tests::unique_tmp_dir("drain-tokenizer");
+    let tokenizer_path = dir.join("tokenizer.json");
+    let config_path = dir.join("tokenizer_config.json");
+    std::fs::write(&tokenizer_path, DRAIN_TOKENIZER_JSON).expect("write tokenizer.json");
+    std::fs::write(&config_path, DRAIN_TOKENIZER_CONFIG_JSON).expect("write tokenizer config");
+    LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+}
+
+/// One request on `path`, answered by an SSE stream that stops after a content
+/// delta — the shape of a process that dies before the terminal usage event.
+fn drain_fixture(path: &str, body: &str) -> Aggregator {
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        },
+    );
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    let sse = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
+    );
+    assert!(feed(&mut aggregator, 0, sse.as_bytes()).is_empty());
+    aggregator
+}
+
+/// A drained stream that broke before the terminal usage event must still get
+/// its input tokens counted, for every request shape the capture pipeline
+/// understands. The fallback used to read a private top-level `messages`
+/// array, so Responses `input` and DashScope native `input.messages` requests
+/// kept `input_tokens` NULL while the output side was counted from the same
+/// events.
+#[test]
+fn drain_fallback_counts_every_request_shape() {
+    let tokenizer = drain_fixture_tokenizer();
+    let cases = [
+        (
+            "/v1/responses",
+            r#"{"model":"gpt-5","instructions":"Be terse.","input":[{"type":"message","role":"user","content":"hello there"}]}"#,
+        ),
+        (
+            "/api/v1/services/aigc/text-generation/generation",
+            r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]}}"#,
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello there"}]}"#,
+        ),
+        // A replay that carries tool calls: `arguments` arrives as a JSON
+        // string and is decoded before the template sees the messages.
+        (
+            "/v1/chat/completions",
+            r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}]}"#,
+        ),
+        // Typed Responses content: the chat template cannot render a block
+        // array, so the raw-message count is the one that must answer.
+        (
+            "/v1/responses",
+            r#"{"model":"gpt-5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello there"}]}]}"#,
+        ),
+    ];
+    for (path, body) in cases {
+        let mut aggregator = drain_fixture(path, body);
+        assert!(!crate::utils::procfs::proc_pid(PID).exists());
+        let drained = aggregator.drain_dead_pid_connections();
+        assert_eq!(
+            drained.len(),
+            1,
+            "{path}: the dead-PID drain keeps the call"
+        );
+        let (_, state) = drained.into_iter().next().unwrap();
+        let request_body = state.pending_request().and_then(|r| r.json_body());
+        let sse_events = match state {
+            ConnectionState::SseActive { sse_events, .. } => sse_events,
+            _ => panic!("{path}: expected an active SSE stream to drain"),
+        };
+        let mut enrichment =
+            GenAIBuilder::extract_sse_enrichment(&sse_events).expect("enrichment from events");
+        assert!(
+            enrichment.input_tokens.is_none(),
+            "{path}: the truncated stream carries no usage"
+        );
+        // The drain path fills the missing input side from the request body.
+        if enrichment.input_tokens.is_none() {
+            if let Some(body) = request_body.as_ref() {
+                enrichment.input_tokens = drain_request_input_tokens(body, &tokenizer);
+            }
+        }
+        assert!(
+            enrichment.input_tokens.is_some_and(|n| n > 0),
+            "{path}: the drain fallback must count the request messages"
+        );
+    }
+}
+
+/// DashScope/Bailian native requests nest their tool definitions under
+/// `parameters` (the OpenAI-compatible spelling is top level). The live
+/// request parser reads both spellings; the drain fallback read only the top
+/// level, so a drained native call was estimated without the tool definitions
+/// the same request carries — and the chat template renders them.
+#[test]
+fn drain_fallback_counts_dashscope_native_parameter_tools() {
+    let tokenizer = drain_fixture_tokenizer();
+    let native_path = "/api/v1/services/aigc/text-generation/generation";
+    let with_tools = r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message","tools":[{"type":"function","function":{"name":"get_weather","description":"Look up the forecast for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}}"#;
+
+    // Walk the real drain so the fallback sees the captured request body.
+    let mut aggregator = drain_fixture(native_path, with_tools);
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let (_, state) = drained.into_iter().next().unwrap();
+    let body = state
+        .pending_request()
+        .and_then(|r| r.json_body())
+        .expect("the native request body survives capture");
+    assert!(
+        body.get("parameters")
+            .and_then(|p| p.get("tools"))
+            .is_some(),
+        "the native tools live under parameters and must survive capture"
+    );
+
+    let counted = drain_request_input_tokens(&body, &tokenizer).expect("count");
+    let without_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message"}}"#,
+    )
+    .unwrap();
+    let baseline = drain_request_input_tokens(&without_tools, &tokenizer).expect("count");
+    assert!(
+        counted > baseline,
+        "the native tool definitions must reach the template: {counted} vs {baseline}"
+    );
+}

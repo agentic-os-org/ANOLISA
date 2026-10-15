@@ -755,6 +755,7 @@ impl SkillFs {
                 self.send_sync(SyncEvent::Reparse {
                     skill_name: skill_name.clone(),
                     source_path: physical.clone(),
+                    max_skill_size: self.max_skill_size,
                 });
                 self.observe_mutation(
                     skill_name,

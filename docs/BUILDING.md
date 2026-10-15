@@ -4,14 +4,14 @@
 
 This guide is for contributors working from an ANOLISA checkout. It describes
 the repository-wide build entry point, the boundary of the aggregate test
-runner, and the local build and test commands for all twelve components. A
+runner, and the local build and test commands for the components below. A
 component README remains the source for component-specific dependencies and
 runtime setup.
 
 ## 1. Prepare a checkout
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa
 ```
 
@@ -24,7 +24,7 @@ or `rust-version` declared by the component you are changing.
 
 ## 2. Repository layout
 
-The `src/` tree currently contains these twelve components:
+The following table lists component locations in the repository:
 
 | Component | Directory | Platform and role |
 |-----------|-----------|-------------------|
@@ -39,7 +39,6 @@ The `src/` tree currently contains these twelve components:
 | SkillFS (`skillfs`) | [`src/skillfs`](../src/skillfs/README.md) | Rust FUSE skill filesystem; Linux |
 | ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README.md) | Rust workspace checkpoint daemon and TypeScript adapters; Linux system service |
 | ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel-tuning engine; Linux |
-| blaze | [`src/blaze`](../src/blaze/README.md) | Rust per-host sandbox orchestrator; Linux |
 
 The repository-level instructions are in [`AGENTS.md`](../AGENTS.md). Read a
 component's `AGENTS.md` before changing that component and use its README for
@@ -55,7 +54,7 @@ component.
 |------|-----------------|
 | Node.js | `deprecated/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
 | Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
-| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `distribution/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/blaze/rust-toolchain.toml` pins `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `distribution/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
 | agent-sec-core | Linux sandbox runtime and integration checks may need bubblewrap, GnuPG, and `jq`. |
 | agentsight | Linux eBPF builds need clang, LLVM, libbpf and ELF development headers, kernel headers, and a BTF-enabled kernel. `make build-mac` builds the macOS local viewer without eBPF. |
@@ -88,8 +87,8 @@ builder. It currently knows eight components:
 - Optional two: `cosh-ng` and `sight`. Add `--all` or select them with
   `--component`.
 
-The four components outside this script are `anolisa`, `skillfs`, `ktuner`, and
-`blaze`; build those with their local commands in section 5.
+Build `anolisa`, `skillfs`, and `ktuner` with their local commands in
+section 5; they are not handled by this script.
 
 The default install profile is user mode. Component files install under
 `~/.local` and user-scoped Copilot Shell directories without `sudo`. Initial
@@ -154,6 +153,7 @@ guide before changing component internals.
 
 | Component | Build | Test and quality gate |
 |-----------|-------|-----------------------|
+| [AW](developer-guide/en/aw/integration.md) | `cd src/aw && cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
 | [copilot-shell](../deprecated/copilot-shell/README.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README.md) | `cd src/os-skills && make build` | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
 | [agent-sec-core](../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
@@ -165,14 +165,13 @@ guide before changing component internals.
 | [anolisa](../distribution/anolisa/README.md) | `cd distribution/anolisa && cargo build --release --locked` | `cd distribution/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
 | [SkillFS](../src/skillfs/README.md) | `cd src/skillfs && cargo build --workspace --release` | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; on Linux, `cd src/skillfs && scripts/test.sh` adds the FUSE smoke test. |
 | [ktuner](../src/ktuner/README.md) | `cd src/ktuner && cargo build --release` | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
-| [blaze](../src/blaze/README.md) | `cd src/blaze && cargo build --workspace --release` | `cd src/blaze && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
 
 For a public API or rustdoc change, add `cargo doc --workspace --no-deps` to
-the affected Rust component's gate. `ktuner tune`, Blaze Firecracker paths,
+the affected Rust component's gate. `ktuner tune`,
 FUSE mounts, eBPF tracing, and system daemons need host privileges or kernel
 features beyond a normal unit-test run.
 
-The [CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) adds coverage, packaging,
+The [CI workflow](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml) adds coverage, packaging,
 frontend, adapter, and integration checks for selected components. Those jobs
 are stricter than the smallest local commands in the matrix, so consult the
 workflow when a change touches a generated package or a framework adapter.
@@ -182,7 +181,7 @@ workflow when a change touches a generated package or a framework adapter.
 `tests/run-all-tests.sh` is a partial convenience runner. With no filter it
 invokes exactly five components: copilot-shell, agent-sec-core, agentsight,
 tokenless, and agent-memory. It does not test cosh-ng, os-skills, ws-ckpt,
-anolisa, SkillFS, ktuner, or blaze.
+anolisa, SkillFS, or ktuner.
 
 ```bash
 ./tests/run-all-tests.sh

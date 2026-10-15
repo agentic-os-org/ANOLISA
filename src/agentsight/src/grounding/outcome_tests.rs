@@ -126,6 +126,18 @@ fn t7_placeholder_payload_is_unknown_not_ok() {
     assert_eq!(v.matched_rule, "B8");
 }
 
+#[test]
+fn a_read_that_quotes_the_placeholder_marker_is_not_unknown() {
+    // A successful Read of this very source quotes the marker inside a larger
+    // payload. The call produced output, so B8 must not swallow it into
+    // Unknown and drop the observation from the evidence pool.
+    let payload = "src/agentsight/src/grounding/outcome.rs\n\
+                   const PLACEHOLDER_MARKERS: &[&str] = &[\"pending-post-tool-use\"];\n\
+                   fn is_placeholder_or_empty(text: &str) -> bool {";
+    let v = classify(&plain_call(), payload);
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+}
+
 // ---------------------------------------------------------------------------
 // R0 / R4 / R5 and their guards
 // ---------------------------------------------------------------------------
@@ -215,6 +227,92 @@ fn probe_chain_of_only_probes_is_expected() {
 }
 
 #[test]
+fn bracket_probe_is_expected() {
+    // `[` and `[[` are the POSIX and bash spellings of `test`: a single
+    // bracket probe that exits non-zero is the answer, not a fault (spec B3).
+    let v = classify(&bash_call("[ -f /var/log/app.log ]"), "Exit code 1");
+    assert_eq!(v.status, CallStatus::OkProbe, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "B3");
+
+    let v = classify(&bash_call("[[ -f /var/log/app.log ]]"), "Exit code 1");
+    assert_eq!(v.status, CallStatus::OkProbe, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "B3");
+}
+
+#[test]
+fn redirected_probe_is_still_expected() {
+    // `2>&1`, `>&2` and `&>` are redirections, not chains. Splitting on the raw
+    // `&` left a stray segment ("1") whose head is not a probe command, so a
+    // probe whose non-zero exit is the answer was graded as a real failure.
+    for command in [
+        "ls /nope 2>&1",
+        "ls /nope >/dev/null 2>&1",
+        "pgrep -f agent &>/dev/null",
+        "ls /nope 1>&2",
+    ] {
+        let v = classify(
+            &bash_call(command),
+            "ls: cannot access '/nope': No such file or directory\nExit code 2",
+        );
+        assert_eq!(
+            v.status,
+            CallStatus::OkProbe,
+            "{command} graded as {} ({:?})",
+            v.matched_rule,
+            v.status
+        );
+        assert_eq!(v.matched_rule, "B3", "{command}");
+    }
+}
+
+#[test]
+fn backgrounded_probe_chain_with_a_real_command_is_not_a_probe() {
+    // A bare `&` still separates: the second command is real work, so a
+    // non-zero exit may be its failure.
+    let v = classify(
+        &bash_call("ls /nope & cat /etc/missing"),
+        "cat: /etc/missing: No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::Failed);
+}
+
+#[test]
+fn redirection_before_a_real_command_still_splits() {
+    // Tolerating the redirection must not swallow the separator that follows it.
+    let v = classify(
+        &bash_call("ls /nope 2>&1 && rm -rf /tmp/cache"),
+        "rm: cannot remove '/tmp/cache': No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::Failed);
+}
+
+#[test]
+fn multiline_command_with_a_real_segment_is_not_a_probe() {
+    // Newlines chain commands exactly like `;` and `&&` do. Splitting only on
+    // the ASCII separators judged the whole script by its first line's head,
+    // so a failing `cat` on line two was read as the expected answer of an
+    // `ls` probe.
+    let v = classify(
+        &bash_call("ls /tmp\ncat /etc/nonexistent"),
+        "cat: /etc/nonexistent: No such file or directory\nExit code 1",
+    );
+    assert_eq!(
+        v.status,
+        CallStatus::Failed,
+        "a real command on a later line means the non-zero exit may be real"
+    );
+}
+
+#[test]
+fn multiline_probe_script_is_still_expected() {
+    let v = classify(
+        &bash_call("ls /tmp\ntest -f /etc/hosts"),
+        "No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::OkProbe);
+}
+
+#[test]
 fn absolute_probe_path_is_recognised() {
     let v = classify(&bash_call("/bin/ls /nope"), "No such file or directory");
     assert_eq!(v.status, CallStatus::OkProbe);
@@ -261,6 +359,30 @@ fn alternate_exit_code_wordings_are_structured_evidence() {
         "src/a.rs: error handling\n(Command exited with code 0)",
     );
     assert_eq!(v.status, CallStatus::Ok);
+}
+
+/// A successful call whose *output* quotes the exit-code wording is not that
+/// call's failure. A `Read` of a file that merely mentions `Exit code 1` — this
+/// repository's own `outcome_tests.rs`, `grader/evidence.rs` and
+/// `reuse/summarize.rs` all do — was classified `Failed` from the quoted text,
+/// which dropped the whole observation from the evidence pool and turned the
+/// paths the file names into apparently fabricated ones.
+#[test]
+fn a_quoted_exit_code_is_not_this_calls_failure() {
+    let v = classify(
+        &plain_call(),
+        "// Exit code 1 is returned when the check fails.\nfn main() {}",
+    );
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "default");
+
+    // A reader that prefixes every line (Claude Code's `Read` numbers them)
+    // embeds the quoted marker mid-line, where it is not this call's report.
+    let v = classify(
+        &plain_call(),
+        "    58→            \"Exit code 255\\nssh: connect failed: Bad file descriptor\",",
+    );
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
 }
 
 #[test]
@@ -336,4 +458,65 @@ fn grep_reporting_binary_matches_is_success() {
         "grep: /var/log/x.db: binary file matches\ngrep: /var/log/y.db: binary file matches",
     );
     assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+}
+
+#[test]
+fn explicit_success_outranks_error_text_and_quoted_exit_codes() {
+    for text in [
+        "Traceback (most recent call last):\nRuntimeError: archived failure",
+        "Error: archived failure",
+        "No such file or directory",
+        "Archived shell output\nExit code 1",
+    ] {
+        let mut successful = flagged_result(text);
+        successful
+            .extra
+            .as_mut()
+            .unwrap()
+            .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+        let v = classify_call(&plain_call(), Some(&successful));
+        assert_eq!(v.status, CallStatus::Ok, "{text}");
+        assert_eq!(v.confidence, Confidence::High);
+        assert_eq!(v.matched_rule, "R1(success)");
+        assert_eq!(
+            classify_call(&plain_call(), Some(&flagged_result(text))).status,
+            CallStatus::Failed
+        );
+        assert_eq!(classify(&plain_call(), text).status, CallStatus::Failed);
+    }
+}
+
+#[test]
+fn explicit_success_preserves_blocked_unknown_and_nested_evidence() {
+    for (text, status) in [
+        ("User denied permission", CallStatus::Blocked),
+        ("", CallStatus::Unknown),
+        ("  ", CallStatus::Unknown),
+        ("[dws-bash:pending-post-tool-use]", CallStatus::Unknown),
+    ] {
+        let mut successful = flagged_result(text);
+        successful
+            .extra
+            .as_mut()
+            .unwrap()
+            .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+        assert_eq!(
+            classify_call(&plain_call(), Some(&successful)).status,
+            status
+        );
+    }
+    let mut successful =
+        flagged_result("tool method invocation failed, java.lang.NullPointerException at Foo.bar");
+    successful
+        .extra
+        .as_mut()
+        .unwrap()
+        .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+    let v = classify_call(&plain_call(), Some(&successful));
+    assert_eq!(v.status, CallStatus::Ok);
+    assert!(
+        v.nested_error
+            .as_deref()
+            .is_some_and(|text| text.contains("NullPointerException"))
+    );
 }

@@ -20,3 +20,6 @@ pub(crate) use output_text::{
     clean_terminal_control_sequences, redact_sensitive_output, ControlSequenceScanner,
 };
 pub(crate) use redaction::{redact_sensitive_text, truncate_provider_authored_command_text};
+
+#[cfg(test)]
+mod catalog_tests;
