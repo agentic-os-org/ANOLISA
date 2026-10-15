@@ -241,6 +241,12 @@ fn cmd_check(
             "security": counts.sec,
             "high_confidence": counts.high,
             "writable": counts.writable,
+            // The performance findings in each `--category` bucket; security
+            // findings are counted once, under `security`.
+            "network": counts.net,
+            "memory": counts.mem,
+            "io": counts.io,
+            "cpu": counts.cpu,
         },
         "system": system_json(&info),
         "environment": format!("{runtime_env}"),

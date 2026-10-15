@@ -393,6 +393,9 @@ fn excluding_every_recommendation_is_an_empty_report() {
     assert_eq!(body["counts"]["security"], serde_json::json!(0));
     assert_eq!(body["counts"]["high_confidence"], serde_json::json!(0));
     assert_eq!(body["counts"]["writable"], serde_json::json!(0));
+    for category in ["network", "memory", "io", "cpu"] {
+        assert_eq!(body["counts"][category], serde_json::json!(0));
+    }
     assert!(
         body.get("unmatched_exclude").is_none(),
         "every name matched, so there is nothing inert to report: {body}"
@@ -400,6 +403,51 @@ fn excluding_every_recommendation_is_an_empty_report() {
     let baseline = json(&ktuner(&["check"]), "check");
     assert_eq!(body["score"], baseline["score"]);
     assert_eq!(body["total_checked"], baseline["total_checked"]);
+}
+
+/// The per-category counts are what each `--category` run would keep, so a
+/// caller can tell from one report where the findings sit without running the
+/// filter once per category: `network`, `memory`, `io` and `cpu` count the
+/// performance findings of their category and `security` the security ones,
+/// and the counts follow a narrowed report like the other counts do.
+#[test]
+fn category_counts_match_what_each_category_keeps() {
+    let full = json(&ktuner(&["check"]), "check");
+    for (key, category) in [
+        ("network", "net"),
+        ("memory", "mem"),
+        ("io", "io"),
+        ("cpu", "cpu"),
+        ("security", "security"),
+    ] {
+        let narrowed = json(
+            &ktuner(&["check", "--category", category]),
+            "check --category",
+        );
+        let kept = narrowed["recommendations"]
+            .as_array()
+            .unwrap_or_else(|| panic!("check must carry recommendations: {narrowed}"))
+            .len() as u64;
+        assert_eq!(
+            full["counts"][key].as_u64(),
+            Some(kept),
+            "counts.{key} must be what --category {category} keeps: {full}"
+        );
+        assert_eq!(
+            narrowed["counts"][key].as_u64(),
+            Some(kept),
+            "a narrowed report counts what it kept: {narrowed}"
+        );
+        for other in ["network", "memory", "io", "cpu", "security"] {
+            if other != key {
+                assert_eq!(
+                    narrowed["counts"][other],
+                    serde_json::json!(0),
+                    "--category {category} keeps nothing of {other}: {narrowed}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

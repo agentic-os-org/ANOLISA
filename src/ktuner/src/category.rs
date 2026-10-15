@@ -181,6 +181,10 @@ pub fn filter_by_categories(mut recs: Vec<Recommendation>, cats: &[String]) -> V
     recs
 }
 
+/// The counts a `check` report carries for its recommendations. `net`, `mem`,
+/// `io` and `cpu` count the performance findings [`category_matches`] keeps for
+/// that category, and `sec` the security findings, so each is the length of
+/// the report `--category` would print.
 pub struct RecCounts {
     pub perf: usize,
     pub sec: usize,
