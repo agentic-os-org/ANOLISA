@@ -78,6 +78,81 @@ fn restore_unknown_id_returns_not_found() {
 }
 
 #[test]
+fn restore_rejects_invalid_gzip_trailer_without_changing_live_files() {
+    for truncate_trailer in [false, true] {
+        let (_tmp, svc) = setup();
+        svc.write("doc.md", "snapshot contents", false).unwrap();
+        let snap = svc.mem_snapshot(None).unwrap();
+        let archive_path = svc
+            .mount
+            .meta_dir
+            .join("snapshots")
+            .join(format!("{}.tar.gz", snap.id));
+        let mut archive = std::fs::read(&archive_path).unwrap();
+        if truncate_trailer {
+            archive.truncate(archive.len() - 8);
+        } else {
+            let crc_offset = archive.len() - 8;
+            archive[crc_offset] ^= 1;
+        }
+        std::fs::write(&archive_path, archive).unwrap();
+
+        svc.write("doc.md", "live contents", true).unwrap();
+        svc.write("new.md", "keep this file", false).unwrap();
+
+        let result = svc.mem_snapshot_restore(&snap.id);
+        assert!(
+            result.is_err(),
+            "restore must reject an invalid gzip trailer (truncated={truncate_trailer})"
+        );
+        assert_eq!(svc.read("doc.md").unwrap(), "live contents");
+        assert_eq!(svc.read("new.md").unwrap(), "keep this file");
+    }
+}
+
+#[test]
+fn restore_rejects_corrupted_gzip_payload_without_changing_live_files() {
+    use std::io::{Read, Write};
+
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "account balance: 100", false).unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+    let archive_path = svc
+        .mount
+        .meta_dir
+        .join("snapshots")
+        .join(format!("{}.tar.gz", snap.id));
+    let mut tar_bytes = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&archive_path).unwrap())
+        .read_to_end(&mut tar_bytes)
+        .unwrap();
+
+    // Stored DEFLATE blocks let us damage a payload byte without breaking
+    // the stream structure; the gzip checksum must catch the corruption.
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+    encoder.write_all(&tar_bytes).unwrap();
+    let mut archive = encoder.finish().unwrap();
+    let marker = b"account balance: 100";
+    let offset = archive
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .unwrap();
+    archive[offset + marker.len() - 3] = b'9';
+    std::fs::write(&archive_path, archive).unwrap();
+
+    svc.write("doc.md", "live contents", true).unwrap();
+    svc.write("new.md", "keep this file", false).unwrap();
+    let result = svc.mem_snapshot_restore(&snap.id);
+    assert!(
+        result.is_err(),
+        "corrupt restore returned {result:?}; current doc.md is {:?}",
+        svc.read("doc.md")
+    );
+    assert_eq!(svc.read("doc.md").unwrap(), "live contents");
+    assert_eq!(svc.read("new.md").unwrap(), "keep this file");
+}
+
+#[test]
 fn restore_preserves_meta_dir_and_leaves_no_rollback_artefacts() {
     // Regression for B3: the old `delete all + move in` flow left the
     // mount empty for the duration of the move, and a crash there would

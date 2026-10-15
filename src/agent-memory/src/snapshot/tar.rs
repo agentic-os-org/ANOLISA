@@ -239,6 +239,11 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                 }
             }
         }
+        // TAR iteration stops at its end marker before gzip necessarily
+        // validates its CRC and length. Reject damaged or truncated archives
+        // while all extracted files are still isolated in staging.
+        std::io::copy(&mut tar.into_inner(), &mut std::io::sink())
+            .map_err(|e| MemoryError::Other(format!("snapshot gzip validation: {e}")))?;
     }
 
     // 2. Two-stage rename swap. The previous implementation deleted the
