@@ -855,7 +855,8 @@ impl BM25Store {
         // JOIN with files to get mtime in a single query (avoids N+1).
         let mut stmt = self.conn.prepare(
             "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+             FROM files_vec v LEFT JOIN files f ON f.path = v.path \
+             WHERE f.is_superseded = 0 OR f.is_superseded IS NULL",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
