@@ -52,6 +52,16 @@ fi
 # inside SHARE_DIR, so this branch is a no-op in those flows.
 PLUGIN_MANIFEST="$PLUGIN_SRC/.claude-plugin/plugin.json"
 PLUGIN_TEMPLATE="$PLUGIN_SRC/.claude-plugin/plugin.json.in"
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Preview before the first write: the dev fallback stamps the manifest into
+    # the plugin tree, so a dry run must stop ahead of it and of the two CLI
+    # registrations it would follow.
+    echo "DRY-RUN: stamp ${PLUGIN_MANIFEST} (only when the manifest is missing)"
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin marketplace add ${PLUGIN_SRC}"
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin install ${PLUGIN_ID}"
+    exit 0
+fi
+
 if [ ! -f "$PLUGIN_MANIFEST" ] && [ -f "$PLUGIN_TEMPLATE" ]; then
     VERSION="${TOKENLESS_VERSION:-${ANOLISA_VERSION:-0.0.0-dev}}"
     sed "s/@VERSION@/${VERSION}/g" "$PLUGIN_TEMPLATE" > "$PLUGIN_MANIFEST"

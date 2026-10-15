@@ -17,6 +17,16 @@ export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
 echo "[${COMPONENT}] Uninstalling ${AGENT} plugin..."
 
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Preview before the first removal: a dry run must leave the CLI
+    # registrations, settings.json and the plugin cache alone.
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin uninstall ${PLUGIN_ID}"
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin marketplace remove ${MARKETPLACE_NAME}"
+    echo "DRY-RUN: clean ${PLUGIN_ID} and ${MARKETPLACE_NAME} from ${SETTINGS}"
+    echo "DRY-RUN: rm -rf ${HOME}/.claude/plugins/cache/${MARKETPLACE_NAME}"
+    exit 0
+fi
+
 # Whether the CLI can answer at all. Without settings.json there is no second
 # witness, so a CLI that cannot even report its version leaves nothing to confirm
 # the removal with — and "cannot confirm" must not be reported as "removed".
