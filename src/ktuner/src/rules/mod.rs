@@ -9018,6 +9018,24 @@ fn eval_tcp_min_tso_segs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
         recs,
         "/proc/sys/net/ipv4/tcp_min_tso_segs",
         info.has_listen_sockets(),
+        min_tso_segs_reach_the_kernel(info),
+    )
+}
+
+/// Whether `net.ipv4.tcp_min_tso_segs` still reaches the kernel:
+/// `tcp_tso_segs()` prefers the congestion control's own hook over the sysctl
+/// (v6.6 net/ipv4/tcp_output.c:2086-2097), and BBR supplies one
+/// (`tcp_bbr.c`, `.min_tso_segs = bbr_min_tso_segs`, whose comment is literally
+/// "override sysctl_tcp_min_tso_segs") — and BBR is what this engine's own
+/// `net.ipv4.tcp_congestion_control` rule asks for. On a host the plan moves to
+/// BBR the write therefore changes no TSO decision while the report counts it
+/// as a throughput gain.
+fn min_tso_segs_reach_the_kernel(info: &SystemInfo) -> bool {
+    !bbr_will_be_in_force(
+        info,
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
     )
 }
 
@@ -9035,11 +9053,15 @@ fn eval_tcp_min_tso_segs_at(
     recs: &mut Vec<Recommendation>,
     path: &str,
     has_listen_sockets: bool,
+    min_tso_in_force: bool,
 ) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !has_listen_sockets {
+        return 1;
+    }
+    if !min_tso_in_force {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -19600,6 +19622,38 @@ mod tests {
     }
 
     #[test]
+    fn min_tso_advice_is_withheld_where_bbr_owns_the_segmentation() {
+        // `tcp_tso_segs()` takes the congestion control's own hook when it has
+        // one (v6.6 net/ipv4/tcp_output.c:2086-2097), and BBR registers one
+        // (`tcp_bbr.c`: `.min_tso_segs = bbr_min_tso_segs`, whose comment is
+        // "override sysctl_tcp_min_tso_segs"). The plan's own
+        // tcp_congestion_control rule asks for BBR, so on that host the write
+        // would report success and change no TSO decision.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_min_tso_bbr_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("min_tso_segs");
+        std::fs::write(&knob, b"1\n").unwrap();
+
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_min_tso_segs_at(&info, &mut recs, knob.to_str().unwrap(), true, false);
+        assert!(
+            recs.is_empty(),
+            "a host the plan moves to BBR has no sysctl TSO floor to size: {recs:?}"
+        );
+
+        let mut recs = Vec::new();
+        eval_tcp_min_tso_segs_at(&info, &mut recs, knob.to_str().unwrap(), true, true);
+        assert_eq!(recs.len(), 1, "the value branch is unchanged");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn tcp_min_tso_segs_advice_needs_a_readable_value() {
         // The rule fires below 2, and read_sysctl_u64 maps an unreadable or
         // unparseable file to 0, which is below it: a masked or garbled proc
@@ -19611,7 +19665,7 @@ mod tests {
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_min_tso_segs_at(&info, &mut recs, path.to_str().unwrap(), true);
+            eval_tcp_min_tso_segs_at(&info, &mut recs, path.to_str().unwrap(), true, true);
             recs
         };
 
