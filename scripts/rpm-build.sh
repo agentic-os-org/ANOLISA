@@ -1340,8 +1340,9 @@ usage() {
     echo ""
     echo "Packages:"
     echo "  copilot-shell             Build copilot-shell RPM"
-    echo "  agent-sec-core            Build agent-sec-core RPM"
-    echo "  agent-sec-core-v2         Build agent-sec-core RPM with the V2 Rust CLI/daemon"
+    echo "  agent-sec-core            Build agent-sec-core RPM with the V2 Rust CLI/daemon"
+    echo "  agent-sec-core-v1         Build agent-sec-core RPM with the legacy V1 Python CLI"
+    echo "  agent-sec-core-v2         Build agent-sec-core RPM with the V2 Rust CLI/daemon (alias)"
     echo "  os-skills                 Build os-skills RPM"
     echo "  agentsight                Build agentsight RPM"
     echo "  tokenless                 Build tokenless RPM"
@@ -1389,6 +1390,9 @@ case "$TARGET" in
         build_copilot_shell
         ;;
     agent-sec-core)
+        build_agent_sec_core_v2
+        ;;
+    agent-sec-core-v1)
         build_agent_sec_core
         ;;
     agent-sec-core-v2)
@@ -1438,7 +1442,7 @@ case "$TARGET" in
         ;;
     all)
         build_copilot_shell
-        build_agent_sec_core
+        build_agent_sec_core_v2
         build_agentic_os_skills
         build_agentsight
         build_tokenless
