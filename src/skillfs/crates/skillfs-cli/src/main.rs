@@ -2535,6 +2535,7 @@ async fn cmd_mount(
                     std::time::Duration::from_millis(ms),
                     daemon_root.clone(),
                     post_publish_controller.clone(),
+                    config.max_skill_size,
                 )
             }),
         _ => None,

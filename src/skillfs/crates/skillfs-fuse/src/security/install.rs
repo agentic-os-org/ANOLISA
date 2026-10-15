@@ -534,6 +534,9 @@ struct PendingInstallEntry {
 /// but remain accessible for exact-path access so the installer can
 /// continue writing.
 pub struct PendingInstallController {
+    /// The per-file `SKILL.md` ceiling the mount was configured with;
+    /// `is_skill_complete` must refuse exactly what the reads refuse.
+    max_skill_size: usize,
     notify_controller: Arc<NotifyController>,
     timeout: Duration,
     source_root: std::path::PathBuf,
@@ -549,7 +552,13 @@ impl PendingInstallController {
         timeout: Duration,
         source_root: std::path::PathBuf,
     ) -> Arc<Self> {
-        Self::new_with_post_publish(notify_controller, timeout, source_root, None)
+        Self::new_with_post_publish(
+            notify_controller,
+            timeout,
+            source_root,
+            None,
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE,
+        )
     }
 
     pub fn new_with_post_publish(
@@ -557,6 +566,7 @@ impl PendingInstallController {
         timeout: Duration,
         source_root: std::path::PathBuf,
         post_publish_controller: Option<Arc<PostPublishGraceController>>,
+        max_skill_size: usize,
     ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let pending: Arc<Mutex<HashMap<String, PendingInstallEntry>>> =
@@ -589,6 +599,7 @@ impl PendingInstallController {
                     worker_timeout,
                     worker_source,
                     worker_pp,
+                    max_skill_size,
                     rx,
                 ));
             });
@@ -607,6 +618,7 @@ impl PendingInstallController {
             sender: tx,
             worker_handle: Mutex::new(join_handle),
             post_publish_controller,
+            max_skill_size,
         })
     }
 
@@ -705,7 +717,7 @@ impl PendingInstallController {
                         continue;
                     }
                     if now >= entry.last_mutation + self.timeout
-                        && is_skill_complete(&self.source_root, &key)
+                        && is_skill_complete(&self.source_root, &key, self.max_skill_size)
                     {
                         let kind = entry.kind;
                         let paths = std::mem::take(&mut entry.paths);
@@ -759,7 +771,11 @@ impl Drop for PendingInstallController {
 ///
 /// Uses `symlink_metadata` (no-follow) to prevent external symlinks
 /// from triggering a pending install notification.
-fn is_skill_complete(source_root: &std::path::Path, skill_name: &str) -> bool {
+fn is_skill_complete(
+    source_root: &std::path::Path,
+    skill_name: &str,
+    max_skill_size: usize,
+) -> bool {
     let skill_dir = source_root.join(skill_name);
     match std::fs::symlink_metadata(&skill_dir) {
         Ok(meta) if meta.file_type().is_dir() => {}
@@ -770,7 +786,9 @@ fn is_skill_complete(source_root: &std::path::Path, skill_name: &str) -> bool {
         Ok(meta) if meta.file_type().is_file() => {}
         _ => return false,
     }
-    match skillfs_core::parser::parse_skill_file(&skill_md) {
+    // The configured ceiling, not the default: the completeness probe must
+    // refuse exactly the manifests the mount's reads and listings refuse.
+    match skillfs_core::parser::parse_skill_file_with_limit(&skill_md, max_skill_size) {
         Ok(entry) => !entry.parse_status.is_error(),
         Err(_) => false,
     }
@@ -782,6 +800,7 @@ async fn pending_install_worker_loop(
     timeout: Duration,
     source_root: std::path::PathBuf,
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
+    max_skill_size: usize,
     mut rx: mpsc::UnboundedReceiver<PendingCommand>,
 ) {
     debug!("pending-install worker starting");
@@ -826,7 +845,7 @@ async fn pending_install_worker_loop(
                     if now < entry.next_check_at {
                         continue;
                     }
-                    if is_skill_complete(&source_root, &key) {
+                    if is_skill_complete(&source_root, &key, max_skill_size) {
                         let kind = entry.kind;
                         let paths = std::mem::take(&mut entry.paths);
                         entry.notified = true;
@@ -1443,7 +1462,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            super::is_skill_complete(dir.path(), "good-skill"),
+            super::is_skill_complete(dir.path(), "good-skill", 1 << 20),
             "real dir + real SKILL.md must be complete"
         );
     }
@@ -1460,7 +1479,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real, dir.path().join("link-skill")).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "link-skill"),
+            !super::is_skill_complete(dir.path(), "link-skill", 1 << 20),
             "symlink skill dir must not be considered complete"
         );
     }
@@ -1478,7 +1497,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real_md, skill.join("SKILL.md")).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "sym-md-skill"),
+            !super::is_skill_complete(dir.path(), "sym-md-skill", 1 << 20),
             "symlink SKILL.md must not be considered complete"
         );
     }
@@ -1487,7 +1506,7 @@ mod tests {
     fn is_skill_complete_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "nonexistent"),
+            !super::is_skill_complete(dir.path(), "nonexistent", 1 << 20),
             "missing directory must not be complete"
         );
     }
@@ -1498,9 +1517,32 @@ mod tests {
         let skill = dir.path().join("no-md");
         std::fs::create_dir_all(&skill).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "no-md"),
+            !super::is_skill_complete(dir.path(), "no-md", 1 << 20),
             "missing SKILL.md must not be complete"
         );
+    }
+
+    #[test]
+    fn is_skill_complete_applies_the_configured_ceiling() {
+        // The completeness probe must refuse exactly the manifests the
+        // mount's reads refuse: under a 64 KiB ceiling a 96 KiB SKILL.md
+        // is not a complete skill; under the default ceiling it is.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sized-skill")).unwrap();
+        let mut content = String::from("---\nname: sized\ndescription: good\n---\n");
+        content.push_str(&"a".repeat(96 * 1024 - content.len()));
+        std::fs::write(dir.path().join("sized-skill/SKILL.md"), content).unwrap();
+
+        assert!(!super::is_skill_complete(
+            dir.path(),
+            "sized-skill",
+            64 * 1024
+        ));
+        assert!(super::is_skill_complete(
+            dir.path(),
+            "sized-skill",
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE
+        ));
     }
 
     // -----------------------------------------------------------------------

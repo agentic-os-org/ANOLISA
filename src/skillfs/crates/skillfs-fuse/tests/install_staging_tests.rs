@@ -1252,6 +1252,19 @@ struct PendingInstallFixture {
 
 impl PendingInstallFixture {
     fn new(pending_timeout_ms: u64, seed: impl FnOnce(&Path)) -> Self {
+        Self::new_with_ceiling(
+            pending_timeout_ms,
+            seed,
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE,
+        )
+    }
+
+    /// Like [`PendingInstallFixture::new`], but threads a non-default
+    /// `SKILL.md` ceiling into both the pending-install worker (through
+    /// `PendingInstallController::new_with_post_publish`) and the mount
+    /// (`MountConfig::max_skill_size`), so the completeness probe runs
+    /// with the ceiling a real deployment configured.
+    fn new_with_ceiling(pending_timeout_ms: u64, seed: impl FnOnce(&Path), ceiling: usize) -> Self {
         let source = tempfile::tempdir().unwrap();
         seed(source.path());
 
@@ -1284,10 +1297,12 @@ impl PendingInstallFixture {
             );
         }
 
-        let pending_ctrl = PendingInstallController::new(
+        let pending_ctrl = PendingInstallController::new_with_post_publish(
             notify_ctrl.clone(),
             Duration::from_millis(pending_timeout_ms),
             source.path().to_path_buf(),
+            None,
+            ceiling,
         );
 
         let mount_resolver = Arc::new(ActiveSkillResolver::new(source.path()));
@@ -1307,6 +1322,7 @@ impl PendingInstallFixture {
             notify_controller: Some(notify_ctrl.clone()),
             active_resolver: Some(mount_resolver.clone()),
             pending_install_controller: Some(pending_ctrl.clone()),
+            max_skill_size: Some(ceiling),
             ..MountConfig::default()
         };
 
@@ -1355,6 +1371,110 @@ impl Drop for PendingInstallFixture {
             .args(["-u", &mp.to_string_lossy()])
             .output();
     }
+}
+
+#[test]
+fn pending_install_worker_applies_a_lowered_ceiling() {
+    skip_if_no_fuse!();
+
+    // A non-default ceiling reaches the real worker through
+    // new_with_post_publish: under a 64 KiB ceiling a 96 KiB SKILL.md is
+    // over the limit, so the worker keeps waiting — no install
+    // notification. With the default ceiling (the pre-fix behavior) the
+    // probe parsed the manifest and fired.
+    let fixture = PendingInstallFixture::new_with_ceiling(
+        200,
+        |src| {
+            create_skill(src, "existing");
+        },
+        64 * 1024,
+    );
+
+    let new_skill = fixture.skill_path("oversized");
+    std::fs::create_dir(&new_skill).unwrap();
+    let mut md = String::from("---\nname: oversized\ndescription: test\n---\n");
+    md.push_str(&"a".repeat(96 * 1024 - md.len()));
+    std::fs::write(new_skill.join("SKILL.md"), md).unwrap();
+
+    // Bounded wait well past the 200 ms quiet timeout: the notification
+    // must never arrive for an over-ceiling manifest.
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    while std::time::Instant::now() < deadline {
+        fixture.notify_controller.flush_for_testing();
+        if fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized"),
+        "the pending worker must not fire for a manifest over the configured ceiling"
+    );
+    // A direct flush must refuse it too: the controller carries the
+    // ceiling, not just the worker loop.
+    fixture.pending_controller.flush_for_testing();
+    fixture.notify_controller.flush_for_testing();
+    assert!(
+        !fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized"),
+        "flush_for_testing must refuse the over-ceiling manifest too"
+    );
+}
+
+#[test]
+fn pending_install_worker_applies_a_raised_ceiling() {
+    skip_if_no_fuse!();
+
+    // The raised arm: a 1.5 MiB manifest is a complete skill under the
+    // 2 MiB configured ceiling, so the real worker must fire the install
+    // notification. With the default 1 MiB ceiling (the pre-fix behavior)
+    // the probe refused it and the notification never fired.
+    let fixture = PendingInstallFixture::new_with_ceiling(
+        200,
+        |src| {
+            create_skill(src, "existing");
+        },
+        2 * 1024 * 1024,
+    );
+
+    let new_skill = fixture.skill_path("legal-big");
+    std::fs::create_dir(&new_skill).unwrap();
+    let mut md = String::from("---\nname: legal-big\ndescription: test\n---\n");
+    md.push_str(&"a".repeat(1536 * 1024 - md.len()));
+    std::fs::write(new_skill.join("SKILL.md"), md).unwrap();
+
+    // Bounded wait for the real worker to fire.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut fired = false;
+    while std::time::Instant::now() < deadline {
+        fixture.notify_controller.flush_for_testing();
+        if fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "legal-big")
+        {
+            fired = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        fired,
+        "the pending worker must fire for a manifest legal under the raised ceiling"
+    );
 }
 
 #[test]
@@ -2417,6 +2537,7 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
         Duration::from_millis(200),
         source.path().to_path_buf(),
         Some(pp_ctrl.clone()),
+        skillfs_core::DEFAULT_MAX_SKILL_SIZE,
     );
 
     let config = MountConfig {

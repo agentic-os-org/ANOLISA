@@ -1666,25 +1666,29 @@ impl SkillFs {
     fn update_store_after_skill_rename(&self, old_name: &str, new_name: &str, new_physical: &Path) {
         self.store.write().remove(old_name);
         let md_path = new_physical.join("SKILL.md");
-        let mut new_entry = match parser::parse_skill_file(&md_path) {
-            Ok(entry) => entry,
-            Err(_) => {
-                // SKILL.md not readable yet — insert a placeholder so the
-                // directory appears in readdir immediately.
-                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
-                SkillEntry {
-                    metadata: SkillMetadata::default(),
-                    parameters: vec![],
-                    returns: vec![],
-                    body: String::new(),
-                    parse_status: ParseStatus::Degraded(
-                        "renamed, awaiting SKILL.md update".to_string(),
-                    ),
-                    source_path: md_path,
-                    last_modified: std::time::SystemTime::now(),
+        // The mount's ceiling, not the default: reads, listings and the
+        // sync-worker reparses all refuse over-limit manifests, so the
+        // rename refresh must refuse exactly the same files.
+        let mut new_entry =
+            match parser::parse_skill_file_with_limit(&md_path, self.max_skill_size as usize) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    // SKILL.md not readable yet — insert a placeholder so the
+                    // directory appears in readdir immediately.
+                    use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
+                    SkillEntry {
+                        metadata: SkillMetadata::default(),
+                        parameters: vec![],
+                        returns: vec![],
+                        body: String::new(),
+                        parse_status: ParseStatus::Degraded(
+                            "renamed, awaiting SKILL.md update".to_string(),
+                        ),
+                        source_path: md_path,
+                        last_modified: std::time::SystemTime::now(),
+                    }
                 }
-            }
-        };
+            };
         adopt_directory_name(&mut new_entry, new_name);
         self.store.write().upsert(new_entry);
     }
@@ -1848,6 +1852,118 @@ mod tests {
             format!("---\nname: {frontmatter_name}\ndescription: demo\n---\nbody\n"),
         )
         .expect("SKILL.md");
+    }
+
+    fn write_sized_skill(dir: &Path, name: &str, total_len: usize) {
+        std::fs::create_dir_all(dir).expect("skill dir");
+        let mut content = format!("---\nname: {name}\ndescription: sized\n---\n");
+        content.push_str(&"a".repeat(total_len.saturating_sub(content.len())));
+        std::fs::write(dir.join("SKILL.md"), content).expect("SKILL.md");
+    }
+
+    #[test]
+    fn rename_refresh_helper_refuses_over_ceiling_manifests() {
+        // Pins the refresh helper's own parse ceiling in isolation: whatever
+        // triggers update_store_after_skill_rename, the refresh must refuse
+        // exactly what the reads and the sync-worker reparses refuse. The
+        // full rename chain — rename_impl's rename_source_backs_store_entry
+        // guard included — is covered by the real-FUSE-mount tests in
+        // tests/rename_ceiling_tests.rs; that guard means a manifest the
+        // loader refused (no store entry) never reaches this refresh
+        // through a real rename.
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_sized_skill(&source.path().join("big-skill"), "big-skill", 96 * 1024);
+
+        let config = ParseConfig {
+            max_skill_size: 64 * 1024,
+            ..ParseConfig::default()
+        };
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &config);
+        assert!(
+            store.get("big-skill").is_none(),
+            "the loader must refuse the over-ceiling manifest up front"
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        )
+        .with_max_skill_size(64 * 1024);
+
+        std::fs::rename(
+            source.path().join("big-skill"),
+            source.path().join("renamed-skill"),
+        )
+        .expect("physical rename");
+        fs.update_store_after_skill_rename(
+            "big-skill",
+            "renamed-skill",
+            &source.path().join("renamed-skill"),
+        );
+
+        let guard = shared.read();
+        let entry = guard.get("renamed-skill").expect("renamed store entry");
+        assert!(
+            !entry.parse_status.is_ok(),
+            "an over-ceiling manifest must not be fully parsed into the store, got {:?}",
+            entry.parse_status
+        );
+        assert!(
+            entry.body.is_empty(),
+            "the over-ceiling body must not be retained"
+        );
+    }
+
+    #[test]
+    fn rename_refresh_helper_keeps_legal_manifests_under_a_raised_ceiling() {
+        // The raised-ceiling arm of the helper's parse ceiling: a manifest
+        // that is legal under the configured ceiling must survive the
+        // refresh fully parsed (the default ceiling degraded a legal skill
+        // forever — this refresh is the only store update for a rename).
+        // The real-callback arm lives in tests/rename_ceiling_tests.rs.
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_sized_skill(&source.path().join("big-skill"), "big-skill", 1536 * 1024);
+
+        let config = ParseConfig {
+            max_skill_size: 2048 * 1024,
+            ..ParseConfig::default()
+        };
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &config);
+        assert!(store.get("big-skill").expect("loaded").parse_status.is_ok());
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        )
+        .with_max_skill_size(2048 * 1024);
+
+        std::fs::rename(
+            source.path().join("big-skill"),
+            source.path().join("renamed-skill"),
+        )
+        .expect("physical rename");
+        fs.update_store_after_skill_rename(
+            "big-skill",
+            "renamed-skill",
+            &source.path().join("renamed-skill"),
+        );
+
+        let guard = shared.read();
+        let entry = guard.get("renamed-skill").expect("renamed store entry");
+        assert!(
+            entry.parse_status.is_ok(),
+            "a manifest legal under the raised ceiling must stay fully parsed, got {:?}",
+            entry.parse_status
+        );
+        assert!(entry.body.len() > 1024 * 1024);
     }
 
     #[test]
