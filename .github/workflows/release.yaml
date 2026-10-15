@@ -180,6 +180,17 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build skillfs precompiled package
+        id: skillfs-prebuilt
+        if: matrix.component == 'skillfs'
+        uses: ./.github/actions/build-skillfs-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Build ANOLISA CLI precompiled package
         id: anolisa-prebuilt
         if: matrix.component == 'anolisa'
@@ -200,12 +211,14 @@ jobs:
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
           WS_CKPT_DIRECTORY: ${{ steps.ws-ckpt-prebuilt.outputs.artifact-directory }}
+          SKILLFS_DIRECTORY: ${{ steps.skillfs-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
             ws-ckpt) ARTIFACT_DIRECTORY="$WS_CKPT_DIRECTORY" ;;
+            skillfs) ARTIFACT_DIRECTORY="$SKILLFS_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
           esac
           if [ -z "$ARTIFACT_DIRECTORY" ]; then

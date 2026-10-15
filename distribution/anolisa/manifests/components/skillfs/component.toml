@@ -18,7 +18,7 @@ package = "skillfs"
 
 [component.platform]
 os = ["linux"]
-arch = ["x86_64"]
+arch = ["x86_64", "aarch64"]
 
 [[component.dependencies]]
 name = "fuse3"

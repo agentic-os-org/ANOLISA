@@ -38,6 +38,18 @@ TARGETS = {
             "profile": "gnu2.28-aarch64",
         },
     ),
+    "skillfs": (
+        {
+            "target-os": "linux",
+            "target-arch": "x86_64",
+            "profile": "gnu2.28-x86_64",
+        },
+        {
+            "target-os": "linux",
+            "target-arch": "aarch64",
+            "profile": "gnu2.28-aarch64",
+        },
+    ),
     "cosh-ng": (
         {
             "target-os": "linux",

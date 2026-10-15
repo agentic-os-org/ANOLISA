@@ -95,6 +95,20 @@ SkillFS 是一个混合文件系统：虚拟目录视图 + 物理写透传。
 
 ## 快速开始
 
+### 预编译包
+
+Release CI 构建 Linux x86_64 和 aarch64 预编译包，glibc 基线为 2.28。
+每个架构产出 `skillfs-{version}-linux-{arch}.tar.gz` 及其 `.sha256`、
+CycloneDX `.tar.gz.cdx.json` SBOM 及 SBOM 的 `.sha256`。
+压缩包包含 `bin/skillfs`、系统安装契约、内置 Skill 和许可证。
+目标系统需要 FUSE 3（包含共享库）；挂载还需要访问 `/dev/fuse`。
+
+发布前，在 GitHub Actions 中运行 **Release / Preview**，选择分支和 `skillfs`，
+填写 `Cargo.toml` 中的版本号（不带 `v` 前缀）。校验成功后下载两种架构的
+`skillfs-prebuilt-{version}-linux-{arch}` artifact。Preview 产物保留 14 天，
+不会创建 GitHub Release。正式发布使用 `skillfs/v{version}` tag，沿用现有
+release environment 审批流程。
+
 ### 构建
 
 ```bash
