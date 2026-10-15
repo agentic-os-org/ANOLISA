@@ -2,10 +2,10 @@
 # Regression tests for the Codex adapter's ANOLISA_DRY_RUN previews.
 #
 # The adapter is the only one of the tokenless family whose install and
-# uninstall did the full job whatever ANOLISA_DRY_RUN said: install created the
-# marketplace tree, the plugin symlink and the manifest and drove `codex plugin
-# marketplace add` / `codex plugin add`, uninstall drove the removals and then
-# deleted the marketplace directory and the component binary.
+# uninstall did the full job whatever ANOLISA_DRY_RUN said. Its install has two
+# write paths a preview must cover: the dev fallback that builds and installs
+# the component binary when the host has none, and the marketplace tree plus the
+# two `codex plugin` registrations.
 set -uo pipefail
 
 PASS=0
@@ -30,14 +30,15 @@ AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
 PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
 PLUGIN_SRC="$(cd "$ADAPTER_DIR/codex" && pwd)"
 STUB_LOG="$FAKE_HOME/.codex-stub.log"
+TOKENLESS_BIN="$PREFIX/bin/tokenless"
 
 # The tokenless CLI phase 1 looks for.
-cat > "$PREFIX/bin/tokenless" <<'STUBEOF'
+cat > "$TOKENLESS_BIN" <<'STUBEOF'
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
 exit 0
 STUBEOF
-chmod +x "$PREFIX/bin/tokenless"
+chmod +x "$TOKENLESS_BIN"
 
 # The codex CLI stand-in: it logs every call and answers both listings with an
 # empty inventory, so only the file operations under test are observable.
@@ -49,22 +50,63 @@ exit 0
 STUBEOF
 chmod +x "$CODEX_STUB"
 
+# The flag under test must be the only one in play: a shell that exported
+# ANOLISA_DRY_RUN or a deregister-only pin would silently turn the "real" runs
+# below into dry runs.
 env_for() {
-    HOME="$FAKE_HOME" TOKENLESS_INSTALL_PREFIX="$PREFIX" XDG_DATA_HOME="$XDG" \
+    env -u ANOLISA_DRY_RUN -u ANOLISA_TARGET -u ANOLISA_COMPONENT \
+        -u TOKENLESS_DEREGISTER_ONLY -u TOKENLESS_SOURCE_DIR \
+        -u TOKENLESS_SKIP_BUILD -u CODEX_HOME \
+        HOME="$FAKE_HOME" TOKENLESS_INSTALL_PREFIX="$PREFIX" XDG_DATA_HOME="$XDG" \
         CODEX_BIN="$CODEX_STUB" "$@"
 }
-calls() { grep -Fc -- "$1" "$STUB_LOG" 2>/dev/null || echo 0; }
+calls() {
+    local n
+    n="$(grep -Fc -- "$1" "$STUB_LOG" 2>/dev/null)"
+    echo "${n:-0}"
+}
+log_size() { wc -c < "$STUB_LOG" 2>/dev/null || echo 0; }
+expect_line() {  # <label> <expected line> <output>
+    case "$3" in
+        *"$2"*) pass "$1" ;;
+        *) fail "$1 (missing: $2)" ;;
+    esac
+}
 
-# ── A dry-run install previews and writes nothing ───────────────────────────
+# ── A dry-run install with the binary in place previews and writes nothing ──
 dry_install_out="$(env_for env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" 2>&1)"
-case "$dry_install_out" in
-    *DRY-RUN:*) pass "dry-run install prints a DRY-RUN preview" ;;
-    *) fail "dry-run install printed no preview: ${dry_install_out}" ;;
-esac
+expect_line "dry-run install keeps the resolved binary" \
+    "DRY-RUN: keep the existing tokenless binary $TOKENLESS_BIN" "$dry_install_out"
+expect_line "dry-run install previews the marketplace tree" \
+    "DRY-RUN: mkdir -p $AGENTS_DIR" "$dry_install_out"
+expect_line "dry-run install previews the plugin symlink" \
+    "DRY-RUN: ln -sfn $PLUGIN_SRC $PLUGIN_LINK" "$dry_install_out"
+expect_line "dry-run install previews the manifest write" \
+    "DRY-RUN: write $AGENTS_DIR/marketplace.json" "$dry_install_out"
+expect_line "dry-run install previews the conditional marketplace removal" \
+    "DRY-RUN: $CODEX_STUB plugin marketplace remove anolisa-tokenless (only when it is already registered)" "$dry_install_out"
+expect_line "dry-run install previews the marketplace registration" \
+    "DRY-RUN: $CODEX_STUB plugin marketplace add $MARKETPLACE_DIR" "$dry_install_out"
+expect_line "dry-run install previews the plugin registration" \
+    "DRY-RUN: $CODEX_STUB plugin add tokenless@anolisa-tokenless" "$dry_install_out"
 if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$STUB_LOG" ]; then
     pass "dry-run install leaves the marketplace tree, the manifest and the CLI alone"
 else
     fail "dry-run install wrote to the host"
+fi
+
+# ── A dry-run install without the binary previews the build it would run ────
+mv "$TOKENLESS_BIN" "$SANDBOX/tokenless.saved"
+no_binary_out="$(env_for env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" 2>&1)"
+mv "$SANDBOX/tokenless.saved" "$TOKENLESS_BIN"
+expect_line "dry-run install previews the source build" \
+    "DRY-RUN: cargo build --release -p tokenless-cli in" "$no_binary_out"
+expect_line "dry-run install previews the built binary install" \
+    "DRY-RUN: install the built binary to $TOKENLESS_BIN (mode 755)" "$no_binary_out"
+if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$STUB_LOG" ] && [ ! -e "$PREFIX/bin/tokenless.built" ]; then
+    pass "a host without the binary is not built on in a dry run"
+else
+    fail "the dry run built or installed the component binary"
 fi
 
 # ── The real install still builds the layout and drives the CLI ─────────────
@@ -85,28 +127,57 @@ if [ "$(calls 'plugin marketplace add')" -ge 1 ] && \
 else
     fail "install did not register with the CLI"
 fi
+if [ "$(log_size)" -gt 0 ]; then
+    pass "the CLI log is a usable snapshot"
+else
+    fail "the CLI log is empty, so the snapshots below prove nothing"
+fi
 
 # ── A dry-run uninstall previews and removes nothing ────────────────────────
 calls_before="$(cat "$STUB_LOG")"
 dry_uninstall_out="$(env_for env ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" --non-interactive 2>&1)"
-case "$dry_uninstall_out" in
-    *DRY-RUN:*) pass "dry-run uninstall prints a DRY-RUN preview" ;;
-    *) fail "dry-run uninstall printed no preview: ${dry_uninstall_out}" ;;
-esac
-if [ -L "$PLUGIN_LINK" ] && [ -f "$PREFIX/bin/tokenless" ] && \
+expect_line "dry-run uninstall previews the plugin removal" \
+    "DRY-RUN: $CODEX_STUB plugin remove tokenless@anolisa-tokenless (only when it is registered)" "$dry_uninstall_out"
+expect_line "dry-run uninstall previews the marketplace removal" \
+    "DRY-RUN: $CODEX_STUB plugin marketplace remove anolisa-tokenless (only when it is registered)" "$dry_uninstall_out"
+expect_line "dry-run uninstall previews the marketplace directory removal" \
+    "DRY-RUN: rm -rf $MARKETPLACE_DIR (only once the registration is confirmed gone)" "$dry_uninstall_out"
+expect_line "dry-run uninstall previews the binary removal" \
+    "DRY-RUN: rm -f $TOKENLESS_BIN (interactive mode asks first; without a terminal it is kept)" "$dry_uninstall_out"
+if [ -L "$PLUGIN_LINK" ] && [ -f "$TOKENLESS_BIN" ] && \
         [ "$(cat "$STUB_LOG")" = "$calls_before" ]; then
     pass "dry-run uninstall leaves the marketplace, the binary and the CLI alone"
 else
     fail "dry-run uninstall removed host state"
 fi
 
-# ── The real uninstall still removes both ───────────────────────────────────
+# ── A deregister-only dry run previews no binary removal ────────────────────
+deregister_out="$(env_for env ANOLISA_DRY_RUN=1 TOKENLESS_DEREGISTER_ONLY=1 \
+    bash "$UNINSTALL_SH" --non-interactive 2>&1)"
+if printf '%s\n' "$deregister_out" | grep -Fq "rm -f $TOKENLESS_BIN"; then
+    fail "a deregister-only dry run announced a binary removal"
+else
+    pass "a deregister-only dry run leaves the component binary out of the preview"
+fi
+
+# ── Without a resolvable CLI the preview says so instead of claiming work ───
+no_cli_out="$(env_for env ANOLISA_DRY_RUN=1 CODEX_BIN="$SANDBOX/bin/missing-codex" \
+    bash "$UNINSTALL_SH" --non-interactive 2>&1)"
+expect_line "a no-CLI dry run reports that nothing can be removed" \
+    "DRY-RUN: no codex CLI resolved: the registration cannot be queried, so nothing is removed," "$no_cli_out"
+if printf '%s\n' "$no_cli_out" | grep -Fq "plugin marketplace remove anolisa-tokenless"; then
+    fail "a no-CLI dry run still announced the CLI removals"
+else
+    pass "a no-CLI dry run does not announce CLI calls it cannot make"
+fi
+
+# ── The real uninstall still removes both ──────────────────────────────────
 if env_for bash "$UNINSTALL_SH" --non-interactive >/dev/null 2>&1; then
     pass "uninstall succeeds"
 else
     fail "uninstall failed"
 fi
-if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$PREFIX/bin/tokenless" ]; then
+if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$TOKENLESS_BIN" ]; then
     pass "uninstall removes the marketplace directory and the component binary"
 else
     fail "uninstall left the marketplace directory or the binary behind"
