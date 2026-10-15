@@ -5402,11 +5402,18 @@ fn sched_child_runs_first_recommendation(
 }
 
 fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_page_cluster_at(info, recs, "/proc/sys/vm/page-cluster", "/proc/swaps")
+    eval_page_cluster_at(
+        info,
+        recs,
+        "/proc/sys/vm/page-cluster",
+        "/proc/swaps",
+        Path::new(SYS_DEV_BLOCK),
+    )
 }
 
 /// Path-injectable form of [`eval_page_cluster`] (the `eval_*_at` idiom) so the
-/// swap gate is assertable against a synthetic /proc/swaps.
+/// swap gate is assertable against a synthetic /proc/swaps and block-device
+/// tree.
 ///
 /// The knob only sizes the swap-in readahead window: v6.6 reads `page_cluster`
 /// solely in `mm/swap_state.c` (`swapin_nr_pages`, `swapin_readahead` and the
@@ -5420,6 +5427,7 @@ fn eval_page_cluster_at(
     recs: &mut Vec<Recommendation>,
     path: &str,
     swaps_path: &str,
+    sys_dev_block: &Path,
 ) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -5441,7 +5449,7 @@ fn eval_page_cluster_at(
     // the premise — `info.disks` is the whole-disk inventory, so an area that is
     // a file, zram or a device-mapper node names none of its disks and nothing
     // is claimed about it.
-    if swap_on_a_rotational_disk(info, swaps_path) {
+    if swap_on_a_rotational_disk_at(info, swaps_path, sys_dev_block) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -5479,6 +5487,9 @@ fn swap_configured(path: &str) -> bool {
     })
 }
 
+/// Root of the block-device tree a swap file's device number resolves through.
+const SYS_DEV_BLOCK: &str = "/sys/dev/block";
+
 /// Whether a swap area listed in `/proc/swaps` sits on a rotational disk this
 /// host reported, i.e. the advice's "on an SSD" premise is provably false for
 /// the area it sizes.
@@ -5508,16 +5519,9 @@ fn swap_configured(path: &str) -> bool {
 /// would fail a strict decode of the whole table, and "no rotational area"
 /// would then hand the harmful advice back to every other area on the host —
 /// the HDD one this gate exists for included.
-fn swap_on_a_rotational_disk(info: &SystemInfo, swaps_path: &str) -> bool {
-    swap_on_a_rotational_disk_at(info, swaps_path, Path::new(SYS_DEV_BLOCK))
-}
-
-/// Root of the block-device tree a swap file's device number resolves through.
-const SYS_DEV_BLOCK: &str = "/sys/dev/block";
-
-/// Path-injectable form of [`swap_on_a_rotational_disk`]: `sys_dev_block` is
-/// the tree the device number is looked up in, so a swap file's medium is
-/// assertable against a synthetic device tree.
+///
+/// `sys_dev_block` is the tree a swap file's device number is looked up in, so
+/// the gate is assertable against a synthetic device tree.
 fn swap_on_a_rotational_disk_at(info: &SystemInfo, swaps_path: &str, sys_dev_block: &Path) -> bool {
     let Ok(content) = std::fs::read(swaps_path) else {
         return false;
@@ -16386,6 +16390,7 @@ mod tests {
             &mut recs,
             param.to_str().unwrap(),
             swaps.to_str().unwrap(),
+            &dir.join("no-sys-dev-block"),
         );
         assert!(
             recs.iter().any(|r| r.param == "vm.page-cluster"),
@@ -16435,6 +16440,7 @@ mod tests {
                 &mut recs,
                 param.to_str().unwrap(),
                 swaps.to_str().unwrap(),
+                &dir.join("no-sys-dev-block"),
             );
             assert!(
                 recs.is_empty(),
@@ -16449,6 +16455,7 @@ mod tests {
             &mut recs,
             param.to_str().unwrap(),
             with_swap.to_str().unwrap(),
+            &dir.join("no-sys-dev-block"),
         );
         assert!(
             recs.iter().any(|r| r.param == "vm.page-cluster"),
@@ -16719,6 +16726,7 @@ mod tests {
                 &mut recs,
                 param.to_str().unwrap(),
                 swaps.to_str().unwrap(),
+                &dir.join("no-sys-dev-block"),
             );
             let fired = recs.iter().any(|r| r.param == "vm.page-cluster");
             assert_eq!(fired, expected, "{why}: {}", swaps.display());
