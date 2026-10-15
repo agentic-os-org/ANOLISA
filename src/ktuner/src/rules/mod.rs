@@ -5383,21 +5383,45 @@ fn eval_sched_latency_ns_at(
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 12000000 {
-        recs.push(Recommendation {
-            param: "kernel.sched_latency_ns".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "24000000".to_string(),
-            reason: format!(
-                "大核数 ({} 核) 服务器增大 CFS 调度周期可减少上下文切换开销",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_latency_ns_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_latency_ns` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl and into debugfs
+/// (commit 8a99b6833c88 "sched: Move SCHED_DEBUG sysctl to debugfs"), so the CFS
+/// period this reason sizes has had no `/proc/sys` node since: the variable is
+/// exported as `/sys/kernel/debug/sched/latency_ns` (v6.6 kernel/sched/debug.c),
+/// which the rule's own path can never reach. A node under the old name exists
+/// only on the trees that re-registered it for another class — the vendor
+/// kernels that map `sched_latency_ns` to their batch-scheduler variable
+/// (`CONFIG_BT_SCHED` in kernel/sysctl.c) — and nothing in such a tree reads
+/// that variable, so the write lands nowhere while the report claims the CFS
+/// period was raised. Silence the rule from 5.13 on, the way the other knobs
+/// whose reader moved are silenced.
+fn sched_latency_ns_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current >= 12_000_000 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_latency_ns".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "24000000".to_string(),
+        reason: format!("大核数 ({cpu_cores} 核) 服务器增大 CFS 调度周期可减少上下文切换开销"),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_tcp_challenge_ack_limit(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -19028,6 +19052,23 @@ mod tests {
             rec.is_none(),
             "Should not recommend sched_latency_ns for small CPU count"
         );
+    }
+
+    #[test]
+    fn sched_latency_advice_stops_where_its_reader_moved() {
+        // 5.13 moved the CFS period (`sysctl_sched_latency`) into debugfs
+        // (8a99b6833c88), so a /proc/sys node under the old name is either
+        // absent (stock trees, which the file probe already covers) or wired to
+        // another scheduler class (the vendor trees that re-register it) —
+        // neither is the CFS knob this reason sizes.
+        assert!(sched_latency_ns_recommendation(6_000_000, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_latency_ns_recommendation(6_000_000, 64, "5.4.0-150").is_some());
+        assert!(sched_latency_ns_recommendation(6_000_000, 64, "5.13.0").is_none());
+        assert!(sched_latency_ns_recommendation(6_000_000, 64, "6.6.87.2").is_none());
+        // Unparseable versions keep the legacy behaviour, and the value gate is
+        // unchanged: a host already at the target keeps its report either way.
+        assert!(sched_latency_ns_recommendation(6_000_000, 64, "").is_some());
+        assert!(sched_latency_ns_recommendation(24_000_000, 64, "5.10.0").is_none());
     }
 
     #[test]
