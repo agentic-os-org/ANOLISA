@@ -42,13 +42,19 @@ function config(sessionId: string, extra: Record<string, unknown> = {}) {
 }
 
 type MockHost = ReturnType<typeof mockApi>;
+type Cleanup = () => Promise<void>;
 
-function mockApi(pluginConfig: Record<string, unknown>) {
+function mockApi(
+  pluginConfig: Record<string, unknown>,
+  lifecycle?: { onDispose?: (cleanup: Cleanup) => () => void },
+) {
   const tools: string[] = [];
   const hooks: string[] = [];
+  const handlers = new Map<string, Cleanup>();
   const warnings: string[] = [];
   const api = {
     pluginConfig,
+    lifecycle,
     resolvePath: (p: string) => p,
     logger: {
       info: () => {},
@@ -58,8 +64,9 @@ function mockApi(pluginConfig: Record<string, unknown>) {
         warnings.push(message);
       },
     },
-    on: (event: string) => {
+    on: (event: string, handler: Cleanup) => {
       hooks.push(event);
+      handlers.set(event, handler);
     },
     registerTool: (spec: { name: string }) => {
       tools.push(spec.name);
@@ -67,7 +74,7 @@ function mockApi(pluginConfig: Record<string, unknown>) {
     registerMemoryCapability: () => {},
     registerMemoryCorpusSupplement: () => {},
   };
-  return { api: api as never, tools, hooks, warnings };
+  return { api: api as never, tools, hooks, handlers, warnings };
 }
 
 function register(host: MockHost) {
@@ -168,5 +175,107 @@ describe("register() stale-client teardown", () => {
     register(mockApi(config("ses_again")));
 
     assert.deepEqual(stopped.slice(mark).map(sessionIdOf), ["ses_recovered"]);
+  });
+});
+
+describe("plugin shutdown ownership", () => {
+  for (const mode of ["disposal", "legacy", "partial lifecycle"] as const) {
+    it(`awaits subprocess shutdown using ${mode}`, async () => {
+      const disposers: Cleanup[] = [];
+      const lifecycle =
+        mode === "legacy"
+          ? undefined
+          : mode === "partial lifecycle"
+            ? {}
+            : {
+                onDispose: (cleanup: Cleanup) => {
+                  disposers.push(cleanup);
+                  return () => {};
+                },
+              };
+      const host = register(mockApi(config("ses_shutdown"), lifecycle));
+      const hasDisposal = mode === "disposal";
+      assert.equal(disposers.length, hasDisposal ? 1 : 0);
+      assert.equal(host.handlers.has("gateway_stop"), !hasDisposal);
+      const cleanup = hasDisposal
+        ? disposers[0]
+        : host.handlers.get("gateway_stop")!;
+
+      const spyStop = McpStdioClient.prototype.stop;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      McpStdioClient.prototype.stop = async () => {
+        calls++;
+        await gate;
+      };
+      let completed = false;
+      const pending = cleanup().then(() => {
+        completed = true;
+      });
+      try {
+        await Promise.resolve();
+        assert.equal(calls, 1);
+        assert.equal(
+          completed,
+          false,
+          "the host must wait for the child to exit",
+        );
+      } finally {
+        release();
+        await pending;
+        McpStdioClient.prototype.stop = spyStop;
+      }
+
+      // After a reload disposes the old instance, shutdown can still dispatch
+      // hooks from its old registry. It must have no gateway_stop to re-enter.
+      if (hasDisposal) {
+        await host.handlers.get("gateway_stop")?.();
+        assert.equal(calls, 1);
+      }
+      const mark = stopped.length;
+      const replacement = register(mockApi(config("ses_after_shutdown")));
+      assert.equal(
+        stopped.length,
+        mark,
+        "cleanup must release the active client",
+      );
+      assert.deepEqual(replacement.warnings, []);
+      await replacement.handlers.get("gateway_stop")!();
+    });
+  }
+
+  it("reports disposal errors and releases the failed client", async () => {
+    const disposers: Cleanup[] = [];
+    const host = register(
+      mockApi(config("ses_failed_shutdown"), {
+        onDispose: (cleanup: Cleanup) => {
+          disposers.push(cleanup);
+          return () => {};
+        },
+      }),
+    );
+    assert.equal(disposers.length, 1);
+    const spyStop = McpStdioClient.prototype.stop;
+    McpStdioClient.prototype.stop = async () => {
+      throw new Error("shutdown failed");
+    };
+    try {
+      await disposers[0]();
+    } finally {
+      McpStdioClient.prototype.stop = spyStop;
+    }
+    assert.ok(
+      host.warnings.some((warning) =>
+        /cleanup error \(shutdown failed\)/.test(warning),
+      ),
+    );
+    const mark = stopped.length;
+    const replacement = register(mockApi(config("ses_after_failure")));
+    assert.equal(stopped.length, mark);
+    assert.deepEqual(replacement.warnings, []);
+    await replacement.handlers.get("gateway_stop")!();
   });
 });

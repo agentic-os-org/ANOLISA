@@ -23,6 +23,11 @@ import {
   type CorpusSearchHit,
 } from "./corpus.js";
 
+// Newer hosts expose instance disposal; keep the pinned older SDK compatible.
+type PluginApiWithDisposal = OpenClawPluginApi & {
+  lifecycle?: { onDispose?: (cleanup: () => Promise<void>) => () => void };
+};
+
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
 // instance, which previously left an orphan agent-memory subprocess
@@ -437,24 +442,29 @@ export default definePluginEntry({
       { names: ["memory_get_context"] },
     );
 
-    // Clean up the subprocess when the gateway shuts down. The
-    // handler is declared async and **returns** the stop() promise so
-    // an OpenClaw runtime that awaits its lifecycle hooks blocks
-    // until the SIGTERM/SIGKILL grace window completes; otherwise
-    // the child would survive as a kernel orphan past gateway exit.
-    api.on("gateway_stop", async () => {
+    // Return the stop promise so the host waits for the subprocess to exit.
+    const cleanup = async () => {
       try {
         await client.stop();
       } catch (err: unknown) {
         api.logger.warn?.(
-          `agent-memory: gateway_stop cleanup error (${err instanceof Error ? err.message : String(err)})`,
+          `agent-memory: subprocess cleanup error (${err instanceof Error ? err.message : String(err)})`,
         );
       } finally {
         if (activeClient === client) {
           activeClient = null;
         }
       }
-    });
+    };
+    const lifecycle = (api as PluginApiWithDisposal).lifecycle;
+    if (lifecycle?.onDispose) {
+      // Reload and gateway shutdown can overlap and dispatch gateway_stop
+      // again after this instance retires. Let instance disposal own cleanup
+      // exclusively so the host cannot re-enter a hook on the retired instance.
+      lifecycle.onDispose(cleanup);
+    } else {
+      api.on("gateway_stop", cleanup);
+    }
 
     // ── Auto-capture: persist notable observations after each turn ──
     let lastCaptureHash = "";
