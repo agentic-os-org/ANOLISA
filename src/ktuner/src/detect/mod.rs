@@ -1221,7 +1221,42 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
         }
     }
 
+    resolve_md_array_types(&mut disks);
     Ok(disks)
+}
+
+/// Re-type an `md*` array from the members that carry it in `holders`.
+///
+/// md derives the array's rotational flag from its members: it keeps
+/// `QUEUE_FLAG_NONROT` only while every active member is non-rotational and the
+/// array is not degraded (v6.6 drivers/md/md.c:6087-6100), and clears it
+/// otherwise. That flag is not the medium for a member that is a virtual disk,
+/// which [`detect_disk_type`] types by the hypervisor on the grounds that the
+/// flag follows the host rather than the backing medium — so an array over
+/// those members read `rotational=1` (HDD) while every member read `SSD`, and
+/// the medium-gated rules followed the array, the device the filesystem is
+/// actually on. The members' answer wins; an array whose members the inventory
+/// does not hold keeps its own.
+fn resolve_md_array_types(disks: &mut [DiskInfo]) {
+    for index in 0..disks.len() {
+        let name = disks[index].name.clone();
+        if !name.starts_with("md") || disks[index].disk_type != DiskType::HDD {
+            continue;
+        }
+
+        let mut members = 0usize;
+        let mut solid_state = true;
+        for member in disks.iter() {
+            if member.holders.iter().any(|holder| holder == &name) {
+                members += 1;
+                solid_state &= matches!(member.disk_type, DiskType::SSD | DiskType::NVMe);
+            }
+        }
+
+        if members > 0 && solid_state {
+            disks[index].disk_type = DiskType::SSD;
+        }
+    }
 }
 
 /// Medium of the device in `dir`, named `name`: the one place the rotational
@@ -2406,6 +2441,78 @@ mod tests {
         // reading clamped down to the cgroup limit, nothing else.
         assert!(info.cpu_cores_host >= info.cpu_cores);
         assert!(info.memory_gb_host >= info.memory_total_gb);
+    }
+
+    /// A virtual-disk member of an md array reports `rotational=1`, so the
+    /// array — whose flag md derives from those members (v6.6
+    /// drivers/md/md.c:6087-6100) — read HDD while the members it is built from
+    /// read SSD. The array is the device the filesystem mounts, so it has to
+    /// carry the members' answer, or every medium-gated rule sizes a
+    /// solid-state device as a mechanical one.
+    #[test]
+    fn md_array_inherits_the_medium_of_its_members() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_md_medium_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        // (name, rotational flag, array it is a member of)
+        for (name, rotational, holder) in [
+            ("vda", "1", Some("md0")),
+            ("vdb", "1", Some("md0")),
+            // A real spinning member keeps the array mechanical.
+            ("sdc", "1", Some("md1")),
+            ("md0", "1", None),
+            ("md1", "1", None),
+            // An array whose members the inventory does not hold keeps its own
+            // answer.
+            ("md2", "1", None),
+            // Solid-state members that need no carve-out.
+            ("sdd", "0", Some("md3")),
+            ("md3", "0", None),
+        ] {
+            let disk = dir.join(name);
+            std::fs::create_dir_all(disk.join("queue")).expect("create queue");
+            std::fs::create_dir_all(disk.join("holders")).expect("create holders");
+            std::fs::write(disk.join("queue/rotational"), format!("{rotational}\n"))
+                .expect("write rotational");
+            std::fs::write(disk.join("queue/scheduler"), "none\n").expect("write scheduler");
+            std::fs::write(disk.join("hidden"), "0\n").expect("write hidden");
+            if let Some(holder) = holder {
+                std::fs::write(disk.join("holders").join(holder), "").expect("write holder");
+            }
+        }
+
+        let disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        let type_of = |name: &str| {
+            disks
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.disk_type.clone())
+        };
+
+        assert_eq!(type_of("vda"), Some(DiskType::SSD));
+        assert_eq!(type_of("sdc"), Some(DiskType::HDD));
+        assert_eq!(
+            type_of("md0"),
+            Some(DiskType::SSD),
+            "an array of virtual (SSD-typed) members is solid-state"
+        );
+        assert_eq!(
+            type_of("md1"),
+            Some(DiskType::HDD),
+            "one spinning member keeps the array mechanical"
+        );
+        assert_eq!(
+            type_of("md2"),
+            Some(DiskType::HDD),
+            "an array with no member in the inventory keeps its own answer"
+        );
+        assert_eq!(type_of("md3"), Some(DiskType::SSD));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
