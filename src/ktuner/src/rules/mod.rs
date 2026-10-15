@@ -7445,6 +7445,12 @@ fn eval_shmmni(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 
 /// Path-injectable form (the `eval_*_at` idiom) so the database gate is
 /// unit-testable against a temp file instead of the live /proc.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
 fn eval_shmmni_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
@@ -7456,7 +7462,9 @@ fn eval_shmmni_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str)
     if !has_db && info.memory_total_gb < 128 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 8192 {
         recs.push(Recommendation {
             param: "kernel.shmmni".to_string(),
@@ -9985,6 +9993,36 @@ mod tests {
             );
         }
         assert!(!is_database_present(&info_with(&[])));
+    }
+
+    #[test]
+    fn shmmni_advice_needs_a_readable_value() {
+        // The rule fires below 8192, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("shmmni", b"8192\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"4096\n").unwrap();
+        let info = info_with_processes(&["postgres"]);
+        assert_eq!(info.memory_total_gb, 64);
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_shmmni_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 4096 is below the floor");
+        assert_eq!(recs[0].current_value, "4096");
+        assert!(advice(&high).is_empty(), "a readable 8192 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
