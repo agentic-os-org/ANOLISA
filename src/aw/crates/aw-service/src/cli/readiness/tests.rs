@@ -146,3 +146,32 @@ fn spawn_failure_returns_without_starting_a_readiness_watcher() {
     assert!(run(&command, &AtomicI32::new(0), Some(fixture.ready())).is_err());
     assert!(!fixture.ready().path.exists());
 }
+
+#[test]
+fn openclaw_degradation_preserves_readiness_and_launch_binding() {
+    let fixture = Fixture::new();
+    let mut ready = fixture.ready();
+    ready.adapter = "openclaw".into();
+    let mut value = json!({"version":1,"adapter":"openclaw","token":ready.token,
+        "pid":std::process::id(),"hooks":2,"degraded":"result_middleware_unavailable"});
+    fs::write(&ready.path, value.to_string()).unwrap();
+    fs::set_permissions(&ready.path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(receipt(&ready, std::process::id()).unwrap());
+    for (field, invalid) in [
+        ("token", json!("wrong")),
+        ("pid", json!(0)),
+        ("hooks", json!(1)),
+        ("adapter", json!("hermes")),
+        ("degraded", json!("unknown")),
+        ("degraded", json!(true)),
+        ("degraded", json!(null)),
+    ] {
+        let mut changed = value.clone();
+        changed[field] = invalid;
+        fs::write(&ready.path, changed.to_string()).unwrap();
+        assert!(receipt(&ready, std::process::id()).is_err(), "{field}");
+    }
+    value.as_object_mut().unwrap().remove("degraded");
+    fs::write(&ready.path, value.to_string()).unwrap();
+    assert!(receipt(&ready, std::process::id()).unwrap());
+}

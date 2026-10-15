@@ -37,6 +37,7 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 完成观察和用户 Hook 可位于最后一个替换步骤之前（OpenClaw 在压缩后执行原生观察）；sec-core/Tokenless 联合模板保留扫描及观察，新增执行前的 Tokenless PreTool 重试建议和最终 PostTool 压缩。
 建议命令必须作为新调用重新通过 sec-core/原生权限检查；RTK 是 PreTool 的外部依赖。
 带引号的参数、符号链接状态路径和使用指南列明的执行前缀形式均保留 RTK 归属。
+OpenClaw 缺少替换 middleware API 时，启动会报告压缩降级，保留 before 阻断和完成观察。
 不同框架的 after 事件覆盖不同。配置词汇包含尚未接通的事件/效果，静态校验本身
 不能证明原生效果生效。跨 Agent 审批、输入改写和 OS 强制执行不在当前
 Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南。

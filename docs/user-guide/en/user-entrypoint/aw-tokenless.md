@@ -137,7 +137,11 @@ frame, including both native views, must fit within 1 MiB, so the usable tool-te
 size is smaller and depends on JSON escaping and metadata. Compression is skipped
 when either snapshot or frame limit is reached. A missing middleware API disables
 compression with a warning while leaving before enforcement and native completion
-observation registered.
+observation registered. The launch receipt reports
+`degraded: "result_middleware_unavailable"`, and AW prints
+`native hooks ready (degraded: result replacement unavailable)` without failing
+startup. The receipt still counts configured steps; it does not claim that the
+missing replacement handler was registered.
 Existing Agent hooks outside the AW step list retain their
 framework's scheduling. Disable overlapping native Tokenless plugins for these
 sessions to avoid duplicate compression/statistics.

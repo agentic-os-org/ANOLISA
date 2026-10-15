@@ -108,7 +108,10 @@ OpenClaw 的原生完成事件发生在结果 middleware 之后，因此先压�
 同一插件实例的所有会话合计最多保留 32 个待观察的原结果快照，完成或会话结束时清理。
 包含两个原生视图的序列化回调帧必须小于等于 1 MiB，因此可用工具文本大小更小，具体
 取决于 JSON 转义和元数据。达到快照数量或帧大小限制时跳过压缩。
-middleware API 缺失时警告并停用压缩，保留 before 阻断和原生完成观察。AW 步骤列表之外的 Hook 仍由框架调度。
+middleware API 缺失时警告并停用压缩，保留 before 阻断和原生完成观察。
+启动回执报告 `degraded: "result_middleware_unavailable"`，AW 输出
+`native hooks ready (degraded: result replacement unavailable)`，不因此导致启动失败。
+回执仍统计配置步骤数，不表示缺失的替换 handler 已注册。AW 步骤列表之外的 Hook 仍由框架调度。
 这些会话应禁用重叠的 Tokenless 原生插件，避免重复压缩和统计。
 
 Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若仅投影导致超限，AW 省略投影，

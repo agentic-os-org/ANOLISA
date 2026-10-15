@@ -58,14 +58,14 @@ function invoke(api, handler, before, event, context, completion) {
   });
 }
 
-function ready(api, count) {
+function ready(api, count, degraded) {
   const receipt = api.pluginConfig.ready;
   api.on('gateway_start', () => {
     const temporary = `${receipt.path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temporary, JSON.stringify({
         version: 1, adapter: 'openclaw', token: receipt.token,
-        pid: process.pid, hooks: count,
+        pid: process.pid, hooks: count, ...(degraded ? { degraded } : {}),
       }) + '\n', { mode: 0o600, flag: 'wx' });
       renameSync(temporary, receipt.path);
     } finally {
@@ -80,6 +80,7 @@ export function register(api, sanitizeToolResult) {
     throw new Error('AW requires a callback binary, binding and readiness receipt');
   }
   let count = 0;
+  let degraded;
   for (const [group, hook] of [['before', 'before_tool_call'], ['after', 'after_tool_call']]) {
     const handlers = config.hooks[group];
     if (group === 'after' && handlers.some(handler => handler.replaceResult)) {
@@ -109,6 +110,7 @@ export function register(api, sanitizeToolResult) {
           } catch (error) { return failure(api, replacement, false, error); }
         }, { runtimes: ['openclaw'] });
       } else {
+        degraded = 'result_middleware_unavailable';
         api.logger?.warn?.('AW result replacement unavailable: OpenClaw tool-result middleware missing');
       }
       if (observers.length) {
@@ -141,5 +143,5 @@ export function register(api, sanitizeToolResult) {
       count += 1;
     }
   }
-  ready(api, count);
+  ready(api, count, degraded);
 }

@@ -9,7 +9,7 @@ const plugin = { register: api => register(api, result => structuredClone(result
 
 const binary = fileURLToPath(new URL('./fixtures/openclaw/client.mjs', import.meta.url));
 
-function setup(t, before = [], after = []) {
+function setup(t, before = [], after = [], middleware = true) {
   const root = mkdtempSync(join(tmpdir(), 'aw-openclaw-plugin-'));
   t.after(() => rmSync(root, { recursive: true }));
   const callbacks = [];
@@ -22,7 +22,7 @@ function setup(t, before = [], after = []) {
       binary, binding: root, ready: { path: join(root, 'ready.json'), token: 'test-token' },
       hooks: { before: before.map(entry), after: after.map(entry) },
     },
-    registerAgentToolResultMiddleware: callback => middlewares.push(callback),
+    registerAgentToolResultMiddleware: middleware ? callback => middlewares.push(callback) : undefined,
     on: (name, callback, options) => callbacks.push({ name, callback, options }),
     logger: { warn: message => warnings.push(message) },
   });
@@ -105,6 +105,10 @@ test('replacement registers the model-bound middleware instead of an observer', 
   const result = await f.middlewares[0]({ ...event, args: event.params, result: { content: [{ type: 'text', text: 'original' }] } }, context);
   assert.deepEqual(result, { result: { content: [{ type: 'text', text: 'compact' }], metadata: { kept: true } } });
   assert.deepEqual(f.rows()[0].received.event.params, event.params);
+  f.callbacks.find(row => row.name === 'gateway_start').callback();
+  const receipt = JSON.parse(readFileSync(join(f.root, 'ready.json')));
+  assert.equal(receipt.hooks, 1);
+  assert.equal(Object.hasOwn(receipt, 'degraded'), false);
 });
 
 test('native completion fields and the original result survive compression and observer failures', { timeout: 10000 }, async t => {
@@ -135,18 +139,30 @@ test('native completion fields and the original result survive compression and o
   assert.equal(f.warnings.length, 1);
 });
 
-test('missing replacement middleware retains before enforcement and native completion observers', async t => {
-  const callbacks = [], warnings = [];
-  register({
-    pluginConfig: { binary, binding: '/unused', ready: { path: '/unused', token: 'test' }, hooks: {
-      before: [{ step: 'block', onError: 'block', budgetMs: 1000 }],
-      after: [{ step: 'observe', onError: 'report', budgetMs: 1000 }, { step: 'replace', replaceResult: true }],
-    } },
-    on: (name, callback) => callbacks.push({ name, callback }), logger: { warn: message => warnings.push(message) },
-  }, value => value);
-  assert.ok(callbacks.some(row => row.name === 'before_tool_call'));
-  assert.ok(callbacks.some(row => row.name === 'after_tool_call'));
-  assert.equal(warnings.length, 1);
+test('missing replacement middleware reports degraded readiness and retains working hooks', { timeout: 10000 }, async t => {
+  const f = setup(t, [{ step: 'block', onError: 'block', budgetMs: 1000 }],
+    ['observe', { step: 'replace', replaceResult: true }], false);
+  assert.equal(f.middlewares.length, 0);
+  assert.deepEqual(await f.callbacks.find(row => row.name === 'before_tool_call').callback(event, context),
+    { block: true, blockReason: 'fixture policy' });
+  await f.callbacks.find(row => row.name === 'after_tool_call').callback(event, context);
+  assert.deepEqual(f.rows().filter(row => row.phase === 'start').map(row => row.step), ['block', 'observe']);
+  f.callbacks.find(row => row.name === 'gateway_start').callback();
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'ready.json'))), {
+    version: 1, adapter: 'openclaw', token: 'test-token', pid: process.pid, hooks: 3,
+    degraded: 'result_middleware_unavailable',
+  });
+  assert.equal(f.warnings.length, 1);
+});
+
+// The service validates content; this bridge must preserve field presence.
+test('present falsy replacements differ from absent replacement and empty stdout', { timeout: 10000 }, async t => {
+  for (const [step, result] of [['replace-empty', ''], ['replace-null', null], ['replace-false', false], ['replace-zero', 0], ['first', undefined], ['empty', undefined]]) {
+    const f = setup(t, [], [{ step, onError: 'report', budgetMs: 1000, replaceResult: true }]);
+    const reply = await f.middlewares[0]({ ...event, args: event.params, result: 'original' }, context);
+    assert.deepEqual(reply, result === undefined ? undefined : { result }, step);
+    assert.deepEqual(f.warnings, []);
+  }
 });
 
 test('completion snapshots are isolated by run and released at completion', { timeout: 10000 }, async t => {

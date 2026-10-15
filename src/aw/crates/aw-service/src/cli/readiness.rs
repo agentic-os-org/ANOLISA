@@ -69,7 +69,6 @@ fn wait(
     let deadline = Instant::now() + ready.timeout;
     loop {
         if receipt(ready, pid).map_err(|error| error.to_string())? {
-            eprintln!("AW {} native hooks ready", ready.adapter);
             return Ok(true);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -110,6 +109,16 @@ fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
     {
         return Err("native startup receipt does not match this launch".into());
     }
+    let suffix = match value.get("degraded") {
+        None => "",
+        Some(reason)
+            if ready.adapter == "openclaw" && reason == "result_middleware_unavailable" =>
+        {
+            " (degraded: result replacement unavailable)"
+        }
+        Some(_) => return Err("invalid native startup degradation reason".into()),
+    };
+    eprintln!("AW {} native hooks ready{suffix}", ready.adapter);
     Ok(true)
 }
 

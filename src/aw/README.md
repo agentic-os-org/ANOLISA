@@ -44,6 +44,8 @@ execution plus final PostTool compression. Suggested commands require a fresh ca
 and pass sec-core/native permissions again; RTK is an external PreTool dependency.
 RTK ownership survives quoted arguments, symlinked state paths and the execution
 prefix forms listed in the user guide. After-event coverage varies by framework.
+If OpenClaw lacks the replacement middleware API, startup reports degraded
+compression while retaining before enforcement and completion observation.
 The configuration vocabulary includes more events/effects than the runtime
 supports; static validation alone does not certify native adoption. Cross-Agent
 approval, input rewriting and OS enforcement are outside this Preview.
