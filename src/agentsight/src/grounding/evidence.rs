@@ -654,7 +654,9 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
     // value out of, where they also bound one in real output. The CJK marks
     // bound a value where prose puts no spaces around it. `|` is sqlite3's
     // default column separator, so `1|/tmp/report.txt` is the text-column shape
-    // of the `complete|119` a count was once hidden in.
+    // of the `complete|119` a count was once hidden in. `\` opens the escape
+    // that follows a value in a JSON payload serialized inside a string
+    // (`\"v1.2.3\",\n`), which the decoding pass in `push_entry` leaves raw.
     let boundary = |c: char| {
         c.is_whitespace()
             || matches!(
@@ -670,6 +672,7 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
                     | '<'
                     | '>'
                     | '|'
+                    | '\\'
                     | '（'
                     | '）'
                     | '【'

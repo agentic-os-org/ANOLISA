@@ -1350,6 +1350,39 @@ fn a_pipe_delimited_column_still_grounds_its_literal() {
 }
 
 #[test]
+fn a_serialized_json_payload_still_grounds_its_literal() {
+    // A real web_fetch result carries its payload as a JSON string inside a
+    // JSON string, so the escaped quote and newline ride along with each value
+    // (the shape the extractor already reads numbers out of). The decoding
+    // pass only unwraps a top-level object or array, which leaves this text
+    // raw, and the backslash glued to the value then hid it from the pool.
+    for (class, literal) in [
+        (ClaimClass::Path, "/tmp/report.txt"),
+        (ClaimClass::Version, "v1.2.3"),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(
+            &mut pool,
+            3,
+            Some("source".into()),
+            &format!(r#"\"value\": \"{literal}\",\n"#),
+        );
+        assert!(
+            matches!(ground_one(
+                &Claim {
+                    text: literal.into(),
+                    class,
+                    value: None,
+                },
+                &pool
+            ), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+            "an escape sequence must not hide {literal} from the pool"
+        );
+    }
+}
+
+#[test]
 fn weak_containment_and_numeric_rounding_remain_supported() {
     let mut pool = Vec::new();
     push_entry(&mut pool, 1, None, "qualified_name_suffix: 242391");
