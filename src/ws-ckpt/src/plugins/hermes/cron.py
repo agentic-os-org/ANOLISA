@@ -12,9 +12,111 @@ from typing import List, Optional
 _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
 
 # Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
-_CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
 _MARKER_RE = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+'([^']+)'")
 _MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)")
+
+# crontab rejects the *entire* submitted file when a single field is out of
+# range, so a schedule that passes a token-count check but fails cron's own
+# validation ("99 99 99 99 99", "0 25 * * *", "* * 32 * *") permanently
+# bricks every later sync for that workspace: the garbage entry stays in the
+# plugin config (it also passes the load-time filter) and each sync attempt
+# writes a file crontab refuses to install. Validate the real 5-field cron
+# grammar (values, ranges, lists, steps, month/day names) like crontab(5),
+# mirroring the OpenClaw plugin's validator.
+_MONTH_NAMES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_DAY_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+# (min, max, names) per field: minute, hour, day-of-month, month, day-of-week.
+# Day-of-week accepts both 0 and 7 as Sunday, like crontab(5).
+_CRON_FIELD_SPEC: List[tuple] = [
+    (0, 59, None),
+    (0, 23, None),
+    (1, 31, None),
+    (1, 12, _MONTH_NAMES),
+    (0, 7, _DAY_NAMES),
+]
+_NUMBER_RE = re.compile(r"^\d+$")
+_STEP_RE = re.compile(r"^\d+$")
+
+
+def _parse_cron_endpoint(text: str, minimum: int, maximum: int, names):
+    """Return the numeric value of one range endpoint, or None if invalid."""
+    if _NUMBER_RE.match(text):
+        # No cron field bound exceeds two digits; reject by length before
+        # int() so an overlong all-digit field (which Python 3.11's int()
+        # refuses with ValueError past 4300 digits) is invalid input rather
+        # than an exception through the unguarded load-time filter.
+        if len(text) > 4:
+            return None
+        value = int(text)
+        if minimum <= value <= maximum:
+            return value
+        return None
+    if names is not None:
+        value = names.get(text.lower())
+        if value is not None and minimum <= value <= maximum:
+            return value
+    return None
+
+
+def _is_valid_cron_item(item: str, field_index: int) -> bool:
+    """Validate one comma-separated cron field item (crontab(5) grammar)."""
+    minimum, maximum, names = _CRON_FIELD_SPEC[field_index]
+
+    base, slash, step = item.partition("/")
+    if slash:
+        # crontab only accepts positive numeric steps; same length bound as
+        # endpoints so an overlong step is invalid, not an int() exception.
+        if not _STEP_RE.match(step) or len(step) > 4 or int(step) < 1:
+            return False
+        if base == "":
+            return False
+
+    if base == "*":
+        return True
+
+    start_text, dash, end_text = base.partition("-")
+    if not dash:
+        # crontab(5): a step combines with a range or a star, never a
+        # scalar — "5/15" would brick every later whole-file sync.
+        if slash:
+            return False
+        return _parse_cron_endpoint(start_text, minimum, maximum, names) is not None
+
+    # A range: both endpoints must exist, be the same kind (name/number),
+    # and be in order. Wrap-around ranges ("fri-mon") are rejected; write
+    # them as an explicit list instead.
+    if not start_text or not end_text:
+        return False
+    start_is_name = not _NUMBER_RE.match(start_text)
+    end_is_name = not _NUMBER_RE.match(end_text)
+    if start_is_name != end_is_name:
+        return False
+    start = _parse_cron_endpoint(start_text, minimum, maximum, names)
+    end = _parse_cron_endpoint(end_text, minimum, maximum, names)
+    return start is not None and end is not None and start <= end
+
+
+def _is_valid_cron_field(field: str, field_index: int) -> bool:
+    if not field:
+        return False
+    # crontab rejects empty list items (",,", trailing comma).
+    return all(
+        item != "" and _is_valid_cron_item(item, field_index)
+        for item in field.split(",")
+    )
+
+
+def validate_cron_expr(expr: str) -> bool:
+    """Return True if expr is an installable 5-field crontab expression."""
+    fields = expr.strip().split()
+    if len(fields) != 5:
+        return False
+    return all(
+        _is_valid_cron_field(field, index) for index, field in enumerate(fields)
+    )
 
 
 def _build_cron_line(workspace: str, schedule: str) -> str:
@@ -71,11 +173,6 @@ def _extract_workspace(line: str) -> Optional[str]:
 
 def _match_workspace(line: str, workspace: str) -> bool:
     return _extract_workspace(line) == workspace
-
-
-def validate_cron_expr(expr: str) -> bool:
-    """Return True if expr looks like a valid 5-field cron expression."""
-    return bool(_CRON_RE.match(expr.strip()))
 
 
 def parse_schedules_update(value: str, current: List[str]) -> tuple[Optional[List[str]], Optional[str]]:
