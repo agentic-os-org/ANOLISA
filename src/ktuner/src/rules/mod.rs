@@ -3679,6 +3679,12 @@ fn eval_shmmax(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 /// SysV IPC rules: `kernel.shmmax` sizes the very shared-memory segment MariaDB
 /// and PostgreSQL keep their buffer pools in, and the hand-rolled
 /// `postgres || mysqld` list skipped the MariaDB 10.4+ `mariadbd` daemon comm.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
 fn eval_shmmax_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -3686,7 +3692,9 @@ fn eval_shmmax_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str)
     if !is_database_present(info) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     let mem_bytes = info.memory_total_gb * 1024 * 1024 * 1024;
     let recommended = mem_bytes / 2;
     if current < recommended {
@@ -10157,6 +10165,37 @@ mod tests {
             .find(|r| r.param == "vm.swappiness")
             .expect("oracle must gate the swappiness rule in");
         assert_eq!(swap.recommended_value, "1");
+    }
+
+    #[test]
+    fn shmmax_advice_needs_a_readable_value() {
+        // The rule fires below half of memory (32 GiB for the fixture), and
+        // read_sysctl_u64 maps an unreadable or unparseable file to 0, which is
+        // below it: a masked or garbled proc entry (a container's, typically)
+        // was reported as `current_value: "0"` and answered with a raise on a
+        // host whose value was never read.
+        let (_, high, others) = zero_switch_paths("shmmax", b"34359738368\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"33554432\n").unwrap();
+        let info = info_with_processes(&["postgres"]);
+        assert_eq!(info.memory_total_gb, 64);
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_shmmax_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 33554432 is below the floor");
+        assert_eq!(recs[0].current_value, "33554432");
+        assert!(advice(&high).is_empty(), "a readable 34359738368 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
