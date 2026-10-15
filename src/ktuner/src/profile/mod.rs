@@ -72,7 +72,16 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("haproxy")
         || info.has_process("caddy");
     let has_java = info.has_process("java");
-    let has_search = info.has_process("elasticsearch") || info.has_process("opensearch");
+    let has_search = info.has_process("elasticsearch")
+        || info.has_process("opensearch")
+        // Apache Solr is the same Lucene-based, JVM-resident search workload as
+        // the two above: the runtime marker table resolves its daemon command
+        // line to the `solr` service and the report lists it, while the class
+        // lists that size a search host - this one and the three hand-rolled
+        // copies of it in the rule layer - skipped it, so a Solr host kept the
+        // stock swappiness, dirty limits, THP policy, vfs_cache_pressure and
+        // busy-poll values its Elasticsearch sibling is advised on.
+        || info.has_process("solr");
     let has_streaming = info.has_process("kafka")
         || info.has_process("flink")
         || info.has_process("spark")
@@ -182,6 +191,20 @@ mod tests {
             classify(&make_info(vec!["memcached"])),
             WorkloadType::MemoryIntensive
         );
+    }
+
+    #[test]
+    fn test_classify_search() {
+        // The Lucene-based search servers are the MemoryIntensive half of the
+        // search class: Elasticsearch and its Apache-licensed fork, and Solr,
+        // which the engine detects and reports under its own name.
+        for name in ["elasticsearch", "opensearch", "solr"] {
+            assert_eq!(
+                classify(&make_info(vec![name])),
+                WorkloadType::MemoryIntensive,
+                "{name} is a search workload"
+            );
+        }
     }
 
     #[test]

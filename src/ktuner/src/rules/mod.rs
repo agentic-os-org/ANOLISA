@@ -553,7 +553,10 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         // The classifier's search workloads (has_search): the same
         // memory-resident shape as the caches and databases above.
         || info.has_process("elasticsearch")
-        || info.has_process("opensearch");
+        || info.has_process("opensearch")
+        // Solr is the third Lucene-based search server of the class; the
+        // runtime marker table resolves its daemon to `solr`.
+        || info.has_process("solr");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
         recs.push(Recommendation {
@@ -2194,6 +2197,9 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         || info.has_process("consul")
         || info.has_process("elasticsearch")
         || info.has_process("opensearch")
+        // Solr is the third search server of the class the two above stand
+        // for; the marker table resolves its daemon cmdline to `solr`.
+        || info.has_process("solr")
         // TiDB is the classifier's OLTP database and TiKV its distributed KV
         // store (`classify`'s has_db -> IoLatency); the sibling rules that
         // take that verdict (eval_swappiness, eval_dirty_ratio) already
@@ -4048,6 +4054,7 @@ fn runs_busy_polling_service(info: &SystemInfo) -> bool {
         || info.has_process("consul")
         || info.has_process("elasticsearch")
         || info.has_process("opensearch")
+        || info.has_process("solr")
         || info.has_process("nginx")
         // The rest of the classifier's web/proxy class (has_web: httpd,
         // apache2, envoy, haproxy, caddy). A per-connection request-path
@@ -11991,7 +11998,7 @@ mod tests {
         // classification, and the vfs_cache_pressure list through the names it
         // swept in with zookeeper/consul — while eval_thp, the only place THP
         // is gated, stayed silent for them.
-        for name in ["elasticsearch", "opensearch"] {
+        for name in ["elasticsearch", "opensearch", "solr"] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
                 name: name.to_string(),
@@ -12084,6 +12091,7 @@ mod tests {
             "consul",
             "elasticsearch",
             "opensearch",
+            "solr",
             "tidb-server",
             "tikv-server",
             "oracle",
@@ -22718,6 +22726,9 @@ mod tests {
             "mongod",
             "clickhouse",
             "oracle",
+            // Solr joins the search pair the gate already lists: a Lucene
+            // query is the same synchronous round-trip shape.
+            "solr",
         ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
