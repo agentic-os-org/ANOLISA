@@ -14,6 +14,10 @@ it("registers distinct tools and routes ANOLISA reads to the existing MCP backen
   t.after(() => fs.rmSync(sessionDir, { recursive: true, force: true }));
   type Tool = {
     name: string;
+    parameters: {
+      required: string[];
+      properties: Record<string, { type: string }>;
+    };
     execute: (
       id: string,
       params: Record<string, unknown>,
@@ -87,4 +91,21 @@ it("registers distinct tools and routes ANOLISA reads to the existing MCP backen
     { name: "memory_search", params: { query: "ANOLISA-SEED" } },
     { name: "mem_read", params: { path: "notes/seed.md" } },
   ]);
+
+  // Keep the model-facing Tool Search example executable against the
+  // registered contract, including its required MCP input.
+  const example = /```json\n([^`]+)\n```/.exec(prompt);
+  assert.ok(example, "memory guidance must include a Tool Search call example");
+  const { id, args } = JSON.parse(example[1]);
+  assert.equal(id, `openclaw:${manifest.id}:memory_observe`);
+  const observe = tools.get("memory_observe")!;
+  for (const key of observe.parameters.required) {
+    assert.ok(Object.hasOwn(args, key), `example is missing required ${key}`);
+  }
+  for (const [key, value] of Object.entries(args)) {
+    assert.equal(typeof value, observe.parameters.properties[key]?.type, key);
+  }
+  const observed = await observe.execute("observe-example", args);
+  assert.equal(observed.content[0].text, "ANOLISA-SEED");
+  assert.deepEqual(calls.at(-1), { name: "memory_observe", params: args });
 });
