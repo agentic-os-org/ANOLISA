@@ -1691,3 +1691,188 @@ test('system audit: an event list pruned below the current page must reopen on r
   rendered = h.render();
   assert.ok(h.text(rendered).includes('session-0'), 'the pruned events must stay reachable');
 });
+
+// ─── Dead Previous click: the two pagers #7486 names ─────────────────────────
+//
+// The same asymmetry #7183 fixed on the sessions page: the display clamps the
+// page (`safePage` / `clamped`), Next clamps its updater, but Previous
+// subtracted from the raw state - so after a list shrink one click only
+// decremented the hidden page and the table did not move.
+
+test('optimization history: one previous click moves back from the displayed page after a shrink', async () => {
+  const driver = createHooksDriver();
+  const { calls, stubs } = deferredFetchStubs(['fetchOptimizeHistory']);
+  const t = (key, args) => (args ? `${key}:${JSON.stringify(args)}` : key);
+  const module = loadPageModule('src/pages/OptimizationPage.tsx', {
+    'react-router-dom': { useParams: () => ({}), useNavigate: () => () => {} },
+    recharts: {},
+    '../utils/apiClient': { ...stubs, ApiRequestError: class ApiRequestError extends Error {} },
+    '../components/CopyButton': { copyText: () => {} },
+    '../utils/formatDuration': { formatDurationSecs: (value) => String(value) },
+    '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en' },
+    '../utils/accuracyAttribution': {
+      fixLocusDiverges: () => false,
+      fixLocusLabel: () => '',
+    },
+    '../utils/richText': richTextStub,
+    '../components/TokenFlameChart': componentStub('TokenFlameChart'),
+  }, driver);
+  // Without a sessionId the route element is the history list view itself.
+  const view = driver.render(module.OptimizationPage).element.type;
+  assert.equal(typeof view, 'function', 'the list route must render a component');
+
+  const entry = (i) => ({
+    session_id: `fixture-${i}`,
+    dimensions: [],
+    created_at_ns: i + 1,
+    updated_at_ns: i + 1,
+  });
+  // The history query is effect 0; re-running it is what a shrinking history
+  // arrives on (the effect is keyed on the i18n handle, so a locale switch or
+  // any refresh re-issues it without resetting the page).
+  const query = async (count) => {
+    const rendered = driver.render(view);
+    rendered.effects[0]();
+    calls.fetchOptimizeHistory.at(-1).resolve(Array.from({ length: count }, (_, i) => entry(i)));
+    await settle();
+    await settle();
+  };
+  const button = (label) => {
+    const node = findElement(driver.render(view).element, (el) => el.type === 'button'
+      && elementText(el).join('') === label);
+    assert.ok(node, `visible ${label} button`);
+    return node;
+  };
+  const summary = () => {
+    const node = findElement(driver.render(view).element, (el) => el.type === 'span'
+      && elementText(el).join('').startsWith('opt.history.paginationSummary:'));
+    assert.ok(node, 'the pager summary must be rendered');
+    return JSON.parse(elementText(node).join('').slice('opt.history.paginationSummary:'.length));
+  };
+
+  await query(40);
+  assert.equal(summary().page, 1, 'sanity: the list opens on page 1');
+  button('»').props.onClick();
+  assert.equal(summary().page, 3, 'sanity: 40 rows at 15 a page put the last page at 3');
+  await query(20);
+  assert.equal(summary().page, 2, 'the shrink clamps the displayed page');
+  const previous = button('‹');
+  assert.equal(previous.props.disabled, false, 'Previous must be enabled on page 2 of 2');
+  previous.props.onClick();
+  assert.equal(summary().page, 1, 'one previous click must move the displayed page back by one');
+});
+
+test('agent health interruptions: one previous click moves back from the displayed page after a refresh shrinks the list', async () => {
+  const t = (key, args) => (args ? `${key}:${JSON.stringify(args)}` : key);
+  const { calls, stubs } = deferredFetchStubs(['fetchInterruptions']);
+  const driver = createHooksDriver();
+  const module = loadPageModule('src/pages/AgentHealthPage.tsx', {
+    '../utils/apiClient': {
+      ...stubs,
+      fetchAgentHealth: async () => [],
+      fetchAgentProcessHealth: async () => ({ roots: [], agents: [] }),
+      deleteAgentHealth: async () => {},
+      restartAgentHealth: async () => {},
+      resolveInterruption: async () => {},
+      createCredentialBinding: async () => ({}),
+      fetchAgentProtectionPreview: async () => ({ paths: [] }),
+      fetchEnforcementBindings: async () => ({ bindings: [] }),
+      detachEnforcementBinding: async () => {},
+      fetchSecurityCases: async () => ({ data: { items: [], total: 0 } }),
+      fetchLatencyMetrics: async () => ({}),
+    },
+    '../i18n': {
+      useI18n: () => ({ t }),
+      useLocaleTag: () => 'en-US',
+      INTERRUPTION_TYPES: [],
+      interruptionTypeKey: () => null,
+    },
+    '../utils/datetime': { formatNs: (ns) => String(ns) },
+    '../constants/policyIds': { CREDENTIAL_POLICY_ID: 'policy' },
+  }, driver);
+
+  // The pagination lives in a section the page renders. Take that component out
+  // of the page's own tree, then drive it against a cleared slot map: the page
+  // itself is never re-rendered, but the section is (its hooks bind to this
+  // module's driver, so the element has to come from this same instance).
+  const pageTree = driver.render(module.AgentHealthPage).element;
+  const section = findElement(pageTree, (el) => typeof el.type === 'function'
+    && el.type.name === 'InterruptionSection');
+  assert.ok(section, 'the page must render its interruption section');
+  driver.slots.length = 0;
+  driver._memos.length = 0;
+  driver._callbackCache.length = 0;
+
+  const realSetInterval = global.setInterval;
+  const realClearInterval = global.clearInterval;
+  const intervals = [];
+  const mounted = [];
+  const sameDeps = (a, b) => a.length === b.length && a.every((dep, i) => Object.is(dep, b[i]));
+  const runEffects = (rendered) => {
+    rendered.effects.forEach((fn, index) => {
+      const deps = fn.__deps;
+      const prev = mounted[index];
+      if (prev && sameDeps(prev.deps, deps)) return;
+      if (prev && typeof prev.cleanup === 'function') prev.cleanup();
+      global.setInterval = (cb) => { intervals.push(cb); return intervals.length; };
+      global.clearInterval = () => {};
+      let cleanup;
+      try {
+        cleanup = fn();
+      } finally {
+        global.setInterval = realSetInterval;
+        global.clearInterval = realClearInterval;
+      }
+      mounted[index] = { deps, cleanup };
+    });
+  };
+  const render = () => {
+    const rendered = driver.render(section.type, section.props);
+    runEffects(rendered);
+    return rendered;
+  };
+  const rows = (count) => Array.from({ length: count }, (_, i) => ({
+    interruption_id: `fixture-${i}`,
+    resolved: false,
+    severity: 'high',
+    interruption_type: 'loop',
+    occurred_at_ns: i + 1,
+    call_id: null,
+    detail: null,
+  }));
+  const button = (label) => {
+    const node = findElement(render().element, (el) => el.type === 'button'
+      && elementText(el).join('') === label);
+    assert.ok(node, `visible ${label} button`);
+    return node;
+  };
+  const summary = () => {
+    const node = findElement(render().element, (el) => el.type === 'span'
+      && elementText(el).join('').startsWith('common.page:'));
+    assert.ok(node, 'the pager summary must be rendered');
+    return JSON.parse(elementText(node).join('').slice('common.page:'.length));
+  };
+  // The 30 s poll is the refresh path the shrunken list arrives on.
+  const refresh = async (count) => {
+    const before = calls.fetchInterruptions.length;
+    intervals.forEach((cb) => cb());
+    assert.equal(calls.fetchInterruptions.length, before + 1, 'the poll must re-issue the query');
+    calls.fetchInterruptions.at(-1).resolve(rows(count));
+    await settle();
+    await settle();
+  };
+
+  render();
+  calls.fetchInterruptions.at(-1).resolve(rows(40));
+  await settle();
+  await settle();
+  assert.equal(summary().cur, 1, 'sanity: the section opens on page 1');
+  button('common.last').props.onClick();
+  assert.equal(summary().cur, 3, 'sanity: 40 rows at 15 a page put the last page at 3');
+  await refresh(20);
+  assert.equal(summary().cur, 2, 'the shrink clamps the displayed page');
+  const previous = button('common.prev');
+  assert.equal(previous.props.disabled, false, 'Previous must be enabled on page 2 of 2');
+  previous.props.onClick();
+  assert.equal(summary().cur, 1, 'one previous click must move the displayed page back by one');
+});

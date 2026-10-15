@@ -1599,7 +1599,7 @@ const InterruptionSection: React.FC<{ addToast: (msg: string) => void }> = ({ ad
                       {t('common.first')}
                     </button>
                     <button
-                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      onClick={() => setPage(p => Math.max(1, Math.min(p, totalPages) - 1))}
                       disabled={clamped <= 1}
                       className="px-2 py-1 rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
                     >
