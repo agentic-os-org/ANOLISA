@@ -29,6 +29,7 @@ TOML_CONTRACTS = (
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.macos.toml"),
     ("src/skillfs/Cargo.toml", "src/skillfs/component.toml"),
+    ("src/skillfs/Cargo.toml", "src/skillfs/.anolisa/component.toml"),
     ("src/tokenless/Cargo.toml", "distribution/anolisa/manifests/components/tokenless/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/.anolisa/component.toml"),
