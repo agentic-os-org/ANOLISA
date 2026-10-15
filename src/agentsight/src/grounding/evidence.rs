@@ -693,13 +693,15 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
     haystack.match_indices(needle).any(|(start, _)| {
         let prefix = &haystack[..start];
         let before = prefix.chars().next_back();
-        let starts_value = before.is_none_or(|c| boundary(c) || matches!(c, ':' | '='))
+        // A comma opens a value, as in a CSV column, but does not close one:
+        // see the suffix rule below.
+        let starts_value = before.is_none_or(|c| boundary(c) || matches!(c, ':' | '=' | ','))
             || (class == ClaimClass::Version
                 && before == Some('v')
                 && prefix[..prefix.len() - 1]
                     .chars()
                     .next_back()
-                    .is_none_or(|c| boundary(c) || matches!(c, ':' | '=')));
+                    .is_none_or(|c| boundary(c) || matches!(c, ':' | '=' | ',')));
         // A terminal period/comma is sentence decoration; the same character
         // followed by more filename/version content is a continuation.
         let suffix = haystack[start + needle.len()..].trim_start_matches(['.', ',', ';', '!', '?']);

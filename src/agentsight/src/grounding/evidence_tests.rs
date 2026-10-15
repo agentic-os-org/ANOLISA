@@ -1383,6 +1383,33 @@ fn a_serialized_json_payload_still_grounds_its_literal() {
 }
 
 #[test]
+fn a_comma_delimited_column_still_grounds_its_literal() {
+    // The CSV form of the sqlite3 column above (`sqlite3 -csv`, `psql --csv`):
+    // the comma is one of the extractor's structural separators, so a value
+    // in a later column opens right after it. Only the opening side changes;
+    // a comma followed by more text stays a continuation of the value.
+    for (class, literal) in [
+        (ClaimClass::Path, "/tmp/report.txt"),
+        (ClaimClass::Version, "v1.2.3"),
+    ] {
+        let mut pool = Vec::new();
+        push_entry(&mut pool, 3, Some("source".into()), &format!("1,{literal}"));
+        assert!(
+            matches!(ground_one(
+                &Claim {
+                    text: literal.into(),
+                    class,
+                    value: None,
+                },
+                &pool
+            ), Grounding::Grounded {
+                step_id: 3, source_call_id: Some(id) } if id == "source"),
+            "a column delimiter must not hide {literal} from the pool"
+        );
+    }
+}
+
+#[test]
 fn weak_containment_and_numeric_rounding_remain_supported() {
     let mut pool = Vec::new();
     push_entry(&mut pool, 1, None, "qualified_name_suffix: 242391");
