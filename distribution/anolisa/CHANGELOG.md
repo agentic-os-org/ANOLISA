@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-10-15
+
+### Added
+
+- Manage Tokenless plugins in QwenWorkCN macOS local mode with
+  `anolisa adapter enable tokenless qwenwork`. Support QwenWorkCN `1.2.5`,
+  preserve ownership records for interrupted operations, and require existing
+  script installations to be uninstalled before adoption. Restart the desktop
+  application and check activation there; CLI status verifies files and reports
+  loading and activation as `unknown`
+  ([#7368](https://github.com/agentic-os-org/ANOLISA/pull/7368)).
+
+### Changed
+
+- Update the Tokenless version in the component catalog to `0.8.7`.
+- Update the Agent Memory version in the component catalog to `0.2.9`.
+- Update the SkillFS version in the component catalog to `0.5.2` and recognize
+  Linux ARM64 releases when compatible artifacts are available.
+- Recognize Linux ARM64 releases for ws-ckpt and resolve its OpenClaw and Hermes
+  plugin bundles from the prebuilt package layout.
+
+### Fixed
+
+- Reject Raw updates that introduce conflicts with installed components before
+  replacing files, preserving the installed version and its management records
+  ([#7635](https://github.com/agentic-os-org/ANOLISA/pull/7635)).
+- Keep payload-provided Raw post-uninstall hooks runnable after removing component
+  files, preserve shared hooks at their original locations, and clean temporary
+  hook copies after success or failure without following staging symlinks
+  ([#6450](https://github.com/agentic-os-org/ANOLISA/pull/6450)).
+- Allow failed OpenClaw installations to be disabled and retried when installation
+  was rejected before changing the host or the plugin is confirmed absent.
+  Preserve cleanup records when host state cannot be verified, including
+  interrupted retries
+  ([#7197](https://github.com/agentic-os-org/ANOLISA/pull/7197)).
+- Create new installation directories with `0755` permissions even under
+  `umask 077`, preserving permissions on existing directories and symlink targets.
+- Reject unresolved variable references in `--repo` overrides before fetching
+  repository metadata and explain that a resolved URL is required.
+- Apply sandbox kernel requirements to dry-run previews as well as installation,
+  retain explicit `--force` previews, and reject malformed requirements before
+  reporting a successful plan
+  ([#7294](https://github.com/agentic-os-org/ANOLISA/pull/7294)).
+- Reject unknown legacy registration-record versions, preserving existing
+  records and consent state instead of attempting an unsupported migration.
+
 ## [0.3.17] - 2026-10-11
 
 ### Added

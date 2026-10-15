@@ -9,6 +9,41 @@
 
 ## [未发布]
 
+## [0.3.18] - 2026-10-15
+
+### 新增
+
+- 通过 `anolisa adapter enable tokenless qwenwork` 管理 QwenWorkCN macOS 本地模式的
+  Tokenless 插件。支持 QwenWorkCN `1.2.5`，保留操作中断后的归属记录；已有脚本安装
+  需先卸载再由 CLI 接管。完成后重启桌面应用并在应用内检查激活状态；CLI 验证文件，
+  但加载与激活状态均报告为 `unknown`
+  （[#7368](https://github.com/agentic-os-org/ANOLISA/pull/7368)）。
+
+### 变更
+
+- 组件目录中的 Tokenless 版本更新至 `0.8.7`。
+- 组件目录中的 Agent Memory 版本更新至 `0.2.9`。
+- 组件目录中的 SkillFS 版本更新至 `0.5.2`，可在兼容制品可用时识别 Linux ARM64 发布包。
+- 识别 ws-ckpt 的 Linux ARM64 发布包，并按预构建包布局查找 OpenClaw 和 Hermes 插件。
+
+### 修复
+
+- Raw 更新在替换文件前拒绝与已安装组件冲突的新版本，保留原版本及其管理记录
+  （[#7635](https://github.com/agentic-os-org/ANOLISA/pull/7635)）。
+- Raw 组件文件移除后仍可执行包内的 post-uninstall hooks；共享 hooks 保持原路径，
+  成功或失败后均清理临时 hook 副本，且不跟随暂存路径中的符号链接
+  （[#6450](https://github.com/agentic-os-org/ANOLISA/pull/6450)）。
+- OpenClaw 安装在修改宿主前被拒绝，或已确认插件不存在时，可正常禁用并重试；
+  宿主状态无法核实时保留清理记录，重试中断后也能继续恢复
+  （[#7197](https://github.com/agentic-os-org/ANOLISA/pull/7197)）。
+- 即使在 `umask 077` 下，新建安装目录也使用 `0755` 权限；保留已有目录及符号链接
+  目标的权限。
+- `--repo` 覆盖在获取仓库元数据前拒绝未展开的变量引用，并提示传入已解析的 URL。
+- sandbox 安装与 dry-run 预览执行相同的内核要求检查，保留显式 `--force` 预览，
+  并在报告计划成功前拒绝无效的要求格式
+  （[#7294](https://github.com/agentic-os-org/ANOLISA/pull/7294)）。
+- 拒绝未知的旧版注册记录版本，保留原记录与同意状态，避免执行不受支持的迁移。
+
 ## [0.3.17] - 2026-10-11
 
 ### 新增
