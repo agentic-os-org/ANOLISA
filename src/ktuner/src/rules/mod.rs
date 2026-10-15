@@ -6921,21 +6921,46 @@ fn dirty_background_bytes_target(dirty_bytes: u64) -> u64 {
 }
 
 fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/dirty_background_bytes";
+    eval_dirty_background_bytes_at(
+        info,
+        recs,
+        "/proc/sys/vm/dirty_background_bytes",
+        "/proc/sys/vm/dirty_background_ratio",
+        "/proc/sys/vm/dirty_bytes",
+    )
+}
+
+/// Path-injectable form of [`eval_dirty_background_bytes`] (the `eval_*_at`
+/// idiom) so the read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the background threshold is still a
+/// percentage — and [`read_sysctl_u64`] maps an unreadable or unparseable
+/// file to that same 0. Only a zero the reader could produce is evidence that
+/// the host runs on the ratio, so a masked or garbled proc entry (a
+/// container's, typically) is not answered with a switch to bytes it may not
+/// need.
+fn eval_dirty_background_bytes_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    ratio_path: &str,
+    dirty_bytes_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
     }
-    let bytes = read_sysctl_u64(path);
-    let ratio_path = "/proc/sys/vm/dirty_background_ratio";
+    let Some(bytes) = read_switch(path) else {
+        return 1;
+    };
     let ratio = if std::path::Path::new(ratio_path).exists() {
         read_sysctl_u64(ratio_path)
     } else {
         0
     };
-    let dirty_bytes = read_sysctl_u64("/proc/sys/vm/dirty_bytes");
+    let dirty_bytes = read_sysctl_u64(dirty_bytes_path);
     dirty_background_bytes_recommendation(info.memory_total_gb, bytes, ratio, dirty_bytes, recs);
     1
 }
@@ -13276,6 +13301,47 @@ mod tests {
             !has_ratio,
             "large-RAM host should use dirty_bytes, not dirty_ratio"
         );
+    }
+
+    #[test]
+    fn dirty_background_bytes_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — the background threshold is a
+        // percentage — and read_sysctl_u64 maps an unreadable or unparseable
+        // file to that same 0, so a masked or garbled proc entry (a
+        // container's, typically) was reported as `current_value: "0"` and
+        // answered with a switch to bytes on a host whose setting was never
+        // read.
+        let (off, _, others) = switch_fixture("dirty_background_bytes");
+        let set = off.with_file_name("dirty_background_bytes.set");
+        std::fs::write(&set, b"134217728\n").unwrap();
+        let ratio = off.with_file_name("dirty_background_ratio");
+        std::fs::write(&ratio, b"10\n").unwrap();
+        let dirty_bytes = off.with_file_name("dirty_bytes");
+        std::fs::write(&dirty_bytes, b"0\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_dirty_background_bytes_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                ratio.to_str().unwrap(),
+                dirty_bytes.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 leaves the ratio in charge");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&set).is_empty(), "a readable byte threshold is kept");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable setting is not the value 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
