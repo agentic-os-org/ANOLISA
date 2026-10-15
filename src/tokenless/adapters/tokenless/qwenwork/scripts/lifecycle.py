@@ -302,7 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     """Run a read-only probe, explicit sideload, or ownership-checked removal."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("detect", "install", "uninstall"))
-    parser.add_argument("--dry-run", action="store_true", help="validate without writing any files")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=os.environ.get("ANOLISA_DRY_RUN") == "1",
+        help="validate without writing any files (also the default under ANOLISA_DRY_RUN=1)",
+    )
     args = parser.parse_args(argv)
     try:
         home, data, target = _paths()

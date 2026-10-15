@@ -329,6 +329,25 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.run_action("uninstall")
         self.assertEqual(snapshot(self.root), before)
 
+    def test_anolisa_dry_run_env_var_previews_like_the_flag(self) -> None:
+        # The adapter family contract is ANOLISA_DRY_RUN=1; `--dry-run` is this
+        # adapter's own spelling of the same request. The variable must reach
+        # the same preview and leave the tree alone.
+        self.run_action("install")
+        self.assertTrue(self.target.exists())
+        before = snapshot(self.root)
+        with mock.patch.dict(os.environ, {"ANOLISA_DRY_RUN": "1"}):
+            out, _ = self.run_action("uninstall")
+            self.assertIn("DRY-RUN: would remove owned plugin", out)
+            self.assertTrue(self.target.exists())
+            self.assertEqual(snapshot(self.root), before)
+            env_out, _ = self.run_action("install")
+            self.assertIn("DRY-RUN: would sideload plugin", env_out)
+            self.assertEqual(snapshot(self.root), before)
+        # The real path still runs once the variable is gone.
+        self.run_action("uninstall")
+        self.assertFalse(self.target.exists())
+
     def test_uninstall_does_not_need_app_dependencies_or_source(self) -> None:
         self.run_action("install")
         shutil.rmtree(self.app)
