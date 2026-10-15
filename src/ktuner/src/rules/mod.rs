@@ -10022,8 +10022,9 @@ fn eval_softlockup_all_cpu_backtrace_at(
     if !soft_lockup_detector_is_live(soft_watchdog_path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
+    // read_sysctl_u64 maps a file it could not read or parse to the same 0
+    // this rule fires on; only a successfully read 0 is the disabled switch.
+    if read_switch(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.softlockup_all_cpu_backtrace".to_string(),
             current_value: "0".to_string(),
@@ -20606,6 +20607,42 @@ mod tests {
                     .iter()
                     .any(|r| r.param == "kernel.softlockup_all_cpu_backtrace"));
             }
+        }
+    }
+
+    #[test]
+    fn softlockup_all_cpu_backtrace_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — a soft lockup dumps only the stuck
+        // CPU — and read_sysctl_u64 maps an unreadable or unparseable file to
+        // that same 0, so a masked or garbled proc entry (a container's,
+        // typically) was reported as `current_value: "0"` and answered with a
+        // write of 1 on a host whose switch was never read.
+        let (off, on, others) = switch_fixture("softlockup_all_cpu_backtrace");
+        let watchdog = off.with_file_name("soft_watchdog");
+        std::fs::write(&watchdog, b"1\n").unwrap();
+        let mut info = make_test_info();
+        info.cpu_cores = 64;
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_softlockup_all_cpu_backtrace_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                watchdog.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 dumps only the stuck CPU");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 dumps them all");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
+            );
         }
     }
 
