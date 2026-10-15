@@ -1886,18 +1886,42 @@ fn program_names_service_tool(program: &str) -> bool {
 /// runs a script under its interpreter — the script path in the argument after
 /// argv[0] when that is a shell. `/proc/<pid>/comm` keeps the script's own
 /// name, which is exactly the name that must not satisfy a service match.
+///
+/// ClickHouse's multi-call binary is the one program argv[0] cannot decide: the
+/// vendor documents the subcommand form as well as the symlinks, and `clickhouse
+/// client` carries the same argv[0] and the same comm as `clickhouse server`, so
+/// only the subcommand separates a client session from the daemon.
 fn is_service_tool(pid: &str) -> bool {
-    let Some(cmdline) = read_cmdline_from(&format!("/proc/{pid}/cmdline")) else {
-        return false;
-    };
+    read_cmdline_from(&format!("/proc/{pid}/cmdline"))
+        .is_some_and(|cmdline| cmdline_names_service_tool(&cmdline))
+}
+
+/// Pure core of [`is_service_tool`], assertable against a synthetic command
+/// line the way [`runtime_service_from_cmdline`] is.
+fn cmdline_names_service_tool(cmdline: &str) -> bool {
     let mut args = cmdline.split('\0').filter(|arg| !arg.is_empty());
     let Some(program) = args.next() else {
         return false;
     };
+    let next = args.next();
     if program_names_service_tool(program) {
         return true;
     }
-    is_shell_program(program) && args.next().is_some_and(program_names_service_tool)
+    if program_is_clickhouse_multi_call(program) {
+        // The binary runs the server only under its `server` subcommand; every
+        // other entry point (`client`, `local`, `benchmark`, `keeper`, ...) is
+        // the client-side or companion program the symlink list names, and a
+        // host whose only ClickHouse process is one of those is not a database
+        // host.
+        return next != Some("server");
+    }
+    is_shell_program(program) && next.is_some_and(program_names_service_tool)
+}
+
+/// Whether `program` (an argv[0]) is ClickHouse's multi-call binary, whose name
+/// the server, the client tools and the keeper all share.
+fn program_is_clickhouse_multi_call(program: &str) -> bool {
+    program.rsplit('/').next().unwrap_or(program) == "clickhouse"
 }
 
 /// Whether the jar a JVM runs names a metrics collector. The Prometheus JMX
@@ -4416,6 +4440,47 @@ mod tests {
             assert!(
                 !program_names_service_tool(daemon),
                 "{daemon} is the service, not a tool"
+            );
+        }
+    }
+
+    /// ClickHouse documents the subcommand form beside the symlinks, and
+    /// `clickhouse client` carries the server's argv[0] *and* its comm: without
+    /// the subcommand a host running a client session against a remote server
+    /// looked like a database host and took the whole database program.
+    #[test]
+    fn clickhouse_subcommand_separates_the_client_from_the_daemon() {
+        for tool in [
+            "/usr/bin/clickhouse\0client\0--host\0db1",
+            "/usr/bin/clickhouse\0local\0--query\0select 1",
+            "/usr/bin/clickhouse\0benchmark\0--host\0db1",
+            "/usr/bin/clickhouse\0compressor\0--codec\0LZ4",
+            "/usr/bin/clickhouse\0format\0--help",
+            "/usr/bin/clickhouse\0obfuscator\0--seed\0x",
+            // The keeper is the coordination daemon — the companion the symlink
+            // side of this filter already drops under its own name — not the
+            // server.
+            "/usr/bin/clickhouse\0keeper\0--config\0/etc/clickhouse-keeper",
+            // No subcommand at all prints the usage text.
+            "/usr/bin/clickhouse",
+        ] {
+            assert!(
+                cmdline_names_service_tool(tool),
+                "{tool:?} runs a tool, not the service"
+            );
+        }
+
+        for daemon in [
+            // The binary in its server mode, however it is addressed.
+            "/usr/bin/clickhouse\0server",
+            "clickhouse\0server\0--config\0/etc/clickhouse-server/config.xml",
+            // The packaged symlinks keep their own argv[0].
+            "/usr/bin/clickhouse-server",
+            "/usr/bin/clickhouse-serv",
+        ] {
+            assert!(
+                !cmdline_names_service_tool(daemon),
+                "{daemon:?} is the service, not a tool"
             );
         }
     }
