@@ -121,12 +121,15 @@ build-openclaw-plugin: sync-versions generate-component-contract ## Build opencl
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
 	# esbuild (what `npm run build` runs) strips types without checking them, so
 	# a type error in src/ or tests/ still produces a dist/index.js. Nothing else
-	# in the pipeline would catch it either: agent-memory.spec.in's %build
-	# deliberately runs no npm and consumes the bundle `make dist` pre-built here,
-	# while the PR CI job runs the plugin unit suite. Type-check first so the
-	# bundle that ships is the bundle tsc accepted. `npm run build:check` is
-	# `tsc --project tsconfig.json --noEmit` over the same tsconfig the plugin is
-	# written against, and needs only the devDependencies installed just above.
+	# in the packaging pipeline would catch it either: agent-memory.spec.in's
+	# %build deliberately runs no npm and consumes the bundle `make dist` pre-built
+	# here, and `test-openclaw-plugin`'s own build:check — the one that keeps a
+	# type error from reaching main through PR CI — only runs once this bundle
+	# already exists. Type-check first so the bundle that ships is the bundle tsc
+	# accepted. `npm run build:check` is `tsc --project tsconfig.json --noEmit`
+	# over the same tsconfig the plugin is written against, and needs only the
+	# devDependencies installed just above. Running tsc twice on the packaging path
+	# (here and again in `test-openclaw-plugin`) is idempotent and costs ~4 s.
 	@echo "==> Type-checking $(NAME) OpenClaw plugin (tsc --noEmit)..."
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build:check
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
@@ -159,15 +162,38 @@ test-tools: ## Run Tier A file-tool integration tests only
 	cargo test --test file_tools_test
 
 # The openclaw adapter ships TS unit tests (tests/unit/*-test.ts) that `npm test`
-# runs through tsx. They are deliberately not a prerequisite of `test:` above —
-# that target is cargo-only and must stay runnable without a Node toolchain or
-# registry access. Use this target to exercise the adapter suite. CI runs it
-# from the `package-source` action, right after `build-openclaw-plugin` has
-# npm-installed the same directory, so the nightly and release packaging paths
-# gate on it. The per-PR `Test agent-memory` job also runs this target.
-test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
+# runs through tsx, plus `build:check` (tsc --noEmit). They are deliberately not
+# prerequisites of `test:` above — that target is cargo-only and must stay
+# runnable without a Node toolchain or registry access. Use this target to
+# exercise the adapter suite. CI runs it from the `package-source` action, so the
+# nightly and release packaging paths gate on it, and from the per-PR
+# `Test agent-memory` job, so a broken plugin cannot reach main.
+#
+# Neither half subsumes the other: tsx strips types without checking them exactly
+# like the esbuild in `build-openclaw-plugin` does, so the unit suite alone would
+# let a type error merge green and only blow up when packaging runs tsc. The
+# build:check below is what closes that gap for PR CI.
+#
+# `npm ci`, not `npm install`: this target is a gate, so dependency resolution
+# must come from the committed package-lock.json instead of whatever the registry
+# serves that day. Under `npm install` a breaking patch to tsx / esbuild / c8 /
+# typescript reddens every agent-memory PR with an error that looks like a plugin
+# regression. The lockfile is committed (lockfileVersion 3) and `sync-versions`
+# rewrites `.version` in package.json and package-lock.json together, so `npm ci`
+# stays satisfied on the packaging path as well. The price: `npm ci` discards the
+# node_modules `build-openclaw-plugin` just warmed, adding one clean install
+# (~15 s) to nightly and release — accepted in exchange for a deterministic gate.
+#
+# Do not "simplify" this into a call to `build-openclaw-plugin`: that target
+# depends on `sync-versions`, which needs `jq`, and the PR job's system packages
+# are only libsystemd-dev + cmake. build:check needs nothing beyond the
+# devDependencies installed just above.
+test-openclaw-plugin: ## Type-check + run openclaw adapter TS unit tests (needs npm registry)
+	@echo "==> Installing openclaw adapter dependencies (npm ci, lockfile-pinned)..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm ci --legacy-peer-deps --no-audit --no-fund
+	@echo "==> Type-checking $(NAME) OpenClaw plugin (tsc --noEmit)..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build:check
 	@echo "==> Running openclaw adapter unit tests..."
-	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm test
 
 # =============================================================================
