@@ -133,7 +133,7 @@ mod java_application_argument_regressions {
                 available_schedulers: vec!["mq-deadline".into()],
                 nr_requests: Some(128),
                 read_ahead_kb: Some(128),
-                rq_affinity: 1,
+                rq_affinity: Some(1),
                 hidden: false,
                 holders: vec![],
             }],
@@ -200,7 +200,10 @@ pub struct DiskInfo {
     /// `None` when `queue/read_ahead_kb` could not be read or parsed, so the
     /// rules never size a window from a value the host did not report.
     pub read_ahead_kb: Option<u64>,
-    pub rq_affinity: u64,
+    /// `None` when `queue/rq_affinity` could not be read or parsed, so the
+    /// rules never judge completion steering from a value the host did not
+    /// report.
+    pub rq_affinity: Option<u64>,
     /// Whether the kernel hides the gendisk (`GENHD_FL_HIDDEN`), from the
     /// disk's `hidden` attribute. A hidden disk is registered without a device
     /// number, so nothing can be mounted on it.
@@ -1370,12 +1373,11 @@ fn read_disk_holders(holders_dir: &Path) -> Vec<String> {
     holders
 }
 
-fn read_rq_affinity(dir: &Path) -> u64 {
+fn read_rq_affinity(dir: &Path) -> Option<u64> {
     let path = dir.join("queue/rq_affinity");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 fn read_network_info() -> Result<Vec<NetInfo>> {

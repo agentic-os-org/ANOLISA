@@ -2523,10 +2523,16 @@ fn eval_rq_affinity_at(
         return 1;
     }
     for disk in &info.disks {
-        if disk.disk_type == DiskType::NVMe && has_request_queue(disk) && disk.rq_affinity == 0 {
+        // Only a 0 the attribute reported is a switched-off migration: the 0
+        // an unreadable or garbled file used to fall back to was reported as
+        // the current value and answered with a write.
+        if disk.disk_type == DiskType::NVMe
+            && has_request_queue(disk)
+            && disk.rq_affinity == Some(0)
+        {
             recs.push(Recommendation {
                 param: format!("block/{}/rq_affinity", disk.name),
-                current_value: disk.rq_affinity.to_string(),
+                current_value: "0".to_string(),
                 recommended_value: "1".to_string(),
                 reason: "多 NUMA 节点下 IO 完成迁移被关闭，恢复默认值让完成回到提交 CPU 所在的缓存域，减少跨节点内存访问"
                     .to_string(),
@@ -11900,7 +11906,7 @@ mod tests {
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
                 nr_requests: Some(256),
                 read_ahead_kb: Some(128),
-                rq_affinity: 1,
+                rq_affinity: Some(1),
                 hidden: false,
                 holders: vec![],
             }],
@@ -12533,7 +12539,7 @@ mod tests {
         info.disks[0].scheduler = "unknown".to_string();
         info.disks[0].available_schedulers = Vec::new();
         info.disks[0].nr_requests = None;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = None;
         let recs = evaluate(&info).unwrap().recommendations;
         for knob in ["scheduler", "nr_requests", "rq_affinity"] {
             assert!(
@@ -12568,7 +12574,7 @@ mod tests {
 
         let mut info = make_test_info();
         info.numa_nodes = 1;
-        info.disks[0].rq_affinity = 1;
+        info.disks[0].rq_affinity = Some(1);
         let mut recs = Vec::new();
         eval_rq_affinity_at(&info, &mut recs, cmdline, version);
         let rec = recs.iter().find(|r| r.param.contains("rq_affinity"));
@@ -12578,7 +12584,7 @@ mod tests {
         );
 
         info.numa_nodes = 2;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
         let mut recs = Vec::new();
         eval_rq_affinity_at(&info, &mut recs, cmdline, version);
         let rec = recs.iter().find(|r| r.param.contains("rq_affinity"));
@@ -12587,6 +12593,56 @@ mod tests {
             "Should recommend rq_affinity=1 on multi-NUMA NVMe"
         );
         assert_eq!(rec.unwrap().recommended_value, "1");
+    }
+
+    /// `queue/rq_affinity` fell back to 0 when it could not be read or parsed,
+    /// and 0 is the switched-off migration this rule restores: a masked or
+    /// garbled attribute was reported as `current_value: "0"` and answered
+    /// with a write on a disk whose setting was never read.
+    #[test]
+    fn rq_affinity_advice_needs_a_readable_setting() {
+        let dir = queue_attribute_tree(
+            "rq_affinity",
+            ["nvme0n1", "nvme1n1", "nvme2n1", "nvme3n1", "nvme4n1"],
+            "rq_affinity",
+            "0\n",
+            &[("queue/scheduler", "[none] mq-deadline\n")],
+        );
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        info.disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        info.disks.sort_by(|a, b| a.name.cmp(&b.name));
+        // A plain command line and a non-RT banner, written after the block
+        // tree is read so they do not show up as disks.
+        let cmdline = dir.join("cmdline");
+        std::fs::write(&cmdline, "BOOT_IMAGE=/vmlinuz root=/dev/sda1\n").unwrap();
+        let version = dir.join("version");
+        std::fs::write(
+            &version,
+            "Linux version 6.6.0 (gcc) #1 SMP PREEMPT_DYNAMIC\n",
+        )
+        .unwrap();
+
+        let mut recs = Vec::new();
+        eval_rq_affinity_at(
+            &info,
+            &mut recs,
+            cmdline.to_str().unwrap(),
+            version.to_str().unwrap(),
+        );
+        let advised: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.param.as_str(), r.current_value.as_str()))
+            .collect();
+        assert_eq!(
+            advised,
+            [("block/nvme0n1/rq_affinity", "0")],
+            "only the setting the disk reported is restored"
+        );
+        let settings: Vec<Option<u64>> = info.disks.iter().map(|d| d.rq_affinity).collect();
+        assert_eq!(settings, [Some(0), None, None, None, None]);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -12615,7 +12671,7 @@ mod tests {
         let mut info = make_test_info();
         info.numa_nodes = 2;
         for current in [1, 2] {
-            info.disks[0].rq_affinity = current;
+            info.disks[0].rq_affinity = Some(current);
             let mut recs = Vec::new();
             eval_rq_affinity_at(&info, &mut recs, cmdline, version);
             assert!(
@@ -12624,7 +12680,7 @@ mod tests {
             );
         }
 
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
         let mut recs = Vec::new();
         eval_rq_affinity_at(&info, &mut recs, cmdline, version);
         let rec = recs.iter().find(|r| r.param.contains("rq_affinity"));
@@ -12671,7 +12727,7 @@ mod tests {
 
         let mut info = make_test_info();
         info.numa_nodes = 2;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
 
         // Baseline: the migration is off and threads do not pin the
         // completion, so the advice stands.
@@ -12722,7 +12778,7 @@ mod tests {
         let cmdline = dir.join("cmdline");
         let mut info = make_test_info();
         info.numa_nodes = 2;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
         let cases = [
             (r#"foo="a threadirqs b""#, true),
             (r#"foo="a threadirqs=0 b""#, true),
@@ -12785,7 +12841,7 @@ mod tests {
 
         let mut info = make_test_info();
         info.numa_nodes = 2;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
 
         // Behind the separator both spellings are init arguments, so the
         // migration is still off and the advice stands; before the separator,
@@ -12842,7 +12898,7 @@ mod tests {
             available_schedulers: vec!["noop".to_string(), "cfq".to_string()],
             nr_requests: Some(256),
             read_ahead_kb: Some(128),
-            rq_affinity: 1,
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];
@@ -12862,7 +12918,7 @@ mod tests {
             available_schedulers: vec!["cfq".to_string()],
             nr_requests: Some(128),
             read_ahead_kb: Some(128),
-            rq_affinity: 1,
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];
@@ -12891,7 +12947,7 @@ mod tests {
             available_schedulers: vec!["mq-deadline".to_string()],
             nr_requests: Some(128),
             read_ahead_kb: Some(128),
-            rq_affinity: 1,
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];
@@ -13123,7 +13179,7 @@ mod tests {
             available_schedulers: vec!["cfq".to_string()],
             nr_requests: Some(128),
             read_ahead_kb: Some(128),
-            rq_affinity: 1,
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];
@@ -16762,7 +16818,7 @@ mod tests {
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
                 nr_requests: Some(128),
                 read_ahead_kb: Some(128),
-                rq_affinity: 1,
+                rq_affinity: Some(1),
                 hidden: false,
                 holders,
             });
@@ -16774,7 +16830,7 @@ mod tests {
             available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
             nr_requests: Some(128),
             read_ahead_kb: Some(128),
-            rq_affinity: 1,
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec!["dm-4".to_string()],
         });
@@ -21308,7 +21364,7 @@ mod tests {
 
         let mut info = make_test_info();
         info.numa_nodes = 2;
-        info.disks[0].rq_affinity = 0;
+        info.disks[0].rq_affinity = Some(0);
         let mut recs = Vec::new();
         eval_rq_affinity_at(
             &info,
