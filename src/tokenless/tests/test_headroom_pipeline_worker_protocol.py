@@ -57,7 +57,7 @@ class TransformPipeline:
         self._provider = provider
 
     def apply(self, messages, model, model_limit=None):
-        return SimpleNamespace(
+        result = SimpleNamespace(
             messages=messages,
             tokens_before=len(messages),
             tokens_after=len(messages),
@@ -65,6 +65,9 @@ class TransformPipeline:
             timing={},
             warnings=[],
         )
+        if model.startswith("invalid-"):
+            setattr(result, model.removeprefix("invalid-"), None)
+        return result
 """
 
 _ROUTER_STUB = """\
@@ -93,7 +96,7 @@ class WorkerProtocolTests(unittest.TestCase):
         )
         (transforms / "content_router.py").write_text(_ROUTER_STUB, encoding="utf-8")
         (transforms / "pipeline.py").write_text(_PIPELINE_STUB, encoding="utf-8")
-        self.env = dict(os.environ, PYTHONPATH=str(stub_root))
+        self.env = dict(os.environ, PYTHONPATH=str(stub_root), PYTHONDONTWRITEBYTECODE="1")
 
     def _run_lines(self, lines: list[str]) -> list[dict[str, Any]]:
         result = subprocess.run(
@@ -136,6 +139,24 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertIs(responses[1]["ok"], False)
         self.assertIn("bad request json", responses[1]["error"])
         self.assertIs(responses[2]["ok"], True)
+
+    def test_deeply_nested_request_and_followup(self) -> None:
+        # Build the wire text directly so the test's encoder cannot hit its own limit.
+        nested = "[" * 2000 + "0" + "]" * 2000
+        request = '{"messages": [], "extra": ' + nested + "}"
+        responses = self._run_lines([request, json.dumps(self._valid_request())])
+        self.assertIs(responses[1]["ok"], False)
+        self.assertIn("RecursionError", responses[1]["error"])
+        self.assertIs(responses[2]["ok"], True)
+
+    def test_invalid_result_metadata_and_followup(self) -> None:
+        for field in ["transforms_applied", "timing", "warnings"]:
+            with self.subTest(field=field):
+                request = self._valid_request()
+                request["model"] = f"invalid-{field}"
+                response = self._exchange(request)
+                self.assertIs(response["ok"], False)
+                self.assertIn("TypeError:", response["error"])
 
     def test_non_object_request_and_followup(self) -> None:
         for request in ["just a string", [1, 2, 3], None, True, 42]:
