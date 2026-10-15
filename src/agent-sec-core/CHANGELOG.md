@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.1
+
+**Breaking Changes**
+
+- Removed SkillSec key rotation: `rotate-keys` and `init --force-keys` are rejected before any
+  write, and the current signing key is retained. Scanned and certified Skills are remembered as
+  exact paths in the daemon's `managedSkillDirs`; remove an entry and restart the daemon to revoke
+  it. (#7629)
+
+**Skill Ledger Runtime**
+
+- Authorized and scanned standard system and local-user Skill directories by default through
+  `enableDefaultSkillDirs`, deriving user homes from local account records in the daemon. (#7419)
+- Kept SkillFS notify acceptance within the 64 KiB session response frame so accepted notifies
+  are no longer dropped and retried. (#7188)
+
+**V2 Policy & Daemon Runtime**
+
+- Verified that the connected daemon runs as root before V2 clients send requests, and replaced
+  the legacy shell health check with the `agent-sec-daemon-health` probe. (#7122)
+- Limited daemon connections per user, reserving connections for root so other users cannot
+  starve it. (#7103)
+- Retained `CAP_SYS_PTRACE` in `agent-sec-core.service` so Scope discovery can read protected
+  process links. (#7404)
+- Ran observability-store retention while the daemon is active, including startup catch-up. (#7099)
+- Removed the process-local policy engine repository and prevented polling lock starvation. (#7111)
+
+**Storage Safety**
+
+- Rejected symlinked and non-regular read-only SQLite database paths instead of following them. (#7295)
+- Rejected symlinked and non-regular writable SQLite database paths before opening them. (#7296)
+
+**V2 Security Operations**
+
+- Stripped information-separator characters from `capabilities` environment values and filters
+  as V1 does. (#7194)
+
+**Build & Packaging**
+
+- Changed the default agent-sec-core RPM build target to V2 while keeping an explicit V1 target. (#7563)
+
+**Testing & CI**
+
+- Restored the V2 workspace clippy gate for prompt-scan crates. (#6680)
+
 ## 1.0.0
 
 **Breaking Changes**

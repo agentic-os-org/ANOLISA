@@ -1,7 +1,7 @@
 {
   "id": "agent-sec",
   "name": "Agent Security",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Security hooks powered by agent-sec-cli",
   "activation": {
     "onCapabilities": ["hook"]
