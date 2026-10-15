@@ -2635,6 +2635,12 @@ fn eval_sched_migration_cost(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 /// again, the opposite of the reason's promise. A negative value is left
 /// alone: the same "already at the target" silence the tcp_adv_win_scale
 /// rule keeps for its 0.
+///
+/// The rule fires below a floor, and [`read_sysctl_i64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
 fn eval_sched_migration_cost_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -2649,7 +2655,9 @@ fn eval_sched_migration_cost_at(
     // -1 is the kernel's "never migrate" sentinel, so it must be read signed
     // or the unsigned fallback maps it to 0, the opposite "always migrate"
     // policy, and the report misdiagnoses a pinned host.
-    let current = read_sysctl_i64(path);
+    let Some(current) = read_switch_i64(path) else {
+        return 1;
+    };
     // Every negative value is the pinned side of the comparison (see above):
     // there is no migration tendency left for the target to raise.
     if current < 0 {
@@ -12703,6 +12711,36 @@ mod tests {
             rec.is_none(),
             "Should not recommend sched_migration_cost for small machines"
         );
+    }
+
+    #[test]
+    fn sched_migration_cost_advice_needs_a_readable_value() {
+        // The rule fires below 5000000, and read_sysctl_i64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("sched_migration_cost", b"5000000\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"500000\n").unwrap();
+        let mut info = make_test_info();
+        info.cpu_cores = 64;
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 500000 is below the floor");
+        assert_eq!(recs[0].current_value, "500000");
+        assert!(advice(&high).is_empty(), "a readable 5000000 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
