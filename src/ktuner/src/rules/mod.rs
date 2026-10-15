@@ -5262,15 +5262,37 @@ fn eval_netdev_budget_usecs_at(
 }
 
 fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/dirty_bytes";
+    eval_dirty_bytes_at(
+        info,
+        recs,
+        "/proc/sys/vm/dirty_bytes",
+        "/proc/sys/vm/dirty_ratio",
+    )
+}
+
+/// Path-injectable form of [`eval_dirty_bytes`] (the `eval_*_at` idiom) so the
+/// read is assertable against synthetic files.
+///
+/// The rule fires on a zero — the limit is still a percentage — and
+/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
+/// Only a zero the reader could produce is evidence that the host runs on
+/// the ratio, so a masked or garbled proc entry (a container's, typically)
+/// is not answered with a switch to bytes it may not need.
+fn eval_dirty_bytes_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    ratio_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    let ratio_path = "/proc/sys/vm/dirty_ratio";
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     let ratio = if std::path::Path::new(ratio_path).exists() {
         read_sysctl_u64(ratio_path)
     } else {
@@ -16029,6 +16051,43 @@ mod tests {
             rec.is_none(),
             "Should not recommend netdev_budget_usecs for 1G network"
         );
+    }
+
+    #[test]
+    fn dirty_bytes_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — the dirty limit is a percentage —
+        // and read_sysctl_u64 maps an unreadable or unparseable file to that
+        // same 0, so a masked or garbled proc entry (a container's, typically)
+        // was reported as `current_value: "0"` and answered with a switch to
+        // bytes on a host whose setting was never read.
+        let (off, _, others) = switch_fixture("dirty_bytes");
+        let set = off.with_file_name("dirty_bytes.set");
+        std::fs::write(&set, b"268435456\n").unwrap();
+        let ratio = off.with_file_name("dirty_ratio");
+        std::fs::write(&ratio, b"20\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_dirty_bytes_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                ratio.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 leaves the ratio in charge");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&set).is_empty(), "a readable byte limit is kept");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable setting is not the value 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
