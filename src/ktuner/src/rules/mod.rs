@@ -801,11 +801,25 @@ fn tcp_fastopen_recommendation(current: i64) -> Option<Recommendation> {
 }
 
 fn eval_min_free_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    if !info.param_exists("/proc/sys/vm/min_free_kbytes") {
+    eval_min_free_kbytes_at(info, recs, "/proc/sys/vm/min_free_kbytes")
+}
+
+/// Path-injectable form of [`eval_min_free_kbytes`] (the `eval_*_at` idiom) so
+/// the read is assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
+fn eval_min_free_kbytes_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
 
-    let current = read_sysctl_u64("/proc/sys/vm/min_free_kbytes");
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     let mem_kb = info.memory_total_gb * 1024 * 1024;
     let recommended = (mem_kb / 1000).min(2 * 1024 * 1024);
 
@@ -16362,6 +16376,36 @@ mod tests {
             rec.is_none(),
             "Should not recommend user_reserve_kbytes for small memory"
         );
+    }
+
+    #[test]
+    fn min_free_kbytes_advice_needs_a_readable_value() {
+        // The rule fires below half its recommendation (33554 for the
+        // fixture's 64 GiB), and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("min_free_kbytes", b"67108\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"16384\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_min_free_kbytes_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 16384 is below the floor");
+        assert_eq!(recs[0].current_value, "16384");
+        assert!(advice(&high).is_empty(), "a readable 67108 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
