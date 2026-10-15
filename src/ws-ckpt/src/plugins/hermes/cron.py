@@ -5,20 +5,23 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 from typing import List, Optional
 
 _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
 
-# Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
 _CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
-_MARKER_RE = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+'([^']+)'")
-_MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)")
 
 
 def _build_cron_line(workspace: str, schedule: str) -> str:
-    quoted_ws = "'" + workspace.replace("'", "'\\''") + "'"
+    # Cron consumes percent escapes before the shell, even inside quotes. Put
+    # each percent between quoted segments so a path backslash cannot escape
+    # the added cron escape instead of the percent itself.
+    quoted_ws = r"\%".join(
+        "'" + part.replace("'", "'\\''") + "'" for part in workspace.split("%")
+    )
     return (
         f"{schedule} /usr/local/bin/ws-ckpt checkpoint -w {quoted_ws}"
         f' -s "cron-$(date +\\%s)"'
@@ -60,12 +63,27 @@ def _write_crontab(lines: List[str]) -> bool:
 
 
 def _extract_workspace(line: str) -> Optional[str]:
-    m = _MARKER_RE.search(line)
-    if m:
-        return m.group(1)
-    m = _MARKER_RE_UNQUOTED.search(line)
-    if m:
-        return m.group(1)
+    if line.lstrip().startswith("#"):
+        return None
+    fields = line.split(None, 1 if line.lstrip().startswith("@") else 5)
+    if len(fields) < (2 if line.lstrip().startswith("@") else 6):
+        return None
+    # Generated percent escapes are outside workspace quotes, where shlex
+    # decodes them. Literal backslashes inside legacy quotes retain the
+    # configured identity so broken old jobs can still be replaced or removed.
+    try:
+        arguments = shlex.split(fields[-1])
+    except ValueError:
+        return None
+    if (
+        len(arguments) < 2
+        or os.path.basename(arguments[0]) != "ws-ckpt"
+        or arguments[1] != "checkpoint"
+    ):
+        return None
+    for index in range(2, len(arguments) - 1):
+        if arguments[index] in ("-w", "--workspace"):
+            return arguments[index + 1]
     return None
 
 
