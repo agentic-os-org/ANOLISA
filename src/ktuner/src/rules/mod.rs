@@ -8341,6 +8341,24 @@ fn eval_tcp_pacing_ca_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
         recs,
         "/proc/sys/net/ipv4/tcp_pacing_ca_ratio",
         info.has_listen_sockets(),
+        pacing_ratios_are_in_force(info),
+    )
+}
+
+/// Whether the pacing ratios still reach the kernel: their only reader is
+/// `tcp_update_pacing_rate()` (v6.6 net/ipv4/tcp_input.c), and the stack calls
+/// it only for a congestion control that does not define `cong_control` — the
+/// early return in `tcp_cong_control` and the `!cong_control` guard on the
+/// ESTABLISHED fast path are its two call sites. BBR is the in-tree algorithm
+/// that defines it, and it is what this engine's own
+/// `net.ipv4.tcp_congestion_control` rule asks for, so on a host the plan moves
+/// to BBR the two ratio writes cannot change any pacing rate.
+fn pacing_ratios_are_in_force(info: &SystemInfo) -> bool {
+    !bbr_will_be_in_force(
+        info,
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
     )
 }
 
@@ -8358,11 +8376,15 @@ fn eval_tcp_pacing_ca_ratio_at(
     recs: &mut Vec<Recommendation>,
     path: &str,
     has_listen_sockets: bool,
+    pacing_in_force: bool,
 ) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !has_listen_sockets {
+        return 1;
+    }
+    if !pacing_in_force {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -8388,6 +8410,7 @@ fn eval_tcp_pacing_ss_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
         recs,
         "/proc/sys/net/ipv4/tcp_pacing_ss_ratio",
         info.has_listen_sockets(),
+        pacing_ratios_are_in_force(info),
     )
 }
 
@@ -8405,11 +8428,15 @@ fn eval_tcp_pacing_ss_ratio_at(
     recs: &mut Vec<Recommendation>,
     path: &str,
     has_listen_sockets: bool,
+    pacing_in_force: bool,
 ) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !has_listen_sockets {
+        return 1;
+    }
+    if !pacing_in_force {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -19540,7 +19567,7 @@ mod tests {
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_pacing_ca_ratio_at(&info, &mut recs, path.to_str().unwrap(), true);
+            eval_tcp_pacing_ca_ratio_at(&info, &mut recs, path.to_str().unwrap(), true, true);
             recs
         };
 
@@ -19571,6 +19598,43 @@ mod tests {
     }
 
     #[test]
+    fn pacing_ratio_advice_is_withheld_where_bbr_owns_pacing() {
+        // The pair's only reader is tcp_update_pacing_rate(), which the stack
+        // never calls for a congestion control that defines cong_control
+        // (v6.6 net/ipv4/tcp_input.c). BBR is the in-tree algorithm that does
+        // (`tcp_bbr.c`: `.cong_control = bbr_main`) and it is what this
+        // engine's own tcp_congestion_control rule asks for, so on a host the
+        // plan moves to BBR the write would report success and change nothing.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_pacing_bbr_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca_ratio");
+        let ss = dir.join("ss_ratio");
+        std::fs::write(&ca, b"50\n").unwrap();
+        std::fs::write(&ss, b"50\n").unwrap();
+
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_pacing_ca_ratio_at(&info, &mut recs, ca.to_str().unwrap(), true, false);
+        eval_tcp_pacing_ss_ratio_at(&info, &mut recs, ss.to_str().unwrap(), true, false);
+        assert!(
+            recs.is_empty(),
+            "a host the plan moves to BBR has no pacing rate to size: {recs:?}"
+        );
+
+        // The value branch is unchanged when pacing is in force.
+        let mut recs = Vec::new();
+        eval_tcp_pacing_ca_ratio_at(&info, &mut recs, ca.to_str().unwrap(), true, true);
+        eval_tcp_pacing_ss_ratio_at(&info, &mut recs, ss.to_str().unwrap(), true, true);
+        assert_eq!(recs.len(), 2, "both ratios are still below their floors");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn tcp_pacing_ss_ratio_advice_needs_a_readable_value() {
         // The rule fires below 200, and read_sysctl_u64 maps an unreadable or
         // unparseable file to 0, which is below it: a masked or garbled proc
@@ -19582,7 +19646,7 @@ mod tests {
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_pacing_ss_ratio_at(&info, &mut recs, path.to_str().unwrap(), true);
+            eval_tcp_pacing_ss_ratio_at(&info, &mut recs, path.to_str().unwrap(), true, true);
             recs
         };
 
