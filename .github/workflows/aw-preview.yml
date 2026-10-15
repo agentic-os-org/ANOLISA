@@ -55,7 +55,7 @@ jobs:
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
-      - name: Verify bundled Tokenless PostTool contract
+      - name: Verify Tokenless PreTool and PostTool contracts
         env:
           AW_TOKENLESS_TEST_CLI: ${{ github.workspace }}/src/tokenless/target/release/tokenless
           TOKENLESS_COMPRESSION_ENABLED: '1'
@@ -63,7 +63,7 @@ jobs:
           TOKENLESS_SLS_ENABLED: '0'
         run: |
           cargo test --locked --manifest-path src/aw/Cargo.toml \
-            -p aw-provider-tokenless --test provider -- --ignored
+            -p aw-provider-tokenless --test provider --test pretool -- --ignored
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |

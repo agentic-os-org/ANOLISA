@@ -217,7 +217,15 @@ fn response(
         if event != "tool.before" {
             return Err("block is unsupported after a tool".into());
         }
-        return emit(adapter.reply(true));
+        let mut reply = adapter.reply(true);
+        if let Some(text) = effects
+            .iter()
+            .find(|effect| effect["type"] == "block")
+            .and_then(|effect| effect["text"].as_str())
+        {
+            super::adapter::block_reason(adapter_id, &mut reply, text)?;
+        }
+        return emit(reply);
     }
     // Neutral output preserves the Agent's independent permission checks.
     emit(adapter.reply(false))

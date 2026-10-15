@@ -3,7 +3,7 @@ name = "aw-provider-tokenless"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "AW PostTool Provider bridge to the Tokenless Protocol v2 CLI"
+description = "AW tool lifecycle Provider bridge to the Tokenless Protocol v2 CLI"
 publish = false
 
 [dependencies]
@@ -12,6 +12,8 @@ aw-provider = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+shlex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+aw-provider-sec-core = { workspace = true }

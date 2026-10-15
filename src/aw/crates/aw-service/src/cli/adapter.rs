@@ -77,6 +77,28 @@ pub(super) struct HookOutput {
     pub stderr: Vec<u8>,
 }
 
+// Preserve each dialect's existing blocking exit semantics while carrying a
+// Provider suggestion to the model. Never emit an approval or updated arguments.
+pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result<()> {
+    if text.is_empty() || text.len() > aw_provider::MAX_MESSAGE_BYTES {
+        return Err("block reason must be nonempty and bounded".into());
+    }
+    match adapter {
+        "qoder" | "qwenpaw" => reply.stderr = format!("{text}\n").into_bytes(),
+        "openclaw" | "hermes" => {
+            let mut value: Value = serde_json::from_slice(&reply.stdout)?;
+            value[if adapter == "openclaw" {
+                "blockReason"
+            } else {
+                "message"
+            }] = serde_json::json!(text);
+            reply.stdout = serde_json::to_vec(&value)?;
+        }
+        _ => return Err("unsupported block reason adapter".into()),
+    }
+    Ok(())
+}
+
 pub(super) trait Adapter: Sync {
     fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>>;
     fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value>;
@@ -141,4 +163,38 @@ pub(super) fn version_output_with_timeout(
         return Err("native version probe failed".into());
     }
     Ok(std::str::from_utf8(&output.stdout)?.trim().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_reasons_preserve_every_dialects_denial_and_never_emit_updates() {
+        let message = "Retry: literal ; $(touch NEVER) ' spaces\nnot executable";
+        for name in ["qoder", "qwenpaw", "hermes", "openclaw"] {
+            let mut reply = select(name).unwrap().reply(true);
+            let was_success = matches!(reply.exit, Exit::Code(0));
+            block_reason(name, &mut reply, message).unwrap();
+            assert_eq!(matches!(reply.exit, Exit::Code(0)), was_success);
+            if matches!(name, "qoder" | "qwenpaw") {
+                assert!(matches!(reply.exit, Exit::Code(2)));
+                assert!(reply.stdout.is_empty());
+                assert_eq!(reply.stderr, format!("{message}\n").as_bytes());
+            } else {
+                let value: Value = serde_json::from_slice(&reply.stdout).unwrap();
+                if name == "openclaw" {
+                    assert_eq!(
+                        value,
+                        serde_json::json!({"block":true,"blockReason":message})
+                    );
+                } else {
+                    assert_eq!(
+                        value,
+                        serde_json::json!({"action":"block","message":message})
+                    );
+                }
+            }
+        }
+    }
 }

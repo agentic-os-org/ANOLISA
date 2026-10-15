@@ -230,20 +230,44 @@ AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周
 分别检查。只有已准入的替换步骤获得可选投影，既有观察步骤保持原事件形态。Adapter 可提供 `event.tool.result_projection`，包含 `text`、`status`、
 `content_origin` 及可选 Shell `command`。原 `result` 和原生载荷保留，并参与请求绑定。
 
-`replace_result` 效果要求字符串 `text`，其他效果类型拒绝该字段。响应最多包含一个
+`replace_result` 效果要求字符串 `text`；`block` 可携带非空、有界的 `text` 原因，其他效果拒绝该字段。响应最多包含一个
 替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
 槽并保留原生 envelope。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
 Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须来自同一 Preview
 构建；旧实现会拒绝不支持的投影或效果，不会静默忽略。
 
+### PreTool 重试与 PostTool 归属
+
+Tokenless Provider 在 `tool.before` 上准入 Protocol v2 `pre_tool`，复用已有的
+`block` 效果。对于具有对象 `command` 的受支持 Shell 工具，声明
+`replace_arguments: false, block_and_suggest: true`，由 Core 选择改写。
+AW 将完整的建议参数作为模型可见阻断原因返回，不输出 `updatedInput`、原生
+`modify`、审批指令，也不执行 Shell。Passthrough 必须保持原参数；直接替换动作、
+修改非 command 字段或非法响应均作为 Provider 故障。
+
+模型必须发起新调用才能采用建议。原调用和重试均经过既有 sec-core before 步骤及
+原生权限链；Tokenless 的中立结果不能覆盖安全拒绝或扫描故障时的 fail-closed。
+联合模板先保留扫描，再追加 PreTool；完成观察仍位于最终 PostTool 步骤之前。
+AW 不改变外部 Hook 的顺序；外部改写 Hook 仍遵循宿主自己的权限合同。
+
+被阻断调用的 ID 不能标识重试。Tokenless 接入层从实际执行参数中识别独立的归属
+RTK 包装（Agent、Session、data 目录及绝对路径的 `rtk`），将
+`output_optimization: rtk` 传入 PostTool，并让此类重试通过 PreTool。
+识别时解码带引号或转义的字面量，并通过已存在祖先的规范路径比较状态目录，不创建目录。
+仅跳过[文档列明的执行前缀形式](../../../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md#pretool-与权限行为)，
+其他命令的参数中出现归属包装并不足以确认 RTK 归属。
+裸 `rtk`、外部归属、未知或带额外选项的包装，以及复合 Shell 命令不推断 RTK 归属。这只是优化提示，不授予权限
+或恢复访问；不新增 AW 持久优化/恢复存储，也不复制压缩策略。
+RTK 定位和改写仍由公共 Tokenless CLI 负责；RTK 是 PreTool 的外部依赖，当前
+AW 包未包含它。CLI 故障按 `on_error: report` 显式报告；sec-core 保持
+`on_error: block`。
+
 ### 生命周期扩展边界
 
-当前 Tokenless 桥接仅实现 Protocol v2 `post_tool`。完整生命周期需要分别准入
-`pre_tool` 命令改写、`before_model` Schema 替换和授权 `retrieve`，并逐框架验证
-原生采用。这是后续设计范围，尚未实现。策略继续复用 Tokenless 公共 Core/CLI，
-将 PreTool 的 `output_optimization` 传入 PostTool，防止重复压缩 RTK 输出。
-命令改写须在最终 sec-core 检查与原生权限检查之前完成；后续 Hook 不能继续修改
-已授权输入，并保留原输入和最终输入的绑定。
+当前桥接实现通过重试的 `pre_tool` 和文本替换的 `post_tool`，未实现透明参数
+替换或 `before_model` Schema 替换。恢复、Stash、可达的恢复入口及恢复结果旁路
+由 Tokenless 接入层负责；当前请求继续声明 recovery `none`。启用 PreTool 不等于
+获得 Tokenless 全部能力。
 
 恢复需要真实的 Agent 可调用入口及 Tokenless 所需的原生授权与作用域，并将 Retrieve
 结果旁路，防止再次压缩。Schema 替换需要模型请求点位及独立恢复能力；当前支持的

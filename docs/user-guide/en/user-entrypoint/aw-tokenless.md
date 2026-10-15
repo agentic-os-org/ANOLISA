@@ -6,23 +6,26 @@ The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
 checks replacement bounds; it does not independently prove semantic losslessness.
 Qoder, OpenClaw, QwenPaw and
-Hermes share one Provider configuration. The first delivery covers PostTool only;
-command rewriting, Schema compression and authorized retrieval remain separate.
+Hermes share one Provider configuration for PreTool retry suggestions and PostTool
+compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
 
 Use the [AW Preview packages](aw-preview.md). `aw-provider-tokenless` contains
 `aw-provider-tokenless` and the `tokenless` CLI built from the same source commit.
 It requires matching `aw-core`; `aw-all-in-one` includes core, sec-core and
-Tokenless. This PostTool package does not need RTK, Python wheels or Tokenless's
-native plugins. Agent installations and their runtime dependencies remain external.
+Tokenless. PostTool works without RTK. PreTool additionally requires a compatible
+RTK installation resolvable by the Agent environment, following the
+[Tokenless installation guide](../token-saving/tokenless/QUICKSTART.md); the AW
+package does not bundle RTK. Python wheels and Tokenless native plugins are not
+needed. Agent installations and their runtime dependencies remain external.
 
 After installing core, install the matching Tokenless extension into the same
 prefix, or install all-in-one into a new prefix. For Qoder/OpenClaw, initialize
 with `aw-package configure --provider tokenless` and the usual Agent flags.
 Choose `--provider sec-core+tokenless --socket ABS_FILE` to generate sec-core
-checks before execution, retain its completion observer, and append compression
-after the existing after steps. Installing a component
+checks before execution, append PreTool, retain its completion observer, and append
+compression after the existing after steps. Installing a component
 does not enable it. The existing plain `sec-core` selection retains its behavior.
 
 For all four frameworks, copy the
@@ -48,6 +51,34 @@ telemetry uploader or SLS/Logtail collection, those metrics and attribution IDs
 can be uploaded separately; this channel still contains no tool text.
 Set `TOKENLESS_STATS_ENABLED=0` and `TOKENLESS_SLS_ENABLED=0` in the environment used to launch AW before binding
 an Agent to disable both sinks. These settings do not delete existing records.
+
+## PreTool and permission behavior
+
+The generated template and shared example include `tool.before` → `pre_tool` with
+`effects: [block]` and `on_error: report`. Supported shell tools are `Bash`, `exec`,
+`terminal`, `shell`, `run_shell_command` and `execute_shell_command` (case insensitive),
+with a nonempty string `command`. Other inputs pass through without calling the CLI.
+Tokenless chooses whether to suggest an RTK command. AW blocks the original attempt
+and shows the full retry arguments to the model; it never silently modifies input
+or approves/executes a command. A new call must pass sec-core and native permission
+checks again. A scanner denial/failure remains authoritative even when PreTool is
+neutral. Existing external Hook scheduling is unchanged.
+
+The Tokenless integration recognizes a standalone attributed RTK wrapper in executed
+arguments and supplies `output_optimization: rtk` to PostTool. The retry's call ID may
+differ from the blocked attempt. Quoted or escaped argument literals and symlinked
+state directories preserve this ownership. Supported execution prefixes are literal
+environment assignments, `env NAME=value ...`, bare `sudo`, `noglob`, `command`,
+`exec`, and `shadowenv exec --`; these forms may be combined. Other wrapper forms
+(including extra flags), bare RTK commands, foreign attribution and compound shell
+commands are not inferred as RTK-owned. Unavailable RTK, CLI errors, invalid
+responses or timeouts are reported under `on_error: report`; they do not disable
+sec-core's `on_error: block` or grant native approval. To keep PostTool alone, remove
+only the `rewrite-command` before step and retain the shared Provider and after chain.
+
+Recovery remains `none` in this delivery. Recovery entry points, Stash, retrieval
+scope and retrieval-output bypass belong to the Tokenless integration layer; enabling
+PreTool does not provide those capabilities or Schema compression.
 
 ## Result and failure behavior
 
@@ -117,7 +148,8 @@ keeps the original event auditable; compression then returns no replacement. The
 stdout/stderr. The Host bounds the whole Provider process; direct callers must
 close stdin and bound its lifetime themselves.
 
-To disable compression, remove the compression step and its Provider, then stop
+To disable PostTool, remove the compression step; remove its Provider only if no
+PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 

@@ -87,6 +87,14 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
         value["spec"]["providers"]["tokenless"] = json!({
             "protocol":"aw-provider/v1alpha1", "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-tokenless"),"--cli",provider.join("tokenless"),"--data-dir",settings.state.join("tokenless")]},
             "timeout_ms":2000,"max_output_bytes":1048576,"config":{"version":1}});
+        if value["spec"]["events"]["tool.before"].is_null() {
+            value["spec"]["events"]["tool.before"] =
+                json!({"enabled":true,"required":true,"steps":[]});
+        }
+        value["spec"]["events"]["tool.before"]["steps"]
+            .as_array_mut()
+            .ok_or_else(|| crate::Error::Invalid("tool.before steps must be an array".into()))?
+            .push(json!({"id":"rewrite-command","provider":"tokenless","operation":"pre_tool","effects":["block"],"on_error":"report"}));
         if value["spec"]["events"]["tool.after"].is_null() {
             value["spec"]["events"]["tool.after"] =
                 json!({"enabled":true,"required":true,"steps":[]});

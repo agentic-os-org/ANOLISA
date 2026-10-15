@@ -4,20 +4,22 @@
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
-Qoder、OpenClaw、QwenPaw 和 Hermes 共用一份 Provider 配置。首版只覆盖
-PostTool；命令重写、Schema 压缩和授权恢复仍是独立能力。
+Qoder、OpenClaw、QwenPaw 和 Hermes 共用一份 Provider 配置，支持 PreTool 重试建议
+与 PostTool 压缩。Schema 压缩和授权恢复仍是独立能力。
 
 ## 安装与启用
 
 使用 [AW Preview 包](aw-preview.md)。`aw-provider-tokenless` 包含桥接程序
 `aw-provider-tokenless` 和从同一源码提交构建的 `tokenless` CLI，要求匹配的
-`aw-core`；`aw-all-in-one` 包含 core、sec-core 和 Tokenless。本 PostTool 包不需要
-RTK、Python wheel 或 Tokenless 原生插件。Agent 安装及其运行依赖仍由用户准备。
+`aw-core`；`aw-all-in-one` 包含 core、sec-core 和 Tokenless。PostTool 不依赖 RTK；
+PreTool 额外要求 Agent 环境能够定位兼容 RTK，安装方式见
+[Tokenless 安装指南](../token-saving/tokenless/QUICKSTART.md)。当前 AW 包未包含 RTK。
+无需 Python wheel 或 Tokenless 原生插件。Agent 安装及其运行依赖仍由用户准备。
 
 先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
 前缀。Qoder/OpenClaw 使用 `aw-package configure --provider tokenless`，并提供既有
 Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生成执行前
-sec-core 检查，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
+sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。
 
 四框架接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
@@ -38,6 +40,29 @@ SLS sink 将指标和归属信息写入本地 JSONL，默认路径为
 组件另行上传；该通道仍不含工具正文。
 如需关闭两个 sink，在启动 AW、绑定 Agent 之前设置 `TOKENLESS_STATS_ENABLED=0`
 和 `TOKENLESS_SLS_ENABLED=0`。这两个开关不会删除已有记录。
+
+## PreTool 与权限行为
+
+生成模板和共用示例包含 `tool.before` → `pre_tool`，设置为 `effects: [block]` 和
+`on_error: report`。受支持的 Shell 工具为 `Bash`、`exec`、`terminal`、`shell`、
+`run_shell_command` 和 `execute_shell_command`（不区分大小写），且要求非空字符串
+`command`。其他输入不调用 CLI，直接保持中立。
+由 Tokenless 判断是否建议 RTK 命令；AW 阻断本次调用并向模型展示完整的重试参数，
+不静默改写输入，不批准或执行命令。新调用必须重新经过 sec-core 与原生权限检查。
+即使 PreTool 中立，扫描拒绝或失败仍然生效；外部 Hook 调度保持既有行为。
+
+Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，并将
+`output_optimization: rtk` 传入 PostTool。重试可以使用不同于原阻断调用的 ID。
+带引号或转义的参数字面量，以及符号链接状态目录，均保留该归属。支持的执行前缀为
+字面环境变量赋值、`env NAME=value ...`、不带选项的 `sudo`、`noglob`、`command`、
+`exec`，以及 `shadowenv exec --`；这些形式可以组合。其他包装形式（包括额外选项）、
+裸 RTK 命令、外部归属或复合 Shell 命令不推断 RTK 归属。缺失 RTK、CLI 故障、非法
+响应或超时按 `on_error: report` 报告，不会关闭 sec-core 的 `on_error: block`，也不
+授予原生批准。仅需 PostTool 时，只删除 before 中的 `rewrite-command` 步骤，保留
+共用 Provider 和 after 链。
+
+本次恢复能力仍为 `none`。恢复入口、Stash、恢复作用域及恢复输出旁路由 Tokenless
+接入层负责；启用 PreTool 不会自动获得这些能力或 Schema 压缩。
 
 ## 结果与故障行为
 
@@ -91,7 +116,8 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 预算，并限制 stdout/stderr。Host 限制整个 Provider 进程；直接调用方必须关闭 stdin
 并自行限制生命周期。
 
-禁用时删除压缩步骤及其 Provider，停止 AW 后用新配置重新启动。已有会话不会
+禁用 PostTool 时删除压缩步骤；仅在没有 PreTool 步骤继续引用时删除 Provider。
+停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
 
 ## 从源码构建

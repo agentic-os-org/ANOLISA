@@ -2,7 +2,7 @@
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata:
-  name: shared-posttool-compression
+  name: shared-tool-optimization
 spec:
   daemon:
     startup: on_demand
@@ -44,6 +44,15 @@ spec:
       config:
         version: 1
   events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: rewrite-command
+          provider: tokenless
+          operation: pre_tool
+          effects: [block]
+          on_error: report
     tool.after:
       enabled: true
       required: true

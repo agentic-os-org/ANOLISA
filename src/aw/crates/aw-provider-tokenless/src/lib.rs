@@ -1,4 +1,6 @@
-//! Project AW PostTool text through the public Tokenless Protocol v2 CLI.
+//! Bridge AW tool lifecycle events through the public Tokenless Protocol v2 CLI.
+
+mod pretool;
 
 use aw_exec::{CommandSpec, Limits};
 use aw_provider::{Protocol, Reply, Request, MAX_MESSAGE_BYTES, VERSION};
@@ -22,13 +24,7 @@ struct Compression {
     protocol_version: u8,
     operation: String,
     attribution: Value,
-    result: CompressionResult,
-}
-
-#[derive(Deserialize)]
-struct CompressionResult {
-    disposition: String,
-    output: String,
+    result: Value,
 }
 
 /// Process one EOF-terminated AW request using a bounded CLI invocation.
@@ -86,7 +82,7 @@ fn dispatch(
     let value = request.as_value();
     if value["method"] == "describe" {
         return Ok(
-            json!({"operations":[{"name":"post_tool","events":["tool.after"],"effects":["replace_result"]}]}),
+            json!({"operations":[{"name":"post_tool","events":["tool.after"],"effects":["replace_result"]},{"name":"pre_tool","events":["tool.before"],"effects":["block"]}]}),
         );
     }
     let config: Config =
@@ -97,21 +93,27 @@ fn dispatch(
     if value["method"] == "validate_config" {
         return Ok(json!({}));
     }
-    if value["operation"] != "post_tool" || value["event"]["name"] != "tool.after" {
+    let before = value["operation"] == "pre_tool" && value["event"]["name"] == "tool.before";
+    if !before && !(value["operation"] == "post_tool" && value["event"]["name"] == "tool.after") {
         return Err("unsupported_operation_event");
     }
-    if !value["allowed_effects"]
-        .as_array()
-        .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_result"))
-    {
+    if !value["allowed_effects"].as_array().is_some_and(|effects| {
+        effects
+            .iter()
+            .any(|effect| effect == if before { "block" } else { "replace_result" })
+    }) {
         return Err("replacement_not_admitted");
     }
     let neutral = json!({"input_digest":value["input_digest"],"effects":[]});
     let event = &value["event"];
-    let Some(projection) = event["tool"].get("result_projection") else {
+    if before && !pretool::supported(&event["tool"]) {
         return Ok(neutral);
-    };
-    if projection["status"] != "success" {
+    }
+    if before && pretool::optimization(event, data_dir) == "rtk" {
+        return Ok(neutral);
+    }
+    let projection = &event["tool"]["result_projection"];
+    if !before && projection["status"] != "success" {
         return Ok(neutral);
     }
     let attribution = json!({"agent_id":event["agent"]["adapter"], "session_id":event["session_id"], "tool_use_id":event["tool"]["call_id"]});
@@ -121,11 +123,15 @@ fn dispatch(
         .as_object_mut()
         .ok_or("invalid_attribution")?
         .retain(|_, value| !value.is_null());
-    let mut operation = json!({"result_kind":"tool", "tool_name":event["tool"]["name"],"content":projection["text"],"status":projection["status"],"content_origin":projection["content_origin"],"output_optimization":"none", "capabilities":{"replace_output":true,"replace_with_text":true,"recovery":{"kind":"none"}}});
+    let mut operation = json!({"result_kind":"tool", "tool_name":event["tool"]["name"],"content":projection["text"],"status":projection["status"],"content_origin":projection["content_origin"],"output_optimization":pretool::optimization(event, data_dir), "capabilities":{"replace_output":true,"replace_with_text":true,"recovery":{"kind":"none"}}});
     if let Some(command) = projection.get("command") {
         operation["command"] = command.clone();
     }
-    let input = serde_json::to_vec(&json!({"protocol_version":2,"operation":"post_tool","attribution":attribution,"input":operation})).map_err(|_| "invalid_compression_input")?;
+    if before {
+        operation = json!({"tool_name":event["tool"]["name"],"arguments":event["tool"]["input"],"command_field":"command","capabilities":{"replace_arguments":false,"block_and_suggest":true}});
+    }
+    let operation_name = if before { "pre_tool" } else { "post_tool" };
+    let input = serde_json::to_vec(&json!({"protocol_version":2,"operation":operation_name,"attribution":attribution,"input":operation})).map_err(|_| "invalid_compression_input")?;
     let milliseconds = value["budget_ms"].as_f64().ok_or("invalid_budget")?;
     let remaining = Duration::try_from_secs_f64(milliseconds / 1000.0)
         .map_err(|_| "invalid_budget")?
@@ -163,15 +169,24 @@ fn dispatch(
     let result: Compression =
         serde_json::from_slice(&result.stdout).map_err(|_| "invalid_compression_result")?;
     if result.protocol_version != 2
-        || result.operation != "post_tool"
+        || result.operation != operation_name
         || result.attribution != attribution
     {
         return Err("invalid_compression_result");
     }
-    match result.result.disposition.as_str() {
+    if before {
+        return pretool::reply(value, &result.result);
+    }
+    let output = result.result["output"]
+        .as_str()
+        .ok_or("invalid_compression_result")?;
+    match result.result["disposition"]
+        .as_str()
+        .ok_or("invalid_compression_result")?
+    {
         "applied"
-            if result.result.output.is_empty()
-                || result.result.output.len()
+            if output.is_empty()
+                || output.len()
                     >= projection["text"]
                         .as_str()
                         .ok_or("invalid_projection")?
@@ -180,10 +195,10 @@ fn dispatch(
             Err("non_shrinking_replacement")
         }
         "applied" => Ok(
-            json!({"input_digest":value["input_digest"],"effects":[{"type":"replace_result","text":result.result.output,"reason_code":"tokenless_compressed"}]}),
+            json!({"input_digest":value["input_digest"],"effects":[{"type":"replace_result","text":output,"reason_code":"tokenless_compressed"}]}),
         ),
         "dry_run" | "passthrough" | "no_savings" | "recoverability_unavailable"
-            if result.result.output == projection["text"] =>
+            if output == projection["text"] =>
         {
             Ok(neutral)
         }

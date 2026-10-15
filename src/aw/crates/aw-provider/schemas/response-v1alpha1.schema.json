@@ -202,10 +202,19 @@
                   ]
                 },
                 "else": {
-                  "not": {
-                    "required": [
-                      "text"
-                    ]
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "block"
+                      }
+                    }
+                  },
+                  "else": {
+                    "not": {
+                      "required": [
+                        "text"
+                      ]
+                    }
                   }
                 }
               }

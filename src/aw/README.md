@@ -39,7 +39,11 @@ Runtime supports tool-before `observe`/`block` and tool-after `observe` or singl
 `replace_result`, plus
 framework-specific native commands. Completion observers and user Hooks can
 precede one final replacement step (OpenClaw observes natively after compression); the combined sec-core/Tokenless template
-retains observation and appends compression. After-event coverage varies by framework.
+retains scanning/observation and adds Tokenless PreTool retry suggestions before
+execution plus final PostTool compression. Suggested commands require a fresh call
+and pass sec-core/native permissions again; RTK is an external PreTool dependency.
+RTK ownership survives quoted arguments, symlinked state paths and the execution
+prefix forms listed in the user guide. After-event coverage varies by framework.
 The configuration vocabulary includes more events/effects than the runtime
 supports; static validation alone does not certify native adoption. Cross-Agent
 approval, input rewriting and OS enforcement are outside this Preview.

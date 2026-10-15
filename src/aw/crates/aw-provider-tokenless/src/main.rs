@@ -1,4 +1,4 @@
-//! One-request PostTool bridge; Tokenless owns compression policy and state.
+//! One-request tool lifecycle bridge; Tokenless owns optimization policy and state.
 
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 

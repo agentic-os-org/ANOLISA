@@ -282,8 +282,8 @@ observers keep their original event shape. The Adapter supplies `event.tool.resu
 `status`, `content_origin` and an optional shell `command`. The original `result`
 and native payload remain available and participate in the request binding.
 
-A `replace_result` effect requires a string `text`; other effect types reject
-that field. Responses allow at most one replacement and require an input
+A `replace_result` effect requires a string `text`. A `block` effect may include
+a nonempty bounded `text` reason; all other effect types reject that field. Responses allow at most one replacement and require an input
 projection. A missing projection permits only a no-replacement result. The
 Adapter replaces its selected slot and preserves the native envelope. This is a
 candidate, not proof that a model consumed it; AW's journal excludes the text.
@@ -291,16 +291,45 @@ The schema additions retain the experimental v1alpha1 protocol. Deploy matching
 CLI, service and Providers from the same Preview build; older implementations
 reject unsupported projections/effects rather than ignoring them.
 
+### PreTool retry and PostTool ownership
+
+The Tokenless Provider admits Protocol v2 `pre_tool` on `tool.before` with the
+existing `block` effect. For supported shell tools with an object `command`, it
+requests `replace_arguments: false, block_and_suggest: true`. Only Core may select
+a rewrite. AW returns the full suggested arguments as a model-visible block
+reason, never `updatedInput`, native `modify`, approval, or a shell invocation.
+Passthrough must preserve the original arguments. A direct-replacement action,
+changes to non-command fields or an invalid response is a Provider failure.
+
+The model must submit a fresh call to use the suggestion. Both the original and
+retry traverse the existing sec-core before step and native permission pipeline;
+Tokenless neutrality cannot override a denial or a fail-closed scanner error.
+The combined template retains scanning first, appends PreTool, and retains its
+completion observer before the final PostTool step. AW does not reorder external
+Hooks. External mutating Hooks still follow their host's permission contract.
+
+A blocked attempt's call ID cannot identify the retry. The Tokenless integration
+instead recognizes the standalone attributed RTK wrapper in the arguments actually
+executed (Agent/session/data directory, absolute `rtk` executable) and supplies
+`output_optimization: rtk` to PostTool. It also passes such retries through PreTool.
+Recognition decodes quoted/escaped literals and compares state paths through their
+canonical existing ancestor without creating directories. It skips only the
+[documented execution prefix forms](../../../../docs/user-guide/en/user-entrypoint/aw-tokenless.md#pretool-and-permission-behavior),
+so an attributed wrapper appearing in another command's arguments is not sufficient.
+Bare `rtk`, foreign attribution, unknown or flag-bearing wrappers and compound shell
+commands are not inferred as RTK-owned. This is an optimization hint, never authorization or recovery access.
+No persistent AW optimization/recovery store or second compression policy is added.
+RTK resolution and rewriting remain in the public Tokenless CLI; RTK is an external
+PreTool dependency, not part of the current AW package payload. CLI failures stay
+visible under `on_error: report`; sec-core retains `on_error: block`.
+
 ### Lifecycle expansion boundary
 
-The current Tokenless bridge implements only Protocol v2 `post_tool`. Full lifecycle
-support requires separately admitted effects and native acceptance for `pre_tool`
-command rewriting, `before_model` schema replacement and authorized `retrieve`.
-This is planned scope, not implemented capability. Keep Tokenless policy in its
-public Core/CLI and carry PreTool `output_optimization` into PostTool to avoid
-compressing RTK output twice. A rewrite must precede final sec-core checks and
-native permission evaluation; later Hooks must not mutate already-authorized input.
-Retain original and final input bindings for that sequence.
+The bridge implements `pre_tool` by retry and `post_tool` text replacement. It does
+not implement transparent argument replacement or `before_model` Schema replacement.
+Recovery, Stash, reachable retrieval entry points and retrieval-result bypass belong
+to the Tokenless integration layer; current requests continue to declare recovery
+`none`. Merely enabling PreTool does not advertise complete Tokenless capabilities.
 
 Recovery requires a real Agent-facing entry with the native authorization and
 scope required by Tokenless, plus Retrieve-output bypass to prevent recompression.

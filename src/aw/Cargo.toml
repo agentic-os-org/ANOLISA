@@ -24,6 +24,7 @@ aw-contracts = { path = "." }
 aw-exec = { path = "crates/aw-exec" }
 aw-host = { path = "crates/aw-host" }
 aw-provider = { path = "crates/aw-provider" }
+aw-provider-sec-core = { path = "crates/aw-provider-sec-core" }
 jsonschema = { version = "0.53", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +32,7 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 thiserror = "2"
+shlex = "1"
 
 [package]
 name = "aw-contracts"

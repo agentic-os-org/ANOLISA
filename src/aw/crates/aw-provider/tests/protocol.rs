@@ -437,6 +437,27 @@ fn finite_float_parameters_round_trip_through_invocation_binding() {
 }
 
 #[test]
+fn block_text_is_a_bounded_reason_and_never_an_input_replacement() {
+    let protocol = Protocol::new().unwrap();
+    let request = protocol
+        .bind_invocation(invoke("tool.before", json!(["block"])))
+        .unwrap();
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"block","text":"Retry with new arguments"}]);
+    assert!(protocol.check_response(&request, &bytes(&reply)).is_ok());
+    for text in [
+        "".to_owned(),
+        "x".repeat(aw_provider::MAX_MESSAGE_BYTES + 1),
+    ] {
+        reply["effects"][0]["text"] = json!(text);
+        assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
+    }
+    reply["effects"] = json!([{"type":"block","text":"retry","arguments":{"command":"execute"}}]);
+    assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
+}
+
+#[test]
 fn replacement_requires_one_text_payload_and_a_projected_after_result() {
     let protocol = Protocol::new().unwrap();
     let mut value = invoke("tool.after", json!(["replace_result"]));

@@ -223,7 +223,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-provider-tokenless", self.root / "crates/aw-provider-tokenless",
-                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile"],
+                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "shlex", "aw-provider-sec-core"],
             ),
         ):
             (directory / "src").mkdir(parents=True)

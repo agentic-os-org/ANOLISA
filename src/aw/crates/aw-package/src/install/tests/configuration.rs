@@ -318,7 +318,10 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
     crate::configure(&settings).unwrap();
     let document: serde_json::Value =
         serde_yaml_ng::from_slice(&fs::read(&config).unwrap()).unwrap();
-    assert!(document["spec"]["events"].get("tool.before").is_none());
+    assert_eq!(
+        document["spec"]["events"]["tool.before"]["steps"][0]["operation"],
+        "pre_tool"
+    );
     assert_eq!(
         document["spec"]["events"]["tool.after"]["steps"][0]["effects"],
         serde_json::json!(["replace_result"])
@@ -333,6 +336,21 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
     assert_eq!(
         document["spec"]["events"]["tool.before"]["steps"][0]["provider"],
         "security"
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.before"]["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.before"]["steps"][1]["operation"],
+        "pre_tool"
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.before"]["steps"][0]["on_error"],
+        "block"
     );
     assert_eq!(
         document["spec"]["events"]["tool.after"]["steps"]
