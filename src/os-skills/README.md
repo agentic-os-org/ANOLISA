@@ -32,6 +32,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)
 
 ### DevOps
+- **docker-admin** — Single-host Docker/Podman runtime administration (diagnostics, logs, safe cleanup, compose lifecycle)
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning

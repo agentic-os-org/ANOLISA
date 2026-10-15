@@ -32,6 +32,7 @@
 - **storage-resize** — 阿里云磁盘扩容（XFS/EXT4/Btrfs）
 
 ### 开发运维
+- **docker-admin** — 单机 Docker/Podman 容器运行时管理（诊断、日志、安全清理、compose 生命周期）
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
