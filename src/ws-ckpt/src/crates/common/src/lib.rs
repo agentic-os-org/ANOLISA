@@ -631,6 +631,85 @@ pub fn validate_checkpoint_id_v2(checkpoint_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum byte length accepted for a snapshot identifier on the legacy
+/// surface. This is the filesystem component bound (`NAME_MAX`, 255 bytes on
+/// the Linux filesystems ws-ckpt deploys on), not the guarded protocol's
+/// policy bound: every id at or under it could have been recorded on disk by
+/// the CLI, so refusing longer ids strands no existing record.
+pub const SNAPSHOT_ID_MAX_BYTES: usize = 255;
+
+/// Validates a snapshot identifier for the legacy IPC surface.
+///
+/// The legacy protocol accepts every id the CLI parser accepts, so unlike
+/// [`validate_checkpoint_id_v2`] this is deliberately *not* a charset check:
+/// interior spaces and non-ASCII names stay valid. It rejects exactly the
+/// shapes that are unsafe as a path component or reserved by the index:
+/// empty and whitespace-only ids, path separators (`/` and `\\`), `.` and
+/// `..`, NUL (which can never arrive through argv but can through a
+/// serialized frame), over-length ids, and the [`LIVE_CHILD`] sentinel —
+/// a snapshot record named like the live-subvolume marker aliases the
+/// sentinel the DAG code special-cases.
+pub fn validate_snapshot_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.trim().is_empty() {
+        return Err("snapshot id must not be empty or whitespace".to_string());
+    }
+    if id == "." || id == ".." {
+        return Err("snapshot id must not be '.' or '..'".to_string());
+    }
+    if id.contains('/') || id.contains('\\') {
+        return Err("snapshot id must be a single path component (no '/' or '\\')".to_string());
+    }
+    if id.contains('\u{0}') {
+        return Err(format!("snapshot id must not contain NUL: {id:?}"));
+    }
+    if id == LIVE_CHILD {
+        return Err("snapshot id is reserved for the live workspace marker".to_string());
+    }
+    if id.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!("snapshot id exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+/// Validates a snapshot lookup reference (exact id or unique prefix) for the
+/// legacy IPC surface.
+///
+/// `Rollback`, `RollbackPreview` and `Diff` carry a reference that
+/// [`SnapshotIndex::resolve_by_prefix`] expands to the final id, so the
+/// caller's string is not necessarily a complete id and must not be held to
+/// [`validate_snapshot_id`]: `__live__` legitimately addresses
+/// `__live__backup` as its unique prefix, and `.`/`..` address dot-prefixed
+/// names. Only shapes no id accepted by [`validate_snapshot_id`] can contain
+/// are refused here — path separators, NUL, over-length strings — plus
+/// references with no non-whitespace content: no CLI-reachable query is
+/// blank, and blank ids are exactly the poison family the id validator
+/// rejects.
+///
+/// The resolved final id must still pass [`validate_snapshot_id`] before it
+/// drives any backend call; consumers map that failure to
+/// [`ResolveError::Unsafe`].
+pub fn validate_snapshot_ref(reference: &str) -> Result<(), String> {
+    if reference.trim().is_empty() {
+        return Err("snapshot reference must not be empty or whitespace".to_string());
+    }
+    if reference.contains('/') || reference.contains('\\') {
+        return Err(
+            "snapshot reference must be a single path component (no '/' or '\\')".to_string(),
+        );
+    }
+    if reference.contains('\u{0}') {
+        return Err(format!(
+            "snapshot reference must not contain NUL: {reference:?}"
+        ));
+    }
+    if reference.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!(
+            "snapshot reference exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
 // ── Snapshot types ──
 
 /// Serde for `SnapshotMeta.metadata`: passes `Value` through for JSON,
@@ -978,6 +1057,11 @@ impl SnapshotIndex {
 pub enum ResolveError {
     NotFound,
     Ambiguous(usize),
+    /// The reference resolved to an index key that is not an acceptable
+    /// snapshot id (e.g. a pre-poisoned `..` or [`LIVE_CHILD`] key). Carries
+    /// the validator's message; consumers map this to `InvalidPath`, not
+    /// `SnapshotNotFound`.
+    Unsafe(String),
 }
 
 impl SnapshotIndex {
@@ -1725,6 +1809,96 @@ pub fn delete_workspace_policy(index_dir: &Path) -> Result<(), WsCkptError> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // ── validate_snapshot_id (legacy IPC surface) ──
+
+    #[test]
+    fn validate_snapshot_id_accepts_every_cli_compatible_id() {
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for id in [
+            "snap-1",
+            "ckpt-20261015T104500.123",
+            "my snapshot",
+            "  padded  ",
+            "快照-1",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_id(id),
+                Ok(()),
+                "id {id:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_empty_and_whitespace_only() {
+        for id in ["", " ", "\t", " \n "] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_traversal_and_separator_shapes() {
+        for id in [".", "..", "../escape", "a/b", "a\\b", "./.diff-tmp-backup"] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_nul_reserved_marker_and_over_length() {
+        assert!(validate_snapshot_id("a\u{0}b").is_err());
+        assert_eq!(
+            validate_snapshot_id(LIVE_CHILD).unwrap_err(),
+            "snapshot id is reserved for the live workspace marker"
+        );
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_id(&too_long).is_err());
+    }
+
+    // ── validate_snapshot_ref (legacy IPC lookup references) ──
+
+    #[test]
+    fn validate_snapshot_ref_accepts_shapes_that_can_be_unique_prefixes() {
+        // A lookup reference is not the final id: `__live__` is the unique
+        // prefix of the valid id `__live__backup`, and `.`/`..` prefix
+        // dot-prefixed names. The resolved id is re-validated separately.
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for reference in [
+            "snap-1",
+            LIVE_CHILD,
+            "__live__backup",
+            ".",
+            "..",
+            ".diff-tmp-backup",
+            "快照",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_ref(reference),
+                Ok(()),
+                "reference {reference:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_ref_rejects_shapes_no_valid_id_can_contain() {
+        for reference in ["", " ", "\t", " \n ", "a/b", "a\\b", "../x", "a\u{0}b"] {
+            assert!(
+                validate_snapshot_ref(reference).is_err(),
+                "reference {reference:?} must be rejected"
+            );
+        }
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_ref(&too_long).is_err());
+    }
 
     // ── Helper: encode then decode round-trip ──
     fn round_trip_request(req: &Request) -> Request {
