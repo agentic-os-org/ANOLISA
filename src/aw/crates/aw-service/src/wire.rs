@@ -91,6 +91,8 @@ pub struct Request {
 pub enum Operation {
     /// Discover identity and current bounded resource counts.
     Status,
+    /// Read at most 20 completed step metadata entries from this service start.
+    RecentExecutions,
     /// Pin context and perform real Provider discovery/private configuration checks.
     Bind {
         /// Named target.

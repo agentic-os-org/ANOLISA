@@ -87,6 +87,14 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
         value["spec"]["providers"]["tokenless"] = json!({
             "protocol":"aw-provider/v1alpha1", "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-tokenless"),"--cli",provider.join("tokenless"),"--data-dir",settings.state.join("tokenless")]},
             "timeout_ms":2000,"max_output_bytes":1048576,"config":{"version":1}});
+        let mut view_argv = value["spec"]["providers"]["tokenless"]["transport"]["argv"]
+            .as_array()
+            .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
+            .clone();
+        view_argv.insert(1, json!("--view"));
+        value["spec"]["providers"]["tokenless"]["view"] = json!({
+            "protocol":"aw-provider-view/v1alpha1","implementation":"tokenless",
+            "transport":{"type":"stdio","location":"agent","argv":view_argv}});
         if value["spec"]["events"]["tool.before"].is_null() {
             value["spec"]["events"]["tool.before"] =
                 json!({"enabled":true,"required":true,"steps":[]});

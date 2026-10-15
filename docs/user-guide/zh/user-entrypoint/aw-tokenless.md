@@ -123,6 +123,61 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
 
+## Panel 只读查询
+
+桌面接入只读取一个快照，不解析私有配置，也不直接调用通用服务 RPC：
+
+```bash
+aw inspect --config /absolute/path/to/aw.yaml --json
+```
+
+使用匹配的 AW 二进制。新生成的 Tokenless 配置自动登记可选 view；已有配置需先退出
+Agent、停止原服务，再离线编辑。在 Tokenless Provider 既有 `transport` 同级添加，
+不要放进私有 `config`：
+
+```yaml
+view:
+  protocol: aw-provider-view/v1alpha1
+  implementation: tokenless
+  transport:
+    type: stdio
+    location: agent
+    argv:
+      - /absolute/path/to/aw-provider-tokenless
+      - --view
+      - --cli
+      - /absolute/path/to/tokenless
+      - --data-dir
+      - /absolute/path/to/tokenless-state
+```
+
+CLI、数据目录和用户上下文应与压缩一致。当前只查询登记目录中的 `stats.db`；
+非空 `TOKENLESS_STATS_DB` 或有效 DSH 别名覆盖返回 unsupported。AW 不直接读组件数据库。
+缺库返回 no_data，不初始化空库。已有库通过公共 CLI 查询，可能发生迁移或维护，
+不能理解为文件系统完全无写入。
+
+快照版本为 `aw-panel/v1alpha1`，时间字段 `generated_at_ms` / `observed_at_ms`
+使用 Unix 毫秒。内容包括服务状态、Provider 卡片和本次服务启动后最近最多 20 条完成步骤
+元数据，新记录在前。服务重启清空该展示缓存，持久审计保持不变。离线查询不启动服务，
+也不准备事件 Provider。`health.summary` 只确认配置；准入、原生就绪、后台存活状态
+保持 unknown，采用状态保持 unverified。未登记 view 的 Provider 仍正常运行，指标显示 unsupported。
+
+Tokenless 指标复用 `stats summary --json --limit 200`（schema `1.1`）。窗口为组件
+存储中筛除 dry-run 前的最近 200 条记录，可能含其他接入的数据。展示时标注该范围内的
+选中候选估算收益，不称为今日、当前 Agent、计费或净收益。录制开关保持 unknown；
+关闭录制后仍可能存在历史数据。快照不含工具正文、凭据、私有 argv、环境或配置；
+组件原有留存策略仍适用。
+
+view 失败只影响对应卡片。每 Provider 最多两秒，完整快照最多三秒，另有有界执行器
+清理宽限；输出最多 1 MiB。客户端合并重复刷新，丢弃旧请求、旧配置/服务 generation
+的响应，隐藏时暂停轮询，可见时最多每五秒刷新。此 CLI 不实现 GUI、批准或策略修改。
+回退到旧 AW 二进制前，先离线删除可选 `view` 字段。
+
+[Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/schemas/view-v1alpha1.schema.json)
+的 `$defs/panel` 定义快照；[fixture](https://github.com/agentic-os-org/ANOLISA/tree/main/src/aw/crates/aw-provider/examples/views)
+覆盖正常、离线、缺组件、无数据、部分失败和陈旧状态。
+[开发合同](../../../../src/aw/docs/design/provider-views_zh.md)定义登记、错误和关联规则。
+
 ## 从源码构建
 
 在 Linux 上从仓库根目录执行：

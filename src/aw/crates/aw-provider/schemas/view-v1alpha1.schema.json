@@ -1,0 +1,922 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/provider-view/v1alpha1",
+  "$ref": "#/$defs/request",
+  "$defs": {
+    "status": {
+      "enum": [
+        "ok",
+        "disabled",
+        "unsupported",
+        "no_data",
+        "unavailable",
+        "partial",
+        "stale"
+      ]
+    },
+    "code": {
+      "enum": [
+        null,
+        "service_offline",
+        "component_missing",
+        "view_unsupported",
+        "store_absent",
+        "query_timeout",
+        "query_failed",
+        "schema_incompatible",
+        "identity_mismatch",
+        "output_limit",
+        "query_cancelled"
+      ]
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "before_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "after_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "saved_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "saved_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "records",
+        "before_tokens_estimated",
+        "after_tokens_estimated",
+        "saved_tokens_estimated",
+        "saved_percent"
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "before_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "after_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "saved_tokens_estimated": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "saved_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "scope": {
+          "const": "component_store_recent_records"
+        },
+        "requested_limit": {
+          "const": 200
+        },
+        "range_start": {
+          "type": "null"
+        },
+        "range_end": {
+          "type": "null"
+        },
+        "recording_state": {
+          "const": "unknown"
+        },
+        "adoption": {
+          "const": "unverified"
+        },
+        "by_operation": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,128}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/totals"
+          }
+        }
+      },
+      "required": [
+        "records",
+        "before_tokens_estimated",
+        "after_tokens_estimated",
+        "saved_tokens_estimated",
+        "saved_percent",
+        "scope",
+        "requested_limit",
+        "range_start",
+        "range_end",
+        "recording_state",
+        "adoption",
+        "by_operation"
+      ]
+    },
+    "description": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "implementation": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "views": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "metrics.summary"
+            ]
+          }
+        }
+      },
+      "required": [
+        "implementation",
+        "version",
+        "views"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/metrics"
+            },
+            {
+              "$ref": "#/$defs/description"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "observed_at_ms",
+        "code",
+        "data"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "const": "aw-provider-view/v1alpha1"
+        },
+        "operation": {
+          "enum": [
+            "describe",
+            "query"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "provider_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "view": {
+          "enum": [
+            "metrics.summary"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "const": 200
+            }
+          },
+          "required": [
+            "limit"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "operation",
+        "request_id",
+        "provider_id",
+        "config_revision",
+        "budget_ms"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "query"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "view",
+              "parameters"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "view"
+                  ]
+                },
+                {
+                  "required": [
+                    "parameters"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "const": "aw-provider-view/v1alpha1"
+        },
+        "operation": {
+          "enum": [
+            "describe",
+            "query"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "provider_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/metrics"
+            },
+            {
+              "$ref": "#/$defs/description"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "operation",
+        "request_id",
+        "provider_id",
+        "config_revision",
+        "status",
+        "observed_at_ms",
+        "code",
+        "data"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              },
+              "operation": {
+                "const": "describe"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/description"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              },
+              "operation": {
+                "const": "query"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/metrics"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "step_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "method": {
+          "enum": [
+            "invoke",
+            "native_hook"
+          ]
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "failure": {
+          "enum": [
+            null,
+            "native_environment",
+            "transport",
+            "exit",
+            "incomplete_input",
+            "provider",
+            "protocol"
+          ]
+        },
+        "failure_action": {
+          "enum": [
+            null,
+            "report",
+            "block"
+          ]
+        },
+        "policy_block": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "step_id",
+        "method",
+        "elapsed_ms",
+        "status",
+        "failure",
+        "failure_action",
+        "policy_block"
+      ]
+    },
+    "recent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "scope": {
+                  "const": "service_generation"
+                },
+                "limit": {
+                  "const": 20
+                },
+                "items": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "$ref": "#/$defs/execution"
+                  }
+                }
+              },
+              "required": [
+                "scope",
+                "limit",
+                "items"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "observed_at_ms",
+        "code",
+        "data"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configured": {
+              "const": true
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "admission": {
+              "const": "unknown"
+            },
+            "native_readiness": {
+              "const": "unknown"
+            },
+            "backend_liveness": {
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "configured",
+            "enabled",
+            "admission",
+            "native_readiness",
+            "backend_liveness"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "observed_at_ms",
+        "code",
+        "data"
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "implementation": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configured": {
+          "const": true
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "admission": {
+          "const": "unknown"
+        },
+        "native_readiness": {
+          "const": "unknown"
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "health.summary",
+              "metrics.summary"
+            ]
+          }
+        },
+        "views": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "health.summary": {
+              "$ref": "#/$defs/health"
+            },
+            "metrics.summary": {
+              "$ref": "#/$defs/metricsResult"
+            }
+          },
+          "required": [
+            "health.summary",
+            "metrics.summary"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "implementation",
+        "version",
+        "configured",
+        "enabled",
+        "admission",
+        "native_readiness",
+        "capabilities",
+        "views"
+      ]
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "aw-panel/v1alpha1"
+        },
+        "generated_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "config_revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "enum": [
+                "online",
+                "offline",
+                "unavailable"
+              ]
+            },
+            "generation": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "audit_healthy": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "adoption": {
+              "const": "unverified"
+            },
+            "code": {
+              "$ref": "#/$defs/code"
+            }
+          },
+          "required": [
+            "state",
+            "generation",
+            "audit_healthy",
+            "adoption",
+            "code"
+          ]
+        },
+        "providers": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/provider"
+          }
+        },
+        "recent_execution": {
+          "$ref": "#/$defs/recent"
+        }
+      },
+      "required": [
+        "api_version",
+        "generated_at_ms",
+        "config_revision",
+        "service",
+        "providers",
+        "recent_execution"
+      ]
+    },
+    "metricsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/metrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "observed_at_ms",
+        "code",
+        "data"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

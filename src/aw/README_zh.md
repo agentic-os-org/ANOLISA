@@ -71,6 +71,11 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 
 ## 开发参考
 
+`aw inspect --config ABS_FILE --json` 返回有界只读 Panel 快照，不启动 AW，也不执行
+工具 Hook。显式登记可选 view 后可查询 Tokenless 统计，未知准入/原生就绪状态保持未知。
+参阅 [Tokenless 指南](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md#panel-只读查询)
+和[展示协议](docs/design/provider-views_zh.md)。
+
 组件通常通过 Provider 协议接入，无需依赖 AW crate。Adapter 与服务客户端开发者
 可查阅下方详细合同。配置、Provider 消息和本地服务消息分别版本化。
 

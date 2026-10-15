@@ -4,6 +4,7 @@ use aw_core::{journal::FileJournal, ports::Journal};
 use aw_host::{CallRecord, Failure, FailureAction, Invocation, Method, StepOutput};
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -19,6 +20,7 @@ pub(crate) struct Audit {
     journal: Mutex<FileJournal>,
     directory: PathBuf,
     failed: AtomicBool,
+    recent: Mutex<VecDeque<Value>>,
 }
 
 impl Audit {
@@ -37,6 +39,7 @@ impl Audit {
             journal: Mutex::new(journal),
             directory: directory.into(),
             failed: AtomicBool::new(false),
+            recent: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -68,7 +71,31 @@ impl Audit {
     }
 
     pub(crate) fn append(&self, key: &str, record: Value) -> Result<Value> {
-        self.mutate(|journal| journal.append(key, &record))
+        self.mutate(|journal| {
+            let written = journal.append(key, &record)?;
+            if record["phase"] == "completed" {
+                // Presentation is best effort and cannot turn a durable successful
+                // write into an event failure. Keep the journal lock until publication
+                // so concurrent completions retain durable order; readers clone 20 items.
+                if let Ok(mut recent) = self.recent.lock() {
+                    let call = &record["call"];
+                    recent.push_front(json!({"provider":call["provider"],"step_id":call["step_id"],
+                        "method":call["method"],"elapsed_ms":call["elapsed_ms"],
+                        "status":record["status"],"failure":record["failure"],
+                        "failure_action":record["failure_action"],"policy_block":record["policy_block"]}));
+                    recent.truncate(20);
+                }
+            }
+            Ok(written)
+        })
+    }
+
+    pub(crate) fn recent(&self) -> Result<Value> {
+        let recent = self
+            .recent
+            .lock()
+            .map_err(|_| rejected("audit_unavailable"))?;
+        Ok(json!({"scope":"service_generation","limit":20,"items":*recent}))
     }
 
     pub(crate) fn release(&self, key: &str) {
@@ -180,5 +207,82 @@ pub(crate) fn preparation(error: &aw_host::Error) -> Value {
         }),
         aw_host::Error::Call(value) => call(&value.record),
         _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn recent_publication_preserves_durable_order_and_latest_twenty() {
+        let directory = tempfile::tempdir().unwrap();
+        let audit = Audit::new(&directory.path().join("journal")).unwrap();
+        let key = "a".repeat(64);
+        audit.claim(&key, json!({"kind":"event"})).unwrap();
+        let completion = |id| {
+            json!({"phase":"completed","call":{"provider":"fixture",
+            "step_id":format!("step-{id}"),"method":"invoke","elapsed_ms":1},"status":"ok"})
+        };
+        thread::scope(|scope| {
+            let reader = audit.recent.lock().unwrap();
+            let writer = scope.spawn(|| audit.append(&key, completion(0)).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !fs::read_to_string(audit.directory.join(format!("{key}.jsonl")))
+                .unwrap()
+                .contains("completed")
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let written = fs::read_to_string(audit.directory.join(format!("{key}.jsonl")))
+                .unwrap()
+                .contains("completed");
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let mut unlocked_before_publication = false;
+            while Instant::now() < deadline {
+                if audit.journal.try_lock().is_ok() {
+                    unlocked_before_publication = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            drop(reader);
+            writer.join().unwrap();
+            assert!(written);
+            assert!(!unlocked_before_publication);
+        });
+        thread::scope(|scope| {
+            for id in 1..33 {
+                let audit = &audit;
+                let key = &key;
+                let completion = &completion;
+                scope.spawn(move || audit.append(key, completion(id)).unwrap());
+            }
+        });
+        let durable = audit.read(&key).unwrap();
+        let expected: Vec<_> = durable["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(20)
+            .map(|record| record["record"]["call"]["step_id"].clone())
+            .collect();
+        let recent = audit.recent().unwrap();
+        let actual: Vec<_> = recent["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["step_id"].clone())
+            .collect();
+        assert_eq!(actual, expected);
+        assert!(audit.append(&"b".repeat(64), completion(99)).is_err());
+        assert!(!audit.healthy());
+        assert_eq!(audit.recent().unwrap(), recent);
     }
 }

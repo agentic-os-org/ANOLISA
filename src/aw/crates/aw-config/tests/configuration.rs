@@ -59,6 +59,30 @@ fn one_configuration_covers_all_four_adapters_and_sixteen_event_names() {
 }
 
 #[test]
+fn optional_view_registration_is_separate_from_event_configuration_and_effects() {
+    let mut value = example();
+    let before = value["spec"]["events"].clone();
+    value["spec"]["providers"]["security"]["view"] = json!({
+        "protocol":"aw-provider-view/v1alpha1","implementation":"security",
+        "transport":{"type":"stdio","location":"agent","argv":["/view-only", "--literal"]}});
+    assert_eq!(parse(&value).unwrap().as_value()["spec"]["events"], before);
+    for (pointer, replacement) in [
+        ("/protocol", json!("aw-provider/v1alpha1")),
+        ("/transport/argv/0", json!("relative-view")),
+        ("/transport/location", json!("daemon")),
+        ("/implementation", json!("not/a/name")),
+    ] {
+        let mut bad = value.clone();
+        *bad["spec"]["providers"]["security"]["view"]
+            .pointer_mut(pointer)
+            .unwrap() = replacement;
+        assert!(parse(&bad).is_err(), "{pointer}");
+    }
+    value["spec"]["providers"]["security"]["view"]["command"] = json!("not allowed");
+    assert!(parse(&value).is_err());
+}
+
+#[test]
 fn opaque_provider_config_preserves_json_values_without_wire_canonical_restrictions() {
     let mut value = example();
     value["spec"]["providers"]["business"]["config"] = json!({

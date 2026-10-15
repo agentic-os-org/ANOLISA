@@ -84,6 +84,12 @@ Hermes native-plugin installation command; it does not install software.
 
 ## Development references
 
+`aw inspect --config ABS_FILE --json` returns a bounded, read-only Panel snapshot
+without starting AW or executing tool Hooks. Explicit optional view registration
+enables Tokenless statistics; unknown admission/readiness stays unknown. See the
+[Tokenless guide](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md#read-only-panel-queries)
+and the [presentation contract](docs/design/provider-views.md).
+
 Component integrations normally use the Provider protocol; they do not need an
 AW crate dependency. Adapter and service-client developers can use the detailed
 contracts below. Configuration, Provider messages and local service messages

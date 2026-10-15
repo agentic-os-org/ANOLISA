@@ -1,0 +1,32 @@
+{
+  "protocol": "aw-provider-view/v1alpha1",
+  "operation": "query",
+  "request_id": "view-example-1",
+  "provider_id": "tokenless-main",
+  "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "ok",
+  "observed_at_ms": 1000,
+  "code": null,
+  "data": {
+    "records": 12,
+    "before_tokens_estimated": 10000,
+    "after_tokens_estimated": 6500,
+    "saved_tokens_estimated": 3500,
+    "saved_percent": 35.0,
+    "scope": "component_store_recent_records",
+    "requested_limit": 200,
+    "range_start": null,
+    "range_end": null,
+    "recording_state": "unknown",
+    "adoption": "unverified",
+    "by_operation": {
+      "compress-response": {
+        "records": 12,
+        "before_tokens_estimated": 10000,
+        "after_tokens_estimated": 6500,
+        "saved_tokens_estimated": 3500,
+        "saved_percent": 35.0
+      }
+    }
+  }
+}

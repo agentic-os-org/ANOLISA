@@ -64,6 +64,8 @@ jobs:
         run: |
           cargo test --locked --manifest-path src/aw/Cargo.toml \
             -p aw-provider-tokenless --test provider --test pretool -- --ignored
+          cargo test --locked --manifest-path src/aw/Cargo.toml \
+            -p aw-provider-tokenless --test views -- --ignored
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |

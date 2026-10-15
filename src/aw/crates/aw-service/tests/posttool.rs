@@ -191,6 +191,11 @@ fn four_adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
             json!({"agent":{"adapter":adapter,"argv":["/unused-native-agent"]}});
         for (name, behavior) in [("security", "observe"), ("tokenless", "replace")] {
             document["spec"]["providers"][name] = json!({"protocol":"aw-provider/v1alpha1", "transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","provider","--label",name,"--behavior",behavior]},"config":{},"timeout_ms":2000,"max_output_bytes":65536});
+            // A broken optional view must never participate in event preparation
+            // or alter observation/replacement in any native Adapter.
+            document["spec"]["providers"][name]["view"] = json!({
+                "protocol":"aw-provider-view/v1alpha1","implementation":name,
+                "transport":{"type":"stdio","location":"agent","argv":["/view-must-not-run"]}});
         }
         document["spec"]["providers"]["custom"] = json!({"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","print('true')"]},"timeout_ms":1000,"max_output_bytes":32});
         document["spec"]["providers"]["user"] = json!({"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","native","--label","user"]},"timeout_ms":1000,"max_output_bytes":4096});

@@ -3,6 +3,7 @@
 mod pretool;
 
 use aw_exec::{CommandSpec, Limits};
+pub mod view;
 use aw_provider::{Protocol, Reply, Request, MAX_MESSAGE_BYTES, VERSION};
 use serde::Deserialize;
 use serde_json::{json, Value};

@@ -43,6 +43,19 @@ spec:
       max_output_bytes: 1048576
       config:
         version: 1
+      view:
+        protocol: aw-provider-view/v1alpha1
+        implementation: tokenless
+        transport:
+          type: stdio
+          location: agent
+          argv:
+            - /absolute/path/to/aw-provider-tokenless
+            - --view
+            - --cli
+            - /absolute/path/to/tokenless
+            - --data-dir
+            - /absolute/path/to/tokenless-state
   events:
     tool.before:
       enabled: true

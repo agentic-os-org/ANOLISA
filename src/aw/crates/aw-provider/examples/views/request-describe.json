@@ -1,0 +1,8 @@
+{
+  "protocol": "aw-provider-view/v1alpha1",
+  "operation": "describe",
+  "request_id": "view-example-1",
+  "provider_id": "tokenless-main",
+  "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "budget_ms": 2000
+}

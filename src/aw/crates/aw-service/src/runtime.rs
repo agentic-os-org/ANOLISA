@@ -116,6 +116,7 @@ impl Runtime {
             return Err(rejected("service_stopping"));
         }
         match operation {
+            Operation::RecentExecutions => self.audit.recent(),
             Operation::Status => Ok(
                 json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),

@@ -157,6 +157,73 @@ PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 
+## Read-only Panel queries
+
+For desktop integrations, use one snapshot instead of parsing private configuration
+or calling generic service RPC:
+
+```bash
+aw inspect --config /absolute/path/to/aw.yaml --json
+```
+
+Use matching AW binaries. New `aw-package configure` Tokenless selections register
+the optional view automatically. For existing configurations, stop Agents and the
+original service before editing offline. Add this alongside the Tokenless
+Provider's existing `transport`, not inside its private `config`:
+
+```yaml
+view:
+  protocol: aw-provider-view/v1alpha1
+  implementation: tokenless
+  transport:
+    type: stdio
+    location: agent
+    argv:
+      - /absolute/path/to/aw-provider-tokenless
+      - --view
+      - --cli
+      - /absolute/path/to/tokenless
+      - --data-dir
+      - /absolute/path/to/tokenless-state
+```
+
+Keep the CLI, data directory and user context identical to compression. Current
+queries support the registered `stats.db`; a nonempty `TOKENLESS_STATS_DB` override
+(or its effective DSH alias) returns unsupported. No component database is read
+directly by AW. A missing store returns no_data without initialization. Querying an
+existing store uses the public CLI, which may migrate or maintain that database;
+this does not promise zero filesystem writes.
+
+The snapshot uses `aw-panel/v1alpha1` and Unix millisecond fields
+`generated_at_ms` / `observed_at_ms`. It contains service status, Provider cards
+and at most 20 recent completed step metadata entries from the current service
+generation, newest first. Restart clears that bounded presentation cache; durable
+audit remains unchanged. Offline inspect never starts a service or prepares event
+Providers. `health.summary` confirms configuration only; admission, native
+readiness and backend liveness remain unknown, and adoption remains unverified.
+Providers without a view remain usable and display unsupported metrics.
+
+Tokenless metrics come from `stats summary --json --limit 200`, schema `1.1`.
+The window covers the component store's latest 200 records before dry-run
+filtering, potentially including other integrations. Show estimated selected
+candidate savings with this scope, not daily, per-Agent, billed or net savings.
+Recording state stays unknown; disabling recording can leave historical data.
+No raw tool text, credentials, private argv, environment or configuration reaches
+the snapshot. Existing component retention settings still apply.
+
+View failures affect only that card. Queries have a two-second per-Provider and
+three-second snapshot budget, plus bounded executor cleanup grace. Output is
+limited to 1 MiB. Clients must coalesce refreshes, discard responses from older
+requests/configurations/generations, and pause polling while hidden. Refresh at
+most every five seconds. This CLI implements no GUI, approval or policy mutation.
+To roll back to older AW binaries, remove optional `view` fields offline first.
+
+The [schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/schemas/view-v1alpha1.schema.json)
+uses `$defs/panel` for snapshots. [Fixtures](https://github.com/agentic-os-org/ANOLISA/tree/main/src/aw/crates/aw-provider/examples/views)
+cover normal, offline, missing component, no data, partial failure and stale states.
+The [developer contract](../../../../src/aw/docs/design/provider-views.md) defines
+registration, errors and correlation.
+
 ## Build from source
 
 From the repository root on Linux:

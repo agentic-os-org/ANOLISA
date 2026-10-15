@@ -29,12 +29,13 @@ fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected run, install, validate, policy, serve, status, request, stop")?;
+        .ok_or("expected run, install, validate, inspect, policy, serve, status, request, stop")?;
     if command == "--help" {
         println!(
             "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
 aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
 aw validate --config FILE\n\
+aw inspect --config ABS_FILE --json\n\
 aw policy < provider-request.json\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
 aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
@@ -48,8 +49,29 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         return Ok(cli::Exit::Code(0));
     }
     let args = cli::Arguments::parse(args)?;
-    if command == "policy" {
+    if command == "policy" || command == "inspect" {
         install_stop_signals()?;
+    }
+    if command == "inspect" {
+        args.check(&["--config", "--json"], false)?;
+        let config = PathBuf::from(args.required("--config")?);
+        if !config.is_absolute() || !args.flags.contains_key("--json") {
+            return Err("inspect requires --config ABS_FILE --json".into());
+        }
+        let bytes = cli::read_file(config, aw_config::MAX_DOCUMENT_BYTES)?;
+        let context = aw_host::ProcessContext {
+            cwd: std::env::current_dir()?,
+            environment: std::env::vars_os().collect(),
+            stderr_bytes: 65536,
+        };
+        let snapshot = aw_service::inspect::snapshot(
+            &bytes,
+            &context,
+            Instant::now() + Duration::from_secs(3),
+            &STOP,
+        )?;
+        println!("{}", serde_json::to_string(&snapshot)?);
+        return Ok(cli::Exit::Code(0));
     }
     if matches!(command.as_str(), "run" | "hook" | "install" | "policy") {
         return cli::dispatch(&command, &args);

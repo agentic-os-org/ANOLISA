@@ -29,6 +29,15 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     let providers = spec["providers"].as_object().ok_or(Error::InvalidSchema)?;
     let events = spec["events"].as_object().ok_or(Error::InvalidSchema)?;
     for (name, provider) in providers {
+        if let Some(view) = provider.get("view") {
+            require(
+                view["transport"]["argv"][0]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path).is_absolute()),
+                &format!("/spec/providers/{name}/view/transport/argv/0"),
+                "view entrypoint must be an absolute executable path",
+            )?;
+        }
         let protocol = provider["protocol"]
             .as_str()
             .unwrap_or(crate::HOOK_PROTOCOL);

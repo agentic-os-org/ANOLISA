@@ -322,6 +322,15 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
         document["spec"]["events"]["tool.before"]["steps"][0]["operation"],
         "pre_tool"
     );
+    let provider = &document["spec"]["providers"]["tokenless"];
+    let mut expected = provider["transport"]["argv"].as_array().unwrap().clone();
+    expected.insert(1, serde_json::json!("--view"));
+    assert_eq!(provider["view"]["protocol"], "aw-provider-view/v1alpha1");
+    assert_eq!(
+        provider["view"]["transport"]["argv"],
+        serde_json::json!(expected)
+    );
+    assert_eq!(provider["view"]["implementation"], "tokenless");
     assert_eq!(
         document["spec"]["events"]["tool.after"]["steps"][0]["effects"],
         serde_json::json!(["replace_result"])
@@ -352,6 +361,9 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
         document["spec"]["events"]["tool.before"]["steps"][0]["on_error"],
         "block"
     );
+    assert!(document["spec"]["providers"]["security"]
+        .get("view")
+        .is_none());
     assert_eq!(
         document["spec"]["events"]["tool.after"]["steps"]
             .as_array()

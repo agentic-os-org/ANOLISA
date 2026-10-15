@@ -11,6 +11,7 @@ mod server;
 mod wire;
 
 pub mod agentsight;
+pub mod inspect;
 pub mod launch_service;
 
 pub use client::Client;

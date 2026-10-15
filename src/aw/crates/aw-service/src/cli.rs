@@ -31,7 +31,11 @@ impl Arguments {
             if !flag.starts_with("--") {
                 return Err("expected a named option (Agent arguments follow --)".into());
             }
-            let value = args.next().ok_or("option requires a value")?;
+            let value = if flag == "--json" {
+                "true".into()
+            } else {
+                args.next().ok_or("option requires a value")?
+            };
             if parsed.flags.insert(flag, value).is_some() {
                 return Err("duplicate option".into());
             }

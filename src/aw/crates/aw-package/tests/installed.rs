@@ -92,6 +92,80 @@ fn rpc(client: &Client, value: Value) -> Value {
 }
 
 #[test]
+#[ignore = "requires installed all-in-one Preview binaries; package CI runs this"]
+fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services() {
+    let prefix = PathBuf::from(std::env::var_os("AW_TEST_PREFIX").expect("AW_TEST_PREFIX"));
+    let work = PathBuf::from(std::env::var_os("AW_TEST_WORK_DIR").expect("AW_TEST_WORK_DIR"));
+    let temporary = tempfile::tempdir_in(work.parent().unwrap()).unwrap();
+    let root = fs::canonicalize(temporary.path()).unwrap();
+    fs::set_permissions(&root, Permissions::from_mode(0o700)).unwrap();
+    let state = root.join("state");
+    let socket = root.join("not-started-sec.sock");
+    for (name, policy) in [
+        ("tokenless", aw_package::Policy::Tokenless),
+        (
+            "combined",
+            aw_package::Policy::SecCoreTokenless { socket: &socket },
+        ),
+    ] {
+        let config = root.join(format!("{name}.yaml"));
+        aw_package::configure(&aw_package::Settings {
+            prefix: &prefix,
+            config: &config,
+            state: &state,
+            policy,
+            qoder: Some(Path::new("/bin/true")),
+            node: None,
+            openclaw: None,
+        })
+        .unwrap();
+        let output = aw_exec::run(
+            &aw_exec::CommandSpec {
+                program: prefix.join("bin/aw"),
+                args: vec![
+                    "inspect".into(),
+                    "--config".into(),
+                    config.as_os_str().into(),
+                    "--json".into(),
+                ],
+                cwd: root.clone(),
+                environment: std::env::vars_os().collect(),
+            },
+            &[],
+            aw_exec::Limits {
+                input_bytes: 0,
+                stdout_bytes: 1024 * 1024,
+                stderr_bytes: 65536,
+            },
+            Instant::now() + Duration::from_secs(5),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["api_version"], "aw-panel/v1alpha1");
+        assert_eq!(value["service"]["state"], "offline");
+        let provider = value["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "tokenless")
+            .unwrap();
+        assert_eq!(provider["views"]["metrics.summary"]["status"], "no_data");
+        assert_eq!(provider["views"]["metrics.summary"]["code"], "store_absent");
+        assert!(!state.join("tokenless").exists());
+        assert!(!state.join("aw.sock").exists());
+        assert!(!socket.exists());
+    }
+    drop(temporary);
+    assert!(!root.exists());
+}
+
+#[test]
 #[ignore = "requires installed Preview binaries and root or AW_TEST_SEC_SOCKET"]
 fn installed_binaries_scan_and_recover_audit() {
     let prefix = PathBuf::from(std::env::var_os("AW_TEST_PREFIX").expect("AW_TEST_PREFIX"));

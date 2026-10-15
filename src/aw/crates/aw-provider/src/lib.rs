@@ -8,6 +8,7 @@
 pub mod admission;
 mod parsing;
 mod protocol;
+pub mod view;
 
 pub use protocol::{Description, Outcome, Protocol, Reply, Request, ValidatedConfig};
 

@@ -288,6 +288,26 @@
         },
         "config": {
           "type": "object"
+        },
+        "view": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocol",
+            "implementation",
+            "transport"
+          ],
+          "properties": {
+            "protocol": {
+              "const": "aw-provider-view/v1alpha1"
+            },
+            "implementation": {
+              "$ref": "#/$defs/name"
+            },
+            "transport": {
+              "$ref": "#/$defs/transport"
+            }
+          }
         }
       },
       "allOf": [
