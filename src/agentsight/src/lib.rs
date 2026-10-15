@@ -39,11 +39,13 @@ pub mod preferences;
 mod private_sqlite;
 // Cross-platform: labels are derived from collected trajectories, which exist on
 // every OS, so the Linux and macOS servers share one implementation. Nothing
-// here touches eBPF.
+// here touches eBPF. Gated on `server` because the judge needs the opt LLM client.
+#[cfg(feature = "server")]
 pub mod reuse;
 pub mod security;
 // Cross-platform: the request/response contract and LLM ranking call behind
 // `POST /api/sessions/search`, shared by the Linux and macOS server handlers.
+#[cfg(feature = "server")]
 pub mod semantic_search;
 #[cfg(target_os = "linux")]
 pub mod token_breakdown;

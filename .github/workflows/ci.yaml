@@ -741,6 +741,11 @@ jobs:
           cd src/agentsight
           cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
 
+      - name: Check build without server feature
+        run: |
+          cd src/agentsight
+          cargo check --no-default-features --features bpf-build
+
       - name: Build enforcer (actplane feature + attested build)
         run: |
           cd src/agentsight
