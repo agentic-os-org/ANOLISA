@@ -265,6 +265,10 @@ fn cmd_check(
 /// (`hidden`, `holders`, `available_schedulers`), so a suggestion those
 /// rules did not make can be explained from the report alone.
 ///
+/// A queue attribute the engine could not read (`read_ahead_kb`) prints as 0,
+/// the value the key has always carried in that case, so the key keeps its
+/// type; the rules see the missing reading and do not advise on it.
+///
 /// `cpu_cores` and `memory_gb` are the effective values the rules scale by,
 /// clamped to the cgroup limits that bind the process; `cpu_cores_host` and
 /// `memory_gb_host` are the host's own readings, so a report tells whether
@@ -280,7 +284,7 @@ fn system_json(info: &detect::SystemInfo) -> serde_json::Value {
                 "scheduler": disk.scheduler,
                 "available_schedulers": disk.available_schedulers,
                 "nr_requests": disk.nr_requests,
-                "read_ahead_kb": disk.read_ahead_kb,
+                "read_ahead_kb": disk.read_ahead_kb.unwrap_or(0),
                 "rq_affinity": disk.rq_affinity,
                 "hidden": disk.hidden,
                 "holders": disk.holders,
@@ -5101,7 +5105,10 @@ mod tests {
                 json!(disk.available_schedulers)
             );
             assert_eq!(entry["nr_requests"], json!(disk.nr_requests));
-            assert_eq!(entry["read_ahead_kb"], json!(disk.read_ahead_kb));
+            assert_eq!(
+                entry["read_ahead_kb"],
+                json!(disk.read_ahead_kb.unwrap_or(0))
+            );
             assert_eq!(entry["rq_affinity"], json!(disk.rq_affinity));
             assert_eq!(entry["hidden"], json!(disk.hidden));
             assert_eq!(entry["holders"], json!(disk.holders));

@@ -2370,11 +2370,17 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
         if !can_carry_filesystem(disk) {
             continue;
         }
+        // An attribute that could not be read says nothing about the window:
+        // the 0 it used to fall back to sits below the HDD floor, so the rule
+        // reported a size the host never showed and asked to raise it.
+        let Some(read_ahead_kb) = disk.read_ahead_kb else {
+            continue;
+        };
         match disk.disk_type {
-            DiskType::HDD if is_streaming && disk.read_ahead_kb < 2048 => {
+            DiskType::HDD if is_streaming && read_ahead_kb < 2048 => {
                 recs.push(Recommendation {
                     param: format!("block/{}/read_ahead_kb", disk.name),
-                    current_value: disk.read_ahead_kb.to_string(),
+                    current_value: read_ahead_kb.to_string(),
                     recommended_value: "2048".to_string(),
                     reason: "机械硬盘顺序读取场景，增大预读窗口提升吞吐（减少磁头寻道次数）"
                         .to_string(),
@@ -2383,10 +2389,10 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
                     writable: true,
                 });
             }
-            DiskType::NVMe | DiskType::SSD if is_db && disk.read_ahead_kb > 128 => {
+            DiskType::NVMe | DiskType::SSD if is_db && read_ahead_kb > 128 => {
                 recs.push(Recommendation {
                     param: format!("block/{}/read_ahead_kb", disk.name),
-                    current_value: disk.read_ahead_kb.to_string(),
+                    current_value: read_ahead_kb.to_string(),
                     recommended_value: "128".to_string(),
                     reason:
                         "数据库随机 IO 为主，过大的预读会浪费内存和 IO 带宽，NVMe/SSD 延迟已经很低"
@@ -10751,7 +10757,7 @@ mod tests {
         info.sysctl.thp_enabled = "always".to_string();
         info.sysctl.dirty_ratio = 20;
         info.disks[0].disk_type = DiskType::NVMe;
-        info.disks[0].read_ahead_kb = 512;
+        info.disks[0].read_ahead_kb = Some(512);
 
         let mut recs = Vec::new();
         eval_swappiness(&info, &WorkloadType::Mixed, &mut recs);
@@ -10801,7 +10807,7 @@ mod tests {
         info.sysctl.swappiness = 60;
         info.sysctl.dirty_ratio = 20;
         info.disks[0].disk_type = DiskType::NVMe;
-        info.disks[0].read_ahead_kb = 512;
+        info.disks[0].read_ahead_kb = Some(512);
 
         let mut recs = Vec::new();
         eval_swappiness(&info, &WorkloadType::Mixed, &mut recs);
@@ -11887,7 +11893,7 @@ mod tests {
                 scheduler: "mq-deadline".to_string(),
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
                 nr_requests: 256,
-                read_ahead_kb: 128,
+                read_ahead_kb: Some(128),
                 rq_affinity: 1,
                 hidden: false,
                 holders: vec![],
@@ -12795,7 +12801,7 @@ mod tests {
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["noop".to_string(), "cfq".to_string()],
             nr_requests: 256,
-            read_ahead_kb: 128,
+            read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
             holders: vec![],
@@ -12815,7 +12821,7 @@ mod tests {
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["cfq".to_string()],
             nr_requests: 128,
-            read_ahead_kb: 128,
+            read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
             holders: vec![],
@@ -12844,7 +12850,7 @@ mod tests {
             scheduler: "mq-deadline".to_string(),
             available_schedulers: vec!["mq-deadline".to_string()],
             nr_requests: 128,
-            read_ahead_kb: 128,
+            read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
             holders: vec![],
@@ -12880,7 +12886,7 @@ mod tests {
             for marker in ["holder", "hidden"] {
                 let mut info = info_with_processes(&[process]);
                 info.disks[0].disk_type = disk_type.clone();
-                info.disks[0].read_ahead_kb = read_ahead_kb;
+                info.disks[0].read_ahead_kb = Some(read_ahead_kb);
                 if marker == "holder" {
                     info.disks[0].holders = vec!["dm-0".to_string()];
                 } else {
@@ -12899,7 +12905,7 @@ mod tests {
             // advice.
             let mut info = info_with_processes(&[process]);
             info.disks[0].disk_type = disk_type.clone();
-            info.disks[0].read_ahead_kb = read_ahead_kb;
+            info.disks[0].read_ahead_kb = Some(read_ahead_kb);
             let mut recs = Vec::new();
             eval_read_ahead_kb(&info, &mut recs);
             assert_eq!(
@@ -12963,6 +12969,75 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A synthetic `/sys/block` tree with one disk per shape a queue
+    /// attribute can take: `names[0]` holds `value`, then a garbled file, an
+    /// empty file, a directory in the file's place, and no file at all. Every
+    /// disk also carries `common`, so the rule under test reaches the read.
+    fn queue_attribute_tree(
+        tag: &str,
+        names: [&str; 5],
+        attribute: &str,
+        value: &str,
+        common: &[(&str, &str)],
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        for (index, name) in names.iter().enumerate() {
+            let disk = dir.join(name);
+            std::fs::create_dir_all(disk.join("queue")).expect("create queue");
+            for (file, body) in common {
+                std::fs::write(disk.join(file), body).expect("write a common attribute");
+            }
+            let path = disk.join("queue").join(attribute);
+            match index {
+                0 => std::fs::write(&path, value).expect("write the readable value"),
+                1 => std::fs::write(&path, "garbage\n").expect("write a garbled value"),
+                2 => std::fs::write(&path, "").expect("write an empty value"),
+                3 => std::fs::create_dir_all(&path).expect("create a directory"),
+                _ => {}
+            }
+        }
+        dir
+    }
+
+    /// `queue/read_ahead_kb` fell back to 0 when it could not be read or
+    /// parsed, and 0 sits below the 2048 KiB the rule raises a streaming HDD
+    /// to: a masked or garbled attribute was reported as `current_value: "0"`
+    /// and answered with a write on a disk whose window was never read.
+    #[test]
+    fn read_ahead_advice_needs_a_readable_window() {
+        let dir = queue_attribute_tree(
+            "read_ahead_kb",
+            ["sda", "sdb", "sdc", "sdd", "sde"],
+            "read_ahead_kb",
+            "128\n",
+            &[("queue/rotational", "1\n")],
+        );
+        let mut info = info_with_processes(&["kafka"]);
+        info.disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        info.disks.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut recs = Vec::new();
+        eval_read_ahead_kb(&info, &mut recs);
+        let advised: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.param.as_str(), r.current_value.as_str()))
+            .collect();
+        assert_eq!(
+            advised,
+            [("block/sda/read_ahead_kb", "128")],
+            "only the window the disk reported is sized"
+        );
+        let windows: Vec<Option<u64>> = info.disks.iter().map(|d| d.read_ahead_kb).collect();
+        assert_eq!(windows, [Some(128), None, None, None, None]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// profile::classify calls a TiDB host io-latency — TiDB is an OLTP
     /// database and TiKV its distributed KV store — but this hand-rolled db
     /// list still skips both process names, so the host kept the default
@@ -12975,7 +13050,7 @@ mod tests {
         for name in ["tidb-server", "tikv-server"] {
             let mut info = info_with_processes(&[name]);
             info.disks[0].disk_type = DiskType::NVMe;
-            info.disks[0].read_ahead_kb = 512;
+            info.disks[0].read_ahead_kb = Some(512);
 
             let mut recs = Vec::new();
             eval_read_ahead_kb(&info, &mut recs);
@@ -12988,7 +13063,7 @@ mod tests {
         // A workload outside the database class keeps the window it has.
         let mut info = info_with_processes(&["make"]);
         info.disks[0].disk_type = DiskType::NVMe;
-        info.disks[0].read_ahead_kb = 512;
+        info.disks[0].read_ahead_kb = Some(512);
         let mut recs = Vec::new();
         eval_read_ahead_kb(&info, &mut recs);
         assert!(
@@ -13007,7 +13082,7 @@ mod tests {
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["cfq".to_string()],
             nr_requests: 128,
-            read_ahead_kb: 128,
+            read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
             holders: vec![],
@@ -16646,7 +16721,7 @@ mod tests {
                 scheduler: "mq-deadline".to_string(),
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
                 nr_requests: 128,
-                read_ahead_kb: 128,
+                read_ahead_kb: Some(128),
                 rq_affinity: 1,
                 hidden: false,
                 holders,
@@ -16658,7 +16733,7 @@ mod tests {
             scheduler: "mq-deadline".to_string(),
             available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
             nr_requests: 128,
-            read_ahead_kb: 128,
+            read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
             holders: vec!["dm-4".to_string()],
