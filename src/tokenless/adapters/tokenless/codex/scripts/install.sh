@@ -47,6 +47,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 PLUGIN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"   # codex/ directory
 
+# The paths and the CLI lookup are inert - no writes, no CLI calls - so they are
+# resolved before Phase 1: the dry-run preview needs them to name what it would
+# do, and a host without the tokenless binary must see the build it would run.
+CODEX_BIN="$(resolve_codex)"
+MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
+PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+
 # ---------------------------------------------------------------------------
 # Phase 1 — Ensure tokenless binary is available
 # ---------------------------------------------------------------------------
@@ -60,6 +68,30 @@ elif [[ -x /usr/local/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/local/bin/tokenless"
 elif [[ -x /usr/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/bin/tokenless"
+fi
+
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
+if [ "$DRY_RUN" = "1" ]; then
+    # Preview before the first write: with no tokenless binary on the host,
+    # Phase 1 builds and installs one, and Phase 2 writes the marketplace tree
+    # and drives the CLI registrations. None of that may happen in a dry run.
+    if [[ -z "$TOKENLESS_BIN" ]]; then
+        echo "DRY-RUN: cargo build --release -p tokenless-cli in $(cd "${TOKENLESS_SOURCE_DIR:-$SCRIPT_DIR/../../../..}" && pwd)"
+        echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
+    else
+        echo "DRY-RUN: keep the existing tokenless binary ${TOKENLESS_BIN}"
+    fi
+    if [[ -n "$CODEX_BIN" ]]; then
+        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is already registered)"
+        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
+        echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
+    else
+        echo "DRY-RUN: no codex CLI found, so the registration would be skipped"
+    fi
+    echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
+    echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${PLUGIN_LINK}"
+    echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
+    exit 0
 fi
 
 if [[ -z "$TOKENLESS_BIN" ]]; then
@@ -92,8 +124,8 @@ fi
 # Phase 2 — Register plugin with codex
 # ---------------------------------------------------------------------------
 
-# 2a. Resolve codex and check availability
-CODEX_BIN="$(resolve_codex)"
+# 2a. Resolve codex and check availability (both resolved above, before the
+# dry-run preview, so the preview can name the CLI it would drive)
 if [[ -z "$CODEX_BIN" ]]; then
     echo "[tokenless] codex CLI not found — skipping plugin registration."
     echo "[tokenless] Install codex first, then run: codex plugin add ${PLUGIN_ID}"
@@ -103,25 +135,10 @@ fi
 # 2a. Create marketplace directory layout in a user-local location so
 # non-root users can run this script even when the plugin source tree
 # is installed under a root-owned prefix (e.g. /usr/share/anolisa).
-MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
-AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
-
-if [ "$DRY_RUN" = "1" ]; then
-    # Preview before the first write: a dry run must leave the marketplace tree,
-    # the plugin symlink, the manifest and the codex registrations alone.
-    echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
-    echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${MARKETPLACE_DIR}/tokenless"
-    echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
-    echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
-    echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
-    exit 0
-fi
-
 mkdir -p "$AGENTS_DIR"
 
 # Symlink plugin at marketplace root (codex resolves plugin paths relative to
 # the marketplace root, not the manifest file).
-PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
 if [[ ! -L "$PLUGIN_LINK" ]] || [[ "$(readlink "$PLUGIN_LINK")" != "$PLUGIN_SRC" ]]; then
     rm -f "$PLUGIN_LINK"
     ln -sfn "$PLUGIN_SRC" "$PLUGIN_LINK"

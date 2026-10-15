@@ -60,12 +60,20 @@ CODEX_BIN="$(resolve_codex)"
 
 if [ "$DRY_RUN" = "1" ]; then
     # Preview before the first removal: a dry run must leave the codex
-    # registrations, the marketplace tree and the component binary alone.
-    echo "DRY-RUN: ${CODEX_BIN:-codex} plugin remove tokenless@${MARKETPLACE_NAME}"
-    echo "DRY-RUN: ${CODEX_BIN:-codex} plugin marketplace remove ${MARKETPLACE_NAME}"
-    echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR}"
+    # registrations, the marketplace tree and the component binary alone. The
+    # two branches of the real path differ (the CLI one asks codex, the no-CLI
+    # one reads config.toml and refuses to guess), so the preview names the one
+    # the resolved state takes instead of claiming both.
+    if [ -n "$CODEX_BIN" ]; then
+        echo "DRY-RUN: ${CODEX_BIN} plugin remove tokenless@${MARKETPLACE_NAME} (only when it is registered)"
+        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is registered)"
+        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only once the registration is confirmed gone)"
+    else
+        echo "DRY-RUN: no codex CLI resolved: the registration cannot be queried, so nothing is removed,"
+        echo "DRY-RUN: ${MARKETPLACE_DIR} is kept, and the script exits 1 while ${CODEX_HOME:-$HOME/.codex}/config.toml still names tokenless"
+    fi
     if [ "$DEREGISTER_ONLY" = "0" ]; then
-        echo "DRY-RUN: rm -f ${BINDIR}/tokenless"
+        echo "DRY-RUN: rm -f ${BINDIR}/tokenless (interactive mode asks first; without a terminal it is kept)"
     fi
     exit 0
 fi
