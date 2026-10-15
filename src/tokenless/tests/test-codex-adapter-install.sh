@@ -147,7 +147,7 @@ else
         "DRY-RUN: cargo build --release -p tokenless-cli in $SRCDIR_EXPECTED" "$no_binary_out"
     expect_line "dry-run install previews the built binary install" \
         "DRY-RUN: install the built binary to $TOKENLESS_BIN (mode 755)" "$no_binary_out"
-    if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$STUB_LOG" ] && [ ! -e "$TOKENLESS_BIN.built" ] \
+    if [ ! -e "$MARKETPLACE_DIR" ] && [ ! -e "$STUB_LOG" ] \
             && [ ! -s "$CARGO_LOG" ]; then
         pass "a host without the binary is not built on in a dry run"
     else
@@ -208,9 +208,9 @@ expect_line "dry-run uninstall previews the plugin removal" \
 expect_line "dry-run uninstall previews the marketplace removal" \
     "DRY-RUN: $CODEX_STUB plugin marketplace remove anolisa-tokenless (only when it is registered)" "$dry_uninstall_out"
 expect_line "dry-run uninstall previews the marketplace directory removal" \
-    "DRY-RUN: rm -rf $MARKETPLACE_DIR (only once the registration is confirmed gone)" "$dry_uninstall_out"
+    "DRY-RUN: rm -rf $MARKETPLACE_DIR (only when it is there and the registration is confirmed gone)" "$dry_uninstall_out"
 expect_line "dry-run uninstall previews the binary removal" \
-    "DRY-RUN: rm -f $TOKENLESS_BIN (interactive mode asks first; without a terminal it is kept)" "$dry_uninstall_out"
+    "DRY-RUN: rm -f $TOKENLESS_BIN (only when it is there; interactive mode asks first; without a terminal it is kept)" "$dry_uninstall_out"
 if [ -L "$PLUGIN_LINK" ] && [ -f "$TOKENLESS_BIN" ] && \
         [ "$(snapshot_log)" = "$calls_before" ]; then
     pass "dry-run uninstall leaves the marketplace, the binary and the CLI alone"
@@ -233,7 +233,11 @@ TOMLEOF
 mentioned_out="$(env_for env ANOLISA_DRY_RUN=1 CODEX_BIN="$SANDBOX/bin/missing-codex" \
     bash "$UNINSTALL_SH" --non-interactive 2>&1)"
 expect_line "a no-CLI dry run with config.toml naming tokenless keeps the tree" \
-    "DRY-RUN: no codex CLI resolved and $CONFIG_TOML still names tokenless, so nothing is removed," "$mentioned_out"
+    "DRY-RUN: no codex CLI resolved and $CONFIG_TOML still names tokenless, so the real run keeps" "$mentioned_out"
+# ...but the component binary is a separate decision in the real path, which
+# removes it whenever TOKENLESS_DEREGISTER_ONLY is unset.
+expect_line "that preview still announces the binary removal" \
+    "DRY-RUN: rm -f $TOKENLESS_BIN (only when it is there; interactive mode asks first; without a terminal it is kept)" "$mentioned_out"
 expect_no_line "that preview does not announce the directory removal" \
     "rm -rf $MARKETPLACE_DIR" "$mentioned_out"
 if [ -L "$PLUGIN_LINK" ]; then
@@ -241,6 +245,23 @@ if [ -L "$PLUGIN_LINK" ]; then
 else
     fail "the dry run removed the marketplace tree"
 fi
+# The real run in the same state: directory kept, binary gone, exit 1 - the
+# contract tests/test-install-script.sh pins for this shape.
+if env_for env CODEX_BIN="$SANDBOX/bin/missing-codex" \
+        bash "$UNINSTALL_SH" --non-interactive >/dev/null 2>&1; then
+    fail "an unconfirmable registration must exit 1"
+elif [ -L "$PLUGIN_LINK" ] && [ ! -e "$TOKENLESS_BIN" ]; then
+    pass "the real run keeps the marketplace directory and still removes the binary"
+else
+    fail "the real run did not mirror its preview (link=$([ -L "$PLUGIN_LINK" ] && echo present || echo gone), binary=$([ -e "$TOKENLESS_BIN" ] && echo present || echo gone))"
+fi
+# Restore the stub binary for the scenarios below.
+cat > "$TOKENLESS_BIN" <<'STUBEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
+exit 0
+STUBEOF
+chmod +x "$TOKENLESS_BIN"
 
 # Without a record the real path does remove the directory, so the preview must
 # say so - that was the hidden `rm -rf` this branch used to omit.
@@ -248,7 +269,9 @@ rm -f "$CONFIG_TOML"
 clean_out="$(env_for env ANOLISA_DRY_RUN=1 CODEX_BIN="$SANDBOX/bin/missing-codex" \
     bash "$UNINSTALL_SH" --non-interactive 2>&1)"
 expect_line "a no-CLI dry run without a record announces the directory removal" \
-    "DRY-RUN: rm -rf $MARKETPLACE_DIR, and the real run exits 0" "$clean_out"
+    "DRY-RUN: rm -rf $MARKETPLACE_DIR (only when it is there), and the real run exits 0" "$clean_out"
+expect_line "that preview announces the binary removal as well" \
+    "DRY-RUN: rm -f $TOKENLESS_BIN (only when it is there; interactive mode asks first; without a terminal it is kept)" "$clean_out"
 if [ -L "$PLUGIN_LINK" ] && [ -f "$TOKENLESS_BIN" ]; then
     pass "the announcing dry run still removed nothing"
 else

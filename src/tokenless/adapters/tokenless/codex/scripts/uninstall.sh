@@ -64,29 +64,28 @@ if [ "$DRY_RUN" = "1" ]; then
     # two branches of the real path differ (the CLI one asks codex, the no-CLI
     # one reads config.toml and refuses to guess), so the preview names the one
     # the resolved state takes instead of claiming both.
-    # Whether the real path ends up removing anything: with a CLI it always
-    # reaches the removals, without one the config.toml read below decides.
-    previews_removal=1
     if [ -n "$CODEX_BIN" ]; then
         echo "DRY-RUN: ${CODEX_BIN} plugin remove tokenless@${MARKETPLACE_NAME} (only when it is registered)"
         echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is registered)"
-        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only once the registration is confirmed gone)"
+        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
     else
         # No CLI to ask, so the real path decides on config.toml alone; the same
-        # read-only check decides here, or the preview would report "nothing is
-        # removed" while the run deletes the marketplace directory.
+        # read-only check decides here, or the preview would report a kept
+        # directory while the run deletes it.
         codex_config="${CODEX_HOME:-$HOME/.codex}/config.toml"
         if [[ -f "$codex_config" ]] && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$codex_config" 2>/dev/null; then
-            previews_removal=0
-            echo "DRY-RUN: no codex CLI resolved and ${codex_config} still names tokenless, so nothing is removed,"
-            echo "DRY-RUN: ${MARKETPLACE_DIR} is kept, and the real run exits 1"
+            echo "DRY-RUN: no codex CLI resolved and ${codex_config} still names tokenless, so the real run keeps"
+            echo "DRY-RUN: ${MARKETPLACE_DIR} and exits 1"
         else
             echo "DRY-RUN: no codex CLI resolved and ${codex_config} records no tokenless registration:"
-            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR}, and the real run exits 0"
+            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there), and the real run exits 0"
         fi
     fi
-    if [ "$previews_removal" = "1" ] && [ "$DEREGISTER_ONLY" = "0" ]; then
-        echo "DRY-RUN: rm -f ${BINDIR}/tokenless (interactive mode asks first; without a terminal it is kept)"
+    # The component binary is a separate decision: the real path removes it
+    # whenever TOKENLESS_DEREGISTER_ONLY is unset, whether or not the
+    # registration could be confirmed, so it is previewed in every branch.
+    if [ "$DEREGISTER_ONLY" = "0" ]; then
+        echo "DRY-RUN: rm -f ${BINDIR}/tokenless (only when it is there; interactive mode asks first; without a terminal it is kept)"
     fi
     exit 0
 fi
