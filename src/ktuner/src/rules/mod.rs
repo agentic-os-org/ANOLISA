@@ -7013,9 +7013,37 @@ fn hardlockup_panic_recommendation(
 // work); rebooting the whole server on one is too aggressive a default for the
 // beginners ktuner targets.
 
-fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_rt_runtime_us";
-    if !std::path::Path::new(path).exists() {
+fn eval_sched_rt_runtime(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_sched_rt_runtime_at(
+        info,
+        recs,
+        "/proc/sys/kernel/sched_rt_runtime_us",
+        "/proc/sys/kernel/sched_rt_period_us",
+    )
+}
+
+/// Path-injectable form of [`eval_sched_rt_runtime`] (the `eval_*_at` idiom) so
+/// both reads are assertable against synthetic files.
+///
+/// The two knobs share one hand-written handler, and it validates the pair after
+/// parsing and *undoes* the write when the pair is invalid: a runtime other than
+/// -1 that exceeds the period is rejected with -EINVAL and the previous values
+/// are restored (v6.6 kernel/sched/rt.c, `sched_rt_global_validate` and the
+/// `undo:` label in `sched_rt_handler`). The literal 950000 - 95% of the default
+/// 1000000 us period - is therefore refused outright on a host whose period was
+/// shortened: the write fails, the old value stays, and the report still counts
+/// the High-confidence security fix as available.
+///
+/// The target keeps the same 95% of whatever period the host runs. When the
+/// period cannot be read, no target can be shown to be acceptable, so the rule
+/// stays silent rather than asking for a write the kernel would refuse.
+fn eval_sched_rt_runtime_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    period_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     let current = std::fs::read_to_string(path)
@@ -7023,17 +7051,33 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
         .trim()
         .parse::<i64>()
         .unwrap_or(950000);
-    if current == -1 {
-        recs.push(Recommendation {
-            param: "kernel.sched_rt_runtime_us".to_string(),
-            current_value: "-1".to_string(),
-            recommended_value: "950000".to_string(),
-            reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
+    if current != -1 {
+        return 1;
     }
+    // A read failure parses to 0, which is not a period any host runs: only a
+    // value the kernel could have produced justifies a target.
+    let period = std::fs::read_to_string(period_path)
+        .unwrap_or_default()
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0);
+    if period <= 0 {
+        return 1;
+    }
+    let target = if period >= 950_000 {
+        950_000
+    } else {
+        period - period / 20
+    };
+    recs.push(Recommendation {
+        param: "kernel.sched_rt_runtime_us".to_string(),
+        current_value: "-1".to_string(),
+        recommended_value: target.to_string(),
+        reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    });
     1
 }
 
@@ -10348,6 +10392,55 @@ fn congestion_algo_available(available: &str, algo: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rt_runtime_target_follows_the_hosts_period() {
+        // `sched_rt_handler` rejects (and undoes) a runtime above the period, so
+        // the literal 950000 is not applicable on a host that shortened its
+        // period; the target keeps the default pair's ratio instead.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_rt_runtime_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("runtime");
+        let period = dir.join("period");
+        std::fs::write(&runtime, b"-1\n").unwrap();
+
+        let info = make_test_info();
+        let advice = |period_value: &[u8]| {
+            std::fs::write(&period, period_value).unwrap();
+            let mut recs = Vec::new();
+            eval_sched_rt_runtime_at(
+                &info,
+                &mut recs,
+                runtime.to_str().unwrap(),
+                period.to_str().unwrap(),
+            );
+            recs
+        };
+
+        // The default pair: the historical target, unchanged.
+        let recs = advice(b"1000000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "950000");
+
+        // A shortened period: 95% of it, a value the kernel accepts.
+        let recs = advice(b"500000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "475000");
+
+        // An unreadable period is not a period: no target can be shown valid.
+        let recs = advice(b"");
+        assert!(recs.is_empty(), "an unreadable period must not be guessed");
+
+        // A bounded runtime is not the finding, whatever the period says.
+        std::fs::write(&runtime, b"950000\n").unwrap();
+        assert!(advice(b"1000000\n").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn bbr_availability_requires_an_exact_algorithm_token() {
