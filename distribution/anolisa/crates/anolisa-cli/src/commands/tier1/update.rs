@@ -3967,6 +3967,73 @@ sha256 = "{sha}"
         );
     }
 
+    #[test]
+    fn raw_update_refuses_new_conflict_before_replacing_files() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body = b"old v1 binary\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+        let layout = common::resolve_layout(&c);
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut store = load_store(&c);
+        let mut other = find_component(&c, "foo");
+        other.name = "bar".to_string();
+        if let ProviderBinding::Owned { artifact } = &mut other.binding {
+            artifact.files.clear();
+        }
+        store.upsert(other);
+        store
+            .save(&state_path)
+            .expect("record incompatible component");
+
+        let new_manifest = raw_manifest("foo", "0.2.0").replace(
+            "version = \"0.2.0\"",
+            "version = \"0.2.0\"\nconflicts = [\"bar\"]",
+        );
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &tar_gz(&[
+                (".anolisa/component.toml", new_manifest.as_bytes()),
+                ("bin/foo", b"new incompatible binary\n"),
+            ]),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("an update must honor the new manifest's conflicts");
+        assert!(
+            err.reason()
+                .contains("conflicts with installed component 'bar'")
+        );
+        assert_eq!(std::fs::read(layout.bin_dir.join("foo")).unwrap(), old_body);
+        assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.1.0");
+        assert!(load_store(&c).find(ObjectKind::Component, "bar").is_some());
+        assert_eq!(
+            std::fs::read_to_string(FsLayout::component_manifest_snapshot_path(
+                &layout.state_dir,
+                "foo",
+            ))
+            .expect("read preserved manifest"),
+            raw_manifest("foo", "0.1.0")
+        );
+
+        let mut store = load_store(&c);
+        assert!(store.remove(ObjectKind::Component, "bar"));
+        store
+            .save(&state_path)
+            .expect("remove incompatible component");
+        update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect("the same update must succeed after resolving the conflict");
+        assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.2.0");
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).unwrap(),
+            b"new incompatible binary\n"
+        );
+    }
+
     /// When the recorded version already matches the latest published version,
     /// update is a clean no-op (U2): no file or state change, no operation
     /// recorded.

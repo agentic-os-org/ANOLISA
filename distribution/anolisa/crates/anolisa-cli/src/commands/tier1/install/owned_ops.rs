@@ -321,6 +321,9 @@ impl OwnedOps for RawReplayOps<'_> {
                         "failed to parse component manifest for preflight: {err}"
                     ))
                 })?;
+            if let Some(reason) = component_conflict(&manifest, self.store) {
+                return Err(OwnedOpError(reason));
+            }
             warnings = super::provision::run_runtime_preflight(&manifest, &self.env, "update")
                 .map_err(|err| OwnedOpError(err.reason()))?;
         }
