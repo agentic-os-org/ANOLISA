@@ -70,38 +70,48 @@ elif [[ -x /usr/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/bin/tokenless"
 fi
 
+# Resolved here so the preview and the real path cannot drift apart: the
+# assignment has no side effects and `cd` only fails when the directory is
+# missing, which the preview reports instead of promising a build.
+if [[ -n "${TOKENLESS_SOURCE_DIR:-}" ]]; then
+    SRCDIR="$TOKENLESS_SOURCE_DIR"
+else
+    SRCDIR="$(cd "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd || printf '%s' "$SCRIPT_DIR/../../../..")"
+fi
+
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 if [ "$DRY_RUN" = "1" ]; then
-    # Preview before the first write: with no tokenless binary on the host,
-    # Phase 1 builds and installs one, and Phase 2 writes the marketplace tree
-    # and drives the CLI registrations. None of that may happen in a dry run.
+    # Preview before the first write, in the order the real path acts and only
+    # where it would act: Phase 1 builds and installs a binary when the host has
+    # none and a source tree exists, Phase 2 writes the marketplace tree and
+    # drives the CLI registrations, and a host without the codex CLI reaches
+    # neither of the last two.
     if [[ -z "$TOKENLESS_BIN" ]]; then
-        echo "DRY-RUN: cargo build --release -p tokenless-cli in $(cd "${TOKENLESS_SOURCE_DIR:-$SCRIPT_DIR/../../../..}" && pwd)"
-        echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
+        if [[ -f "$SRCDIR/Cargo.toml" ]]; then
+            echo "DRY-RUN: cargo build --release -p tokenless-cli in ${SRCDIR}"
+            echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
+        else
+            echo "DRY-RUN: no tokenless binary and no source tree at ${SRCDIR}: the real run exits 1"
+        fi
     else
         echo "DRY-RUN: keep the existing tokenless binary ${TOKENLESS_BIN}"
     fi
     if [[ -n "$CODEX_BIN" ]]; then
+        echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
+        echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${PLUGIN_LINK}"
+        echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
         echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is already registered)"
         echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
         echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
     else
-        echo "DRY-RUN: no codex CLI found, so the registration would be skipped"
+        echo "DRY-RUN: no codex CLI found, so the registration and the marketplace directory are both skipped"
     fi
-    echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
-    echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${PLUGIN_LINK}"
-    echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
     exit 0
 fi
 
 if [[ -z "$TOKENLESS_BIN" ]]; then
-    # No binary — try building from source (dev scenario)
-    if [[ -n "${TOKENLESS_SOURCE_DIR:-}" ]]; then
-        SRCDIR="$TOKENLESS_SOURCE_DIR"
-    else
-        SRCDIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-    fi
-
+    # No binary — try building from source (dev scenario). SRCDIR is resolved
+    # above the dry-run guard so both paths agree on the directory.
     if [[ ! -f "$SRCDIR/Cargo.toml" ]]; then
         echo "[tokenless] ERROR: tokenless binary not found and no source tree at $SRCDIR" >&2
         echo "[tokenless] Install the tokenless RPM package first:" >&2
