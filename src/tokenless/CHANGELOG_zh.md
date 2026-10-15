@@ -9,6 +9,17 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.7] - 2026-10-15
+
+### 修复
+
+- 当 JSON 响应包含解析时无法保持精确数值的数字时，保留完整原文；仅在解码能恢复相同数值和类型时使用 TOON 转换，避免静默丢失数值精度（[#7069](https://github.com/agentic-os-org/ANOLISA/pull/7069)）。
+- OpenCode Schema 压缩保留可执行的参数校验器，仅修改发送给模型的 JSON Schema；只提供运行时 codec 的旧版宿主会跳过 Schema 压缩（[#7048](https://github.com/agentic-os-org/ANOLISA/pull/7048)）。
+- Qwen Code 和 OpenCode 卸载脚本遵守 `ANOLISA_DRY_RUN=1`，仅预览移除操作，不删除插件注册或修改启用设置（[#7348](https://github.com/agentic-os-org/ANOLISA/pull/7348)）。
+- 压缩与检索在统计数据库无法打开时发出告警，同时继续返回正常结果；遗漏的统计不会重试或重放（[#7395](https://github.com/agentic-os-org/ANOLISA/pull/7395)）。
+- Selective-Claw 将归档摘要与当前对话窗口的召回 ID 正确对应，不再用不完整或被改写轮次的摘要覆盖无关归档摘要（[#7042](https://github.com/agentic-os-org/ANOLISA/pull/7042)）。
+- 发布校验接受规范化的 Python 预发布 wheel 文件名，同时独立校验原始 release tag 拼写，并拒绝 pip 无法安装的文件名（[#5271](https://github.com/agentic-os-org/ANOLISA/pull/5271)）。
+
 ## [0.8.6] - 2026-10-14
 
 ### 新增

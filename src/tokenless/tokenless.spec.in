@@ -534,7 +534,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Oct 14 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Oct 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Preserve exact JSON values and OpenCode parameter validators
+- Honor Qwen Code and OpenCode uninstall dry runs
+- Warn on stats initialization failures without blocking results
+- Align Selective-Claw summaries with current recall IDs
+- Validate normalized prerelease wheel filenames
+
+* Wed Oct 14 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.6-1
 - Add the QwenWork local-mode adapter
 - Deliver OpenClaw compression before model continuation; require OpenClaw 2026.6.6
 - Preserve HTML code spans, sed source reads and macOS RTK results

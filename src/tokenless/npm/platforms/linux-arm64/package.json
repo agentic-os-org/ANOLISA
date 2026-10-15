@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/tokenless-linux-arm64",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "private": true,
   "description": "Token-Less native binaries for Linux aarch64",
   "license": "Apache-2.0",

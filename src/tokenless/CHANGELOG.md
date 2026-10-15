@@ -9,6 +9,17 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-15
+
+### Fixed
+
+- JSON responses containing numbers that cannot retain their exact value during parsing now pass through unchanged. TOON conversion is used only when decoding preserves the same values and types, preventing silent numeric precision loss ([#7069](https://github.com/agentic-os-org/ANOLISA/pull/7069)).
+- OpenCode schema compression now preserves executable parameter validators and modifies only the model-facing JSON schema. Older hosts exposing only a runtime codec skip schema compression ([#7048](https://github.com/agentic-os-org/ANOLISA/pull/7048)).
+- Qwen Code and OpenCode uninstall scripts now honor `ANOLISA_DRY_RUN=1`, previewing removals without deleting plugin registrations or changing enablement settings ([#7348](https://github.com/agentic-os-org/ANOLISA/pull/7348)).
+- Compression and retrieval now warn when the statistics database cannot be opened while continuing to return their normal output. Missed statistics are not retried or replayed ([#7395](https://github.com/agentic-os-org/ANOLISA/pull/7395)).
+- Selective-Claw now aligns archived summaries with the current conversation window's recall IDs. Partial or rewritten turns no longer overwrite unrelated archived summaries ([#7042](https://github.com/agentic-os-org/ANOLISA/pull/7042)).
+- Release validation now accepts normalized Python prerelease wheel filenames while checking the original release-tag spelling separately, and rejects filenames that pip cannot install ([#5271](https://github.com/agentic-os-org/ANOLISA/pull/5271)).
+
 ## [0.8.6] - 2026-10-14
 
 ### Added
