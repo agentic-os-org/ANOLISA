@@ -5975,6 +5975,12 @@ fn eval_admin_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 /// headroom does not exist, so the write cannot change any allocation —
 /// the sibling [`overcommit_ratio_recommendation`] gate already keys on the
 /// same `oc_mode == 2` condition.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
 fn eval_admin_reserve_kbytes_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -5990,7 +5996,9 @@ fn eval_admin_reserve_kbytes_at(
     if !overcommit_reserves_are_live(overcommit_path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 131072 {
         recs.push(Recommendation {
             param: "vm.admin_reserve_kbytes".to_string(),
@@ -16445,6 +16453,42 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 10 is below the floor");
         assert_eq!(recs[0].current_value, "10");
         assert!(advice(&high).is_empty(), "a readable 200 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn admin_reserve_kbytes_advice_needs_a_readable_value() {
+        // The rule fires below 131072, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("admin_reserve_kbytes", b"131072\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"8192\n").unwrap();
+        let info = make_test_info();
+        let mode = high.with_file_name("overcommit_never");
+        std::fs::write(&mode, b"2\n").unwrap();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_admin_reserve_kbytes_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                mode.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 8192 is below the floor");
+        assert_eq!(recs[0].current_value, "8192");
+        assert!(advice(&high).is_empty(), "a readable 131072 is not");
         for path in &others {
             assert!(
                 advice(path).is_empty(),
