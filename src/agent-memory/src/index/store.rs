@@ -258,6 +258,21 @@ impl BM25Store {
         Ok(())
     }
 
+    /// Remove one file's metadata, text, and vector without matching descendants.
+    /// Unlike `remove`, exact matching cannot evict wildcard- or case-alike
+    /// neighbors. Use for known regular files; returns whether any row existed.
+    pub(super) fn remove_file(&mut self, rel_path: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM files_fts WHERE rowid IN (SELECT rowid FROM files WHERE path = ?1)",
+            params![rel_path],
+        )?;
+        let files = tx.execute("DELETE FROM files WHERE path = ?1", params![rel_path])?;
+        let vectors = tx.execute("DELETE FROM files_vec WHERE path = ?1", params![rel_path])?;
+        tx.commit()?;
+        Ok(files > 0 || vectors > 0)
+    }
+
     /// Remove a file's index entry. Returns true if any row existed.
     ///
     /// Cascade semantics: if `rel_path` matches a stored row exactly, that
@@ -1313,6 +1328,21 @@ fn add_superseded_frontmatter(path: &std::path::Path, new_id: &str) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_file_reports_only_actual_evictions() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        assert!(!store.remove_file("missing.md").unwrap());
+        store.upsert("text.md", 0, 4, "text", None).unwrap();
+        assert!(store.remove_file("text.md").unwrap());
+        assert!(!store.remove_file("text.md").unwrap());
+
+        // Vector cleanup remains unconditional even without file metadata.
+        store.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+        assert!(store.remove_file("vector.md").unwrap());
+        assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        assert!(!store.remove_file("vector.md").unwrap());
+    }
 
     #[test]
     fn upsert_search_remove_roundtrip() {
