@@ -7561,23 +7561,49 @@ fn eval_sched_wakeup_granularity(info: &SystemInfo, recs: &mut Vec<Recommendatio
     if info.cpu_cores <= 16 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 3000000 {
-        recs.push(Recommendation {
-            param: "kernel.sched_wakeup_granularity_ns".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "3000000".to_string(),
-            reason: format!(
-                "{}核 CPU 唤醒粒度 {}ms 过大，降低可减少调度延迟提升响应速度",
-                info.cpu_cores,
-                current / 1000000
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = sched_wakeup_granularity_recommendation(
+        read_sysctl_u64(path),
+        info.cpu_cores,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_wakeup_granularity_ns` recommendation for an
+/// already-read value; split from the file probe so the version gate is
+/// testable anywhere.
+///
+/// Linux 5.13 moved the SCHED_DEBUG tunables out of sysctl into debugfs
+/// (commit 8a99b6833c88), so the wakeup granularity this reason sizes has had
+/// no `/proc/sys` node since — the CFS variables are exported as
+/// `/sys/kernel/debug/sched/*` only (v6.6 kernel/sched/debug.c). A node under
+/// the old name exists only where a vendor tree re-registered it for another
+/// class (the `CONFIG_BT_SCHED` batch variables in kernel/sysctl.c), and no
+/// code in such a tree reads that variable: the write lands nowhere while the
+/// report claims the wakeup latency was lowered. Silence the rule from 5.13 on,
+/// the way the knobs whose reader moved are silenced.
+fn sched_wakeup_granularity_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current <= 3_000_000 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_wakeup_granularity_ns".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "3000000".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 唤醒粒度 {}ms 过大，降低可减少调度延迟提升响应速度",
+            current / 1000000
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_extfrag_threshold(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -17062,6 +17088,24 @@ mod tests {
         {
             assert_eq!(rec.recommended_value, "3000000");
         }
+    }
+
+    #[test]
+    fn sched_wakeup_granularity_advice_stops_where_its_reader_moved() {
+        // 5.13 moved the SCHED_DEBUG tunables into debugfs (8a99b6833c88); a
+        // /proc/sys node under the old name is then either absent (stock, which
+        // the file probe already covers) or wired to a vendor scheduler class
+        // nothing reads.
+        assert!(
+            sched_wakeup_granularity_recommendation(4_000_000, 64, "5.10.0-26-amd64").is_some()
+        );
+        assert!(sched_wakeup_granularity_recommendation(4_000_000, 64, "5.4.0-150").is_some());
+        assert!(sched_wakeup_granularity_recommendation(4_000_000, 64, "5.13.0").is_none());
+        assert!(sched_wakeup_granularity_recommendation(4_000_000, 64, "6.6.87.2").is_none());
+        // Unparseable versions keep the legacy behaviour, and the value gate is
+        // unchanged: 3 ms is already the target.
+        assert!(sched_wakeup_granularity_recommendation(4_000_000, 64, "").is_some());
+        assert!(sched_wakeup_granularity_recommendation(3_000_000, 64, "5.10.0").is_none());
     }
 
     #[test]
