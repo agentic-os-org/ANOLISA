@@ -61,8 +61,9 @@ typedef void (*agentsight_https_callback_fn)(const AgentsightHttpsData *data, vo
 typedef void (*agentsight_llm_callback_fn)(const AgentsightLLMData *data, void *user_data);
 typedef void (*agentsight_event_callback_fn)(const AgentsightEvent *data, void *user_data);
 
-/* ---- Error handling ---- */
+/* ---- Error handling and ABI-safe optional field access ---- */
 const char *agentsight_last_error(void);
+const char *agentsight_llm_binding_id(const AgentsightLLMData *data);
 
 /* ---- Configuration ---- */
 AgentsightConfigHandle *agentsight_config_new(void);

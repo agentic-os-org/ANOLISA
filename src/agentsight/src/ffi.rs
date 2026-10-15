@@ -303,6 +303,8 @@ pub struct AgentsightLLMData {
     /// is kept (inclusive). JSON array of InputMessage.
     pub input_message_delta: *const c_char,
     pub input_message_delta_len: u32,
+    /// Enforcer binding id shared with security events. Null when unknown.
+    pub binding_id: *const c_char,
 }
 
 /// Stable discriminator for the versioned generic event envelope.
@@ -394,6 +396,7 @@ struct LlmDataHolder {
     _resp_messages: CString,
     _tools: CString,
     _input_message_delta: CString,
+    _binding_id: Option<CString>,
 }
 
 struct EventDataHolder {
@@ -554,6 +557,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("conversation_id")
         .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
+    let binding_id = call.metadata.get("binding_id").map(|s| safe_cstring(s));
     // Normalize agent_name to lowercase at the FFI boundary so C consumers
     // observe a consistent value regardless of config-file casing.
     let agent_name = call
@@ -678,6 +682,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         tools_len: tools_json.len() as u32,
         input_message_delta: input_message_delta.as_ptr(),
         input_message_delta_len: input_message_delta_json.len() as u32,
+        binding_id: binding_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
     };
 
     LlmDataHolder {
@@ -695,6 +700,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         _resp_messages: resp_messages,
         _tools: tools,
         _input_message_delta: input_message_delta,
+        _binding_id: binding_id,
     }
 }
 
@@ -759,6 +765,25 @@ unsafe fn dispatch_event_v2(
 #[unsafe(no_mangle)]
 pub extern "C" fn agentsight_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
+}
+
+/// Returns the optional enforcement binding id carried by one LLM callback payload.
+///
+/// This accessor lets consumers built with an older struct declaration read the appended field
+/// without assuming the runtime library's `AgentsightLLMData` size.
+///
+/// # Safety
+///
+/// `data` must be null or point to an `AgentsightLLMData` supplied by the same loaded library. The
+/// returned string is owned by that payload and remains valid only for the callback duration.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_llm_binding_id(
+    data: *const AgentsightLLMData,
+) -> *const c_char {
+    if data.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*data).binding_id }
 }
 
 // ---- Configuration ----
@@ -2193,6 +2218,44 @@ mod tests {
     fn test_build_llm_data_agent_name_none_is_null() {
         let holder = build_llm_data(&make_llm_call(None, 1234));
         assert!(holder.c_data.agent_name.is_null());
+    }
+
+    #[test]
+    fn test_build_llm_data_exposes_binding_id() {
+        let binding_id = Uuid::new_v4().to_string();
+        let mut call = make_llm_call(None, 1234);
+        call.metadata
+            .insert("binding_id".to_string(), binding_id.clone());
+
+        let holder = build_llm_data(&call);
+
+        assert!(!holder.c_data.binding_id.is_null());
+        let actual = unsafe { CStr::from_ptr(holder.c_data.binding_id) };
+        assert_eq!(actual.to_str().unwrap(), binding_id);
+    }
+
+    #[test]
+    fn test_build_llm_data_binding_id_none_is_null() {
+        let holder = build_llm_data(&make_llm_call(None, 1234));
+        assert!(holder.c_data.binding_id.is_null());
+    }
+
+    #[test]
+    fn test_llm_binding_accessor_is_null_safe_and_returns_the_appended_field() {
+        assert!(unsafe { agentsight_llm_binding_id(ptr::null()) }.is_null());
+
+        let binding_id = Uuid::new_v4().to_string();
+        let mut call = make_llm_call(None, 1234);
+        call.metadata
+            .insert("binding_id".to_string(), binding_id.clone());
+        let holder = build_llm_data(&call);
+        let actual = unsafe { agentsight_llm_binding_id(&holder.c_data) };
+
+        assert!(!actual.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(actual) }.to_str().unwrap(),
+            binding_id
+        );
     }
 
     /// A call captured over plaintext h2c records `url.scheme: http`; the

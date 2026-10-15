@@ -91,6 +91,13 @@ Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
 built from source.
 
+When an LLM call's PID and process start time exactly match an enforced binding's root process,
+AgentSight adds the same `agentsight.binding.id` to Logtail and C FFI output. This key joins model
+calls to normalized security events without relying on independently generated session IDs. Bindings
+refresh from the local enforcer every 30 seconds, so a new binding may take that long to appear;
+after 90 seconds without a successful refresh the cached snapshot is discarded. Descendant-process
+matching is not inferred.
+
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
 

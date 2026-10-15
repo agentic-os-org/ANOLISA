@@ -81,6 +81,11 @@ typedef struct {
        去掉 system 消息后，保留从最后一个 user 消息开始（含）到末尾的部分 */
     const char* input_message_delta;
     uint32_t    input_message_delta_len;
+
+    /* 与同一 root 进程 security event 共享的 enforcer binding UUID；未知时为 NULL。
+       字段追加在结构体尾部，旧调用方仍可按原 layout 读取前缀字段。使用本字段的
+       新调用方必须加载包含该字段的同版或更新版 libagentsight.so。 */
+    const char* binding_id;
 } AgentsightLLMData;
 
 typedef enum {
@@ -124,6 +129,9 @@ void agentsight_config_free(AgentsightConfigHandle* cfg);
 typedef void (*agentsight_https_callback_fn)(const AgentsightHttpsData* data, void* user_data);
 typedef void (*agentsight_llm_callback_fn)(const AgentsightLLMData* data, void* user_data);
 typedef void (*agentsight_event_callback_fn)(const AgentsightEvent* data, void* user_data);
+
+/* 旧 header 编译的调用方用可选符号安全读取尾部 binding_id；旧 .so 不导出该符号。 */
+const char* agentsight_llm_binding_id(const AgentsightLLMData* data);
 
 /* ---- 生命周期 ---- */
 AgentsightHandle* agentsight_new(AgentsightConfigHandle* cfg);
