@@ -9308,12 +9308,25 @@ fn eval_tcp_available_ulp(info: &SystemInfo, _recs: &mut Vec<Recommendation>) ->
     1
 }
 
-fn eval_keys_maxbytes(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/keys/maxbytes";
+fn eval_keys_maxbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_keys_maxbytes_at(info, recs, "/proc/sys/kernel/keys/maxbytes")
+}
+
+/// Path-injectable form of [`eval_keys_maxbytes`] (the `eval_*_at` idiom) so
+/// the read is assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
+fn eval_keys_maxbytes_at(_info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 25000 {
         recs.push(Recommendation {
             param: "kernel.keys.maxbytes".to_string(),
@@ -19364,6 +19377,35 @@ mod tests {
             .find(|r| r.param == "net.ipv4.neigh.default.gc_stale_time")
         {
             assert_eq!(rec.recommended_value, "120");
+        }
+    }
+
+    #[test]
+    fn keys_maxbytes_advice_needs_a_readable_value() {
+        // The rule fires below 25000, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("keys_maxbytes", b"25000\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"20000\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_keys_maxbytes_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 20000 is below the floor");
+        assert_eq!(recs[0].current_value, "20000");
+        assert!(advice(&high).is_empty(), "a readable 25000 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
         }
     }
 
