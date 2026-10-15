@@ -65,6 +65,34 @@ Enabled unsupported events, exact tool selectors, guards, `ask`, input-replaceme
 effects and guarantees beyond `native_hook` are rejected. The
 [protocol design](provider-protocol.md) defines the complete admission contract.
 
+## Adapter execution semantics
+
+For admitted `tool.after` chains with one final replacement, the following table
+separates native scheduling from AW's configured step order. Hooks outside the AW
+chain retain their native scheduling.
+
+| Framework | Native ordering | Replacement seam | Result seen by AW observers | AW orders inside the service | Completion/correlation seam |
+| --- | --- | --- | --- | --- | --- |
+| Qoder | Parallel callbacks, or explicitly configured native `sequential` | `PostToolUse` returns `hookSpecificOutput.updatedToolOutput` | Original callback result | Yes: preceding AW attempts finish before the next step; external Hooks are not serialized | Independent callbacks share the same immutable native input and event handle |
+| OpenClaw | Result middleware precedes completion; native after handlers run concurrently | `registerAgentToolResultMiddleware` | Sanitized pre-compression result, with native completion metadata | No: the plugin runs AW observers serially at completion, after replacement | Original middleware snapshot binds replacement and observation; the first completion view is pinned |
+| QwenPaw | Acting middleware unwinds in reverse registration order | Final `ToolResponse` returned by `on_acting` | Original completed result | No: reverse registration makes AW observers unwind in configured order before replacement | Callbacks share the completed response and tool-call identity; intermediate chunks are not projected |
+| Hermes | Completion callbacks precede the final result transform | `transform_tool_result` returns the final string | Original completion result | No: native callback registration preserves the AW observer order | `post_tool_call` and `transform_tool_result` share a binding that normalizes only the seam name and observer-only middleware trace |
+
+Every row shares one event deadline and once-only step claims. A reported failure
+does not renew the budget; Qoder releases successors after failed attempts, while
+missing callbacks leave an event to expire. The service has explicit Qoder
+ordering and OpenClaw/Hermes correlation branches; this is the current supported
+adapter contract, not a framework-independent scheduling guarantee. See the
+[shared event lifecycle](local-service.md#shared-event-lifetime) for binding and
+cancellation details.
+
+The executable contracts are in
+[`posttool.rs`](../../crates/aw-service/tests/posttool.rs),
+[`openclaw.mjs`](../../crates/aw-service/tests/openclaw.mjs), and the native
+[QwenPaw](../../crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py) and
+[Hermes](../../crates/aw-service/tests/fixtures/hermes/native_contract.py) fixtures.
+Fixture success alone does not establish real-model adoption.
+
 ## Default invoke-only hooks
 
 A boolean hook uses only `invoke`, optionally omitted from its step. The Host

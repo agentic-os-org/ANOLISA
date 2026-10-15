@@ -55,6 +55,30 @@ Agent 已采用策略。准入范围仍为：
 启用但不受支持的事件、精确工具选择器、guard、`ask`、输入替换效果及超出
 `native_hook` 的保证均被拒绝。完整准入合同见[协议设计](provider-protocol_zh.md)。
 
+## Adapter 执行语义
+
+对于已准入且包含一个末尾替换步骤的 `tool.after` 链，下表区分原生调度与 AW 配置
+步骤顺序。AW 链之外的 Hook 保留原生调度。
+
+| 框架 | 原生顺序 | 替换点位 | AW 观察步骤看到的结果 | AW 是否在服务内部排序 | 完成/关联点位 |
+| --- | --- | --- | --- | --- | --- |
+| Qoder | 回调并行，或显式配置原生 `sequential` | `PostToolUse` 返回 `hookSpecificOutput.updatedToolOutput` | 原始回调结果 | 是：此前 AW 步骤尝试结束后执行下一步，不串行化外部 Hook | 独立回调共享不可变原生输入和事件句柄 |
+| OpenClaw | 结果 middleware 先于完成事件，原生 after handler 并发执行 | `registerAgentToolResultMiddleware` | 压缩前结果的脱敏视图，以及原生完成元数据 | 否：插件在替换后的完成阶段串行执行 AW 观察步骤 | 原始 middleware 快照绑定替换和观察阶段，首次完成视图被固定 |
+| QwenPaw | Acting middleware 按注册顺序逆序返回 | `on_acting` 返回的最终 `ToolResponse` | 原始完成结果 | 否：反向注册使 AW 观察步骤按配置顺序返回，再执行替换 | 回调共享完成响应和工具调用身份，中间块不投影 |
+| Hermes | 完成回调先于最终结果转换 | `transform_tool_result` 返回最终字符串 | 原始完成结果 | 否：原生回调注册保留 AW 观察步骤顺序 | `post_tool_call` 和 `transform_tool_result` 共享绑定，仅归一化点位名称和观察阶段独有的 middleware trace |
+
+每种框架均共享一个事件截止时间和步骤单次执行声明。已报告的失败不会延长预算；
+Qoder 在失败尝试结束后释放后续步骤，缺失回调则让事件过期。服务中存在显式的 Qoder
+排序及 OpenClaw/Hermes 关联分支；这是当前受支持 Adapter 的合同，不是与框架无关的
+调度保证。绑定和取消细节见[共享事件生命周期](local-service_zh.md#共享事件生命周期)。
+
+可执行合同位于
+[`posttool.rs`](../../crates/aw-service/tests/posttool.rs)、
+[`openclaw.mjs`](../../crates/aw-service/tests/openclaw.mjs)，以及原生
+[QwenPaw](../../crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py) 和
+[Hermes](../../crates/aw-service/tests/fixtures/hermes/native_contract.py) fixture。
+Fixture 通过本身不证明真实模型采用。
+
 ## 缺省只调用 invoke 的 Hook
 
 布尔 Hook 只使用 `invoke`，步骤中也可省略。Host 在内部绑定并校验调用，只将
