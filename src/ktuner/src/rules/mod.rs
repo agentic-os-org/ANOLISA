@@ -10204,9 +10204,30 @@ fn eval_hung_task_warnings_at(
 }
 
 fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let oc_path = "/proc/sys/vm/overcommit_memory";
-    let ratio_path = "/proc/sys/vm/overcommit_ratio";
-    let kbytes_path = "/proc/sys/vm/overcommit_kbytes";
+    eval_overcommit_ratio_at(
+        info,
+        recs,
+        "/proc/sys/vm/overcommit_ratio",
+        "/proc/sys/vm/overcommit_memory",
+        "/proc/sys/vm/overcommit_kbytes",
+    )
+}
+
+/// Path-injectable form of [`eval_overcommit_ratio`] (the `eval_*_at` idiom)
+/// so the reads are assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below it. Only a value the reader could
+/// produce is evidence that the ratio is low, so a masked or garbled proc
+/// entry (a container's, typically) neither reports a `current_value` the
+/// host does not have nor asks for a write it may not need.
+fn eval_overcommit_ratio_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    ratio_path: &str,
+    oc_path: &str,
+    kbytes_path: &str,
+) -> usize {
     if !std::path::Path::new(ratio_path).exists() {
         return 1;
     }
@@ -10214,13 +10235,19 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
     if oc_mode != 2 {
         return 1;
     }
-    let ratio = read_sysctl_u64(ratio_path);
+    let Some(ratio) = read_switch(ratio_path) else {
+        return 1;
+    };
     // The ratio reads 0 while its counterpart holds the commit limit, so the
     // probe has to hand the value branch that counterpart to tell "disabled"
     // apart from "too low". A kernel without the kbytes file reports 0, which
-    // leaves the ratio advice exactly as it was.
+    // leaves the ratio advice exactly as it was; a kbytes file that exists but
+    // cannot be read says nothing about which of the two is in charge.
     let kbytes = if std::path::Path::new(kbytes_path).exists() {
-        read_sysctl_u64(kbytes_path)
+        let Some(kbytes) = read_switch(kbytes_path) else {
+            return 1;
+        };
+        kbytes
     } else {
         0
     };
@@ -11089,6 +11116,54 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overcommit_ratio_advice_needs_a_readable_value() {
+        // The rule fires below 80, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose ratio was never read. The
+        // kbytes counterpart decides whether a 0 ratio is in charge at all, so
+        // an unreadable one cannot vouch for the ratio either.
+        let (_, high, others) = zero_switch_paths("overcommit_ratio", b"80\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"50\n").unwrap();
+        let never = high.with_file_name("overcommit_memory");
+        std::fs::write(&never, b"2\n").unwrap();
+        let kbytes = high.with_file_name("overcommit_kbytes");
+        std::fs::write(&kbytes, b"0\n").unwrap();
+        let info = info_with_processes(&["postgres"]);
+        let advice = |ratio: &std::path::Path, kbytes: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_overcommit_ratio_at(
+                &info,
+                &mut recs,
+                ratio.to_str().unwrap(),
+                never.to_str().unwrap(),
+                kbytes.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&low, &kbytes);
+        assert_eq!(recs.len(), 1, "a readable 50 is below the floor");
+        assert_eq!(recs[0].current_value, "50");
+        assert!(advice(&high, &kbytes).is_empty(), "a readable 80 is not");
+        for path in &others {
+            assert!(
+                advice(path, &kbytes).is_empty(),
+                "{}: an unreadable ratio is not 0",
+                path.display()
+            );
+            if path.exists() {
+                assert!(
+                    advice(&low, path).is_empty(),
+                    "{}: an unreadable kbytes cannot vouch for the ratio",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]
