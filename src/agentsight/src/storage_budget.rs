@@ -138,7 +138,10 @@ fn read_cap_from_file(path: &Path) -> Option<u64> {
         storage: Option<StorageProbe>,
     }
     let content = std::fs::read_to_string(path).ok()?;
-    let probe: ConfigProbe = serde_json::from_str(&content).ok()?;
+    // The startup loader accepts one leading UTF-8 BOM, so the hot read must
+    // too, or a marked file keeps its startup cap through every edit.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let probe: ConfigProbe = serde_json::from_str(content).ok()?;
     probe.storage.and_then(|storage| storage.max_total_size_mb)
 }
 
@@ -317,6 +320,28 @@ mod tests {
         assert_eq!(budget.cap_mb(), 9);
         std::fs::write(&config_path, r#"{"storage": {"max_total_size_mb": 8}}"#).unwrap();
         assert_eq!(budget.cap_mb(), 9);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn cap_is_hot_read_from_a_bom_prefixed_config_file() {
+        // A Windows editor saving "UTF-8 with BOM" prefixes the file with
+        // U+FEFF, and the startup loader accepts that file. The hot read must
+        // see the same edit, not keep the startup value forever.
+        let base = unique_dir("hot-reload-bom");
+        let config_path = base.join("config.json");
+        let storage = StorageConfig {
+            base_path: base.clone(),
+            max_total_size_mb: 100,
+            ..StorageConfig::default()
+        };
+        std::fs::write(
+            &config_path,
+            "\u{feff}{\"storage\": {\"max_total_size_mb\": 9}}",
+        )
+        .unwrap();
+        let budget = StorageBudget::new(Some(config_path.clone()), &storage);
+        assert_eq!(budget.cap_mb(), 9, "a BOM must not hide the edited cap");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
