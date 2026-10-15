@@ -21,7 +21,8 @@ mod tests;
 use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{BatchConfig, PeriodicStoragePolicy};
@@ -79,9 +80,31 @@ pub struct GenAISqliteStore {
     last_flush: Mutex<Instant>,
     /// Retention and capacity settings supplied by the owning runtime.
     storage_policy: PeriodicStoragePolicy,
+    /// Background maintenance yields to capture instead of waiting for write locks.
+    maintenance_only: bool,
+    capture_priority: Arc<AtomicUsize>,
+}
+
+/// Prevent new maintenance transactions while a capture write needs the writer.
+pub(crate) struct CaptureWriteGuard(Arc<AtomicUsize>);
+
+impl Drop for CaptureWriteGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl GenAISqliteStore {
+    /// Keep maintenance from repeatedly acquiring SQLite's writer ahead of capture.
+    pub(crate) fn prioritize_capture(&self) -> CaptureWriteGuard {
+        self.capture_priority.fetch_add(1, Ordering::AcqRel);
+        CaptureWriteGuard(Arc::clone(&self.capture_priority))
+    }
+
+    fn capture_has_priority(&self) -> bool {
+        self.maintenance_only && self.capture_priority.load(Ordering::Acquire) != 0
+    }
+
     /// Create a new GenAI SQLite store at the default path.
     pub fn new(storage_policy: PeriodicStoragePolicy) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::default_path();
@@ -119,6 +142,43 @@ impl GenAISqliteStore {
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
             storage_policy: PeriodicStoragePolicy::default(),
+            maintenance_only: false,
+            capture_priority: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// Open a separate connection for the registered background maintenance job.
+    ///
+    /// The capture store owns the schema, WAL setup, and shared writer priority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existing database cannot be opened or configured.
+    pub(crate) fn open_maintenance_existing(
+        path: &std::path::Path,
+        storage_policy: PeriodicStoragePolicy,
+        capture: &Self,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadWriteExisting,
+                busy_timeout: Duration::ZERO,
+                enable_wal: false,
+            },
+        )?;
+        // Checkpoint explicitly between batches so a delete cannot trigger a
+        // large automatic checkpoint while retaining the SQLite writer lock.
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+            batch_config: BatchConfig::default(),
+            pending: Mutex::new(Vec::new()),
+            last_flush: Mutex::new(Instant::now()),
+            storage_policy,
+            maintenance_only: true,
+            capture_priority: Arc::clone(&capture.capture_priority),
         })
     }
 
@@ -137,6 +197,8 @@ impl GenAISqliteStore {
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
             storage_policy,
+            maintenance_only: false,
+            capture_priority: Arc::new(AtomicUsize::new(0)),
         };
         store.init_tables()?;
 

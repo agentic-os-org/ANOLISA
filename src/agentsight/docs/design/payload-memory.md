@@ -81,6 +81,13 @@ capacity. SQLite message columns borrow `RawValue` arrays from that JSON when th
 is needed; incremental subsets retain their existing serialization and exact field content.
 Direct insertion and promotion fallback reuse the same serialization, including capacity retries.
 
+GenAI maintenance opens its own registered connection with a zero lock-wait timeout and no automatic WAL
+checkpoint. Age and capacity deletion use transactions bounded by 128 rows and a 4 MiB estimated
+payload target, allowing one oversized row to make progress. Batches yield between transactions;
+write contention defers the remaining work. A passive checkpoint copies WAL frames before a
+non-waiting truncate attempt, and an incomplete checkpoint stops further capacity pruning.
+Separate age, pruning and checkpoint timings identify which maintenance phase is slow.
+
 FFI delivery moves calls and records into boxed queue items. A byte reservation survives dequeue
 until callbacks return, and failed sends or receiver destruction refund it. Large JSON fields are
 serialized directly into NUL-terminated byte buffers; lengths exclude the terminator. Raw HTTP

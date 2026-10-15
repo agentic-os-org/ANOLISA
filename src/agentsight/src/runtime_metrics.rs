@@ -341,7 +341,11 @@ fn describe_metrics() {
     );
     metrics::describe_gauge!(
         "agentsight_pending_genai_count",
-        "GenAI events waiting for session correlation"
+        "GenAI batches waiting for session correlation or a local SQLite write"
+    );
+    metrics::describe_counter!(
+        "agentsight_genai_sqlite_retry_total",
+        "Local SQLite completion retry outcomes under the shared pending budget"
     );
     metrics::describe_gauge!(
         "agentsight_pending_genai_bytes",

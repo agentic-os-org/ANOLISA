@@ -3599,6 +3599,305 @@ fn row_count(store: &GenAISqliteStore) -> i64 {
         .unwrap()
 }
 
+#[test]
+fn maintenance_connection_does_not_block_capture_delivery_or_loop_detection() {
+    use crate::database::{
+        DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
+    };
+    use std::sync::{Arc, mpsc};
+
+    let (live, path) = create_populated_store("maintenance-isolation");
+    let live = Arc::new(live);
+    let manager = DatabaseManager::new(
+        DatabaseRole::Trace,
+        [DatabaseSpec::new(
+            DatabaseId::GenAi,
+            &path,
+            DatabaseAccess::ReadWrite,
+            DatabaseCoverage::Full,
+        )],
+    )
+    .unwrap();
+    let maintenance = manager
+        .open_read_write(DatabaseId::GenAi, |path| {
+            GenAISqliteStore::open_maintenance_existing(path, size_test_policy(), &live)
+        })
+        .unwrap();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let job = manager
+        .maintenance_job(DatabaseId::GenAi, Duration::from_secs(3600), move || {
+            let connection = maintenance.conn.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(connection);
+            maintenance.maintain_with_limit_mb(1).map_err(|error| {
+                agentsight_sqlite_lifecycle::LifecycleError::MaintenanceJobFailed(error.to_string())
+            })
+        })
+        .unwrap();
+    manager.start_maintenance(vec![job]).unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let writer = Arc::clone(&live);
+    let capture = std::thread::spawn(move || {
+        let request =
+            serde_json::from_value(serde_json::json!({"messages":[],"stream":false})).unwrap();
+        let mut call = LLMCall::new(
+            "during-maintenance".into(),
+            BASE_NS as u64,
+            "openai".into(),
+            "fixture".into(),
+            request,
+            1,
+            "fixture".into(),
+        );
+        call.metadata
+            .insert("conversation_id".into(), "live-conversation".into());
+        let result = writer
+            .complete_captured(&GenAISemanticEvent::LLMCall(call))
+            .map(|_| {
+                writer
+                    .get_recent_calls_for_conversation("live-conversation", 5)
+                    .len()
+            })
+            .map_err(|error| error.to_string());
+        done_tx.send(result).unwrap();
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(2));
+    release_tx.send(()).unwrap();
+    manager.stop_maintenance().unwrap();
+    capture.join().unwrap();
+    assert_eq!(
+        completed.unwrap().unwrap(),
+        1,
+        "delivery and its follow-up query must not wait for maintenance"
+    );
+    drop(live);
+    drop(manager);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_yields_until_all_capture_write_guards_are_released() {
+    let (capture, path) = create_populated_store("capture-priority");
+    let maintenance = GenAISqliteStore::open_maintenance_existing(
+        &path,
+        PeriodicStoragePolicy::default(),
+        &capture,
+    )
+    .unwrap();
+    let first = capture.prioritize_capture();
+    let second = capture.prioritize_capture();
+    maintenance.maintain().unwrap();
+    assert_eq!(row_count(&capture), 6);
+    assert_eq!(
+        maintenance
+            .delete_maintenance_batch(super::schema::PruneTable::Events, None, 128,)
+            .unwrap(),
+        0
+    );
+    drop(first);
+    maintenance.maintain().unwrap();
+    assert_eq!(
+        row_count(&capture),
+        6,
+        "one active or queued capture still has priority"
+    );
+    drop(second);
+    maintenance.maintain().unwrap();
+    assert_eq!(
+        row_count(&capture),
+        0,
+        "retention resumes after capture makes progress"
+    );
+    drop(maintenance);
+    drop(capture);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_checkpoint_yields_to_a_pinned_reader() {
+    let path = unique_size_test_db("passive-checkpoint");
+    let live = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    grow_db(&live, 300, 10 * 1024);
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM genai_events;")
+        .unwrap();
+    live.conn.lock().unwrap().execute(
+        "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json) VALUES ('llm_call', 301, '{}')", [],
+    ).unwrap();
+    let maintenance =
+        GenAISqliteStore::open_maintenance_existing(&path, size_test_policy(), &live).unwrap();
+    maintenance
+        .conn
+        .lock()
+        .unwrap()
+        .busy_timeout(Duration::from_secs(5))
+        .unwrap();
+    let started = Instant::now();
+    maintenance.maintain().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a pinned reader must not invoke the checkpoint busy timeout"
+    );
+    assert_eq!(
+        row_count(&live),
+        301,
+        "an incomplete checkpoint must prevent capacity deletion"
+    );
+    reader.execute_batch("ROLLBACK").unwrap();
+    maintenance.maintain().unwrap();
+    assert!(row_count(&live) < 301);
+    drop(maintenance);
+    drop(reader);
+    drop(live);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_deletion_batches_bound_payload_and_preserve_pending() {
+    use super::schema::PruneTable;
+
+    let path = unique_size_test_db("bounded-batches");
+    let live = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    {
+        let conn = live.conn.lock().unwrap();
+        let payload = "x".repeat(1024 * 1024);
+        for timestamp in 1..=2 {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json, input_messages, user_query)
+                 VALUES ('llm_call', ?1, ?2, ?2, ?2)", params![timestamp, payload],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, status, event_json)
+             VALUES ('llm_call', 0, 'pending', ?1), ('llm_call', 3, 'complete', ?2)",
+            params![payload, "x".repeat(6 * 1024 * 1024)],
+        )
+        .unwrap();
+    }
+    let maintenance =
+        GenAISqliteStore::open_maintenance_existing(&path, size_test_policy(), &live).unwrap();
+    for remaining in [3, 2, 1] {
+        assert_eq!(
+            maintenance
+                .delete_maintenance_batch(PruneTable::Events, None, usize::MAX)
+                .unwrap(),
+            1
+        );
+        assert_eq!(row_count(&live), remaining);
+    }
+    let status: String = live
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT status FROM genai_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(status, "pending");
+    drop(maintenance);
+    drop(live);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_rechecks_rows_adopted_after_selection() {
+    use super::schema::PruneTable;
+    use std::cell::RefCell;
+    use std::sync::mpsc;
+
+    type Handoff = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+    thread_local! {
+        static HANDOFF: RefCell<Option<Handoff>> = const { RefCell::new(None) };
+    }
+
+    let path = unique_size_test_db("adoption-during-prune");
+    let live = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    live.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, status, event_json)
+         VALUES ('llm_call', 1, 'interrupted', '{}')",
+            [],
+        )
+        .unwrap();
+    let maintenance =
+        GenAISqliteStore::open_maintenance_existing(&path, size_test_policy(), &live).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker
+        .execute_batch("BEGIN IMMEDIATE; UPDATE genai_events SET status = 'pending';")
+        .unwrap();
+    let (selected_tx, selected_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let prune = std::thread::spawn(move || {
+        HANDOFF.with(|state| *state.borrow_mut() = Some((selected_tx, resume_rx)));
+        maintenance
+            .conn
+            .lock()
+            .unwrap()
+            .busy_handler(Some(|attempt| {
+                attempt == 0
+                    && HANDOFF.with(|state| {
+                        let state = state.borrow();
+                        let (selected, resume) = state.as_ref().unwrap();
+                        selected.send(()).is_ok() && resume.recv().is_ok()
+                    })
+            }))
+            .unwrap();
+        maintenance
+            .delete_maintenance_batch(PruneTable::Events, None, 128)
+            .map_err(|error| error.to_string())
+    });
+
+    // The committed row is still interrupted during selection. Its adoption
+    // becomes visible only after maintenance attempts to acquire the write lock.
+    let selected = selected_rx.recv_timeout(Duration::from_secs(2));
+    blocker.execute_batch("COMMIT").unwrap();
+    let _ = resume_tx.send(());
+    let deleted = prune.join().unwrap().unwrap();
+    selected.unwrap();
+    assert_eq!(deleted, 0, "an adopted in-flight row must survive pruning");
+    assert_eq!(row_count(&live), 1);
+    drop(blocker);
+    drop(live);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn maintenance_defers_a_busy_writer_then_resumes_retention() {
+    let path = unique_size_test_db("defer-busy-writer");
+    let policy = PeriodicStoragePolicy::new(1, 0, 1);
+    let live = GenAISqliteStore::new_with_path(&path, policy).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    live.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json)
+         VALUES ('llm_call', 1, '{}'), ('llm_call', ?1, '{}')",
+            [now],
+        )
+        .unwrap();
+    let maintenance = GenAISqliteStore::open_maintenance_existing(&path, policy, &live).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    maintenance.maintain().unwrap();
+    assert_eq!(row_count(&live), 2);
+    blocker.execute_batch("ROLLBACK").unwrap();
+    maintenance.maintain().unwrap();
+    assert_eq!(row_count(&live), 1);
+    drop(blocker);
+    drop(maintenance);
+    drop(live);
+    cleanup_size_test_db(&path);
+}
+
 /// Covers all three adaptive prune branches: overshoot 1-2x (10% per
 /// iteration), 2-5x (25%), and 5x+ (50%). Each scenario must converge
 /// below the prune threshold within the iteration bound.

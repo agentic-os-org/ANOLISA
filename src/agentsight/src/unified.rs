@@ -101,7 +101,7 @@ pub struct AgentSight {
     filewatch_callback: Option<Box<dyn Fn(FileWatchEvent) + Send + 'static>>,
     /// ResponseId → SessionId mapper for FileWrite events
     response_mapper: ResponseSessionMapper,
-    /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
+    /// Pending GenAI events awaiting session resolution or retrying a local write.
     pending_genai: PendingGenAiQueue,
     /// Calls exported with a fallback session_id after the deferral window
     /// timed out, keyed by pid, awaiting a late FileWrite mapping for
@@ -139,7 +139,7 @@ pub struct AgentSight {
     metrics_exporter: Option<MetricsFileExporter>,
 }
 
-/// GenAI events waiting for session_id resolution via ResponseSessionMapper.
+/// Owned GenAI batches awaiting session resolution or a local SQLite retry.
 /// If the mapper lookup succeeds within the timeout, session_id metadata is updated
 /// before export. Otherwise, the events are exported with the response_id-based
 /// fallback (`SHA256("session" + first_response_id)`).
@@ -166,7 +166,11 @@ impl PendingGenAI {
 #[derive(Default)]
 struct PendingGenAiQueue {
     entries: Vec<PendingGenAI>,
-    /// Total estimated bytes of `entries` (memory budget enforcement).
+    // Local retries bypass external fan-out because those sinks already received the batch.
+    local_retries: Vec<PendingGenAI>,
+    local_retry_priority: Option<crate::storage::sqlite::genai::CaptureWriteGuard>,
+    local_retry_after: Option<std::time::Instant>,
+    /// Shared retained-byte budget for deferred sessions and local write retries.
     bytes: usize,
 }
 
@@ -185,11 +189,16 @@ impl PendingGenAiQueue {
 
     /// Re-derive the counter from the queue contents.
     fn resync(&mut self) {
-        self.bytes = self.entries.iter().map(|p| p.estimated_bytes()).sum();
+        self.bytes = self
+            .entries
+            .iter()
+            .chain(&self.local_retries)
+            .map(|p| p.estimated_bytes())
+            .sum();
     }
 
     fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.local_retries.len()
     }
 
     /// Drain entries whose session_id can now be resolved, or that timed out
@@ -258,11 +267,12 @@ impl PendingGenAiQueue {
         drained
     }
 
-    /// Drain everything (shutdown): no fix-ups — the process is exiting, so
+    /// Drain session waits on shutdown; local writes are retried separately.
+    /// No fix-ups — the process is exiting, so
     /// no further FileWrite can arrive to repair a fallback session_id.
     fn flush_all(&mut self) -> Vec<crate::genai::DeferredPayload> {
         let pending_items: Vec<_> = std::mem::take(&mut self.entries);
-        self.bytes = 0;
+        self.resync();
         pending_items
             .into_iter()
             .map(|pending| {
@@ -275,7 +285,7 @@ impl PendingGenAiQueue {
             .collect()
     }
 
-    /// Drain only the given (exited) pid's entries; other pids keep waiting.
+    /// Drain the exited pid's session waits; local write retries remain eligible.
     fn flush_for_pid(&mut self, pid: u32) -> Vec<crate::genai::DeferredPayload> {
         if self.entries.is_empty() {
             return Vec::new();
@@ -296,14 +306,12 @@ impl PendingGenAiQueue {
         let max_count = limits.pending_genai_max_count.max(1);
         let max_bytes = limits.pending_genai_max_bytes.max(1);
         let mut evicted = Vec::new();
-        while !self.entries.is_empty()
-            && (self.entries.len() >= max_count || self.bytes >= max_bytes)
-        {
+        while !self.entries.is_empty() && (self.len() >= max_count || self.bytes >= max_bytes) {
             let oldest = self.entries.remove(0);
             self.bytes = self.bytes.saturating_sub(oldest.estimated_bytes());
             log::warn!(
                 "pending_genai limit exceeded (count={}/{}, bytes={}/{}),                  flushing oldest response_id={}",
-                self.entries.len() + 1,
+                self.len() + 1,
                 max_count,
                 self.bytes + oldest.estimated_bytes(),
                 max_bytes,
@@ -846,10 +854,12 @@ impl AgentSight {
                 },
             )?);
         }
-        if let Some(target) = genai_sqlite_store.as_ref()
+        if let Some(capture) = genai_sqlite_store.as_deref()
             && config.storage.genai.check_interval_secs > 0
         {
-            let target = Arc::clone(target);
+            let target = database_manager.open_read_write(DatabaseId::GenAi, |path| {
+                GenAISqliteStore::open_maintenance_existing(path, config.storage.genai, capture)
+            })?;
             let budget = Arc::clone(&storage_budget);
             let own_limit_mb = config.storage.genai.max_db_size_mb;
             maintenance_jobs.push(database_manager.maintenance_job(
@@ -2162,6 +2172,7 @@ impl AgentSight {
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
     pub fn flush_expired_pending_genai(&mut self) {
+        self.retry_local_genai(false);
         let drained = self.pending_genai.flush_expired();
         for batch in &drained {
             if let Some(pid) = batch.fixup_pid {
@@ -2181,6 +2192,7 @@ impl AgentSight {
     /// `apply_retro_session_fixup`; the remaining pendings are persisted with
     /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
+        self.retry_local_genai(true);
         for events in self.pending_genai.flush_all() {
             self.complete_and_export_deferred_genai(events);
         }

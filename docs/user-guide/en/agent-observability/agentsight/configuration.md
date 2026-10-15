@@ -167,7 +167,7 @@ The packaged systemd unit still uses `MemoryMax=350M`.
 | `event_channel_capacity` | `10000` | Bounded probe → pipeline channel |
 | `event_channel_policy` | `backpressure` | Wait for a queue slot after byte admission; `drop_newest` rejects a full queue. `sample`, `sample:N` and `sample=N` retain every Nth event (default N=10) |
 | `event_channel_max_bytes_mb` | `64` | Byte cap for queued probe payloads; `0` disables it. Byte-limit rejection drops the event and increments the channel drop counter, independently of the slot policy |
-| `pending_genai_max_count` | `1000` | Events waiting for a session ID |
+| `pending_genai_max_count` | `1000` | Shared limit for session-ID waits and completed batches retrying a busy local SQLite write |
 | `pending_genai_max_bytes_mb` | `16` | Byte cap for the same queue |
 | `pid_cache_size` | `1024` | PID → Agent name LRU entries |
 | `connection_capacity` | `32` | HTTP connection cache entries; must be greater than zero. Set at least as high as the expected concurrent connections |

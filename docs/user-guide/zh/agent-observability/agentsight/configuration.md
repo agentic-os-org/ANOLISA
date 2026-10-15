@@ -159,7 +159,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 | `event_channel_capacity` | `10000` | 探针到流水线的有界通道容量 |
 | `event_channel_policy` | `backpressure` | 通过字节限额后等待队列槽位；`drop_newest` 拒绝已满队列。`sample`、`sample:N`、`sample=N` 每 N 条保留一条（默认 N=10） |
 | `event_channel_max_bytes_mb` | `64` | 排队 probe payload 的字节上限；`0` 关闭限额。超过字节限额时丢弃事件并增加通道丢弃计数，与槽位策略分别执行 |
-| `pending_genai_max_count` | `1000` | 等待 session ID 的事件条数上限 |
+| `pending_genai_max_count` | `1000` | 等待 session ID 的事件与因本地 SQLite 忙而等待重试的完成批次共享条数上限 |
 | `pending_genai_max_bytes_mb` | `16` | 同一队列的字节上限 |
 | `pid_cache_size` | `1024` | PID → Agent 名称的 LRU 条目数 |
 | `connection_capacity` | `32` | HTTP 连接缓存条目数，必须大于零；至少应达到预计同时存在的连接数 |

@@ -831,8 +831,10 @@ fn server_maintenance_jobs(
         let interval = Duration::from_secs(policy.check_interval_secs);
         let budget = Arc::clone(&budget);
         let job = match id {
-            DatabaseId::GenAi => stores.genai.as_ref().map(|store| {
-                let store = Arc::clone(store);
+            DatabaseId::GenAi => stores.genai.as_ref().map(|capture| {
+                let store = manager.open_read_write(id, |path| {
+                    GenAISqliteStore::open_maintenance_existing(path, policy, capture)
+                })?;
                 manager.maintenance_job(id, interval, move || {
                     let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store

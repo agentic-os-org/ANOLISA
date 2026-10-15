@@ -269,6 +269,189 @@ fn local_sqlite_write_failure_still_delivers_to_the_active_sink() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn busy_local_completions_survive_retry_and_deliver_each_external_record_once() {
+    let dir = super::tests::unique_tmp_dir("local-write-busy");
+    let path = dir.join("genai_events.db");
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let log_path = dir.join("events.jsonl");
+    std::fs::File::create(&log_path).unwrap();
+    let exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(Arc::new(
+        LogtailExporter::new_with_path_dynamic(log_path.to_str().unwrap(), None, true, false, true),
+    ))];
+    let mut queue = PendingGenAiQueue::default();
+    let mut mapper = ResponseSessionMapper::new();
+    let limits = RuntimeLimits::default();
+    let mut expected = Vec::new();
+    for index in 0..5 {
+        let (output, _) = delivery_fixture(&format!("busy-call-{index}"), &mapper, false);
+        let error = super::delivery::complete_local_genai(&output, &store, &exporters).unwrap_err();
+        assert!(super::delivery::is_retryable_sqlite_write(error.as_ref()));
+        expected.push(serde_json::to_value(&output.events[0]).unwrap());
+        assert!(queue.queue_local_completion(output, &store, &limits));
+    }
+    assert_eq!(queue.len(), 5);
+    assert!(queue.bytes > 0 && queue.bytes <= limits.pending_genai_max_bytes);
+    let bytes = queue.bytes;
+    assert!(queue.flush_for_pid(PID).is_empty());
+    assert!(queue.flush_all().is_empty());
+    assert_eq!(
+        queue.bytes, bytes,
+        "session drains must keep retry accounting"
+    );
+    let next_retry = queue.local_retry_after.unwrap();
+    assert!(
+        queue
+            .retry_local_completion(
+                &store,
+                &mapper,
+                next_retry - std::time::Duration::from_nanos(1),
+                false,
+            )
+            .is_none()
+    );
+    assert_eq!(queue.local_retry_after, Some(next_retry));
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    assert_eq!(
+        queue.len(),
+        5,
+        "a second busy result must preserve the owned batch"
+    );
+    assert_eq!(queue.bytes, bytes);
+
+    let session = "00000000-0000-0000-0000-000000000001";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid: PID,
+        tid: PID,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"busy-call-0"}"#.to_vec(),
+    });
+    blocker.execute_batch("ROLLBACK").unwrap();
+    for mut expected in expected {
+        let (events, fixup) = queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .expect("completed capture survives a transient writer lock");
+        assert!(
+            fixup.is_none(),
+            "the mapping arrived while the write was queued"
+        );
+        expected["LLMCall"]["metadata"]["session_id"] = serde_json::json!(session);
+        assert_eq!(serde_json::to_value(&events[0]).unwrap(), expected);
+        // Replayed batches remain idempotent when a previous attempt partly succeeded.
+        store.complete_captured(&events[0]).unwrap();
+    }
+    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.bytes, 0);
+    assert!(queue.local_retry_priority.is_none());
+    let rows = store.get_events_by_session(session).unwrap();
+    assert_eq!(rows.len(), 5);
+    assert!(
+        rows.iter()
+            .all(|row| row.status.as_deref() == Some("complete") && row.total_tokens == 13)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap().lines().count(),
+        5
+    );
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    drop(rows);
+    drop(blocker);
+    drop(store);
+    drop(exporters);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_write_retries_share_session_count_and_byte_limits() {
+    let dir = super::tests::unique_tmp_dir("local-write-limits");
+    let store = GenAISqliteStore::new_with_path(
+        &dir.join("genai_events.db"),
+        crate::config::PeriodicStoragePolicy::default(),
+    )
+    .unwrap();
+    let mapper = ResponseSessionMapper::new();
+    let mut queue = PendingGenAiQueue::default();
+    let (output, _) = delivery_fixture("session-wait", &mapper, true);
+    queue.push(PendingGenAI {
+        response_id: output.pending_response_id.unwrap(),
+        events: output.events.into(),
+        pid: PID,
+        created_at: std::time::Instant::now(),
+    });
+    let limits = RuntimeLimits {
+        pending_genai_max_count: 2,
+        ..Default::default()
+    };
+    let (output, _) = delivery_fixture("local-retry", &mapper, false);
+    assert!(queue.queue_local_completion(output, &store, &limits));
+    let bytes = queue.bytes;
+    let (output, _) = delivery_fixture("count-overflow", &mapper, false);
+    assert!(!queue.queue_local_completion(output, &store, &limits));
+    let (output, _) = delivery_fixture("byte-overflow", &mapper, false);
+    assert!(!queue.queue_local_completion(
+        output,
+        &store,
+        &RuntimeLimits {
+            pending_genai_max_bytes: bytes,
+            ..Default::default()
+        }
+    ));
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.bytes, bytes);
+    queue.resync();
+    assert_eq!(queue.bytes, bytes);
+    assert_eq!(queue.enforce_limits(&limits).len(), 1);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.bytes, queue.local_retries[0].estimated_bytes());
+    drop(queue);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_write_retry_does_not_loop_on_non_lock_failures() {
+    let dir = super::tests::unique_tmp_dir("local-write-readonly");
+    let path = dir.join("genai_events.db");
+    drop(
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap(),
+    );
+    let store = GenAISqliteStore::open_read_only_existing(&path).unwrap();
+    let mapper = ResponseSessionMapper::new();
+    let (output, _) = delivery_fixture("readonly-retry", &mapper, false);
+    let error = super::delivery::complete_local_genai(&output, &store, &[]).unwrap_err();
+    assert!(!super::delivery::is_retryable_sqlite_write(error.as_ref()));
+    let mut queue = PendingGenAiQueue::default();
+    assert!(queue.queue_local_completion(output, &store, &RuntimeLimits::default()));
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.bytes, 0);
+    assert!(queue.local_retry_priority.is_none());
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn delivery_fixture(
     response_id: &str,
     mapper: &ResponseSessionMapper,

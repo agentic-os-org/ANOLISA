@@ -64,6 +64,12 @@ SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储
 数组时，从该 JSON 借用 `RawValue`；增量子集保留原有序列化方式及完整字段内容。
 直接插入与 promotion 的回退插入复用同一份序列化结果，包括容量错误后的重试。
 
+GenAI 维护通过注册路径打开独立连接，不等待写锁，也不触发自动 WAL checkpoint。按时间和容量删除
+使用小事务，每批最多 128 行，估算 payload 目标为 4 MiB；单条超大记录仍允许删除，以保证清理能推进。
+批次之间让出执行机会，写锁冲突时将剩余工作延后。checkpoint 先通过 passive 模式复制 WAL 页面，再
+尝试不等待的截断；未完成 checkpoint 时停止后续容量淘汰。按时间清理、容量清理与 checkpoint 分别计时，
+用于区分维护耗时来源。
+
 FFI 将调用和 HTTP 记录 move 到 boxed 队列条目。字节 reservation 在出队后持续到 callback 返回，
 发送失败或 receiver 销毁时自动扣回。大 JSON 字段直接序列化为带 NUL 结尾的字节 buffer，长度不包含
 终止符。Raw HTTP 字段在 callback 期间借用记录的存储。C 结构布局与函数签名保持兼容，消费方仍需在

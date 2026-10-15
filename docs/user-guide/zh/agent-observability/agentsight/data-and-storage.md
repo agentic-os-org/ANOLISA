@@ -71,6 +71,16 @@ Tokenless 的 `stats.db` 会在状态 API 中列为外部存储。AgentSight 只
 `serve` 同时覆盖同一物理文件时，通过 `<db>.maintenance.lock` 协调；拿到锁的进程会重新测量保留与容量
 状态后再执行操作。
 
+GenAI 维护使用独立于采集投递与查询的连接。删除分成小批次，并在批次之间释放写锁；数据库忙时，维护
+延后到下一轮。WAL checkpoint 先通过 passive 模式复制页面，再尝试立即截断，避免长期读事务使维护
+等待时阻塞采集写入。
+采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
+
+完成的采集记录遇到临时 SQLite 写锁冲突时，会留在现有 pending 队列中重试，与等待 session ID 的事件
+共享 `pending_genai_max_count` 和 `pending_genai_max_bytes_mb`。重试不会向外部出口重复发送记录。
+超出预算或永久写入失败会记录日志；`agentsight_genai_sqlite_retry_total` 按 queued、busy、stored、
+over_budget、failed 区分排队、锁冲突、写入成功、预算拒绝和失败次数。
+
 每次维护遵循同一顺序：
 
 1. 按各业务 Store 的 schema 安全规则，删除早于保留截止时间且允许淘汰的记录。

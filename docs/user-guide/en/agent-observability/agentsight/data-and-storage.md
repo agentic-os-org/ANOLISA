@@ -82,6 +82,19 @@ runs all of its database jobs sequentially. When `trace` and `serve` both cover 
 they coordinate through `<db>.maintenance.lock`; the process that acquires the lock performs fresh
 retention and size measurements before acting.
 
+GenAI maintenance uses a separate connection from capture delivery and queries. Deletion releases
+the write lock between small batches, and a busy database defers maintenance to the next pass.
+WAL checkpointing copies frames in passive mode before attempting immediate truncation, so a pinned
+reader does not make maintenance wait while excluding the capture writer.
+Maintenance yields before starting another delete batch while capture writes or queued retries
+need the writer, and resumes on a later scheduled pass.
+
+Completed captures that encounter a transient SQLite write lock stay in the existing pending
+queue for retry. They share `pending_genai_max_count` and `pending_genai_max_bytes_mb` with
+session-ID waits. Retries do not resend records to external sinks. Budget rejection and permanent
+write failures are logged; `agentsight_genai_sqlite_retry_total` records queued, busy, stored,
+over-budget and failed outcomes.
+
 Every pass follows the same lifecycle:
 
 1. Delete records older than the retention cutoff, subject to the store's schema-safe eligibility rules.

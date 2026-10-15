@@ -162,6 +162,7 @@ impl GenAISqliteStore {
         &self,
         event: &GenAISemanticEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let _priority = self.prioritize_capture();
         let _timer = crate::runtime_metrics::StageTimer::start("genai_capture_complete");
         let has_pending = if let GenAISemanticEvent::LLMCall(call) = event {
             let conn = self
