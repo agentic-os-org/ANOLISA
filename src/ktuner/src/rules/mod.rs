@@ -2031,6 +2031,12 @@ fn eval_max_map_count(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 
 /// Path-injectable form (the `eval_*_at` idiom) so the gate is unit-testable
 /// against a temp file instead of the live /proc.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
 fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -2048,7 +2054,9 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
     if !needs_high {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 262144 {
         recs.push(Recommendation {
             param: "vm.max_map_count".to_string(),
@@ -11415,6 +11423,35 @@ mod tests {
             .find(|r| r.param.contains("hugepage"))
             .unwrap_or_else(|| panic!("oracle must get the THP recommendation"));
         assert_eq!(thp_rec.recommended_value, "madvise");
+    }
+
+    #[test]
+    fn max_map_count_advice_needs_a_readable_value() {
+        // The rule fires below 262144, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("max_map_count", b"262144\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"65530\n").unwrap();
+        let info = info_with_processes(&["java"]);
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_max_map_count_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 65530 is below the floor");
+        assert_eq!(recs[0].current_value, "65530");
+        assert!(advice(&high).is_empty(), "a readable 262144 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
