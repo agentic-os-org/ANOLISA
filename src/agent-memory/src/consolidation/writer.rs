@@ -84,6 +84,14 @@ impl FactWriter {
             match s.detect_conflicts(&search_text, self.conflict_threshold) {
                 Ok(conflicts) => {
                     for (old_path, score) in &conflicts {
+                        // Search also indexes journals and source notes; only fact
+                        // records participate in the replacement lifecycle.
+                        let path = Path::new(old_path);
+                        if !path.starts_with("facts")
+                            || path.extension() != Some(std::ffi::OsStr::new("md"))
+                        {
+                            continue;
+                        }
                         tracing::info!(
                             "conflict detected: new fact '{}' conflicts with '{}' (score={:.2})",
                             fact.title,
