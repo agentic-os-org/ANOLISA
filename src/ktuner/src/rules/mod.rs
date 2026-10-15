@@ -421,14 +421,20 @@ fn eval_io_scheduler(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
             }
             DiskType::SSD => {
                 count += 1;
-                if disk.scheduler == "cfq" {
-                    let target = if disk.available_schedulers.contains(&"none".to_string()) {
-                        "none"
-                    } else if disk.available_schedulers.contains(&"noop".to_string()) {
-                        "noop"
-                    } else if disk.available_schedulers.contains(&"deadline".to_string()) {
-                        "deadline"
-                    } else {
+                // The sorting elevators an SSD is advised off: `cfq` up to 4.x
+                // and `bfq`, its successor from 5.0 on (`bfq-iosched.rst`:
+                // "plus a lot of code, are borrowed from CFQ"). Keying on
+                // `cfq` alone made the whole arm unreachable on 5.x/6.x, whose
+                // elevators are `none`, `mq-deadline`, `kyber` and `bfq`.
+                if disk.scheduler == "cfq" || disk.scheduler == "bfq" {
+                    // `none` first: 5.x offers it on every queue that has an
+                    // elevator (`elv_iosched_show`), and a pass-through is what
+                    // the reason promises. `noop`/`deadline` are the names
+                    // those two carried before 5.0.
+                    let target = ["none", "noop", "mq-deadline", "deadline"]
+                        .into_iter()
+                        .find(|candidate| disk.available_schedulers.iter().any(|s| s == candidate));
+                    let Some(target) = target else {
                         continue;
                     };
 
@@ -436,7 +442,7 @@ fn eval_io_scheduler(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
                         param: format!("block/{}/scheduler", disk.name),
                         current_value: disk.scheduler.clone(),
                         recommended_value: target.to_string(),
-                        reason: "SSD 随机读写性能强，cfq 的排队排序开销是不必要的".to_string(),
+                        reason: "SSD 随机读写性能强，cfq/bfq 的排队排序开销是不必要的".to_string(),
                         confidence: Confidence::High,
                         category: Category::Performance,
                         writable: true,
@@ -12804,6 +12810,65 @@ mod tests {
         let rec = recs.iter().find(|r| r.param.contains("scheduler"));
         assert!(rec.is_some(), "Should recommend changing cfq on SSD");
         assert_eq!(rec.unwrap().recommended_value, "noop");
+    }
+
+    #[test]
+    fn test_ssd_scheduler_bfq_is_the_modern_sorting_elevator() {
+        // 5.0 dropped `cfq` and renamed the pass-through names, so the state
+        // the arm exists for is an SSD running `bfq` (cfq's successor) with the
+        // 5.x list `none mq-deadline kyber bfq`.
+        let mut info = make_test_info();
+        info.disks = vec![DiskInfo {
+            name: "sda".to_string(),
+            disk_type: DiskType::SSD,
+            scheduler: "bfq".to_string(),
+            available_schedulers: vec![
+                "none".to_string(),
+                "mq-deadline".to_string(),
+                "kyber".to_string(),
+                "bfq".to_string(),
+            ],
+            nr_requests: 256,
+            read_ahead_kb: 128,
+            rq_affinity: 1,
+            hidden: false,
+            holders: vec![],
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let rec = recs.iter().find(|r| r.param == "block/sda/scheduler");
+        assert_eq!(
+            rec.map(|r| r.recommended_value.as_str()),
+            Some("none"),
+            "an SSD running bfq must be advised the pass-through"
+        );
+    }
+
+    #[test]
+    fn test_ssd_scheduler_leaves_the_light_elevators_alone() {
+        // `mq-deadline` is not the queuing overhead the reason describes, and
+        // the arm must not claim every 5.x elevator is a problem.
+        let mut info = make_test_info();
+        info.disks = vec![DiskInfo {
+            name: "sda".to_string(),
+            disk_type: DiskType::SSD,
+            scheduler: "mq-deadline".to_string(),
+            available_schedulers: vec![
+                "none".to_string(),
+                "mq-deadline".to_string(),
+                "kyber".to_string(),
+                "bfq".to_string(),
+            ],
+            nr_requests: 256,
+            read_ahead_kb: 128,
+            rq_affinity: 1,
+            hidden: false,
+            holders: vec![],
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter().all(|r| r.param != "block/sda/scheduler"),
+            "mq-deadline is not the sorting overhead the arm names"
+        );
     }
 
     #[test]
