@@ -605,6 +605,55 @@ impl TrajectoryStore {
         Ok(out)
     }
 
+    /// Returns collected children for a captured session, retaining exact-ID
+    /// precedence and resolving a bare UUID to a unique Codex rollout parent.
+    ///
+    /// Children can exist before their collected parent, so the alias is read
+    /// from child IDs. Non-Codex sources and ambiguous rollout parents are not
+    /// aliases. Existing exact-ID lookup and deletion semantics stay literal.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn get_captured_session_subagents(&self, session_id: &str) -> Result<Vec<String>> {
+        let exact = self.get_subagent_atif_jsons(session_id)?;
+        let is_uuid = session_id.len() == 36
+            && session_id.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            });
+        if !exact.is_empty() || !is_uuid {
+            return Ok(exact);
+        }
+        let aliases = {
+            let conn = self.lock_conn()?;
+            let mut stmt = conn.prepare(
+                "WITH parents AS (
+                    SELECT DISTINCT substr(session_id, 1, instr(session_id, ':subagent:') - 1) AS id
+                    FROM collected_trajectories
+                    WHERE source = 'codex' AND is_subagent = 1
+                      AND instr(session_id, ':subagent:') > 0
+                 )
+                 SELECT id FROM parents
+                 WHERE substr(id, 1, 8) = 'rollout-' AND length(id) > 45
+                   AND substr(id, -37) = '-' || ?1
+                 LIMIT 2",
+            )?;
+            let rows = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if let [parent] = aliases.as_slice() {
+            self.get_subagent_atif_jsons(parent)
+        } else {
+            if aliases.len() > 1 {
+                log::warn!("multiple collected Codex parents for captured session {session_id}");
+            }
+            Ok(Vec::new())
+        }
+    }
+
     /// Deletes the subagent rows of `parent_session_id` whose session ids are
     /// not listed in `keep`, returning how many rows were removed.
     ///
@@ -1169,6 +1218,10 @@ pub fn extract_user_message_previews(atif_json: &str) -> (Option<String>, Option
     (first, last)
 }
 
+#[cfg(test)]
+#[path = "captured_subagents_tests.rs"]
+mod captured_subagents_tests;
+
 /// SELECT DISTINCT on a fixed column name (hard-coded, never user input).
 fn distinct_column(conn: &Connection, column: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!(
@@ -1208,14 +1261,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn tmp_db(tag: &str) -> PathBuf {
+    pub(super) fn tmp_db(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("traj-store-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("trajectories.db")
     }
 
-    fn sample_record() -> TrajectoryRecord {
+    pub(super) fn sample_record() -> TrajectoryRecord {
         TrajectoryRecord {
             session_id: "s-1".into(),
             schema_version: "ATIF-v1.7".into(),

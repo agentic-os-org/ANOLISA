@@ -123,6 +123,11 @@ optimization LLM to rank candidates by intent, e.g. "fix build error".
 
 **Analyze** sends the session to the Optimization page.
 
+Opening a session captured by both sources retains its captured steps and Token metrics,
+and includes its collected subagent trajectories in the ATIF viewer. A captured Codex UUID
+can resolve children under one matching collected rollout parent; ambiguous rollout parents
+are not combined. If collected children are unavailable, the captured session remains readable.
+
 ## Reuse Labels
 
 Reviews collected trajectories for later Agent reuse. Run deterministic triage first, then confirm or override `good`, `bad`, `useless`, or `unknown` labels individually or in batch. The rules never assign `bad`; that verdict requires a human decision or an LLM judgement with a cited trajectory step.

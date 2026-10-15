@@ -22,6 +22,10 @@ use crate::interruption::InterruptionType;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
 
+#[cfg(test)]
+#[path = "handlers_session_export_tests.rs"]
+mod session_export_tests;
+
 // ─── Prometheus helpers ───────────────────────────────────────────────────────
 
 /// Escape a Prometheus label value per the text format spec:
@@ -1529,7 +1533,22 @@ mod tests {
         })
     }
 
-    fn write_completed_conversation_event(path: &std::path::Path, conversation_id: &str) {
+    pub(super) fn write_completed_conversation_event(
+        path: &std::path::Path,
+        conversation_id: &str,
+    ) {
+        write_completed_event_for_session(
+            path,
+            conversation_id,
+            &format!("session-{conversation_id}"),
+        );
+    }
+
+    pub(super) fn write_completed_event_for_session(
+        path: &std::path::Path,
+        conversation_id: &str,
+        session_id: &str,
+    ) {
         let store =
             GenAISqliteStore::new_with_path(path, crate::config::PeriodicStoragePolicy::default())
                 .unwrap();
@@ -1584,10 +1603,8 @@ mod tests {
             "response_id".to_string(),
             format!("trace-{conversation_id}"),
         );
-        call.metadata.insert(
-            "session_id".to_string(),
-            format!("session-{conversation_id}"),
-        );
+        call.metadata
+            .insert("session_id".to_string(), session_id.to_string());
         call.metadata
             .insert("user_query".to_string(), "hello".to_string());
 
@@ -1625,7 +1642,7 @@ mod tests {
         store.flush();
     }
 
-    fn cleanup_db(path: &std::path::Path) {
+    pub(super) fn cleanup_db(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -2003,7 +2020,7 @@ mod tests {
         })
     }
 
-    fn unique_handler_db(label: &str) -> PathBuf {
+    pub(super) fn unique_handler_db(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "agentsight_handler_{label}_{}_{}.db",
             std::process::id(),
@@ -2016,7 +2033,11 @@ mod tests {
 
     // ─── Trajectory handler tests ────────────────────────────────────────
 
-    fn trajectory_record(session_id: &str, project: &str, source: &str) -> TrajectoryRecord {
+    pub(super) fn trajectory_record(
+        session_id: &str,
+        project: &str,
+        source: &str,
+    ) -> TrajectoryRecord {
         TrajectoryRecord {
             session_id: session_id.to_string(),
             schema_version: "ATIF-v1.7".to_string(),
@@ -2047,7 +2068,7 @@ mod tests {
         test_app_state_with_activity_stores(PathBuf::from(":memory:"), store)
     }
 
-    fn test_app_state_with_activity_stores(
+    pub(super) fn test_app_state_with_activity_stores(
         storage_path: PathBuf,
         trajectory_store: Option<Arc<TrajectoryStore>>,
     ) -> web::Data<AppState> {
@@ -5059,7 +5080,34 @@ pub async fn export_atif_session(
     }
 
     match crate::atif::convert_session_to_atif(&session_id, events) {
-        Ok(doc) => HttpResponse::Ok().json(doc),
+        Ok(mut doc) => {
+            // The unified list folds collected children into this captured
+            // parent. Keep its measured steps/tokens while making those
+            // children reachable from the same document the viewer opens.
+            if let Some(tstore) = data.trajectory_store() {
+                match tstore.get_captured_session_subagents(&session_id) {
+                    Ok(children) => {
+                        let children: Vec<agentsight_atif::AtifTrajectory> = children
+                            .iter()
+                            .filter_map(|json| match serde_json::from_str(json) {
+                                Ok(child) => Some(child),
+                                Err(error) => {
+                                    log::warn!("invalid collected child for {session_id}: {error}");
+                                    None
+                                }
+                            })
+                            .collect();
+                        if !children.is_empty() {
+                            doc.subagent_trajectories = Some(children);
+                        }
+                    }
+                    Err(error) => log::warn!(
+                        "collected children unavailable for captured session {session_id}: {error}"
+                    ),
+                }
+            }
+            HttpResponse::Ok().json(doc)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
