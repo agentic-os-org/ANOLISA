@@ -324,7 +324,11 @@ test-claude-code-detect:
 # tests. It is unittest-shaped now and rides on this target beside the other
 # plain-python3 suites the Test tokenless job already runs, which is what
 # gives the raw packaging gate regression coverage in CI.
-test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts test-qwenwork-hooks
+# Keep the worker protocol suite as a prerequisite so test-integration and
+# its aggregate callers cannot omit it. It is stdlib-only: the subprocess
+# fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
+test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
+                  test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_hermes_lifecycle.py
@@ -338,6 +342,10 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_verify_release_versions.py
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
+
+.PHONY: test-headroom-pipeline-worker
+test-headroom-pipeline-worker:
+	python3 tests/test_headroom_pipeline_worker_protocol.py
 
 # Keep this standalone entry free of Rust/plugin builds. CI runs the shared
 # suites through test-integration and only the installer through test-adapters.

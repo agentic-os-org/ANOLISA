@@ -23,6 +23,8 @@ Line-delimited JSON over stdin/stdout, one JSON object per line:
                          {"ready": false, "error": "..."}   (then exit 1)
   request:               {"messages": [...], "model": "...", "model_limit": N,
                           "variant": "pure_stage"|"router"}
+                         Truthy variant values must be strings; missing or falsy
+                         values retain the legacy pure_stage default.
   response:              {"ok": true, "messages": [...], "compress_ms": ...,
                           "tokens_before": N, "tokens_after": N,
                           "transforms_applied": [...], "timing": {...}}
@@ -205,9 +207,7 @@ def _build_pipelines() -> dict[str, Any]:
 
     return {
         "pure_stage": TransformPipeline(transforms=stages(), provider=provider),
-        "router": TransformPipeline(
-            transforms=[*stages(), ContentRouter()], provider=provider
-        ),
+        "router": TransformPipeline(transforms=[*stages(), ContentRouter()], provider=provider),
     }
 
 
@@ -253,7 +253,11 @@ def main() -> int:
         if not isinstance(messages, list):
             _emit({"ok": False, "error": "request has no messages list"})
             continue
+        # Preserve legacy falsy defaults; validate only the normalized truthy value.
         variant = request.get("variant") or "pure_stage"
+        if not isinstance(variant, str):
+            _emit({"ok": False, "error": "request variant must be a string"})
+            continue
         pipeline = pipelines.get(variant)
         if pipeline is None:
             _emit({"ok": False, "error": f"unknown variant {variant!r}"})
