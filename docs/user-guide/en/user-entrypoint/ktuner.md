@@ -151,6 +151,12 @@ exactly as `--category` has always done, so a selection that leaves nothing to
 report answers with an empty list and exit `0` (the diagnosis has no blocked
 state). The two flags are mutually exclusive, and a run carrying both is a
 command error (`2`, stderr JSON), decided before the system is read.
+The report's `counts` object counts the recommendations it carries:
+`performance` and `security` by kind, `high_confidence`, `writable`, and one
+count per category — `network`, `memory`, `io` and `cpu` — each the number of
+recommendations `check --category` with that name keeps (security findings
+are counted once, under `security`). Like the other counts they follow the
+report that is left after `--category`, `--only` and `--exclude`.
 The report's `system` object describes the machine itself: `kernel`,
 `cpu_cores`, `memory_gb` and `numa_nodes` as before, plus `os_distro`,
 `cpu_model`, the `disks` inventory (one entry per disk, carrying the fields

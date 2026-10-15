@@ -71,10 +71,14 @@ the tuned values on the next boot, and a ledger that survived keeps
 ```json
 {
   "counts": {
-    "high_confidence": 5,
-    "performance": 34,
-    "security": 6,
-    "writable": 40
+    "cpu": 1,
+    "high_confidence": 11,
+    "io": 3,
+    "memory": 8,
+    "network": 35,
+    "performance": 47,
+    "security": 8,
+    "writable": 55
   },
   "environment": "物理机/虚拟机",
   "predicted_score": 100,
@@ -148,6 +152,13 @@ the tuned values on the next boot, and a ledger that survived keeps
 }
 ```
 
+`counts` describes the recommendations in the report: `performance` and
+`security` by kind, `high_confidence` and `writable`, and one count per
+category — `network`, `memory`, `io` and `cpu` — each the number of
+recommendations `check --category` with that name keeps. Security findings
+are counted once, under `security`, so the four category counts add up to
+`performance`.
+
 `system` is the machine the engine diagnosed. Alongside the four keys it
 always carried it names the distro (`os_distro`), the CPU (`cpu_model`), and
 the two inventories the rules read: `disks`, one entry per disk with all
@@ -190,13 +201,13 @@ nothing to report answers with an empty `recommendations` list and exit 0
 recommendation reports that recommendation alone:
 
 ```json
-{"counts": {"high_confidence": 1, "performance": 1, "security": 0, "writable": 1}, "environment": "物理机/虚拟机", "predicted_score": 30, "recommendations": [ ... ], "score": 30, "services": [], "system": {"cpu_cores": 12, "cpu_cores_host": 12, "cpu_model": "AMD Ryzen 9 7945HX with Radeon Graphics", "disks": [{"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdd", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}, {"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdb", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}], "kernel": "6.6.87.2-microsoft-standard-WSL2", "memory_gb": 11, "memory_gb_host": 11, "network": [{"name": "eth0", "speed_mbps": 10000}], "numa_nodes": 1, "os_distro": "Ubuntu 24.04.3 LTS"}, "total_checked": 208, "workload": "mixed"}
+{"counts": {"cpu": 0, "high_confidence": 1, "io": 0, "memory": 0, "network": 1, "performance": 1, "security": 0, "writable": 1}, "environment": "物理机/虚拟机", "predicted_score": 30, "recommendations": [ ... ], "score": 30, "services": [], "system": {"cpu_cores": 12, "cpu_cores_host": 12, "cpu_model": "AMD Ryzen 9 7945HX with Radeon Graphics", "disks": [{"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdd", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}, {"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdb", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}], "kernel": "6.6.87.2-microsoft-standard-WSL2", "memory_gb": 11, "memory_gb_host": 11, "network": [{"name": "eth0", "speed_mbps": 10000}], "numa_nodes": 1, "os_distro": "Ubuntu 24.04.3 LTS"}, "total_checked": 208, "workload": "mixed"}
 ```
 
 An inert name is echoed instead of failing the run:
 
 ```json
-{"counts": {"high_confidence": 0, "performance": 0, "security": 0, "writable": 0}, "environment": "物理机/虚拟机", "predicted_score": 30, "recommendations": [], "score": 30, "services": [], "system": {"cpu_cores": 12, "cpu_cores_host": 12, "cpu_model": "AMD Ryzen 9 7945HX with Radeon Graphics", "disks": [{"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdd", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}, {"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdb", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}], "kernel": "6.6.87.2-microsoft-standard-WSL2", "memory_gb": 11, "memory_gb_host": 11, "network": [{"name": "eth0", "speed_mbps": 10000}], "numa_nodes": 1, "os_distro": "Ubuntu 24.04.3 LTS"}, "total_checked": 208, "unmatched_only": ["no_such_ktuner_param"], "workload": "mixed"}
+{"counts": {"cpu": 0, "high_confidence": 0, "io": 0, "memory": 0, "network": 0, "performance": 0, "security": 0, "writable": 0}, "environment": "物理机/虚拟机", "predicted_score": 30, "recommendations": [], "score": 30, "services": [], "system": {"cpu_cores": 12, "cpu_cores_host": 12, "cpu_model": "AMD Ryzen 9 7945HX with Radeon Graphics", "disks": [{"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdd", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}, {"available_schedulers": ["none", "mq-deadline", "kyber"], "hidden": false, "holders": [], "name": "sdb", "nr_requests": 950, "read_ahead_kb": 128, "rq_affinity": 1, "scheduler": "none", "type": "HDD"}], "kernel": "6.6.87.2-microsoft-standard-WSL2", "memory_gb": 11, "memory_gb_host": 11, "network": [{"name": "eth0", "speed_mbps": 10000}], "numa_nodes": 1, "os_distro": "Ubuntu 24.04.3 LTS"}, "total_checked": 208, "unmatched_only": ["no_such_ktuner_param"], "workload": "mixed"}
 ```
 
 ### why output

@@ -132,6 +132,11 @@ sudo ktuner rollback --list --category net   # 预览同一集合
 以来的做法一致，因此什么都没选中时输出空建议列表、退出 `0`（诊断没有 blocked
 状态）。两个参数互斥，同时给出是命令错误（`2`、stderr JSON），在读取系统信息
 之前就被拒绝。
+报告中的 `counts` 对象统计它携带的建议：按性质分为 `performance` 与
+`security`，另有 `high_confidence`、`writable`，以及每个分类各一个计数——
+`network`、`memory`、`io`、`cpu`——各自等于以同名分类运行 `check --category`
+时保留的建议条数（安全类建议只计入 `security` 一次）。与其他计数一样，它们跟随
+`--category`、`--only`、`--exclude` 过滤后剩下的报告。
 报告中的 `system` 对象描述这台机器本身：原有的 `kernel`、`cpu_cores`、
 `memory_gb`、`numa_nodes` 之外，新增 `os_distro`、`cpu_model`、`disks`
 清单（每块磁盘一条，携带磁盘规则的门槛字段 `hidden`、`holders`、
