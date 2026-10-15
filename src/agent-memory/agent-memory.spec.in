@@ -201,6 +201,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Oct 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.10-1
+- Guide deferred tool calls in the bundled OpenClaw adapter
+- Clean up MCP subprocesses on shutdown and plugin disposal
+
 * Sun Oct 11 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.9-1
 - Reject directory-valued OpenClaw binary paths during startup
 - Skip PATH directory shadows while accepting executable file symlinks

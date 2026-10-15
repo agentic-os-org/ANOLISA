@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.10] - 2026-10-15
+
+### Added
+
+- **agent-memory**: Updated to v0.2.10, provides Linux x86_64 and ARM64 raw release packages with the memory server and bundled OpenClaw adapter, users can install verified archives without building from source (#7648, #7649)
+
+### Fixed
+
+- **agent-memory**: Guides agents through the host's available Tool Search or direct tool calls, so deferred memory tools can be discovered and invoked with valid arguments (#7645)
+- **agent-memory**: Waits for the MCP child process to exit and cleans it up when an OpenClaw plugin instance is disposed, preventing leftover memory processes during shutdown and reload (#7482, #7661)
+
 ## [0.2.9] - 2026-10-11
 
 ### Fixed

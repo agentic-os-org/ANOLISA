@@ -1,6 +1,6 @@
 {
   "name": "memory-anolisa-openclaw-plugin",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "type": "module",
   "main": "dist/index.js",
   "files": [

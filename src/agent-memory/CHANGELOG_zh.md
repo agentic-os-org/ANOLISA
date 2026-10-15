@@ -7,6 +7,17 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.10] - 2026-10-15
+
+### 新增
+
+- **agent-memory**：更新至 v0.2.10，提供包含记忆服务和 OpenClaw 适配器的 Linux x86_64 与 ARM64 原始发布包，用户可直接安装经过校验的归档，无需从源码构建（#7648、#7649）
+
+### 修复
+
+- **agent-memory**：按宿主提供的 Tool Search 或直接工具调用方式引导 Agent，使延迟加载的记忆工具能够被发现并以有效参数调用（#7645）
+- **agent-memory**：等待 MCP 子进程退出，并在 OpenClaw 插件实例销毁时清理进程，避免关闭和重新加载时遗留记忆进程（#7482、#7661）
+
 ## [0.2.9] - 2026-10-11
 
 ### 修复
