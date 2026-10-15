@@ -14,6 +14,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use support::{Fixture, Service};
 
@@ -338,7 +339,9 @@ fn plugin_node_contract_tests_pass() {
     command
         .arg("--test")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openclaw.mjs"));
-    let output = fixture.run(command);
+    // This child runs the whole Node suite; individual test deadlines stay in Node.
+    let output =
+        support::Process::spawn(&fixture, command).finish_with_timeout(Duration::from_secs(180));
     assert!(
         output.status.success(),
         "{}\n{}",

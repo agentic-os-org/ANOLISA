@@ -187,7 +187,7 @@ impl Process {
         let stderr = fixture.root.join(format!("process-{id}.stderr"));
         let record = fixture.root.join(format!("process-{id}.json"));
         let mut value = json!({"command":std::iter::once(command.get_program().to_string_lossy().into_owned()).chain(command.get_args().map(|a|a.to_string_lossy().into_owned())).collect::<Vec<_>>(),
-            "cwd":fixture.root,"pid":null,"ports":[],"stdout":stdout,"stderr":stderr,"timeout_seconds":14,"stop":null});
+            "cwd":fixture.root,"pid":null,"ports":[],"stdout":stdout,"stderr":stderr,"timeout_seconds":TIMEOUT.as_secs(),"stop":null});
         fs::write(&record, value.to_string()).unwrap();
         let child = command
             .stdin(stdin)
@@ -211,8 +211,14 @@ impl Process {
         // SAFETY: this unreaped Child reserves its PID until finish or Drop.
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
-    pub fn finish(mut self) -> Output {
-        let deadline = Instant::now() + TIMEOUT;
+    pub fn finish(self) -> Output {
+        self.finish_with_timeout(TIMEOUT)
+    }
+    /// Wait for an owned child with an explicit aggregate-suite budget.
+    pub fn finish_with_timeout(mut self, timeout: Duration) -> Output {
+        self.value["timeout_seconds"] = json!(timeout.as_secs());
+        fs::write(&self.record, self.value.to_string()).unwrap();
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
