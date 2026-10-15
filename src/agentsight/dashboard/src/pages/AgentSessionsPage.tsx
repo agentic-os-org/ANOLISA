@@ -142,16 +142,6 @@ export const AgentSessionsPage: React.FC = () => {
       .catch(() => setSemanticEnabled(false));
   }, []);
 
-  // Clear stale semantic results as soon as the query or filters change, so
-  // the 500ms debounce window never shows results for the previous query.
-  // Enter the loading state immediately too: the LLM request does not start
-  // until the debounce fires, and without this flag the table would flash
-  // "no matching sessions" during that window.
-  useEffect(() => {
-    setSemanticMatches({});
-    setSemanticLoading(search.trim().length > 0 && semanticEnabled);
-  }, [search, sourceFilter, agentFilter, rangeMs, semanticEnabled]);
-
   // Candidate pool shared by the debounce effect and the `filtered` memo:
   // sessions within the selected time range, source, and agent filters.
   // /api/trajectories has no time-range support, so log-collected sessions
@@ -200,6 +190,14 @@ export const AgentSessionsPage: React.FC = () => {
       setSemanticLoading(false);
       return;
     }
+
+    // Reset only when the ranking request changes. A filter can leave the
+    // payload identical; clearing it separately would strand loading with
+    // no replacement request. Changed candidates must lose their old ranking
+    // immediately, including during the debounce window.
+    setSemanticMatches({});
+    setSemanticError(false);
+    setSemanticLoading(true);
 
     let cancelled = false;
     const timer = setTimeout(() => {

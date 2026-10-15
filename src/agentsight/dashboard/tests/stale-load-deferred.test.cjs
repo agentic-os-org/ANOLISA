@@ -1876,3 +1876,200 @@ test('agent health interruptions: one previous click moves back from the display
   previous.props.onClick();
   assert.equal(summary().cur, 1, 'one previous click must move the displayed page back by one');
 });
+
+// Filter controls can change without changing the request payload.
+async function semanticFilterScenario(mutation, outcome = 'success') {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchSessions',
+    'fetchTrajectories',
+    'fetchOptimizeConfig',
+    'semanticSearchSessions',
+  ]);
+  const driver = createHooksDriver();
+  const sameDeps = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+  const realSetTimeout = global.setTimeout;
+  const settle = () => new Promise((r) => realSetTimeout(r, 0));
+  const t = (k) => k;
+  const page = loadPageModule(
+    'src/pages/AgentSessionsPage.tsx',
+    {
+      'react-router-dom': { useNavigate: () => () => {} },
+      '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': stubs,
+      '../utils/semanticSearchFilter': loadPageModule('src/utils/semanticSearchFilter.ts', {}),
+      '../utils/sessionModel': loadPageModule('src/utils/sessionModel.ts', {}),
+      '../components/CopyButton': componentStub('CopyButton'),
+    },
+    driver,
+  ).AgentSessionsPage;
+  const timers = new Map();
+  let timerId = 0;
+  const mounted = [];
+  function effects(rendered) {
+    const old = [global.setTimeout, global.clearTimeout];
+    global.setTimeout = (fn) => {
+      timers.set(++timerId, fn);
+      return timerId;
+    };
+    global.clearTimeout = (id) => timers.delete(id);
+    try {
+      rendered.effects.forEach((effect, i) => {
+        if (mounted[i] && sameDeps(mounted[i].deps, effect.__deps)) return;
+        mounted[i]?.cleanup?.();
+        mounted[i] = { deps: effect.__deps, cleanup: effect() };
+      });
+    } finally {
+      [global.setTimeout, global.clearTimeout] = old;
+    }
+  }
+  function render() {
+    const r = driver.render(page);
+    effects(r);
+    return r;
+  }
+  function fire() {
+    for (const [id, fn] of [...timers]) {
+      timers.delete(id);
+      fn();
+    }
+  }
+  const active = Date.now() - 1000;
+  const sessions = () =>
+    Array.from({ length: 6 }, (_, i) => ({
+      session_id: `session-${i}`,
+      agent_name: 'claude',
+      model: 'fixture',
+      conversation_count: 1,
+      first_seen_ns: (active - 60000) * 1e6,
+      last_seen_ns: (active - i * 1000) * 1e6,
+      total_input_tokens: 10,
+      total_output_tokens: 5,
+      first_user_query: `question ${i}`,
+      last_user_query: `answer ${i}`,
+    }));
+  const logs = () =>
+    mutation === 'source_changed_candidates'
+      ? [
+          {
+            ...sessions()[0],
+            session_id: 'session-0',
+            source: 'claude',
+            is_subagent: false,
+            num_steps: 1,
+            collected_at_ns: active * 1e6,
+            project: 'fixture',
+          },
+        ]
+      : [];
+  render();
+  calls.fetchSessions[0].resolve(sessions());
+  calls.fetchTrajectories[0].resolve(logs());
+  calls.fetchOptimizeConfig[0].resolve({ configured: true });
+  await settle();
+  let r = render();
+  const input = findElement(
+    r.element,
+    (n) => n.type === 'input' && n.props.placeholder === 'as.searchPlaceholder',
+  );
+  input.props.onChange({ target: { value: 'find the widget' } });
+  render();
+  fire();
+  assert.equal(calls.semanticSearchSessions.length, 1);
+  const original = { results: [{ session_id: 'session-0', relevance: 'high', reason: 'fixture' }] };
+  if (outcome === 'failure')
+    calls.semanticSearchSessions[0].reject(new Error('fixture unavailable'));
+  else if (outcome !== 'pending')
+    calls.semanticSearchSessions[0].resolve(outcome === 'empty' ? { results: [] } : original);
+  await settle();
+  r = render();
+  assert.equal(driver.slots[8].value, outcome === 'pending');
+  assert.equal(Object.keys(driver.slots[9].value).length, outcome === 'success' ? 1 : 0);
+  if (mutation === 'agent_same_candidates') {
+    findElement(r.element, (n) => n.type === 'select').props.onChange({
+      target: { value: 'claude' },
+    });
+  } else if (mutation === 'range_same_candidates') {
+    findElement(
+      r.element,
+      (n) => n.type === 'button' && elementText(n).includes('as.timePreset.last24h'),
+    ).props.onClick();
+  } else if (mutation.startsWith('source_')) {
+    const label = mutation === 'source_same_candidates' ? 'as.source.ebpf' : 'as.source.log';
+    findElement(
+      r.element,
+      (n) => n.type === 'button' && elementText(n).includes(label),
+    ).props.onClick();
+  } else if (mutation === 'query_changed') {
+    input.props.onChange({ target: { value: 'find something else' } });
+  } else {
+    findElement(
+      r.element,
+      (n) => n.type === 'button' && elementText(n).includes('common.refresh'),
+    ).props.onClick();
+  }
+  render();
+  if (calls.fetchSessions.length > 1) {
+    calls.fetchSessions[1].resolve(sessions());
+    calls.fetchTrajectories[1].resolve(logs());
+    await settle();
+    render();
+  }
+  fire();
+  if (calls.semanticSearchSessions.length > 1) {
+    calls.semanticSearchSessions[1].resolve(original);
+    await settle();
+  }
+  if (outcome === 'pending') {
+    calls.semanticSearchSessions[0].resolve(original);
+    await settle();
+  }
+  r = render();
+  const text = elementText(r.element);
+  return {
+    mutation,
+    requests: calls.semanticSearchSessions.length,
+    pending_timers: timers.size,
+    semantic_loading: driver.slots[8].value,
+    matches: Object.keys(driver.slots[9].value),
+    spinner_visible: text.includes('AI ...'),
+    displayed_session_ids: text.filter((v) => /^session-\d$/.test(v)),
+    semantic_error: driver.slots[10].value,
+  };
+}
+
+for (const mutation of [
+  'agent_same_candidates',
+  'source_same_candidates',
+  'range_same_candidates',
+]) {
+  for (const outcome of ['success', 'empty', 'failure', 'pending']) {
+    test(`agent sessions: ${mutation} preserves ${outcome} ranking ownership`, async () => {
+      const result = await semanticFilterScenario(mutation, outcome);
+      assert.equal(
+        result.requests,
+        1,
+        'equivalent candidates must not incur another ranking request',
+      );
+      assert.equal(result.pending_timers, 0, 'no replacement search should be scheduled');
+      assert.equal(result.semantic_loading, false, 'a settled request must release the spinner');
+      assert.equal(result.spinner_visible, false, 'the real page must stop displaying AI ...');
+      assert.equal(result.semantic_error, outcome === 'failure');
+      assert.deepEqual(
+        result.matches,
+        ['success', 'pending'].includes(outcome) ? ['session-0'] : [],
+      );
+      assert.deepEqual(
+        result.displayed_session_ids,
+        ['success', 'pending'].includes(outcome) ? ['session-0'] : [],
+      );
+    });
+  }
+}
+
+test('agent sessions: changed filters cancel the superseded ranking', async () => {
+  const result = await semanticFilterScenario('source_changed_candidates', 'pending');
+  assert.equal(result.requests, 1, 'the one-row pool needs no ranking request');
+  assert.equal(result.semantic_loading, false);
+  assert.deepEqual(result.matches, [], 'a late old result must not repopulate matches');
+  assert.deepEqual(result.displayed_session_ids, ['session-0']);
+});
