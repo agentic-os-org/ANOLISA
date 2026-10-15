@@ -108,6 +108,14 @@ impl ConsolidatedFact {
         out.push_str(&format!("category: {}\n", self.category));
         out.push_str(&format!("title: {}\n", sanitize_hint(&self.title)));
         out.push_str(&format!("source_tool: {}\n", self.source_tool));
+        // Sovereignty stamp. `memory_summary`, `memory_auto_created` and
+        // `mem_export --source` classify memories by the `source` frontmatter
+        // key (`auto-*` = auto-created, `manual-*` = manual); `source_tool`
+        // names the tool behind the evidence and none of them read it. Without
+        // this line every consolidated fact counted as `unknown_source` and
+        // stayed invisible to the audit and consent views. Mirrors the
+        // `source: manual-observe` stamp that `memory_observe` writes.
+        out.push_str("source: auto-consolidation\n");
         if !self.related_paths.is_empty() {
             out.push_str("related_paths:\n");
             for p in &self.related_paths {
@@ -190,6 +198,24 @@ mod tests {
         assert!(md.contains("source_tool: mem_edit"));
         assert!(md.contains("x.rs"));
         assert!(md.contains("Details here"));
+    }
+
+    #[test]
+    fn fact_markdown_stamps_auto_consolidation_source() {
+        let f = ConsolidatedFact::new(
+            "sid",
+            FactCategory::Summary,
+            "Session summary".into(),
+            "Body".into(),
+            "mem_write".into(),
+            vec![],
+            0.8,
+        );
+        let md = f.to_markdown();
+        // `source` (sovereignty class) and `source_tool` (evidence origin) are
+        // distinct frontmatter keys; the consumers read only the former.
+        assert!(md.contains("\nsource: auto-consolidation\n"), "{md}");
+        assert!(md.contains("source_tool: mem_write"), "{md}");
     }
 
     #[test]
