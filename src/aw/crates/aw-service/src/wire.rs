@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha2";
+pub const VERSION: &str = "aw-service/v1alpha3";
 
 /// Configuration snapshot and daemon lifetime to which every mutable request binds.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -69,6 +69,28 @@ pub struct EventHandle {
     pub instance_id: String,
     /// Admitted step identifiers; their order does not imply scheduling.
     pub steps: Vec<String>,
+    /// Digest of the original event candidate; completion views never replace it.
+    pub candidate_revision: String,
+}
+
+/// Same-user launcher report; a PID is descriptive data, never process authentication.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunOutcome {
+    /// The foreground child was successfully spawned.
+    Started {
+        /// Child PID reported by its owning launcher.
+        pid: u32,
+    },
+    /// The owning launcher reaped the child with exactly one exit representation.
+    Exited {
+        /// Ordinary exit status, or null for a signal.
+        code: Option<i32>,
+        /// Terminating signal, or null for ordinary exit.
+        signal: Option<i32>,
+    },
+    /// Launch or native readiness failed; no successful completion is implied.
+    Failed,
 }
 
 /// One bounded local RPC. The client never retries it automatically.
@@ -104,6 +126,27 @@ pub enum Operation {
         /// Complete explicit environment; no implicit daemon inheritance.
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
+    },
+    /// Start optional instance observation once, probing the configured source within bounds.
+    StartObservation {
+        /// Prepared instance owned by this launcher.
+        instance_id: String,
+    },
+    /// Record launcher-reported process state without claiming source process association.
+    ReportRun {
+        /// Instance with an active observation owner.
+        instance_id: String,
+        /// Actual foreground process outcome or a launch failure.
+        outcome: RunOutcome,
+    },
+    /// Accept a pure observation callback without admitting or invoking any action.
+    ObserveHookEvent {
+        /// Instance with optional observation enabled.
+        instance_id: String,
+        /// Adapter-normalized tool event.
+        event: Value,
+        /// Original native callback bytes used to corroborate the identity.
+        native_input: Vec<u8>,
     },
     /// Release a binding; active events must be closed first.
     Unbind {
@@ -162,6 +205,17 @@ pub enum Operation {
         event_id: String,
         /// Expected instance.
         instance_id: String,
+    },
+    /// Freeze one bounded analysis context for an active event, without invoking steps.
+    /// Only configured sources and verified native sessions can be queried. Repeated
+    /// requests reuse the snapshot; failures, closure and expiry cannot renew its budget.
+    FreezeContext {
+        /// Active service event.
+        event_id: String,
+        /// Expected owning instance.
+        instance_id: String,
+        /// Exact revision returned by the original event handle.
+        candidate_revision: String,
     },
     /// Read one bounded, verified durable record chain, including previous starts.
     Audit {

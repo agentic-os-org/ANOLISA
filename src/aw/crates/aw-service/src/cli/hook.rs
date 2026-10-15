@@ -125,6 +125,17 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     if client.identity() != &binding.binding.identity {
         return Err("stale hook binding".into());
     }
+    if step == adapter::OBSERVE_STEP {
+        client.call(
+            Operation::ObserveHookEvent {
+                instance_id: binding.binding.instance_id,
+                event: normalized,
+                native_input: input,
+            },
+            deadline,
+        )?;
+        return emit(adapter.reply(false));
+    }
     let handle: EventHandle = serde_json::from_value(client.call(
         Operation::OpenHookEvent {
             instance_id: binding.binding.instance_id.clone(),

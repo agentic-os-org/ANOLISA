@@ -2,7 +2,7 @@
 
 use crate::{
     audit::{self, Audit},
-    rejected, Binding, Capabilities, EventHandle, Identity, Operation, Result,
+    rejected, Capabilities, EventHandle, Identity, Operation, Result,
 };
 use aw_host::{Host, ProcessContext};
 use serde_json::{json, Value};
@@ -19,6 +19,8 @@ use std::{
     time::Instant,
 };
 
+mod binding;
+mod evidence;
 mod hooks;
 
 const MAX_BINDINGS: usize = 16;
@@ -30,12 +32,14 @@ struct Instance {
     host: Arc<Host>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
+    observation: Option<Arc<evidence::Observation>>,
 }
 
 struct EventEntry {
     instance_id: String,
     sender: SyncSender<Job>,
     cancelled: Arc<AtomicBool>,
+    context: Arc<evidence::Cell>,
 }
 
 enum Job {
@@ -64,6 +68,7 @@ pub(crate) struct Runtime {
     workers: Mutex<Vec<JoinHandle<()>>>,
     next: AtomicU64,
     calls: AtomicU64,
+    contexts: evidence::Contexts,
 }
 
 impl Runtime {
@@ -76,7 +81,9 @@ impl Runtime {
             .trim()
             .to_owned();
         let revision = format!("{:x}", Sha256::digest(&bytes));
+        let contexts = evidence::Contexts::new(&bytes)?;
         Ok(Arc::new(Self {
+            contexts,
             identity: Identity {
                 generation,
                 config_revision: revision,
@@ -117,11 +124,26 @@ impl Runtime {
         }
         match operation {
             Operation::RecentExecutions => self.audit.recent(),
-            Operation::Status => Ok(
-                json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
+            Operation::Status => {
+                let observations = self.observation_status()?;
+                Ok(
+                    json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
-                "guarantee": "native_hook", "adoption": "unverified"}),
-            ),
+                "observations": observations, "guarantee": "native_hook", "adoption": "unverified"}),
+                )
+            }
+            Operation::StartObservation { instance_id } => {
+                self.start_observation(&instance_id, deadline)
+            }
+            Operation::ReportRun {
+                instance_id,
+                outcome,
+            } => self.report_run(&instance_id, outcome),
+            Operation::ObserveHookEvent {
+                instance_id,
+                event,
+                native_input,
+            } => self.observe_hook(&instance_id, event, native_input, deadline),
             Operation::Bind {
                 target,
                 capabilities,
@@ -196,82 +218,25 @@ impl Runtime {
                     return Err(rejected("instance_has_events"));
                 }
                 instances
-                    .remove(&instance_id)
-                    .ok_or_else(|| rejected("unknown_instance"))?;
-                Ok(json!({"released": true}))
+                    .get_mut(&instance_id)
+                    .and_then(Option::as_mut)
+                    .ok_or_else(|| rejected("unknown_instance"))?
+                    .closing = true;
+                drop(instances);
+                self.release_instance(&instance_id, deadline)
             }
             Operation::ReleaseInstance { instance_id } => {
                 self.release_instance(&instance_id, deadline)
             }
             Operation::Audit { key } => self.audit.read(&key),
+            Operation::FreezeContext {
+                event_id,
+                instance_id,
+                candidate_revision,
+            } => self.freeze_context(&event_id, &instance_id, &candidate_revision, deadline),
             Operation::Stop => {
                 self.stopped.store(true, Ordering::Release);
                 Ok(json!({"stopping": true}))
-            }
-        }
-    }
-
-    fn bind(
-        &self,
-        target: String,
-        capabilities: Capabilities,
-        context: ProcessContext,
-        deadline: Instant,
-        cancelled: &AtomicBool,
-    ) -> Result<Value> {
-        let instance_id = self.identifier()?;
-        {
-            let mut instances = self
-                .instances
-                .lock()
-                .map_err(|_| rejected("state_poisoned"))?;
-            if instances.len() >= MAX_BINDINGS {
-                return Err(rejected("binding_limit"));
-            }
-            instances.insert(instance_id.clone(), None);
-        }
-        let result = self.prepare(
-            &instance_id,
-            &target,
-            capabilities,
-            context,
-            deadline,
-            cancelled,
-        );
-        let result = result.and_then(|host| {
-            if cancelled.load(Ordering::Acquire)
-                || self.stopped.load(Ordering::Acquire)
-                || Instant::now() >= deadline
-            {
-                Err(rejected("binding_cancelled"))
-            } else {
-                Ok(host)
-            }
-        });
-        let mut instances = self
-            .instances
-            .lock()
-            .map_err(|_| rejected("state_poisoned"))?;
-        match result {
-            Ok(host) => {
-                instances.insert(
-                    instance_id.clone(),
-                    Some(Instance {
-                        host: Arc::new(host),
-                        closing: false,
-                        hooks: Arc::new(Mutex::new(BTreeMap::new())),
-                    }),
-                );
-                Ok(json!(Binding {
-                    identity: self.identity.clone(),
-                    instance_id: instance_id.clone(),
-                    target,
-                    audit_key: instance_id
-                }))
-            }
-            Err(error) => {
-                instances.remove(&instance_id);
-                Err(error)
             }
         }
     }
@@ -352,6 +317,7 @@ impl Runtime {
         let metadata = event_metadata(&value)?;
         let key = self.identifier()?;
         let cancelled = Arc::new(AtomicBool::new(false));
+        let context = Arc::new(evidence::Cell::default());
         let (sender, receiver) = mpsc::sync_channel(MAX_STEPS + 1);
         let (ready, result) = mpsc::sync_channel(1);
         {
@@ -365,6 +331,7 @@ impl Runtime {
                     instance_id: instance_id.clone(),
                     sender,
                     cancelled: Arc::clone(&cancelled),
+                    context: Arc::clone(&context),
                 },
             );
         }
@@ -373,6 +340,8 @@ impl Runtime {
         let thread_key = key.clone();
         let worker = thread::Builder::new().name("aw-event".into()).spawn(move || {
             let automatic = native_input.is_some();
+            let association = evidence::association(&host.capabilities().adapter, &value, native_input.as_deref());
+            let candidate = value.clone();
             // Qoder's native sequential flag serializes external Hooks too.
             let ordered = automatic && host.capabilities().adapter == "qoder"
                 && value["name"] == "tool.after"
@@ -383,13 +352,31 @@ impl Runtime {
             }.map_err(|_| rejected("event_invalid"));
             match event {
                 Ok(event) => {
-                    let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect() };
+                    let seed = runtime.contexts.seed(json!({
+                        "generation":runtime.identity.generation,"config_revision":runtime.identity.config_revision,
+                        "binding_id":host.target(),"instance_id":instance_id,"event_id":thread_key,
+                        "adapter":host.capabilities().adapter,
+                    }), &candidate, association, event.deadline()).and_then(|seed| context.initialize(seed));
+                    let candidate_revision = match seed {
+                        Ok(revision) => revision,
+                        Err(error) => {
+                            let _ = ready.send(Err(error));
+                            context.close();
+                            if let Ok(mut events) = runtime.events.lock() { events.remove(&thread_key); }
+                            return;
+                        }
+                    };
+                    let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
                     let claimed = runtime.audit.claim(&thread_key, json!({"kind": "event", "identity": runtime.identity,
                         "instance_id": instance_id, "binding_id": host.target(), "host_event_id": event.id(), "event": metadata}));
                     match claimed {
                         Ok(_) => {
-                            let _ = ready.send(Ok(json!(handle)));
-                            runtime.event_loop(&thread_key, &event, &cancelled, receiver, automatic, ordered);
+                            if let Err(error) = context.seed().ok_or_else(|| rejected("context_not_ready")).and_then(|seed| runtime.observe_seed(&instance_id, seed)) {
+                                let _ = ready.send(Err(error));
+                            } else {
+                                let _ = ready.send(Ok(json!(handle)));
+                            }
+                            runtime.event_loop(&thread_key, &event, (&cancelled, &context), receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -397,6 +384,7 @@ impl Runtime {
                 Err(error) => { let _ = ready.send(Err(error)); }
             }
             runtime.audit.release(&thread_key);
+            context.close();
             if let Ok(mut events) = runtime.events.lock() { events.remove(&thread_key); }
         });
         match worker {
@@ -435,11 +423,12 @@ impl Runtime {
         &self,
         key: &str,
         event: &aw_host::Event<'_>,
-        cancelled: &AtomicBool,
+        lease: (&AtomicBool, &evidence::Cell),
         receiver: Receiver<Job>,
         automatic: bool,
         ordered: bool,
     ) {
+        let (cancelled, context) = lease;
         let mut close = None;
         let mut claimed = BTreeSet::new();
         let mut panicked = false;
@@ -557,6 +546,7 @@ impl Runtime {
                 panicked |= child.join().is_err();
             }
         });
+        context.close();
         let completed = self.audit.append(key, json!({"phase": "closed", "status": if panicked { "worker_failed" } else if close.is_some() { "closed" } else if automatic && completed_steps.load(Ordering::Acquire) == step_count { "completed" } else if self.stopped.load(Ordering::Acquire) { "stopped" } else if Instant::now() >= event.deadline() { "expired" } else { "cancelled" }, "attempted_steps": claimed.len()}));
         // Release registry membership before acknowledging close so immediate unbind works.
         if let Ok(mut events) = self.events.lock() {
@@ -580,6 +570,9 @@ impl Runtime {
             }
             // Dropping registry senders wakes idle event workers; in-flight handlers are bounded.
             events.clear();
+        }
+        if shutdown {
+            self.stop_observations()?;
         }
         let mut workers = self
             .workers

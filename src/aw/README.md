@@ -12,6 +12,7 @@ scheduling and permissions. It also manages public Pi SDK workers. The current r
 
 | Task | Guide |
 | --- | --- |
+| Observe the Agent lifecycle with an optional source | [AgentSight through aw run](../../docs/user-guide/en/user-entrypoint/aw-agentsight.md) |
 | Install prebuilt core and optional sec-core packages | [Preview installation](../../docs/user-guide/en/user-entrypoint/aw-preview.md) |
 | Build from source and connect your component | [Integration walkthrough](../../docs/developer-guide/en/aw/integration.md) |
 | Write and validate configuration | [Configuration reference](../../docs/developer-guide/en/aw/configuration.md) |
@@ -19,6 +20,10 @@ scheduling and permissions. It also manages public Pi SDK workers. The current r
 | Compress model-visible results across four frameworks | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
+
+Optional AgentSight observation follows `aw run`; loopback HTTP needs no token,
+while HTTPS requires a private token file. Source failure leaves native actions
+and local audit active; semantic evaluation remains a later stage.
 
 AW is not yet distributed through `anolisa install` or RPM. Preview package
 installation uses `aw-package`; it does not install an Agent or its model

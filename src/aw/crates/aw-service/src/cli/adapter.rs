@@ -168,6 +168,41 @@ pub(super) fn version_output_with_timeout(
     Ok(std::str::from_utf8(&output.stdout)?.trim().into())
 }
 
+// This registration ID cannot name a configured step (configuration IDs are names).
+pub(super) const OBSERVE_STEP: &str = "$aw.observe";
+
+pub(super) fn observation_enabled(document: &Value, target: &str) -> bool {
+    let evidence = &document["spec"]["agents"][target]["evidence"];
+    evidence.is_object() && evidence["mode"] != "off"
+}
+
+#[derive(Clone)]
+pub(super) struct NativeStep {
+    pub step_id: String,
+    pub on_error: String,
+    pub replaces_result: bool,
+}
+
+pub(super) fn native_steps(steps: &[AdmittedStep], event: &str, observe: bool) -> Vec<NativeStep> {
+    let mut selected: Vec<_> = steps
+        .iter()
+        .filter(|step| step.event == event)
+        .map(|step| NativeStep {
+            step_id: step.step_id.clone(),
+            on_error: step.on_error.clone(),
+            replaces_result: step.execution.replaces_result(),
+        })
+        .collect();
+    if selected.is_empty() && observe {
+        selected.push(NativeStep {
+            step_id: OBSERVE_STEP.into(),
+            on_error: "report".into(),
+            replaces_result: false,
+        });
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 
 | 任务 | 指南 |
 | --- | --- |
+| 通过可选来源观测 Agent 生命周期 | [通过 aw run 接入 AgentSight](../../docs/user-guide/zh/user-entrypoint/aw-agentsight.md) |
 | 安装预编译 core 和可选 sec-core 包 | [Preview 安装](../../docs/user-guide/zh/user-entrypoint/aw-preview.md) |
 | 从源码构建并接入自己的组件 | [组件接入教程](../../docs/developer-guide/zh/aw/integration.md) |
 | 编写和校验配置 | [配置参考](../../docs/developer-guide/zh/aw/configuration.md) |
@@ -18,6 +19,9 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 | 四框架模型可见结果压缩 | [Tokenless Provider](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md) |
 | 使用已有 sec-core 后端 | [sec-core Provider](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md) |
 | 容器部署与审计持久化 | [运行与持久化](../../docs/user-guide/zh/user-entrypoint/aw.md#容器与持久化数据) |
+
+可选 AgentSight 观测贯穿 `aw run`：loopback HTTP 无需 token，HTTPS 要求私有
+token 文件。来源失败保留原生动作与本地审计，语义评估仍属后续阶段。
 
 AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package` 安装，
 不安装 Agent 或配置其模型凭据。core 无需 sec-core 或任何 Provider 即可使用。

@@ -19,6 +19,8 @@ shared configuration below to verify native tool behavior. Field definitions
 live in the [configuration reference](../../../developer-guide/en/aw/configuration.md).
 
 
+For optional lifecycle observation, see [AgentSight through aw run](aw-agentsight.md).
+
 ## Current support
 
 | Capability | Status |
@@ -321,7 +323,7 @@ The native Hook output dialect and event coverage remain framework-specific.
 
 ## Upgrade the service
 
-This build uses local protocol `aw-service/v1alpha2`. A daemon from an older
+This build uses local protocol `aw-service/v1alpha3`. A daemon from an older
 build is rejected with `protocol_version` before Agent binding or callbacks.
 Before replacing the executable, exit its Agent sessions and use the **old**
 `aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.

@@ -358,3 +358,33 @@ fn native_callback_environment_preserves_profile_changes_without_rebinding_provi
     preserved(&fixture);
     service.released(&fixture);
 }
+
+#[test]
+fn observation_only_app_registers_callbacks_without_actions() {
+    let fixture = Fixture::new();
+    let mut document = setup(&fixture);
+    fixture.observation(&mut document, "qwenpaw");
+    let service = Service::start(&fixture, &document);
+    let output = fixture.run(launch(&fixture));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ready_hook_count"], 2);
+    assert_eq!(report["tool_executed"], true);
+    let audit = fixture.run_audit(&service, &output);
+    assert_eq!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["record"]["phase"] == "native_callback")
+            .count(),
+        2
+    );
+    assert_eq!(audit["terminal"], true);
+    preserved(&fixture);
+    service.released(&fixture);
+}

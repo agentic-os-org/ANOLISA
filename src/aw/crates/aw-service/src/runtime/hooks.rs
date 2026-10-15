@@ -60,7 +60,9 @@ impl Runtime {
                 }
                 active
             };
-            if !active {
+            if !active && self.finish_observation(instance_id)? {
+                self.release_source_sessions(instance_id)?;
+                let observation = self.observation_metadata(instance_id)?;
                 self.instances
                     .lock()
                     .map_err(|_| rejected("state_poisoned"))?
@@ -68,7 +70,7 @@ impl Runtime {
                 if !self.audit.healthy() {
                     return Err(rejected("audit_unavailable"));
                 }
-                return Ok(json!({"released": true}));
+                return Ok(json!({"released": true, "observation":observation}));
             }
             if Instant::now() >= deadline {
                 return Err(rejected("instance_release_timeout"));
@@ -387,6 +389,7 @@ mod tests {
             Some(Instance {
                 host: Arc::new(host),
                 closing: false,
+                observation: None,
                 hooks: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         );
@@ -417,6 +420,7 @@ mod tests {
                 instance_id: "fixture".into(),
                 sender,
                 cancelled: Arc::clone(&cancelled),
+                context: Arc::new(super::super::evidence::Cell::default()),
             },
         );
         assert!(

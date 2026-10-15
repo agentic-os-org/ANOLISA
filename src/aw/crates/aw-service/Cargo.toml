@@ -11,6 +11,7 @@ name = "aw"
 path = "src/main.rs"
 
 [dependencies]
+aw-contracts = { workspace = true }
 aw-config = { workspace = true }
 aw-core = { workspace = true }
 aw-exec = { workspace = true }

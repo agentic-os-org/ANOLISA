@@ -16,6 +16,8 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 原生工具行为。字段定义集中在[配置参考](../../../developer-guide/zh/aw/configuration.md)。
 
 
+可选生命周期观测参见[通过 aw run 接入 AgentSight](aw-agentsight.md)。
+
 ## 安装 Preview
 
 使用 [Preview 包](aw-preview.md) 安装并演示 AW + sec-core，无需编译。
@@ -281,7 +283,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 
 ## 升级服务
 
-本版本使用本地协议 `aw-service/v1alpha2`。旧版 daemon 会在 Agent 绑定和回调前
+本版本使用本地协议 `aw-service/v1alpha3`。旧版 daemon 会在 Agent 绑定和回调前
 被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
 **旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。

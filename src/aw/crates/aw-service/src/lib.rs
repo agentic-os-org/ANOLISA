@@ -17,7 +17,7 @@ pub mod launch_service;
 pub use client::Client;
 pub use server::Server;
 pub use wire::{
-    Binding, Capabilities, EventHandle, Identity, Operation, Request, Response, VERSION,
+    Binding, Capabilities, EventHandle, Identity, Operation, Request, Response, RunOutcome, VERSION,
 };
 
 /// Service boundary failure; remote messages contain only stable error codes.
