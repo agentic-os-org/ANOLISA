@@ -4537,21 +4537,44 @@ fn eval_sched_min_granularity_at(
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if info.cpu_cores > 32 && current < 10_000_000 {
-        recs.push(Recommendation {
-            param: "kernel.sched_min_granularity_ns".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "10000000".to_string(),
-            reason: format!(
-                "{}核机器上调度器切换过频，增大最小调度粒度可减少上下文切换开销",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_min_granularity_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_min_granularity_ns` recommendation for an
+/// already-read value; split from the file probe so the version gate is
+/// testable anywhere.
+///
+/// Linux 5.13 moved the SCHED_DEBUG tunables out of sysctl into debugfs
+/// (commit 8a99b6833c88), so the scheduling slice this reason sizes has had no
+/// `/proc/sys` node since — the CFS variables are exported as
+/// `/sys/kernel/debug/sched/*` only (v6.6 kernel/sched/debug.c). A node under
+/// the old name exists only where a vendor tree re-registered it for another
+/// class (the `CONFIG_BT_SCHED` batch variables in kernel/sysctl.c), and no
+/// code in such a tree reads that variable: the write lands nowhere while the
+/// report claims the slice was raised. Silence the rule from 5.13 on, the way
+/// the knobs whose reader moved are silenced.
+fn sched_min_granularity_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || cpu_cores <= 32 || current >= 10_000_000 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_min_granularity_ns".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "10000000".to_string(),
+        reason: format!("{cpu_cores}核机器上调度器切换过频，增大最小调度粒度可减少上下文切换开销"),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_icmp_echo_ignore_broadcasts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -14962,6 +14985,23 @@ mod tests {
         {
             assert_eq!(rec.recommended_value, "10000000");
         }
+    }
+
+    #[test]
+    fn sched_min_granularity_advice_stops_where_its_reader_moved() {
+        // 5.13 moved the SCHED_DEBUG tunables into debugfs (8a99b6833c88); a
+        // /proc/sys node under the old name is then either absent (stock, which
+        // the file probe already covers) or wired to a vendor scheduler class
+        // nothing reads.
+        assert!(sched_min_granularity_recommendation(3_000_000, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_min_granularity_recommendation(3_000_000, 64, "5.4.0-150").is_some());
+        assert!(sched_min_granularity_recommendation(3_000_000, 64, "5.13.0").is_none());
+        assert!(sched_min_granularity_recommendation(3_000_000, 64, "6.6.87.2").is_none());
+        // Unparseable versions keep the legacy behaviour, and the two existing
+        // gates (core count, value floor) are unchanged.
+        assert!(sched_min_granularity_recommendation(3_000_000, 64, "").is_some());
+        assert!(sched_min_granularity_recommendation(3_000_000, 8, "5.10.0").is_none());
+        assert!(sched_min_granularity_recommendation(10_000_000, 64, "5.10.0").is_none());
     }
 
     #[test]
