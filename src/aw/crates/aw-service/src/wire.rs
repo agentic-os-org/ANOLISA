@@ -126,8 +126,12 @@ pub enum Operation {
     /// Lease one native callback shared by all step processes for the same tool call.
     ///
     /// Nonempty session/tool call IDs identify the event within this instance.
-    /// Repeated opens require identical input and reuse the first deadline. Closed
-    /// correlations remain claimed until unbind; they cannot start a new budget.
+    /// Repeated opens require identical input and reuse the first deadline. Hermes
+    /// completion observers and final replacement normalize only their seam name
+    /// and observer-only middleware trace; the first native bytes are retained.
+    /// OpenClaw binds compression and native completion to one original snapshot;
+    /// its pinned completion view supplies native metadata without renewing claims.
+    /// Closed correlations remain claimed until unbind; they cannot start a new budget.
     /// At most 1024 correlations are retained per instance; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.

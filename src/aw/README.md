@@ -16,6 +16,7 @@ scheduling and permissions. The current release is a Preview.
 | Build from source and connect your component | [Integration walkthrough](../../docs/developer-guide/en/aw/integration.md) |
 | Write and validate configuration | [Configuration reference](../../docs/developer-guide/en/aw/configuration.md) |
 | Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
+| Compress model-visible results across four frameworks | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
@@ -34,11 +35,14 @@ includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
 
-Runtime supports tool-before `observe`/`block` and tool-after `observe`, plus
-framework-specific native commands. After-event coverage varies by framework.
+Runtime supports tool-before `observe`/`block` and tool-after `observe` or single-text
+`replace_result`, plus
+framework-specific native commands. Completion observers and user Hooks can
+precede one final replacement step (OpenClaw observes natively after compression); the combined sec-core/Tokenless template
+retains observation and appends compression. After-event coverage varies by framework.
 The configuration vocabulary includes more events/effects than the runtime
 supports; static validation alone does not certify native adoption. Cross-Agent
-approval, input/result rewriting and OS enforcement are outside this Preview.
+approval, input rewriting and OS enforcement are outside this Preview.
 See the user guide for each Adapter's profile requirements and coexistence.
 
 ## Basic use
@@ -60,7 +64,8 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
 Initialize Qoder/OpenClaw YAML with `aw-package configure`; omit `--provider`
-for an empty policy, or select `--provider command` / `--provider sec-core`.
+for an empty policy, or select `--provider command` / `--provider sec-core` / `--provider tokenless` /
+`--provider sec-core+tokenless` (with `--socket`).
 For four targets, copy the shared template. Simple scripts omit `protocol` and
 `operation`, return JSON true/false and declare matched effects in each YAML
 step. AW validates admission and constructs results without script handshake

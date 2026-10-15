@@ -30,6 +30,7 @@ pub struct Event<'a> {
     deadline: Instant,
     cancelled: &'a AtomicBool,
     claimed: Mutex<BTreeSet<String>>,
+    callback: Mutex<Option<(Value, Vec<u8>)>>,
 }
 
 impl Host {
@@ -138,11 +139,55 @@ impl Host {
             deadline,
             cancelled,
             claimed: Mutex::new(BTreeSet::new()),
+            callback: Mutex::new(None),
         })
     }
 }
 
 impl Event<'_> {
+    /// Select a later native completion view without renewing claims or budget.
+    ///
+    /// The Adapter must bind both views to the same original result. Only native
+    /// completion metadata, its result view and its projection may differ.
+    ///
+    /// # Errors
+    /// Rejects non-native/after events, changed identity or input, invalid bounds,
+    /// an expired budget or a poisoned callback lock.
+    pub fn completion_view(&self, value: Value, input: Vec<u8>) -> Result<(), Error> {
+        if self.name != "tool.after" || self.native_input.is_none() {
+            return Err(Error::Invalid(
+                "completion view requires a native after event",
+            ));
+        }
+        let candidate = self
+            .host
+            .hook_event(value, input, self.deadline, self.cancelled)?;
+        let mut bound = candidate.value.clone();
+        bound["native"] = self.value["native"].clone();
+        for field in ["result", "result_projection"] {
+            if let Some(original) = self.value["tool"].get(field) {
+                bound["tool"][field] = original.clone();
+            } else if let Some(tool) = bound["tool"].as_object_mut() {
+                tool.remove(field);
+            }
+        }
+        if bound != self.value {
+            return Err(Error::Invalid(
+                "completion view changed event identity or input",
+            ));
+        }
+        *self
+            .callback
+            .lock()
+            .map_err(|_| Error::Invalid("callback view poisoned"))? = Some((
+            candidate.value,
+            candidate
+                .native_input
+                .ok_or(Error::Invalid("missing native completion input"))?,
+        ));
+        Ok(())
+    }
+
     /// Process-local correlation ID shared by all attempts within this event.
     pub fn id(&self) -> &str {
         &self.id
@@ -226,11 +271,17 @@ impl Event<'_> {
             return Err(Error::Invalid("step was already claimed for this event"));
         }
         let transport = self.host.transport(provider, self.deadline, self.cancelled);
+        let callback = self
+            .callback
+            .lock()
+            .map_err(|_| Error::Invalid("callback view poisoned"))?
+            .clone();
         let (record, result) = match &step.execution {
             StepExecution::Native => {
-                let input = self
-                    .native_input
+                let input = callback
                     .as_ref()
+                    .map(|(_, input)| input)
+                    .or(self.native_input.as_ref())
                     .ok_or(Error::Invalid("native callback input is missing"))?;
                 transport.native(record, input, environment)
             }
@@ -241,12 +292,24 @@ impl Event<'_> {
                 } else {
                     "invoke"
                 };
+                // Bind one immutable event across callbacks; projections belong
+                // only to the final replacement Provider, not earlier observers.
+                let mut event = callback
+                    .as_ref()
+                    .map(|(value, _)| value)
+                    .unwrap_or(&self.value)
+                    .clone();
+                if !step.execution.replaces_result() {
+                    if let Some(tool) = event["tool"].as_object_mut() {
+                        tool.remove("result_projection");
+                    }
+                }
                 let build = |budget_ms| {
                     let value = json!({
                         "api_version": VERSION, "method": "invoke", "request_id": request_id,
                         "operation": operation, "config_revision": self.host.revision,
                         "budget_ms": budget_ms, "allowed_effects": effects,
-                        "config": provider.config, "event": self.value,
+                        "config": provider.config, "event": event,
                     });
                     if matches!(step.execution, StepExecution::Hook { .. }) {
                         self.host.protocol.bind_hook_invocation(value)

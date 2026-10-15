@@ -157,7 +157,10 @@ pub(super) fn capabilities(args: &[String]) -> Capabilities {
         .into(),
         events: BTreeMap::from([
             ("tool.before".into(), vec!["observe".into(), "block".into()]),
-            ("tool.after".into(), vec!["observe".into()]),
+            (
+                "tool.after".into(),
+                vec!["observe".into(), "replace_result".into()],
+            ),
         ]),
     }
 }
@@ -317,6 +320,10 @@ pub(super) fn generate(
             name.into(),
             HookEvent {
                 budget_ms: budget,
+                replacement_step: selected
+                    .iter()
+                    .find(|step| step.execution.replaces_result())
+                    .map(|step| step.step_id.clone()),
                 steps: selected
                     .into_iter()
                     .map(|step| (step.step_id.clone(), step.on_error.clone()))

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import plugin from '../../../adapters/openclaw/index.mjs';
+import { register } from '../../../adapters/openclaw/hooks.mjs';
+const plugin = { register: api => register(api, result => structuredClone(result)) };
 
 const binary = fileURLToPath(new URL('./fixtures/openclaw/client.mjs', import.meta.url));
 
@@ -12,6 +13,7 @@ function setup(t, before = [], after = []) {
   const root = mkdtempSync(join(tmpdir(), 'aw-openclaw-plugin-'));
   t.after(() => rmSync(root, { recursive: true }));
   const callbacks = [];
+  const middlewares = [];
   const warnings = [];
   const entry = item => typeof item === 'string'
     ? { step: item, onError: 'report', budgetMs: 1000 } : item;
@@ -20,10 +22,11 @@ function setup(t, before = [], after = []) {
       binary, binding: root, ready: { path: join(root, 'ready.json'), token: 'test-token' },
       hooks: { before: before.map(entry), after: after.map(entry) },
     },
+    registerAgentToolResultMiddleware: callback => middlewares.push(callback),
     on: (name, callback, options) => callbacks.push({ name, callback, options }),
     logger: { warn: message => warnings.push(message) },
   });
-  return { root, warnings, callbacks, rows: () => readFileSync(join(root, 'calls.jsonl'), 'utf8')
+  return { root, warnings, callbacks, middlewares, rows: () => readFileSync(join(root, 'calls.jsonl'), 'utf8')
     .trim().split('\n').map(line => JSON.parse(line)) };
 }
 
@@ -92,4 +95,83 @@ test('readiness is attested only by gateway_start after hook registration', asyn
   assert.deepEqual(JSON.parse(readFileSync(path)), {
     version: 1, adapter: 'openclaw', token: 'test-token', pid: process.pid, hooks: 2,
   });
+});
+
+
+test('replacement registers the model-bound middleware instead of an observer', { timeout: 10000 }, async t => {
+  const f = setup(t, [], [{ step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  assert.equal(f.middlewares.length, 1);
+  assert.deepEqual(f.callbacks.map(row => row.name), ['gateway_start']);
+  const result = await f.middlewares[0]({ ...event, args: event.params, result: { content: [{ type: 'text', text: 'original' }] } }, context);
+  assert.deepEqual(result, { result: { content: [{ type: 'text', text: 'compact' }], metadata: { kept: true } } });
+  assert.deepEqual(f.rows()[0].received.event.params, event.params);
+});
+
+test('native completion fields and the original result survive compression and observer failures', { timeout: 10000 }, async t => {
+  const f = setup(t, [], ['slow', 'first', 'error',
+    { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  assert.equal(f.middlewares.length, 1);
+  assert.deepEqual(f.callbacks.map(row => row.name), ['after_tool_call', 'session_end', 'gateway_stop', 'gateway_start']);
+  const native = { ...event, args: event.params, result: { content: [{ type: 'text', text: 'original' }] } };
+  const snapshot = structuredClone(native);
+  const result = await f.middlewares[0](native, context);
+  assert.equal(result.result.content[0].text, 'compact');
+  assert.deepEqual(native, snapshot);
+  const completed = { ...event, result: result.result, durationMs: 37, error: 'native failure metadata', extra: 'preserved' };
+  await f.callbacks.find(row => row.name === 'after_tool_call').callback(completed, context);
+  const rows = f.rows();
+  assert.deepEqual(rows.filter(row => row.phase === 'start').map(row => row.step), ['replace', 'slow', 'first', 'error']);
+  assert.ok(rows.findIndex(row => row.step === 'slow' && row.phase === 'end')
+    < rows.findIndex(row => row.step === 'first' && row.phase === 'start'));
+  for (const row of rows) {
+    assert.deepEqual(row.received.event.result, native.result);
+    if (row.step !== 'replace') {
+      assert.equal(row.received.event.error, completed.error);
+      assert.equal(row.received.event.durationMs, 37);
+      assert.equal(row.received.event.extra, 'preserved');
+      assert.equal(row.completion.phase, 'observation');
+    }
+  }
+  assert.equal(f.warnings.length, 1);
+});
+
+test('missing replacement middleware retains before enforcement and native completion observers', async t => {
+  const callbacks = [], warnings = [];
+  register({
+    pluginConfig: { binary, binding: '/unused', ready: { path: '/unused', token: 'test' }, hooks: {
+      before: [{ step: 'block', onError: 'block', budgetMs: 1000 }],
+      after: [{ step: 'observe', onError: 'report', budgetMs: 1000 }, { step: 'replace', replaceResult: true }],
+    } },
+    on: (name, callback) => callbacks.push({ name, callback }), logger: { warn: message => warnings.push(message) },
+  }, value => value);
+  assert.ok(callbacks.some(row => row.name === 'before_tool_call'));
+  assert.ok(callbacks.some(row => row.name === 'after_tool_call'));
+  assert.equal(warnings.length, 1);
+});
+
+test('completion snapshots are isolated by run and released at completion', { timeout: 10000 }, async t => {
+  const f = setup(t, [], ['first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  for (const runId of ['run-a', 'run-b']) {
+    await f.middlewares[0]({ ...event, runId, args: event.params, result: { content: [{ type: 'text', text: runId }] } }, { ...context, runId });
+  }
+  for (const runId of ['run-b', 'run-a']) {
+    await f.callbacks.find(row => row.name === 'after_tool_call').callback({ ...event, runId,
+      result: { content: [{ type: 'text', text: 'compact' }] }, durationMs: 1 }, { ...context, runId });
+  }
+  assert.deepEqual(f.rows().filter(row => row.step === 'first' && row.phase === 'start')
+    .map(row => row.received.event.result.content[0].text), ['run-b', 'run-a']);
+});
+
+test('bounded snapshot retention skips compression and session teardown releases capacity', { timeout: 10000 }, async t => {
+  const f = setup(t, [], ['first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  const native = { ...event, args: event.params, result: { content: [{ type: 'text', text: 'original' }] } };
+  for (let index = 0; index < 32; index++) {
+    await f.middlewares[0]({ ...native, toolCallId: `call-${index}` }, context);
+  }
+  assert.equal(await f.middlewares[0]({ ...native, toolCallId: 'over-limit' }, context), undefined);
+  assert.equal(f.warnings.length, 1);
+  f.callbacks.find(row => row.name === 'session_end').callback({ sessionId: context.sessionId }, context);
+  assert.equal((await f.middlewares[0]({ ...native, toolCallId: 'after-teardown' }, context)).result.content[0].text, 'compact');
+  assert.equal(f.rows().filter(row => row.phase === 'start').length, 33);
+  f.callbacks.find(row => row.name === 'gateway_stop').callback();
 });

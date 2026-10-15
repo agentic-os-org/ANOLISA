@@ -33,7 +33,7 @@ live in the [configuration reference](../../../developer-guide/en/aw/configurati
 | Start QwenPaw through AW | ✅ the official App/API entrypoint |
 | Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
-| Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
+| Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
 
 For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
@@ -744,3 +744,5 @@ covers every field and event name. The [local service contract](../../../../src/
 describes operation JSON, deadlines and lifecycle for Adapter developers.
 
 Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](aw-sec-core.md).
+
+Model-visible PostTool compression uses the optional [Tokenless Provider](aw-tokenless.md).

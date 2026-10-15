@@ -527,3 +527,34 @@ fn native_hooks_require_no_fabricated_provider_evidence() {
     )
     .is_err());
 }
+
+#[test]
+fn result_replacement_requires_adapter_evidence_and_is_the_final_enabled_step() {
+    let mut document = document();
+    document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = json!(["replace_result"]);
+    let config = configuration(&document);
+    let mut caps = capabilities("qoder");
+    assert!(preflight(&config, "qoder", &caps).is_err());
+    caps.events
+        .get_mut("tool.after")
+        .unwrap()
+        .push("replace_result".into());
+    assert!(preflight(&config, "qoder", &caps)
+        .unwrap()
+        .iter()
+        .any(|step| step.execution.replaces_result()));
+    let extra = document["spec"]["events"]["tool.after"]["steps"][0].clone();
+    document["spec"]["events"]["tool.after"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra);
+    document["spec"]["events"]["tool.after"]["steps"][1]["id"] = json!("second");
+    assert!(preflight(&configuration(&document), "qoder", &caps).is_err());
+    document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = json!(["observe"]);
+    let steps = preflight(&configuration(&document), "qoder", &caps).unwrap();
+    assert_eq!(steps.len(), 3); // The fixture also includes its before step.
+    assert!(!steps[0].execution.replaces_result());
+    document["spec"]["events"]["tool.after"]["steps"][1]["enabled"] = json!(false);
+    document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = json!(["replace_result"]);
+    assert!(preflight(&configuration(&document), "qoder", &caps).is_ok());
+}

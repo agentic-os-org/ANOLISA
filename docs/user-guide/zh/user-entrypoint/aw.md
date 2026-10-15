@@ -35,7 +35,7 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
 | 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
-| 其他事件、跨框架 `ask`、结果替换或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
+| 其他事件、跨框架 `ask`、输入改写或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
 | 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](aw-preview.md)，尚非稳定发行 |
 
 对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
@@ -632,3 +632,5 @@ rm -r -- "$AW_DEMO_ROOT"
 说明操作 JSON、截止时间和生命周期。
 
 sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](aw-sec-core.md)。
+
+模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](aw-tokenless.md)。

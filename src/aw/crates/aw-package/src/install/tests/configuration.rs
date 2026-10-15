@@ -290,3 +290,67 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
         }
     }
 }
+
+#[test]
+fn tokenless_templates_require_its_package_and_keep_security_before_compression() {
+    let f = Fixture::new();
+    install(&f.combined, &f.prefix).unwrap();
+    let config = f.root.join("tokenless.yaml");
+    let state = &f.state;
+    let mut settings = crate::Settings {
+        prefix: &f.prefix,
+        config: &config,
+        state,
+        policy: crate::Policy::Tokenless,
+        qoder: Some(Path::new("/bin/true")),
+        node: None,
+        openclaw: None,
+    };
+    assert!(crate::configure(&settings)
+        .unwrap_err()
+        .to_string()
+        .contains("install the Tokenless Provider"));
+    let provider = bundle(
+        &f.root.join("tokenless-provider"),
+        &["aw-provider-tokenless"],
+    );
+    install(&provider, &f.prefix).unwrap();
+    crate::configure(&settings).unwrap();
+    let document: serde_json::Value =
+        serde_yaml_ng::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert!(document["spec"]["events"].get("tool.before").is_none());
+    assert_eq!(
+        document["spec"]["events"]["tool.after"]["steps"][0]["effects"],
+        serde_json::json!(["replace_result"])
+    );
+    fs::remove_file(&config).unwrap();
+    settings.policy = crate::Policy::SecCoreTokenless {
+        socket: Path::new("/run/aw-test/sec.sock"),
+    };
+    crate::configure(&settings).unwrap();
+    let document: serde_json::Value =
+        serde_yaml_ng::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(
+        document["spec"]["events"]["tool.before"]["steps"][0]["provider"],
+        "security"
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.after"]["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.after"]["steps"][0]["provider"],
+        "security"
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.after"]["steps"][0]["operation"],
+        "observe_tool"
+    );
+    assert_eq!(
+        document["spec"]["events"]["tool.after"]["steps"][1]["provider"],
+        "tokenless"
+    );
+}

@@ -40,10 +40,12 @@ pub(crate) fn selected_receipts(
             paths::absolute(&path)?;
             let value: Component = serde_json::from_reader(File::open(&path)?)?;
             require(
-                matches!(value.component.as_str(), "aw-core" | "aw-provider-sec-core")
-                    && path
-                        .file_stem()
-                        .is_some_and(|stem| stem == value.component.as_str())
+                matches!(
+                    value.component.as_str(),
+                    "aw-core" | "aw-provider-sec-core" | "aw-provider-tokenless"
+                ) && path
+                    .file_stem()
+                    .is_some_and(|stem| stem == value.component.as_str())
                     && !components.contains_key(&value.component),
                 "invalid package receipt",
             )?;

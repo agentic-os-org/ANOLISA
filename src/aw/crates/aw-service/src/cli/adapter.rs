@@ -27,6 +27,8 @@ pub(super) struct HookBinding {
 #[serde(deny_unknown_fields)]
 pub(super) struct HookEvent {
     pub budget_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_step: Option<String>,
     pub steps: BTreeMap<String, String>,
 }
 

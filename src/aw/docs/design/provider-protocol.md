@@ -174,7 +174,8 @@ preserved; admission does not schedule distinct events or choose parallelism.
 | --- | --- |
 | `tool.before`: `observe`, `block` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
-| `ask`, input/result replacement or a block after execution | Rejected |
+| `tool.after`: `replace_result` | One structured step with trusted text-replacement capability |
+| `ask`, input replacement or a block after execution | Rejected |
 | An enabled event outside the two tool events | Rejected, including when `required: false` |
 | A guard such as `security.violation` | Rejected; final-check ordering is not implemented by this profile |
 | Exact tool selectors or a guarantee beyond `native_hook` | Rejected |
@@ -268,3 +269,44 @@ The four-framework fixtures verify one common message shape and capability
 rejection behavior. They do not establish that all native entrypoints load Hooks,
 that a framework honors a returned block, or that execution cannot bypass a
 callback. Those claims require separate runtime acceptance.
+
+## PostTool text replacement
+
+A structured `tool.after` operation may request `replace_result` when its trusted
+Adapter evidence supports it. It must be the event's last enabled step; earlier
+observers, boolean Hooks and native Hooks are retained. A second replacement or
+any enabled step after replacement is rejected. Boolean Hooks cannot request
+replacement. Provider and Adapter evidence remain separately checked.
+Only the admitted replacement step receives the optional projection; existing
+observers keep their original event shape. The Adapter supplies `event.tool.result_projection` containing `text`,
+`status`, `content_origin` and an optional shell `command`. The original `result`
+and native payload remain available and participate in the request binding.
+
+A `replace_result` effect requires a string `text`; other effect types reject
+that field. Responses allow at most one replacement and require an input
+projection. A missing projection permits only a no-replacement result. The
+Adapter replaces its selected slot and preserves the native envelope. This is a
+candidate, not proof that a model consumed it; AW's journal excludes the text.
+The schema additions retain the experimental v1alpha1 protocol. Deploy matching
+CLI, service and Providers from the same Preview build; older implementations
+reject unsupported projections/effects rather than ignoring them.
+
+### Lifecycle expansion boundary
+
+The current Tokenless bridge implements only Protocol v2 `post_tool`. Full lifecycle
+support requires separately admitted effects and native acceptance for `pre_tool`
+command rewriting, `before_model` schema replacement and authorized `retrieve`.
+This is planned scope, not implemented capability. Keep Tokenless policy in its
+public Core/CLI and carry PreTool `output_optimization` into PostTool to avoid
+compressing RTK output twice. A rewrite must precede final sec-core checks and
+native permission evaluation; later Hooks must not mutate already-authorized input.
+Retain original and final input bindings for that sequence.
+
+Recovery requires a real Agent-facing entry with the native authorization and
+scope required by Tokenless, plus Retrieve-output bypass to prevent recompression.
+Schema replacement requires a model-request seam and its own recovery capability.
+OpenClaw and Hermes currently lack that schema seam in the supported native
+integration; advertise partial capabilities instead of claiming four-framework
+parity. Failed-output diagnostics also need a separate additive result contract:
+the current bridge intentionally retains failed results unchanged. Tool Ready is
+hard-disabled upstream and is not part of an active-capability completeness claim.

@@ -99,6 +99,11 @@ class AwToolMiddleware(MiddlewareBase):
             )
         if code != 0:
             raise CallbackFailure(f"native_exit_{code}")
+        if self.hook["event"] == "tool.after" and isinstance(directive, dict) and "aw_replacement" in directive:
+            try:
+                return ToolResponse.model_validate(directive["aw_replacement"])
+            except (ValueError, TypeError) as error:
+                raise CallbackFailure("invalid_result_replacement") from error
         return None
 
     async def on_acting(
@@ -123,7 +128,9 @@ class AwToolMiddleware(MiddlewareBase):
         async for item in next_handler():
             # ToolChunk is intermediate; ToolResponse is the completed native result.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
-                await self._run({**payload, "tool_response": item.model_dump(mode="json")})
+                replacement = await self._run({**payload, "tool_response": item.model_dump(mode="json")})
+                if replacement is not None:
+                    item = replacement
             yield item
 
 

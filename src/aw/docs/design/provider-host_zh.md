@@ -50,9 +50,9 @@ Agent 已采用策略。准入范围仍为：
 | 事件 | 候选效果 | 失败动作 |
 | --- | --- | --- |
 | `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
-| `tool.after` | `observe` | `report` |
+| `tool.after` | `observe`, `replace_result` | `report` |
 
-启用但不受支持的事件、精确工具选择器、guard、`ask`、替换效果及超出
+启用但不受支持的事件、精确工具选择器、guard、`ask`、输入替换效果及超出
 `native_hook` 的保证均被拒绝。完整准入合同见[协议设计](provider-protocol_zh.md)。
 
 ## 缺省只调用 invoke 的 Hook

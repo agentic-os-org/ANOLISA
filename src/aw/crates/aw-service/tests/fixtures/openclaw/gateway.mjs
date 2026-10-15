@@ -10,7 +10,9 @@ if (process.argv.includes('--version')) {
 const config = JSON.parse(readFileSync(process.env.OPENCLAW_CONFIG_PATH));
 const root = process.env.FAKE_ROOT;
 const directory = config.plugins.load.paths.at(-1);
-const plugin = (await import(pathToFileURL(join(directory, 'index.mjs')))).default;
+// This synthetic host supplies the SDK boundary; native acceptance uses the real SDK.
+const { register } = await import(pathToFileURL(join(directory, 'hooks.mjs')));
+const plugin = { register: api => register(api, result => structuredClone(result)) };
 const callbacks = [];
 plugin.register({ pluginConfig: config.plugins.entries['aw-native-hooks'].config,
   on: (name, handler) => callbacks.push({ name, handler }), logger: { warn: message => console.error(message) } });

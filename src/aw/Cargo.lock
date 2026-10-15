@@ -137,6 +137,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-provider-tokenless"
+version = "0.1.0"
+dependencies = [
+ "aw-exec",
+ "aw-provider",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "aw-service"
 version = "0.1.0"
 dependencies = [

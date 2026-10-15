@@ -1,0 +1,55 @@
+# Replace all absolute path placeholders; native profiles and model credentials stay external.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: shared-posttool-compression
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/path/to/aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [/absolute/path/to/qodercli]
+    openclaw:
+      adapter: openclaw
+      argv: [/absolute/path/to/node, /absolute/path/to/openclaw.mjs, gateway, run]
+    qwenpaw:
+      adapter: qwenpaw
+      argv: [/absolute/path/to/qwenpaw, app]
+    hermes:
+      adapter: hermes
+      argv: [/absolute/path/to/hermes, chat]
+  providers:
+    tokenless:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-tokenless
+          - --cli
+          - /absolute/path/to/tokenless
+          - --data-dir
+          - /absolute/path/to/tokenless-state
+      timeout_ms: 2000
+      max_output_bytes: 1048576
+      config:
+        version: 1
+  events:
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: compress-result
+          provider: tokenless
+          operation: post_tool
+          effects: [replace_result]
+          on_error: report

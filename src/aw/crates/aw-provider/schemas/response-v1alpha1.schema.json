@@ -180,8 +180,36 @@
                 "not": {
                   "pattern": "[^A-Za-z0-9_.-]"
                 }
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1048576
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "replace_result"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "text"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "text"
+                    ]
+                  }
+                }
+              }
+            ]
           },
           "minItems": 0,
           "maxItems": 64

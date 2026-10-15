@@ -59,18 +59,19 @@ def hooks(name):
                "tool_input": {"command": option("--tool-command", "echo fixture"), "ratio": 0.125, "标签": "测试"},
                "scenario": scenario, "run_id": run_id}
     if name == "PostToolUse":
-        payload["tool_response"] = {"result": "native-output"}
+        payload["tool_response"] = os.environ.get("FAKE_QODER_RESULT_TEXT", {"result": "native-output"})
+        if "FAKE_QODER_RESULT_BYTES" in os.environ:
+            payload["tool_response"] = "x" * int(os.environ["FAKE_QODER_RESULT_BYTES"])
     encoded = (json.dumps(payload, ensure_ascii=False, indent=1) + "\n").encode()
     (root / f"payload-{run_id}-{name}.bin").write_bytes(encoded)
-    event_results = []
-    for group in settings.get("hooks", {}).get(name, []):
-        selected = group.get("hooks", [])
-        if group.get("sequential"):
-            group_results = [invoke(hook, encoded) for hook in selected]
-        else:
-            with ThreadPoolExecutor(max_workers=max(1, len(selected))) as executor:
-                group_results = list(executor.map(lambda hook: invoke(hook, encoded), selected))
-        event_results.extend(group_results)
+    groups = settings.get("hooks", {}).get(name, [])
+    # Qoder 1.1.64 applies sequential to the whole matching execution plan.
+    selected = [hook for group in groups for hook in group.get("hooks", [])]
+    if any(group.get("sequential") for group in groups):
+        event_results = [invoke(hook, encoded) for hook in selected]
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, len(selected))) as executor:
+            event_results = list(executor.map(lambda hook: invoke(hook, encoded), selected))
     results.append({"event": name, "hooks": event_results})
     return any(result["status"] == 2 for result in event_results)
 

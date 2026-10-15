@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -78,6 +79,11 @@ def register(ctx: Any) -> None:
             launch["binary"], "hook", "--binding", launch["binding"],
             "--adapter", "hermes", "--event", event, "--step", step, "--on-error", action,
         ])
+        if hook.get("replace_result"):
+            if event != "tool.after":
+                raise ValueError("AW replacements require a completed tool")
+            callbacks.append(("transform_tool_result", _replacement_callback(launch, hook)))
+            continue
         spec = ShellHookSpec(
             event=EVENTS[event], command=command, timeout=timeout,
             fail_closed=action == "block",
@@ -100,3 +106,30 @@ def register(ctx: Any) -> None:
             # Native rediscovery replaces callbacks but retains this session's receipt.
             if _read_private_json(launch["ready_path"]) != receipt:
                 raise ValueError("AW Hermes readiness receipt belongs to another registration") from None
+
+
+def _replacement_callback(launch: dict[str, Any], hook: dict[str, Any]) -> Any:
+    """Use Hermes' final model-bound string seam, preserving its native deadline."""
+    argv = [launch["binary"], "hook", "--binding", launch["binding"],
+            "--adapter", "hermes", "--event", "tool.after", "--step", hook["step"],
+            "--on-error", hook["on_error"]]
+
+    def callback(tool_name: str = "", args: Any = None, result: str = "",
+                 session_id: str = "", **kwargs: Any) -> str | None:
+        payload = {"hook_event_name": "transform_tool_result", "cwd": str(Path.cwd()),
+                   "session_id": session_id, "tool_name": tool_name, "tool_input": args,
+                   "extra": {**kwargs, "result": result}}
+        try:
+            completed = subprocess.run(argv, input=json.dumps(payload).encode(),
+                capture_output=True, timeout=hook["timeout"], check=False)
+            if completed.returncode != 0:
+                print("AW Hermes result replacement failed; original result retained", file=sys.stderr)
+                return None
+            reply = json.loads(completed.stdout) if completed.stdout.strip() else {}
+            replacement = reply.get("aw_replacement")
+            return replacement if isinstance(replacement, str) else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+            print("AW Hermes result replacement failed; original result retained", file=sys.stderr)
+            return None
+
+    return callback

@@ -29,7 +29,8 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
     }
     match &settings.policy {
         Policy::None => {}
-        Policy::SecCore { socket } => {
+        Policy::Tokenless => {}
+        Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } => {
             let provider = settings.prefix.join("libexec/aw/providers/sec-core");
             let mut tools = json!({});
             if settings.qoder.is_some() {
@@ -77,6 +78,23 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
             value["spec"]["events"] = json!({
                 "tool.before":{"enabled":true,"required":true,"steps":[{"id":"check-command","provider":"command","effects":[effect],"reason_code":reason_code,"on_error":"block"}]}});
         }
+    }
+    if matches!(
+        settings.policy,
+        Policy::Tokenless | Policy::SecCoreTokenless { .. }
+    ) {
+        let provider = settings.prefix.join("libexec/aw/providers/tokenless");
+        value["spec"]["providers"]["tokenless"] = json!({
+            "protocol":"aw-provider/v1alpha1", "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-tokenless"),"--cli",provider.join("tokenless"),"--data-dir",settings.state.join("tokenless")]},
+            "timeout_ms":2000,"max_output_bytes":1048576,"config":{"version":1}});
+        if value["spec"]["events"]["tool.after"].is_null() {
+            value["spec"]["events"]["tool.after"] =
+                json!({"enabled":true,"required":true,"steps":[]});
+        }
+        value["spec"]["events"]["tool.after"]["steps"]
+            .as_array_mut()
+            .ok_or_else(|| crate::Error::Invalid("tool.after steps must be an array".into()))?
+            .push(json!({"id":"compress-result","provider":"tokenless","operation":"post_tool","effects":["replace_result"],"on_error":"report"}));
     }
     Ok(value)
 }

@@ -85,7 +85,7 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
         require(
             matches!(
                 component.component.as_str(),
-                "aw-core" | "aw-provider-sec-core"
+                "aw-core" | "aw-provider-sec-core" | "aw-provider-tokenless"
             ) && identities.insert(&component.component),
             "unknown or duplicate component",
         )?;
@@ -99,6 +99,15 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
         )?;
         let required = if component.component == "aw-core" {
             vec!["bin/aw", "bin/aw-package"]
+        } else if component.component == "aw-provider-tokenless" {
+            require(
+                component.requires.get("aw-core") == Some(&component.version),
+                "aw-provider-tokenless requires matching aw-core version in its manifest",
+            )?;
+            vec![
+                "libexec/aw/providers/tokenless/aw-provider-tokenless",
+                "libexec/aw/providers/tokenless/tokenless",
+            ]
         } else {
             require(
                 component.requires.get("aw-core") == Some(&component.version),

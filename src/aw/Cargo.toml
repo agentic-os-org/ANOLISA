@@ -7,6 +7,7 @@ members = [
     "crates/aw-host",
     "crates/aw-provider",
     "crates/aw-provider-sec-core",
+    "crates/aw-provider-tokenless",
     "crates/aw-service",
     "crates/aw-package",
 ]

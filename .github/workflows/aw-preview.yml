@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'src/aw/crates/aw-package/**'
+      - 'src/aw/crates/aw-provider-tokenless/**'
+      - 'src/tokenless/crates/**'
+      - 'src/tokenless/Cargo.*'
       - 'src/aw/Cargo.*'
       - 'docs/user-guide/*/user-entrypoint/aw-preview.md'
       - '.github/workflows/aw-preview.yml'
@@ -43,7 +46,8 @@ jobs:
           workspaces: |
             src/aw
             src/agent-sec-core/v2
-      - name: Test installer and build the three artifacts
+            src/tokenless
+      - name: Test installer and build the four artifacts
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ! command -v python3
@@ -51,6 +55,15 @@ jobs:
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
+      - name: Verify bundled Tokenless PostTool contract
+        env:
+          AW_TOKENLESS_TEST_CLI: ${{ github.workspace }}/src/tokenless/target/release/tokenless
+          TOKENLESS_COMPRESSION_ENABLED: '1'
+          TOKENLESS_STATS_ENABLED: '0'
+          TOKENLESS_SLS_ENABLED: '0'
+        run: |
+          cargo test --locked --manifest-path src/aw/Cargo.toml \
+            -p aw-provider-tokenless --test provider -- --ignored
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |
@@ -72,6 +85,7 @@ jobs:
           "$root/core-only/bin/aw-package" uninstall --prefix "$root/core-only"
           aw-core-*/aw-package install --prefix "$root/split"
           aw-provider-sec-core-*/aw-package install --prefix "$root/split"
+          aw-provider-tokenless-*/aw-package install --prefix "$root/split"
           aw-all-in-one-*/aw-package install --prefix "$root/combined"
           diff -r "$root/split/.aw-packages" "$root/combined/.aw-packages"
           umask 0002

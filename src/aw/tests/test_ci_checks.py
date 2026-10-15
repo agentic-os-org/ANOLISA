@@ -221,6 +221,10 @@ class GateTests(GateFixture):
                 "aw-package", self.root / "crates/aw-package",
                 ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile"],
             ),
+            (
+                "aw-provider-tokenless", self.root / "crates/aw-provider-tokenless",
+                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")

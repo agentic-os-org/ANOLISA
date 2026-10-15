@@ -1,11 +1,11 @@
 //! Correlate per-step native callbacks without extending or replaying an event.
 
-use super::{event_metadata, Runtime};
+use super::{event_metadata, Job, Runtime};
 use crate::{rejected, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    sync::{atomic::Ordering, Arc, TryLockError},
+    sync::{atomic::Ordering, mpsc, Arc, TryLockError},
     thread,
     time::{Duration, Instant},
 };
@@ -15,6 +15,23 @@ const MAX_HOOK_EVENTS: usize = 1024;
 pub(super) struct Lease {
     digest: [u8; 32],
     handle: Option<Value>,
+    completion_digest: Option<[u8; 32]>,
+}
+
+fn hermes_completion(mut native: Value) -> Result<Value> {
+    if !matches!(
+        native["hook_event_name"].as_str(),
+        Some("post_tool_call" | "transform_tool_result")
+    ) {
+        return Err(rejected("native_completion_seam_invalid"));
+    }
+    if let Some(fields) = native.as_object_mut() {
+        fields.insert("hook_event_name".into(), json!("post_tool_call"));
+        if let Some(extra) = fields.get_mut("extra").and_then(Value::as_object_mut) {
+            extra.remove("middleware_trace");
+        }
+    }
+    Ok(native)
 }
 
 impl Runtime {
@@ -67,7 +84,7 @@ impl Runtime {
     pub(super) fn open_hook(
         self: &Arc<Self>,
         instance_id: String,
-        value: Value,
+        mut value: Value,
         native_input: Vec<u8>,
         deadline: Instant,
     ) -> Result<Value> {
@@ -75,13 +92,113 @@ impl Runtime {
         let session = value["session_id"]
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| rejected("native_correlation_missing"))?;
+            .ok_or_else(|| rejected("native_correlation_missing"))?
+            .to_owned();
         let call = value["tool"]["call_id"]
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| rejected("native_correlation_missing"))?;
-        let encoded = serde_json::to_vec(&value).map_err(|_| rejected("event_encoding"))?;
+            .ok_or_else(|| rejected("native_correlation_missing"))?
+            .to_owned();
+        let (hooks, hermes_after, replacement_after) =
+            {
+                let instances = self
+                    .instances
+                    .lock()
+                    .map_err(|_| rejected("state_poisoned"))?;
+                let instance = instances
+                    .get(&instance_id)
+                    .and_then(Option::as_ref)
+                    .filter(|instance| !instance.closing)
+                    .ok_or_else(|| rejected("unknown_instance"))?;
+                (
+                    Arc::clone(&instance.hooks),
+                    value["name"] == "tool.after"
+                        && value["agent"]["adapter"] == "hermes"
+                        && instance.host.steps().iter().any(|step| {
+                            step.event == "tool.after" && step.execution.replaces_result()
+                        }),
+                    instance
+                        .host
+                        .steps()
+                        .iter()
+                        .any(|step| step.event == "tool.after" && step.execution.replaces_result()),
+                )
+            };
+        if native_input.len() > aw_provider::MAX_MESSAGE_BYTES {
+            return Err(rejected("event_size_limit"));
+        }
+        let mut comparison = value.clone();
+        let mut compared_input = native_input.clone();
+        let completion = value["native"]
+            .as_object_mut()
+            .and_then(|native| native.remove("aw_completion"));
+        let mut observed = false;
+        let mut completion_digest = None;
+        if let Some(completion) = completion {
+            if !replacement_after
+                || value["agent"]["adapter"] != "openclaw"
+                || value["name"] != "tool.after"
+            {
+                return Err(rejected("native_completion_seam_invalid"));
+            }
+            comparison = completion["snapshot"].clone();
+            if comparison["native"]["hook"] != "after_tool_call"
+                || value["native"]["hook"] != "after_tool_call"
+            {
+                return Err(rejected("native_completion_seam_invalid"));
+            }
+            match completion["phase"].as_str() {
+                Some("replacement") if value == comparison => {}
+                Some("observation") => {
+                    observed = true;
+                    let mut bound = value.clone();
+                    bound["native"] = comparison["native"].clone();
+                    for field in ["result", "result_projection"] {
+                        bound["tool"]
+                            .as_object_mut()
+                            .ok_or_else(|| rejected("event_invalid"))?
+                            .remove(field);
+                        if let Some(original) = comparison["tool"].get(field) {
+                            bound["tool"][field] = original.clone();
+                        }
+                    }
+                    if bound != comparison {
+                        return Err(rejected("native_correlation_mismatch"));
+                    }
+                    let mut digest = Sha256::new();
+                    digest.update(
+                        serde_json::to_vec(&value).map_err(|_| rejected("event_encoding"))?,
+                    );
+                    digest.update(&native_input);
+                    completion_digest = Some(digest.finalize().into());
+                }
+                _ => return Err(rejected("native_completion_seam_invalid")),
+            }
+            compared_input = completion["input"]
+                .as_str()
+                .ok_or_else(|| rejected("native_event_invalid"))?
+                .as_bytes()
+                .to_vec();
+            if serde_json::from_slice::<Value>(&compared_input)
+                .map_err(|_| rejected("native_event_invalid"))?
+                != comparison["native"]
+            {
+                return Err(rejected("native_correlation_mismatch"));
+            }
+        }
+        if hermes_after {
+            // Hermes observes completion before its model-bound transform seam.
+            // Only the seam name and observer-only trace differ; retain all other
+            // fields in the binding and the first callback's exact native bytes.
+            comparison["native"] = hermes_completion(comparison["native"].take())?;
+            let native: Value = serde_json::from_slice(&native_input)
+                .map_err(|_| rejected("native_event_invalid"))?;
+            compared_input = serde_json::to_vec(&hermes_completion(native)?)
+                .map_err(|_| rejected("event_encoding"))?;
+        }
+        let encoded = serde_json::to_vec(&comparison).map_err(|_| rejected("event_encoding"))?;
         if native_input.len() > aw_provider::MAX_MESSAGE_BYTES
+            || compared_input.len() > aw_provider::MAX_MESSAGE_BYTES
             || encoded.len() > aw_provider::MAX_MESSAGE_BYTES
         {
             return Err(rejected("event_size_limit"));
@@ -96,22 +213,8 @@ impl Runtime {
         let mut digest = Sha256::new();
         digest.update((encoded.len() as u64).to_be_bytes());
         digest.update(encoded);
-        digest.update(&native_input);
+        digest.update(&compared_input);
         let digest: [u8; 32] = digest.finalize().into();
-        let hooks = {
-            let instances = self
-                .instances
-                .lock()
-                .map_err(|_| rejected("state_poisoned"))?;
-            Arc::clone(
-                &instances
-                    .get(&instance_id)
-                    .and_then(Option::as_ref)
-                    .filter(|instance| !instance.closing)
-                    .ok_or_else(|| rejected("unknown_instance"))?
-                    .hooks,
-            )
-        };
         // Serialize only opens for this instance, including initial audit claim.
         // Event workers do not acquire this lock, so preparation cannot deadlock.
         let mut hooks = loop {
@@ -128,7 +231,7 @@ impl Runtime {
                 ),
             }
         };
-        if let Some(lease) = hooks.get(&correlation) {
+        if let Some(lease) = hooks.get_mut(&correlation) {
             if lease.digest != digest {
                 return Err(rejected("native_correlation_mismatch"));
             }
@@ -145,7 +248,31 @@ impl Runtime {
             if cancelled.load(Ordering::Acquire) {
                 return Err(rejected("native_event_closed"));
             }
+            if observed {
+                if lease.completion_digest.is_some() && lease.completion_digest != completion_digest
+                {
+                    return Err(rejected("native_correlation_mismatch"));
+                }
+                if lease.completion_digest.is_none() {
+                    let (sender, _) = self.event_sender(key, &instance_id)?;
+                    let (reply, result) = mpsc::sync_channel(1);
+                    sender
+                        .try_send(Job::Completion {
+                            value,
+                            input: native_input,
+                            reply,
+                        })
+                        .map_err(|_| rejected("event_busy_or_closed"))?;
+                    result
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .map_err(|_| rejected("event_reply_unavailable"))??;
+                    lease.completion_digest = completion_digest;
+                }
+            }
             return Ok(handle.clone());
+        }
+        if observed {
+            return Err(rejected("native_completion_without_replacement"));
         }
         if hooks.len() >= MAX_HOOK_EVENTS {
             return Err(rejected("native_event_limit"));
@@ -156,6 +283,7 @@ impl Runtime {
             Lease {
                 digest,
                 handle: None,
+                completion_digest: None,
             },
         );
         let handle = self.open(instance_id, value, Some(native_input), deadline)?;
@@ -164,6 +292,7 @@ impl Runtime {
             Lease {
                 digest,
                 handle: Some(handle.clone()),
+                completion_digest: None,
             },
         );
         Ok(handle)
@@ -173,6 +302,7 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::runtime::{EventEntry, Instance};
     use aw_host::{Host, ProcessContext};
     use aw_provider::admission::AdapterCapabilities;
@@ -184,6 +314,30 @@ mod tests {
             mpsc, Mutex,
         },
     };
+
+    #[test]
+    fn hermes_completion_only_normalizes_the_two_final_native_seams() {
+        let original = json!({"hook_event_name":"post_tool_call","extra":{"result":"original","middleware_trace":["observer-only"]}});
+        let final_seam =
+            json!({"hook_event_name":"transform_tool_result","extra":{"result":"original"}});
+        assert_eq!(
+            hermes_completion(original).unwrap(),
+            hermes_completion(final_seam.clone()).unwrap()
+        );
+        let mut changed = final_seam.clone();
+        changed["extra"]["result"] = json!("changed");
+        assert_ne!(
+            hermes_completion(final_seam).unwrap(),
+            hermes_completion(changed).unwrap()
+        );
+        for native in [
+            json!(null),
+            json!("opaque"),
+            json!({"hook_event_name":"pre_tool_call"}),
+        ] {
+            assert!(hermes_completion(native).is_err());
+        }
+    }
 
     #[test]
     fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {

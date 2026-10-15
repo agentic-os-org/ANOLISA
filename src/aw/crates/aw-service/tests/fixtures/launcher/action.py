@@ -29,11 +29,14 @@ if args.protocol == "provider":
     if request["method"] == "describe":
         reply["operations"] = [
             {"name": "check", "events": ["tool.before"], "effects": ["observe", "block"]},
-            {"name": "record", "events": ["tool.after"], "effects": ["observe"]}]
+            {"name": "record", "events": ["tool.after"], "effects": ["observe", "replace_result"]}]
     elif request["method"] == "invoke":
         reply["input_digest"] = request["input_digest"]
         if request["event"]["name"] == "tool.after":
-            reply["effects"] = [{"type": "observe", "reason_code": "after_recorded"}]
+            reply["effects"] = ([{"type": "replace_result", "text": "compact"}]
+                if args.behavior == "replace" else [{"type": "observe", "reason_code": "after_recorded"}])
+            if args.behavior == "replace" and "result_projection" not in request["event"]["tool"]:
+                reply["effects"] = []
         elif request["event"]["native"]["scenario"] == "block":
             reply["effects"] = [{"type": "block", "reason_code": "fixture_policy"}]
         else:

@@ -114,7 +114,9 @@ pub enum Selection {
     Core,
     /// The sec-core extension, requiring a separately installed matching core.
     SecCore,
-    /// Core, sec-core extension and their identical combined package.
+    /// PostTool extension using the bundled Tokenless CLI, without RTK or native plugins.
+    Tokenless,
+    /// Core, both Provider extensions and their identical combined package.
     All,
 }
 
@@ -123,7 +125,8 @@ impl Selection {
         match self {
             Self::Core => &["aw-core"],
             Self::SecCore => &["aw-provider-sec-core"],
-            Self::All => &["aw-core", "aw-provider-sec-core"],
+            Self::Tokenless => &["aw-provider-tokenless"],
+            Self::All => &["aw-core", "aw-provider-sec-core", "aw-provider-tokenless"],
         }
     }
 
@@ -131,24 +134,36 @@ impl Selection {
         match self {
             Self::Core => &["aw-core"],
             Self::SecCore => &["aw-provider-sec-core"],
-            Self::All => &["aw-core", "aw-provider-sec-core", "aw-all-in-one"],
+            Self::Tokenless => &["aw-provider-tokenless"],
+            Self::All => &[
+                "aw-core",
+                "aw-provider-sec-core",
+                "aw-provider-tokenless",
+                "aw-all-in-one",
+            ],
         }
     }
 
     fn builds(self, repo: &Path) -> Vec<(PathBuf, Vec<&'static str>)> {
         let mut aw = vec!["aw-package"];
-        if self != Self::SecCore {
+        if matches!(self, Self::Core | Self::All) {
             aw.push("aw-service");
         }
-        if self != Self::Core {
+        if matches!(self, Self::SecCore | Self::All) {
             aw.push("aw-provider-sec-core");
         }
+        if matches!(self, Self::Tokenless | Self::All) {
+            aw.push("aw-provider-tokenless");
+        }
         let mut builds = vec![(repo.join("src/aw"), aw)];
-        if self != Self::Core {
+        if matches!(self, Self::SecCore | Self::All) {
             builds.push((
                 repo.join("src/agent-sec-core/v2"),
                 vec!["asc-cli", "asc-daemon"],
             ));
+        }
+        if matches!(self, Self::Tokenless | Self::All) {
+            builds.push((repo.join("src/tokenless"), vec!["tokenless-cli"]));
         }
         builds
     }
@@ -273,6 +288,20 @@ fn stage(
                     &root,
                     &format!("bin/{binary}"),
                     &aw.join(binary),
+                    true,
+                    &mut files,
+                    cancel,
+                )?;
+            }
+        } else if *name == "aw-provider-tokenless" {
+            for (binary, directory) in [
+                ("aw-provider-tokenless", aw.clone()),
+                ("tokenless", repo.join("src/tokenless/target/release")),
+            ] {
+                add(
+                    &root,
+                    &format!("libexec/aw/providers/tokenless/{binary}"),
+                    &directory.join(binary),
                     true,
                     &mut files,
                     cancel,

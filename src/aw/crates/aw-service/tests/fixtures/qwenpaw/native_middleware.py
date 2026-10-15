@@ -33,6 +33,51 @@ class MiddlewareTests(unittest.IsolatedAsyncioTestCase):
             state=SimpleNamespace(session_id="native-session"),
         )
 
+    async def test_replacement_reaches_native_acting_result_and_preserves_metadata(self):
+        original = ToolResponse(content=[TextBlock(text="original")], metadata={"kept": True})
+        class Probe(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload):
+                result = payload["tool_response"]
+                result["content"][0]["text"] = "compact"
+                return 0, json.dumps({"aw_replacement": result}).encode(), b""
+        chunk = ToolChunk(content=[TextBlock(text="partial")], is_last=False)
+        async def tool(tool_call):
+            yield chunk
+            yield original
+        agent = self.agent([Probe({}, hook("tool.after", "compress"))], tool)
+        output = [item async for item in Agent._acting(agent, ToolCallBlock(id="call", name="tool", input="{}"))]
+        self.assertIs(output[0], chunk)
+        self.assertEqual(output[1].content[0].text, "compact")
+        self.assertEqual(output[1].metadata, original.metadata)
+        self.assertEqual(original.content[0].text, "original")
+
+    async def test_observers_and_user_hook_finish_before_compression(self):
+        seen = []
+        original = ToolResponse(content=[TextBlock(text="original")], metadata={"kept": True})
+
+        class Probe(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload):
+                seen.append(self.hook["step"])
+                self_outer.assertEqual(payload["tool_response"]["content"][0]["text"], "original")
+                if self.hook["step"] == "user":
+                    return 3, b"", b"user failure reported"
+                if self.hook["step"] == "compress":
+                    payload["tool_response"]["content"][0]["text"] = "compact"
+                    return 0, json.dumps({"aw_replacement": payload["tool_response"]}).encode(), b""
+                return 0, b"{}", b""
+
+        self_outer = self
+        async def tool(tool_call):
+            yield original
+        # Generated configuration registers after wrappers in reverse so native
+        # onion unwinding preserves the declared observe/user/compress order.
+        registrations = [Probe({}, hook("tool.after", name)) for name in ["compress", "user", "observe"]]
+        output = [item async for item in Agent._acting(self.agent(registrations, tool), ToolCallBlock(id="call", name="tool", input="{}"))]
+        self.assertEqual(seen, ["observe", "user", "compress"])
+        self.assertEqual(output[0].content[0].text, "compact")
+        self.assertEqual(output[0].metadata, original.metadata)
+        self.assertEqual(original.content[0].text, "original")
+
     async def test_onion_coexistence_streaming_and_projection(self):
         seen = []
 

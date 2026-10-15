@@ -317,7 +317,7 @@ fn responses_cannot_escalate_effects_or_change_request_binding() {
         ("tool.before", "ask"),
         ("tool.before", "replace_input"),
         ("tool.after", "block"),
-        ("tool.after", "replace_result"),
+        ("tool.before", "replace_result"),
     ] {
         assert!(protocol
             .bind_invocation(invoke(event, json!([effect])))
@@ -434,4 +434,41 @@ fn finite_float_parameters_round_trip_through_invocation_binding() {
         );
         protocol.parse_request(&bytes(request.as_value())).unwrap();
     }
+}
+
+#[test]
+fn replacement_requires_one_text_payload_and_a_projected_after_result() {
+    let protocol = Protocol::new().unwrap();
+    let mut value = invoke("tool.after", json!(["replace_result"]));
+    value["event"]["tool"]["result_projection"] =
+        json!({"text":"original","status":"success","content_origin":"api_response"});
+    let request = protocol.bind_invocation(value.clone()).unwrap();
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"replace_result","text":"compact"}]);
+    assert!(matches!(
+        protocol.check_response(&request, &bytes(&reply)),
+        Ok(Reply::Invocation(_))
+    ));
+    for effects in [
+        json!([{"type":"replace_result"}]),
+        json!([{"type":"replace_result","text":""}]),
+        json!([{"type":"replace_result","text":"x".repeat(aw_provider::MAX_MESSAGE_BYTES + 1)}]),
+        json!([{"type":"observe","text":"hidden"}]),
+        json!([{"type":"replace_result","text":"a"},{"type":"replace_result","text":"b"}]),
+    ] {
+        reply["effects"] = effects;
+        assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
+    }
+    value["event"]["tool"]
+        .as_object_mut()
+        .unwrap()
+        .remove("result_projection");
+    let request = protocol.bind_invocation(value).unwrap();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"replace_result","text":"compact"}]);
+    assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
+    assert!(protocol
+        .bind_invocation(invoke("tool.before", json!(["replace_result"])))
+        .is_err());
 }

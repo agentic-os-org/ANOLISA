@@ -42,6 +42,11 @@ fn bundle(root: &Path, names: &[&str]) -> PathBuf {
     for name in names {
         let entries = if *name == "aw-core" {
             vec!["bin/aw".into(), "bin/aw-package".into()]
+        } else if *name == "aw-provider-tokenless" {
+            ["aw-provider-tokenless", "tokenless"]
+                .iter()
+                .map(|name| format!("libexec/aw/providers/tokenless/{name}"))
+                .collect()
         } else {
             ["aw-provider-sec-core", "agent-sec-cli", "agent-sec-daemon"]
                 .iter()
@@ -677,3 +682,6 @@ fn already_cancelled_install_does_not_create_prefix() {
 
 mod configuration;
 mod standalone;
+
+#[path = "tests/tokenless.rs"]
+mod tokenless;

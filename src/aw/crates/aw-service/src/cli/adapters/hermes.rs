@@ -70,7 +70,8 @@ impl Adapter for Hermes {
     }
 
     fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
-        if native["hook_event_name"] != event_name(event)?
+        if (native["hook_event_name"] != event_name(event)?
+            && !(event == "tool.after" && native["hook_event_name"] == "transform_tool_result"))
             || native["cwd"].as_str() != binding.cwd.to_str()
         {
             return Err(
@@ -266,7 +267,10 @@ impl PreparedLaunch for Prepared {
             entrypoint: "chat".into(),
             events: BTreeMap::from([
                 ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                ("tool.after".into(), vec!["observe".into()]),
+                (
+                    "tool.after".into(),
+                    vec!["observe".into(), "replace_result".into()],
+                ),
             ]),
         }
     }
@@ -300,12 +304,16 @@ impl PreparedLaunch for Prepared {
             let budget = self.budget(event)?;
             for step in &selected {
                 hooks.push(json!({"event":event, "step":step.step_id,
-                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4}));
+                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.execution.replaces_result()}));
             }
             events.insert(
                 event.into(),
                 HookEvent {
                     budget_ms: budget,
+                    replacement_step: selected
+                        .iter()
+                        .find(|step| step.execution.replaces_result())
+                        .map(|step| step.step_id.clone()),
                     steps: selected
                         .into_iter()
                         .map(|step| (step.step_id.clone(), step.on_error.clone()))

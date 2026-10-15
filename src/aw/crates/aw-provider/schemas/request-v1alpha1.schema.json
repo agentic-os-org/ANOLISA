@@ -221,7 +221,39 @@
                   "maxLength": 512
                 },
                 "input": {},
-                "result": {}
+                "result": {},
+                "result_projection": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "text",
+                    "status",
+                    "content_origin"
+                  ],
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "success",
+                        "error",
+                        "interrupted",
+                        "denied"
+                      ]
+                    },
+                    "content_origin": {
+                      "enum": [
+                        "command_output",
+                        "file_content",
+                        "api_response"
+                      ]
+                    },
+                    "command": {
+                      "type": "string"
+                    }
+                  }
+                }
               }
             },
             "native": {

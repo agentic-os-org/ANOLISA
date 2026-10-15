@@ -189,7 +189,10 @@ impl PreparedLaunch for Prepared {
             entrypoint: "app".into(),
             events: BTreeMap::from([
                 ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                ("tool.after".into(), vec!["observe".into()]),
+                (
+                    "tool.after".into(),
+                    vec!["observe".into(), "replace_result".into()],
+                ),
             ]),
         }
     }
@@ -291,13 +294,22 @@ fn event_routes(
         if !(1..=55000).contains(&budget) {
             return Err("QwenPaw native event budgets must be 1..55000 ms".into());
         }
-        for step in &selected {
+        let mut registration = selected.clone();
+        if selected.iter().any(|step| step.execution.replaces_result()) {
+            // After handlers unwind the native middleware stack inside out.
+            registration.reverse();
+        }
+        for step in registration {
             hooks.push(json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget}));
         }
         events.insert(
             event.into(),
             HookEvent {
                 budget_ms: budget,
+                replacement_step: selected
+                    .iter()
+                    .find(|step| step.execution.replaces_result())
+                    .map(|step| step.step_id.clone()),
                 steps: selected
                     .into_iter()
                     .map(|step| (step.step_id.clone(), step.on_error.clone()))
@@ -338,4 +350,52 @@ fn normalize(binding: &HookBinding, event: &str, native: &Value) -> Result<Value
             "result": native.get("tool_response").cloned().unwrap_or(Value::Null)},
         "native": native,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aw_provider::admission::StepExecution;
+
+    #[test]
+    fn replacement_registers_outermost_so_observers_unwind_first() {
+        let steps: Vec<_> = ["observe", "user", "compress"]
+            .into_iter()
+            .map(|id| AdmittedStep {
+                event: "tool.after".into(),
+                step_id: id.into(),
+                provider: id.into(),
+                on_error: "report".into(),
+                execution: if id == "user" {
+                    StepExecution::Native
+                } else {
+                    StepExecution::Provider {
+                        operation: "record".into(),
+                        effects: vec![if id == "compress" {
+                            "replace_result"
+                        } else {
+                            "observe"
+                        }
+                        .into()],
+                    }
+                },
+            })
+            .collect();
+        let (events, hooks) = event_routes(
+            &json!({"spec":{"events":{},"execution":{"default_event_budget_ms":5000}}}),
+            &steps,
+        )
+        .unwrap();
+        assert_eq!(
+            hooks
+                .iter()
+                .map(|hook| hook["step"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["compress", "user", "observe"]
+        );
+        assert_eq!(
+            events["tool.after"].replacement_step.as_deref(),
+            Some("compress")
+        );
+    }
 }

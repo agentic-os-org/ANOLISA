@@ -129,7 +129,18 @@ impl Fixture {
         command
     }
     pub fn run(&self, command: Command) -> Output {
-        Process::spawn(self, command).finish()
+        self.run_input(command, None)
+    }
+    pub fn run_input(&self, command: Command, input: Option<&[u8]>) -> Output {
+        let Some(input) = input else {
+            return Process::spawn(self, command).finish();
+        };
+        let path = self.root.join(format!(
+            "stdin-{}",
+            self.next.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, input).unwrap();
+        Process::spawn_stdin(self, command, Stdio::from(fs::File::open(path).unwrap())).finish()
     }
     pub fn successful(&self, command: Command) -> Value {
         let output = self.run(command);
@@ -167,7 +178,10 @@ pub struct Process {
     value: Value,
 }
 impl Process {
-    pub fn spawn(fixture: &Fixture, mut command: Command) -> Self {
+    pub fn spawn(fixture: &Fixture, command: Command) -> Self {
+        Self::spawn_stdin(fixture, command, Stdio::null())
+    }
+    fn spawn_stdin(fixture: &Fixture, mut command: Command, stdin: Stdio) -> Self {
         let id = fixture.next.fetch_add(1, Ordering::Relaxed);
         let stdout = fixture.root.join(format!("process-{id}.stdout"));
         let stderr = fixture.root.join(format!("process-{id}.stderr"));
@@ -176,7 +190,7 @@ impl Process {
             "cwd":fixture.root,"pid":null,"ports":[],"stdout":stdout,"stderr":stderr,"timeout_seconds":14,"stop":null});
         fs::write(&record, value.to_string()).unwrap();
         let child = command
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(fs::File::create(&stdout).unwrap())
             .stderr(fs::File::create(&stderr).unwrap())
             .process_group(0)
@@ -260,7 +274,11 @@ impl Service {
             ) {
                 break client;
             }
-            assert!(Instant::now() < deadline, "daemon startup failed");
+            assert!(
+                Instant::now() < deadline,
+                "daemon startup failed: {}",
+                fs::read_to_string(&process.stderr).unwrap_or_default()
+            );
             thread::sleep(Duration::from_millis(10));
         };
         Self {

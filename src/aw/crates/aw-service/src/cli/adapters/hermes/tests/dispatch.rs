@@ -151,3 +151,62 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
         assert!(error.contains("UTF-8"), "{error}");
     }
 }
+
+#[test]
+fn generated_profile_marks_only_the_admitted_replacement_step() {
+    use aw_provider::admission::StepExecution;
+    let profile = Profile::new("unknown: keep\n");
+    let launch = profile.0.join("launch");
+    fs::create_dir(&launch).unwrap();
+    let files = crate::cli::run::Artifacts(launch);
+    let steps: Vec<_> = ["observe", "compress"]
+        .into_iter()
+        .map(|id| AdmittedStep {
+            event: "tool.after".into(),
+            step_id: id.into(),
+            provider: "fixture".into(),
+            on_error: "report".into(),
+            execution: StepExecution::Provider {
+                operation: "record".into(),
+                effects: vec![if id == "compress" {
+                    "replace_result"
+                } else {
+                    "observe"
+                }
+                .into()],
+            },
+        })
+        .collect();
+    let mut prepared = Prepared {
+        input: LaunchInput {
+            document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
+            target: "hermes".into(),
+            flags: BTreeMap::new(),
+            command: aw_exec::CommandSpec {
+                program: "/hermes".into(),
+                args: vec!["chat".into(), "--cli".into()],
+                cwd: profile.0.clone(),
+                environment: BTreeMap::new(),
+            },
+        },
+        profile: profile.0.clone(),
+        python: "/usr/bin/python3".into(),
+        callback_timeout: 30.0,
+    };
+    let plan = prepared
+        .configure(&LaunchContext {
+            files: &files,
+            binding_path: &profile.0.join("binding"),
+            executable: std::path::Path::new("/aw"),
+            steps: &steps,
+        })
+        .unwrap();
+    let launch: Value =
+        serde_json::from_slice(&fs::read(files.0.join("hermes-launch.json")).unwrap()).unwrap();
+    assert_eq!(launch["hooks"][0]["replace_result"], false);
+    assert_eq!(launch["hooks"][1]["replace_result"], true);
+    assert_eq!(
+        plan.events["tool.after"].replacement_step.as_deref(),
+        Some("compress")
+    );
+}

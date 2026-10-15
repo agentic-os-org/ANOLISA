@@ -19,7 +19,7 @@ fn run() -> Result<()> {
     let mut component = None;
     while let Some(flag) = args.next() {
         if flag == "--help" {
-            println!("aw-build --version X.Y.Z-preview.N --output ABS_DIR [--component core|sec-core|all]");
+            println!("aw-build --version X.Y.Z-preview.N --output ABS_DIR [--component core|sec-core|tokenless|all]");
             return Ok(());
         }
         let value = args
@@ -37,10 +37,11 @@ fn run() -> Result<()> {
     let selection = match component.as_deref().unwrap_or("core") {
         "core" => aw_package::package::Selection::Core,
         "sec-core" => aw_package::package::Selection::SecCore,
+        "tokenless" => aw_package::package::Selection::Tokenless,
         "all" => aw_package::package::Selection::All,
         _ => {
             return Err(Error::Invalid(
-                "--component must be core, sec-core or all".into(),
+                "--component must be core, sec-core, tokenless or all".into(),
             ))
         }
     };

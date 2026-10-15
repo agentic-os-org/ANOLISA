@@ -59,9 +59,9 @@ adopted a policy. The admitted surface remains:
 | Event | Candidate effects | Failure action |
 | --- | --- | --- |
 | `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
-| `tool.after` | `observe` | `report` |
+| `tool.after` | `observe`, `replace_result` | `report` |
 
-Enabled unsupported events, exact tool selectors, guards, `ask`, replacement
+Enabled unsupported events, exact tool selectors, guards, `ask`, input-replacement
 effects and guarantees beyond `native_hook` are rejected. The
 [protocol design](provider-protocol.md) defines the complete admission contract.
 

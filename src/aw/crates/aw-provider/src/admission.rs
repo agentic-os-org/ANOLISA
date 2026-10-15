@@ -75,6 +75,13 @@ pub enum StepExecution {
     Native,
 }
 
+impl StepExecution {
+    /// Whether this structured step requests a model-visible text replacement.
+    pub fn replaces_result(&self) -> bool {
+        matches!(self, Self::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_result"))
+    }
+}
+
 /// Admits enabled tool steps using explicit Provider and trusted Adapter evidence.
 ///
 /// Native commands and disabled steps require no Provider discovery. Enabled events
@@ -173,6 +180,22 @@ pub fn preflight(
                 "exact tool selectors are not supported",
             )?;
         }
+        let enabled: Vec<_> = event["steps"]
+            .as_array()
+            .ok_or(Error::Invalid("event steps must be an array"))?
+            .iter()
+            .filter(|step| step["enabled"] != false)
+            .collect();
+        if let Some(index) = enabled.iter().position(|step| {
+            step["effects"]
+                .as_array()
+                .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_result"))
+        }) {
+            require(
+                index + 1 == enabled.len(),
+                "result replacement must be the last enabled event step",
+            )?;
+        }
         for step in event["steps"]
             .as_array()
             .ok_or(Error::Invalid("event steps must be an array"))?
@@ -225,6 +248,10 @@ fn preflight_step(
             effects.push(effect.to_owned());
         }
         if protocol == aw_config::HOOK_PROTOCOL {
+            require(
+                !effects.iter().any(|effect| effect == "replace_result"),
+                "boolean Hooks cannot replace results",
+            )?;
             StepExecution::Hook {
                 effects,
                 reason_code: step["reason_code"].as_str().map(str::to_owned),
@@ -300,7 +327,7 @@ fn supported_event(event: &str) -> bool {
 fn supported_effect(event: &str, effect: &str) -> bool {
     matches!(
         (event, effect),
-        ("tool.before", "observe" | "block") | ("tool.after", "observe")
+        ("tool.before", "observe" | "block") | ("tool.after", "observe" | "replace_result")
     )
 }
 

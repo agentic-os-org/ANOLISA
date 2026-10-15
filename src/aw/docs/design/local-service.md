@@ -88,7 +88,7 @@ the event deadline. It is an RPC field, not a new `aw.yaml` option.
 
 The current service admits structured `tool.before` with `observe`/`block`,
 `tool.after` with `observe`, and explicit native steps at those tool points. It
-rejects enabled unsupported events, structured `ask`, result replacement,
+rejects enabled unsupported events, structured `ask`, input replacement,
 final guards and stronger execution guarantees. A successful empty effect list
 adds no restriction and grants no native permission. A successful policy block
 is distinct from a failed invocation whose `failure_action` is `block`.
@@ -103,21 +103,41 @@ configuration and Provider protocols.
 
 An Adapter opens an event once, then sends individual `invoke_step` requests in
 the order and concurrency required by its native framework. Client clones can
-invoke different steps concurrently. The service adds no serial/parallel policy
-and does not rerun failed steps. Each step may be attempted once in that event.
+invoke different steps concurrently. The service does not rerun failed steps. Qoder after events with a final
+replacement order their AW invocations inside the service; all other scheduling
+follows the Adapter and native framework. Each step may be attempted once in that event.
 
 The Adapter must share the returned handle across callbacks belonging to the
 same native event. A native session or tool-call ID is correlation data, not
 proof that two callbacks belong to one service event. `open_hook_event` correlates
 nonempty session/tool-call IDs and event name inside a prepared instance, then
 requires the same normalized event and exact native bytes for subsequent opens.
+When Hermes has a final after replacement, completion observation and the native
+transform seam share a comparison that normalizes only `hook_event_name` and the
+observer-only `extra.middleware_trace`. Tool inputs, results and all other fields
+remain bound; the first callback's exact bytes are still forwarded to native
+commands. The two seams reuse the same budget and once-only step claims.
+OpenClaw after identities use the pinned native case/alias policy names; before
+inputs and raw native names remain unchanged. Compression precedes native
+completion observation. Its private
+callback frame binds both phases to the exact original middleware snapshot;
+completion metadata and the native sanitized result form a separate observation
+view. The first completion view is pinned, so later metadata changes are rejected.
+Host view changes cannot alter identity/input, renew the deadline or reset claims.
+Private correlation fields are removed before Providers or native commands receive
+input. Native commands receive the exact serialized completion payload. Other
+Adapters continue requiring their original immutable bytes.
+
 It retains closed and failed-open claims until instance release; they cannot
 create a new budget. Opening an independent event per step is not valid shared
 event scheduling. The current per-instance correlation limit is 1,024 events.
 
 The Qoder Adapter registers one callback per AW step in a shared matcher group.
-Qoder retains default parallel execution and its matching-group sequential
-behavior. Each callback opens or joins its event, then claims only its own step.
+Qoder retains its native parallel or explicitly configured sequential policy.
+An after replacement does not force the native sequential flag, which would also
+serialize external Hooks. AW callbacks may arrive concurrently; their admitted
+after steps wait for preceding AW attempts, including reported failures, within
+the original event deadline. Every callback retains its own native output/status.
 Incomplete events expire even if Qoder never invokes the remaining callbacks.
 Current native input is immutable: a sequential command that returns
 `updatedInput` can change the next callback stdin, which is rejected as a

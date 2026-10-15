@@ -83,6 +83,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         ("aw", "src/aw"),
         ("aw-package", "src/aw"),
         ("aw-provider-sec-core", "src/aw"),
+        ("aw-provider-tokenless", "src/aw"),
+        ("tokenless", "src/tokenless"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
     ] {
@@ -152,7 +154,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         Selection::All,
     )
     .unwrap();
-    assert_eq!(archives.len(), 3);
+    assert_eq!(archives.len(), 4);
     let checksums = fs::read_to_string(output.join("SHA256SUMS")).unwrap();
     for archive in archives {
         assert!(checksums.contains(&digest(&archive).unwrap()));
@@ -279,6 +281,7 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     assert!(manifest.components[0].requires.is_empty());
     assert!(!unpacked.join("payload/libexec").exists());
     assert!(!repo.join("src/agent-sec-core").exists());
+    assert!(!repo.join("src/tokenless").exists());
 }
 
 #[test]
@@ -336,4 +339,61 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     );
     assert!(!package.join("payload/bin/aw").exists());
     assert!(!repo.join("src/aw/target/release/aw").exists());
+}
+
+#[test]
+fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+    fs::create_dir_all(&target).unwrap();
+    let directory = tempfile::tempdir_in(target).unwrap();
+    let repo = directory.path().canonicalize().unwrap();
+    for (name, source) in [
+        ("aw-package", "src/aw"),
+        ("aw-provider-tokenless", "src/aw"),
+        ("tokenless", "src/tokenless"),
+    ] {
+        let path = repo.join(source).join("target/release").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy("/bin/true", path).unwrap();
+    }
+    for name in [
+        "LICENSE",
+        "NOTICE",
+        "docs/user-guide/en/user-entrypoint/aw-preview.md",
+        "docs/user-guide/zh/user-entrypoint/aw-preview.md",
+    ] {
+        let path = repo.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "fixture").unwrap();
+    }
+    let output = repo.join("output");
+    fs::create_dir(&output).unwrap();
+    let archives = stage(
+        &repo,
+        "0.1.0-preview.1",
+        &"a".repeat(40),
+        &output,
+        &AtomicBool::new(false),
+        Selection::Tokenless,
+    )
+    .unwrap();
+    assert_eq!(archives.len(), 1);
+    tar::Archive::new(flate2::read::GzDecoder::new(
+        File::open(&archives[0]).unwrap(),
+    ))
+    .unpack(&output)
+    .unwrap();
+    let package = output.join(format!(
+        "aw-provider-tokenless-0.1.0-preview.1-linux-{}",
+        std::env::consts::ARCH
+    ));
+    let manifest = crate::inspect(&package).unwrap();
+    assert_eq!(manifest.components.len(), 1);
+    assert_eq!(manifest.components[0].component, "aw-provider-tokenless");
+    assert_eq!(
+        manifest.components[0].requires,
+        BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())])
+    );
+    assert!(!repo.join("src/agent-sec-core").exists());
+    assert!(!package.join("payload/bin/aw").exists());
 }

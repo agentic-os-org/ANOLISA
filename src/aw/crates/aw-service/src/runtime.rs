@@ -39,6 +39,11 @@ struct EventEntry {
 }
 
 enum Job {
+    Completion {
+        value: Value,
+        input: Vec<u8>,
+        reply: SyncSender<Result<Value>>,
+    },
     Invoke {
         step: String,
         native_environment: Option<BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
@@ -367,6 +372,10 @@ impl Runtime {
         let thread_key = key.clone();
         let worker = thread::Builder::new().name("aw-event".into()).spawn(move || {
             let automatic = native_input.is_some();
+            // Qoder's native sequential flag serializes external Hooks too.
+            let ordered = automatic && host.capabilities().adapter == "qoder"
+                && value["name"] == "tool.after"
+                && host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result());
             let event = match native_input {
                 Some(input) => host.hook_event(value, input, deadline, &cancelled),
                 None => host.event(value, deadline, &cancelled),
@@ -379,7 +388,7 @@ impl Runtime {
                     match claimed {
                         Ok(_) => {
                             let _ = ready.send(Ok(json!(handle)));
-                            runtime.event_loop(&thread_key, &event, &cancelled, receiver, automatic);
+                            runtime.event_loop(&thread_key, &event, &cancelled, receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -428,11 +437,13 @@ impl Runtime {
         cancelled: &AtomicBool,
         receiver: Receiver<Job>,
         automatic: bool,
+        ordered: bool,
     ) {
         let mut close = None;
         let mut claimed = BTreeSet::new();
         let mut panicked = false;
         let completed_steps = AtomicU64::new(0);
+        let completed_mask = AtomicU64::new(0);
         let step_count = event.steps().count() as u64;
         thread::scope(|scope| {
             let mut children = Vec::new();
@@ -454,6 +465,17 @@ impl Runtime {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 match job {
+                    Job::Completion {
+                        value,
+                        input,
+                        reply,
+                    } => {
+                        let result = event
+                            .completion_view(value, input)
+                            .map(|()| json!({}))
+                            .map_err(|_| rejected("native_completion_invalid"));
+                        let _ = reply.send(result);
+                    }
                     Job::Close { reply } => {
                         close = Some(reply);
                         break;
@@ -468,12 +490,19 @@ impl Runtime {
                             let _ = reply.send(Err(rejected("event_cancelled")));
                             continue;
                         }
-                        if !event.steps().any(|candidate| candidate.step_id == step)
-                            || !claimed.insert(step.clone())
-                        {
+                        let Some(index) = event
+                            .steps()
+                            .position(|candidate| candidate.step_id == step)
+                        else {
+                            let _ = reply.send(Err(rejected("step_unknown_or_claimed")));
+                            continue;
+                        };
+                        if !claimed.insert(step.clone()) {
                             let _ = reply.send(Err(rejected("step_unknown_or_claimed")));
                             continue;
                         }
+                        // Admission caps events at 64 steps, so every step has a bit.
+                        let bit = 1u64 << index;
                         if self
                             .calls
                             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -482,13 +511,26 @@ impl Runtime {
                             .is_err()
                         {
                             completed_steps.fetch_add(1, Ordering::Release);
+                            completed_mask.fetch_or(bit, Ordering::Release);
                             let _ = reply.send(Err(rejected("call_limit")));
                             continue;
                         }
                         let completed_steps = &completed_steps;
+                        let completed_mask = &completed_mask;
                         children.push(scope.spawn(move || {
                             let _guard = CallGuard(&self.calls);
                             let result = (|| {
+                                while ordered
+                                    && completed_mask.load(Ordering::Acquire) & (bit - 1) != bit - 1
+                                {
+                                    if Instant::now() >= event.deadline()
+                                        || cancelled.load(Ordering::Acquire)
+                                        || self.stopped.load(Ordering::Acquire)
+                                    {
+                                        return Err(rejected("event_cancelled_or_expired"));
+                                    }
+                                    thread::sleep(std::time::Duration::from_millis(2));
+                                }
                                 self.audit
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
                                 let invocation = match native_environment {
@@ -503,6 +545,7 @@ impl Runtime {
                                 Ok(result)
                             })();
                             completed_steps.fetch_add(1, Ordering::Release);
+                            completed_mask.fetch_or(bit, Ordering::Release);
                             let _ = reply.send(result);
                         }));
                     }

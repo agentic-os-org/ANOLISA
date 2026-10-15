@@ -20,7 +20,7 @@ fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "--help".into());
     if command == "--help" {
-        println!("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]\naw-package configure --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core --socket ABS_FILE | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]\naw-package uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
+        println!("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]\naw-package configure --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]\naw-package uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
         println!("{}", config::HELP);
         return Ok(());
     }
@@ -86,7 +86,8 @@ fn run() -> Result<()> {
                 .map(String::as_str)
                 .unwrap_or("none");
             let command_flags = ["--check", "--effect", "--reason-code"];
-            if (flags.contains_key("--socket") && selection != "sec-core")
+            if (flags.contains_key("--socket")
+                && !matches!(selection, "sec-core" | "sec-core+tokenless"))
                 || ((command_flags.iter().any(|name| flags.contains_key(*name))
                     || !check_args.is_empty())
                     && selection != "command")
@@ -96,6 +97,10 @@ fn run() -> Result<()> {
             let mut argv = Vec::new();
             let policy = match selection {
                 "none" => Policy::None,
+                "tokenless" => Policy::Tokenless,
+                "sec-core+tokenless" => Policy::SecCoreTokenless {
+                    socket: required("--socket")?,
+                },
                 "sec-core" => Policy::SecCore {
                     socket: required("--socket")?,
                 },
@@ -112,11 +117,10 @@ fn run() -> Result<()> {
                             .ok_or_else(|| Error::Invalid("missing --reason-code".into()))?,
                     }
                 }
-                _ => {
-                    return Err(Error::Invalid(
-                        "--provider must be none, sec-core or command".into(),
-                    ))
-                }
+                _ => return Err(Error::Invalid(
+                    "--provider must be none, sec-core, tokenless, sec-core+tokenless or command"
+                        .into(),
+                )),
             };
             aw_package::configure(&Settings {
                 prefix,

@@ -4,6 +4,7 @@ mod adapter;
 mod adapters;
 mod hook;
 mod policy;
+mod projection;
 mod qoder;
 mod readiness;
 mod run;

@@ -84,9 +84,43 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         return Err("step or budget does not match binding".into());
     }
     let deadline = Instant::now() + Duration::from_millis(route.budget_ms + 2000);
-    let input = read_input(deadline)?;
-    let value: Value = serde_json::from_slice(&input)?;
-    let normalized = adapter.normalize(&binding, event, &value)?;
+    let mut input = read_input(deadline)?;
+    let mut value: Value = serde_json::from_slice(&input)?;
+    let completion = if binding.adapter == "openclaw" {
+        value.get("aw_openclaw_completion").cloned()
+    } else {
+        None
+    };
+    if completion.is_some() {
+        input = value["native_input"]
+            .as_str()
+            .ok_or("missing OpenClaw native input")?
+            .as_bytes()
+            .to_vec();
+        value = serde_json::from_slice(&input)?;
+    }
+    let mut normalized = adapter.normalize(&binding, event, &value)?;
+    if event == "tool.after" && route.replacement_step.is_some() {
+        if let Some(projection) = super::projection::project(&binding.adapter, &value) {
+            project_within_limit(&mut normalized, projection)?;
+        }
+    }
+    if let Some(completion) = completion {
+        if event != "tool.after" || route.replacement_step.is_none() {
+            return Err("unexpected OpenClaw completion frame".into());
+        }
+        let snapshot_input = completion["snapshot"]
+            .as_str()
+            .ok_or("missing OpenClaw snapshot")?;
+        let snapshot: Value = serde_json::from_str(snapshot_input)?;
+        let mut bound = adapter.normalize(&binding, event, &snapshot)?;
+        if let Some(projection) = super::projection::project(&binding.adapter, &snapshot) {
+            project_within_limit(&mut bound, projection)?;
+        }
+        normalized["native"]["aw_completion"] = serde_json::json!({
+            "phase":completion["phase"], "snapshot":bound, "input":snapshot_input
+        });
+    }
     let client = Client::connect(&binding.socket, deadline)?;
     if client.identity() != &binding.binding.identity {
         return Err("stale hook binding".into());
@@ -108,10 +142,31 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         },
         deadline,
     )?;
-    response(adapter, event, on_error, output)
+    response(adapter, event, on_error, output, &binding.adapter, &value)
 }
 
-fn response(adapter: &dyn Adapter, event: &str, on_error: &str, output: Value) -> Result<Exit> {
+fn project_within_limit(event: &mut Value, projection: Value) -> Result<()> {
+    event["tool"]["result_projection"] = projection;
+    if serde_json::to_vec(event)?.len() > aw_provider::MAX_MESSAGE_BYTES {
+        event["tool"]
+            .as_object_mut()
+            .ok_or("missing tool")?
+            .remove("result_projection");
+    }
+    Ok(())
+}
+
+fn response(
+    adapter: &dyn Adapter,
+    event: &str,
+    on_error: &str,
+    output: Value,
+    adapter_id: &str,
+    native: &Value,
+) -> Result<Exit> {
+    if !matches!(on_error, "report" | "block") {
+        return Err("invalid failure action".into());
+    }
     if output["status"] != "ok" {
         return Err("step execution failed; query the instance audit for metadata".into());
     }
@@ -137,15 +192,32 @@ fn response(adapter: &dyn Adapter, event: &str, on_error: &str, output: Value) -
     let effects = output["effects"]
         .as_array()
         .ok_or("missing Provider effects")?;
+    if let Some(effect) = effects
+        .iter()
+        .find(|effect| effect["type"] == "replace_result")
+    {
+        // Observe effects already reached the journal and need no native action.
+        if event != "tool.after"
+            || effects
+                .iter()
+                .filter(|effect| effect["type"] == "replace_result")
+                .count()
+                != 1
+        {
+            return Err("invalid result replacement".into());
+        }
+        return emit(super::projection::reply(
+            adapter_id,
+            native,
+            effect["text"].as_str().ok_or("missing replacement text")?,
+        )?);
+    }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
         if event != "tool.before" {
             return Err("block is unsupported after a tool".into());
         }
         return emit(adapter.reply(true));
-    }
-    if !matches!(on_error, "report" | "block") {
-        return Err("invalid failure action".into());
     }
     // Neutral output preserves the Agent's independent permission checks.
     emit(adapter.reply(false))

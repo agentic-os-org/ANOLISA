@@ -35,6 +35,13 @@ pub struct Settings<'a> {
 pub enum Policy<'a> {
     /// No business policy or Provider calls.
     None,
+    /// PostTool compression using the installed Tokenless Provider.
+    Tokenless,
+    /// sec-core tool-before checks followed by Tokenless PostTool compression.
+    SecCoreTokenless {
+        /// Existing daemon socket; configuration generation never starts it.
+        socket: &'a Path,
+    },
     /// Optional installed sec-core Provider using an existing system daemon.
     SecCore {
         /// Existing daemon socket; configuration generation never starts it.
@@ -73,20 +80,35 @@ pub(crate) fn configure_using(
         openclaw,
     } = settings;
     let _lock = paths::shared_lock(prefix)?;
-    let names: &[&str] = if matches!(policy, Policy::SecCore { .. }) {
-        &["aw-core", "aw-provider-sec-core"]
-    } else {
-        &["aw-core"]
-    };
-    let installed = selected_receipts(prefix, Some(names))?;
+    let mut names = vec!["aw-core"];
+    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
+        names.push("aw-provider-tokenless");
+    }
+    if matches!(
+        policy,
+        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
+    ) {
+        names.push("aw-provider-sec-core");
+    }
+
+    let installed = selected_receipts(prefix, Some(&names))?;
     require(
         installed.contains_key("aw-core"),
         "install AW core before configuring",
     )?;
-    if matches!(policy, Policy::SecCore { .. }) {
+    if matches!(
+        policy,
+        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
+    ) {
         require(
             installed.contains_key("aw-provider-sec-core"),
             "install the sec-core Provider before selecting its template",
+        )?;
+    }
+    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
+        require(
+            installed.contains_key("aw-provider-tokenless"),
+            "install the Tokenless Provider before selecting its template",
         )?;
     }
     verified_files(prefix, &installed)?;
@@ -114,7 +136,7 @@ pub(crate) fn configure_using(
         "configuration and state must be outside the immutable prefix",
     )?;
     socket_length("AW state", &state.join("aw.sock"))?;
-    if let Policy::SecCore { socket } = policy {
+    if let Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } = policy {
         paths::absolute(socket)?;
         socket_length("sec-core", socket)?;
     }

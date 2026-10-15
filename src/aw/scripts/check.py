@@ -153,6 +153,7 @@ def check_inventory() -> None:
         ("aw-exec", "execution"),
         ("aw-host", "host"),
         ("aw-provider-sec-core", "provider"),
+        ("aw-provider-tokenless", "provider"),
         ("aw-service", "service"),
         ("aw-service", "qwenpaw"),
     ):
@@ -168,6 +169,7 @@ def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
         "aw-package": {"serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile", "aw-config", "aw-exec", "aw-service"},
+        "aw-provider-tokenless": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile"},
         "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"},
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},

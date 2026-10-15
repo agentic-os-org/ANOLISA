@@ -264,6 +264,39 @@ class NativeContract(unittest.TestCase):
             manager._hooks.setdefault(name, []).append(callback)
         return SimpleNamespace(register_hook=register_hook)
 
+    def test_replacement_uses_the_final_native_transform_seam(self) -> None:
+        launch = self.launch([("tool.after", "observe"), ("tool.after", "user"), ("tool.after", "compress")])
+        config = json.loads(launch.read_text())
+        config["hooks"][-1]["replace_result"] = True
+        launch.write_text(json.dumps(config))
+        manager = self.manager()
+        self.plugin.register(self.context(manager))
+        self.assertEqual(len(manager._hooks["post_tool_call"]), 2)
+        self.assertIn("transform_tool_result", manager._hooks)
+        import model_tools
+        ids = model_tools._CallIds("task", "session", "call", "turn", "request")
+        import subprocess
+        original_run = subprocess.run
+        def checked_run(*args, **kwargs):
+            completed = original_run(*args, **kwargs)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+            return completed
+        with (patch("hermes_cli.lifecycle.has_hook", lambda event: bool(manager._hooks.get(event))),
+              patch("hermes_cli.lifecycle.invoke_hook", manager.invoke_hook),
+              patch.object(self.plugin.subprocess, "run", checked_run)):
+            model_tools._emit_post_tool_call_hook(function_name="terminal", function_args={"command":"echo text"},
+                result='{"output":"original","exit_code":0}', duration_ms=1,
+                task_id="task", session_id="session", tool_call_id="call", turn_id="turn", api_request_id="request")
+            result = model_tools._apply_transform_tool_result_hook("terminal", {"command":"echo text"},
+                '{"output":"original","exit_code":0}', 1, ids)
+        self.assertEqual(result, "compact")
+        rows = [json.loads(row) for row in self.trace.read_text().splitlines()]
+        self.assertEqual([row["step"] for row in rows], ["observe", "user", "compress"])
+        self.assertTrue(all(row["payload"]["extra"]["result"] == '{"output":"original","exit_code":0}' for row in rows))
+        payload = rows[-1]["payload"]
+        self.assertEqual(payload["hook_event_name"], "transform_tool_result")
+        self.assertEqual(payload["extra"]["api_request_id"], "request")
+
     def test_native_order_and_block_keep_later_callbacks(self) -> None:
         self.launch([("tool.before", "deny"), ("tool.before", "after-deny")])
         manager = self.manager()

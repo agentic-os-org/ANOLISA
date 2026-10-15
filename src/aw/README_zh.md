@@ -15,6 +15,7 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 | 从源码构建并接入自己的组件 | [组件接入教程](../../docs/developer-guide/zh/aw/integration.md) |
 | 编写和校验配置 | [配置参考](../../docs/developer-guide/zh/aw/configuration.md) |
 | 四框架共用策略、验证并清理 | [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md#四框架使用同一份配置) |
+| 四框架模型可见结果压缩 | [Tokenless Provider](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md) |
 | 使用已有 sec-core 后端 | [sec-core Provider](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md) |
 | 容器部署与审计持久化 | [运行与持久化](../../docs/user-guide/zh/user-entrypoint/aw.md#容器与持久化数据) |
 
@@ -32,9 +33,10 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
 
-运行时支持工具前 `observe`/`block`、工具后 `observe`，以及各框架的原生命令。
+运行时支持工具前 `observe`/`block`、工具后 `observe` 或单文本 `replace_result`，以及各框架的原生命令。
+完成观察和用户 Hook 可位于最后一个替换步骤之前（OpenClaw 在压缩后执行原生观察）；sec-core/Tokenless 联合模板保留观察并追加压缩。
 不同框架的 after 事件覆盖不同。配置词汇包含尚未接通的事件/效果，静态校验本身
-不能证明原生效果生效。跨 Agent 审批、输入/结果改写和 OS 强制执行不在当前
+不能证明原生效果生效。跨 Agent 审批、输入改写和 OS 强制执行不在当前
 Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南。
 
 ## 基本使用
@@ -56,7 +58,8 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
 用 `aw-package configure` 初始化 Qoder/OpenClaw YAML，不传 `--provider` 就生成
-空策略，也可选择 `--provider command` / `--provider sec-core`。四框架使用共用模板。
+空策略，也可选择 `--provider command` / `--provider sec-core` / `--provider tokenless` /
+`--provider sec-core+tokenless`（配合 `--socket`）。四框架使用共用模板。
 简单脚本省略 `protocol` 和 `operation`，返回 JSON true/false，命中后的效果放在
 各 YAML 步骤中；AW 校验准入并构造结果，不调用脚本握手方法。添加规则前按
 [初始化与编辑流程](../../docs/user-guide/zh/user-entrypoint/aw-preview.md#编辑已有-provider-与-hook-配置)准备配置。`aw-package config` 离线查看、校验和编辑已有 YAML/JSON

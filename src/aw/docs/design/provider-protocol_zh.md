@@ -144,7 +144,8 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 | --- | --- |
 | `tool.before`：`observe`、`block` | 所选操作和 Adapter 均支持全部请求效果时通过 |
 | `tool.after`：`observe` | 双方均支持时通过 |
-| `ask`、输入或结果替换、执行后阻断 | 拒绝 |
+| `tool.after`：`replace_result` | 单个结构化步骤与可信文本替换能力 |
+| `ask`、输入替换、执行后阻断 | 拒绝 |
 | 启用两个工具事件以外的事件 | 拒绝，`required: false` 也不例外 |
 | `security.violation` 等 guard | 拒绝，本模型尚未实现最后一道检查的顺序保证 |
 | 精确工具选择器或高于 `native_hook` 的保证 | 拒绝 |
@@ -220,3 +221,32 @@ AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周
 
 四框架夹具校验统一消息结构及能力拒绝行为，不证明所有原生入口都加载 Hook、
 框架一定采用返回的 block，或执行无法绕过回调。这些结论需要独立的运行时验收。
+
+## PostTool 文本替换
+
+结构化 `tool.after` 操作在可信 Adapter 能力支持时可以请求 `replace_result`，并且
+必须是事件最后一个启用步骤；之前可保留观察、布尔 Hook 和原生 Hook。第二个替换
+步骤或替换之后还有启用步骤时，准入会拒绝。布尔 Hook 不能请求该效果。Provider 与 Adapter 证据仍
+分别检查。只有已准入的替换步骤获得可选投影，既有观察步骤保持原事件形态。Adapter 可提供 `event.tool.result_projection`，包含 `text`、`status`、
+`content_origin` 及可选 Shell `command`。原 `result` 和原生载荷保留，并参与请求绑定。
+
+`replace_result` 效果要求字符串 `text`，其他效果类型拒绝该字段。响应最多包含一个
+替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
+槽并保留原生 envelope。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
+Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须来自同一 Preview
+构建；旧实现会拒绝不支持的投影或效果，不会静默忽略。
+
+### 生命周期扩展边界
+
+当前 Tokenless 桥接仅实现 Protocol v2 `post_tool`。完整生命周期需要分别准入
+`pre_tool` 命令改写、`before_model` Schema 替换和授权 `retrieve`，并逐框架验证
+原生采用。这是后续设计范围，尚未实现。策略继续复用 Tokenless 公共 Core/CLI，
+将 PreTool 的 `output_optimization` 传入 PostTool，防止重复压缩 RTK 输出。
+命令改写须在最终 sec-core 检查与原生权限检查之前完成；后续 Hook 不能继续修改
+已授权输入，并保留原输入和最终输入的绑定。
+
+恢复需要真实的 Agent 可调用入口及 Tokenless 所需的原生授权与作用域，并将 Retrieve
+结果旁路，防止再次压缩。Schema 替换需要模型请求点位及独立恢复能力；当前支持的
+OpenClaw、Hermes 原生接入缺少该点位，应声明能力子集，不能声称四框架完全一致。
+失败环境诊断还需要独立的附加结果合同：当前桥接有意保持失败结果原样。上游 Tool Ready
+仍为硬禁用，不应计入当前已激活能力的完整性承诺。

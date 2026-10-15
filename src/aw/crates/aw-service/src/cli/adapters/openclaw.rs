@@ -110,6 +110,18 @@ impl Adapter for OpenClaw {
             .as_object()
             .ok_or("missing OpenClaw context")?;
         let tool = identifier(event.get("toolName"), "toolName")?;
+        // Native completion uses policy names; middleware retains the tool's name.
+        // Match the pinned runtime's three aliases without changing before input.
+        let tool = if name == "tool.after" {
+            match tool.trim().to_lowercase().as_str() {
+                "bash" => "exec".to_owned(),
+                "apply-patch" => "apply_patch".to_owned(),
+                "cron" => "automations".to_owned(),
+                _ => tool.trim().to_lowercase(),
+            }
+        } else {
+            tool.to_owned()
+        };
         let call = identifier(
             event.get("toolCallId").or(context.get("toolCallId")),
             "toolCallId",
@@ -155,7 +167,10 @@ impl PreparedLaunch for Prepared {
             entrypoint: "gateway".into(),
             events: BTreeMap::from([
                 ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                ("tool.after".into(), vec!["observe".into()]),
+                (
+                    "tool.after".into(),
+                    vec!["observe".into(), "replace_result".into()],
+                ),
             ]),
         }
     }
@@ -173,6 +188,10 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "openclaw-plugin/index.mjs",
             include_bytes!("../../../../../adapters/openclaw/index.mjs"),
+        )?;
+        context.files.write(
+            "openclaw-plugin/hooks.mjs",
+            include_bytes!("../../../../../adapters/openclaw/hooks.mjs"),
         )?;
         context.files.write(
             "openclaw-plugin/package.json",
@@ -204,12 +223,16 @@ impl PreparedLaunch for Prepared {
                 "after"
             }] = json!(selected
                 .iter()
-                .map(|step| json!({"step":step.step_id,"onError":step.on_error,"budgetMs":budget}))
+                .map(|step| json!({"step":step.step_id,"onError":step.on_error,"budgetMs":budget,"replaceResult":step.execution.replaces_result()}))
                 .collect::<Vec<_>>());
             events.insert(
                 name.into(),
                 HookEvent {
                     budget_ms: budget,
+                    replacement_step: selected
+                        .iter()
+                        .find(|step| step.execution.replaces_result())
+                        .map(|step| step.step_id.clone()),
                     steps: selected
                         .into_iter()
                         .map(|step| (step.step_id.clone(), step.on_error.clone()))
@@ -411,6 +434,96 @@ fn lock_profile(path: &Path) -> Result<(PathBuf, File)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn after_identity_matches_native_completion_case_and_aliases() {
+        let binding: HookBinding = serde_json::from_value(json!({"adapter":"openclaw",
+            "binding":{"identity":{"generation":"fixture","config_revision":"a".repeat(64)},"instance_id":"instance","target":"target","audit_key":"key"},
+            "socket":"/tmp/fixture.sock","cwd":"/tmp","events":{}})).unwrap();
+        for (raw, canonical) in [
+            ("Custom/Tool", "custom/tool"),
+            ("Bash", "exec"),
+            ("apply-patch", "apply_patch"),
+            ("CRON", "automations"),
+        ] {
+            let native = json!({"hook":"after_tool_call","event":{"toolName":raw,"params":{},"toolCallId":"call","runId":"run"},"context":{"sessionId":"session"}});
+            let normalized = OpenClaw.normalize(&binding, "tool.after", &native).unwrap();
+            assert_eq!(normalized["tool"]["name"], canonical);
+            assert_eq!(normalized["native"]["event"]["toolName"], raw);
+            let mut before = native;
+            before["hook"] = json!("before_tool_call");
+            assert_eq!(
+                OpenClaw
+                    .normalize(&binding, "tool.before", &before)
+                    .unwrap()["tool"]["name"],
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn generated_profile_marks_only_the_admitted_replacement_step() {
+        use aw_provider::admission::StepExecution;
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
+        fs::create_dir_all(&parent).unwrap();
+        let root = tempfile::tempdir_in(parent).unwrap();
+        let launch = root.path().join("launch");
+        fs::create_dir(&launch).unwrap();
+        let files = crate::cli::run::Artifacts(launch);
+        let steps: Vec<_> = ["observe", "compress"]
+            .into_iter()
+            .map(|id| AdmittedStep {
+                event: "tool.after".into(),
+                step_id: id.into(),
+                provider: "fixture".into(),
+                on_error: "report".into(),
+                execution: StepExecution::Provider {
+                    operation: "record".into(),
+                    effects: vec![if id == "compress" {
+                        "replace_result"
+                    } else {
+                        "observe"
+                    }
+                    .into()],
+                },
+            })
+            .collect();
+        let mut prepared = Prepared {
+            input: LaunchInput {
+                document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
+                target: "openclaw".into(),
+                flags: BTreeMap::new(),
+                command: aw_exec::CommandSpec {
+                    program: "/native/openclaw".into(),
+                    args: vec!["gateway".into(), "run".into()],
+                    cwd: root.path().into(),
+                    environment: BTreeMap::new(),
+                },
+            },
+            settings: json!({"gateway":{"mode":"local"}}),
+            profile: root.path().join("profile"),
+            _lock: File::create(root.path().join("lock")).unwrap(),
+        };
+        let plan = prepared
+            .configure(&LaunchContext {
+                files: &files,
+                binding_path: &root.path().join("binding"),
+                executable: Path::new("/aw"),
+                steps: &steps,
+            })
+            .unwrap();
+        let settings: Value =
+            serde_json::from_slice(&fs::read(files.0.join("openclaw.json")).unwrap()).unwrap();
+        let hooks = &settings["plugins"]["entries"][PLUGIN]["config"]["hooks"]["after"];
+        assert_eq!(hooks[0]["replaceResult"], false);
+        assert_eq!(hooks[1]["replaceResult"], true);
+        assert_eq!(
+            plan.events["tool.after"].replacement_step.as_deref(),
+            Some("compress")
+        );
+        assert!(files.0.join("openclaw-plugin/hooks.mjs").is_file());
+    }
 
     #[test]
     fn gateway_arguments_preserve_literal_values_and_version_prefix() {

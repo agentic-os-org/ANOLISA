@@ -23,7 +23,10 @@ with Path(os.environ["AW_HERMES_TRACE"]).open("a") as handle:
         "profile_sentinel": os.environ.get("AW_HERMES_PROFILE_SENTINEL"),
         "tmpdir": os.environ.get("TMPDIR"), "home": os.environ.get("HOME"),
         "literal": args.literal}) + "\n")
-if args.step == "deny":
+if args.step == "compress":
+    print(json.dumps({"aw_replacement": "compact"}))
+    raise SystemExit(0)
+elif args.step == "deny":
     print('{"action":"block","message":"native block"}')
     raise SystemExit(2)
 if args.step == "ask":

@@ -116,11 +116,19 @@ impl Protocol {
         if value["method"] == "invoke" {
             let before = value["event"]["name"] == "tool.before";
             for effect in array(&value["allowed_effects"])? {
-                if effect != "observe" && !(before && effect == "block") {
+                if effect != "observe"
+                    && !(before && effect == "block")
+                    && !(!before
+                        && effect == "replace_result"
+                        && value["event"]["name"] == "tool.after")
+                {
                     return Err(Error::Invalid("invocation effect is not implemented"));
                 }
             }
-            if before && !value["event"]["tool"]["result"].is_null() {
+            if before
+                && (!value["event"]["tool"]["result"].is_null()
+                    || value["event"]["tool"].get("result_projection").is_some())
+            {
                 return Err(Error::Invalid("tool.before cannot supply a tool result"));
             }
         }
@@ -235,7 +243,22 @@ impl Protocol {
                 if value["input_digest"] != request.0["input_digest"] {
                     return Err(Error::Invalid("response binding mismatch"));
                 }
+                let mut replacements = 0;
                 for effect in array(&value["effects"])? {
+                    if effect["type"] == "replace_result" {
+                        replacements += 1;
+                        if replacements > 1 {
+                            return Err(Error::Invalid("multiple result replacements"));
+                        }
+                        if request.0["event"]["tool"]
+                            .get("result_projection")
+                            .is_none()
+                        {
+                            return Err(Error::Invalid(
+                                "replacement response requires a result projection",
+                            ));
+                        }
+                    }
                     if !array(&request.0["allowed_effects"])?.contains(&effect["type"]) {
                         return Err(Error::Invalid("response effect was not admitted"));
                     }

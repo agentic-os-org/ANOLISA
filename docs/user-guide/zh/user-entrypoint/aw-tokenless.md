@@ -1,0 +1,108 @@
+# 通过 AW 压缩模型可见的工具结果
+
+[English](../../en/user-entrypoint/aw-tokenless.md)
+
+可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
+策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
+Qoder、OpenClaw、QwenPaw 和 Hermes 共用一份 Provider 配置。首版只覆盖
+PostTool；命令重写、Schema 压缩和授权恢复仍是独立能力。
+
+## 安装与启用
+
+使用 [AW Preview 包](aw-preview.md)。`aw-provider-tokenless` 包含桥接程序
+`aw-provider-tokenless` 和从同一源码提交构建的 `tokenless` CLI，要求匹配的
+`aw-core`；`aw-all-in-one` 包含 core、sec-core 和 Tokenless。本 PostTool 包不需要
+RTK、Python wheel 或 Tokenless 原生插件。Agent 安装及其运行依赖仍由用户准备。
+
+先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
+前缀。Qoder/OpenClaw 使用 `aw-package configure --provider tokenless`，并提供既有
+Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生成执行前
+sec-core 检查，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
+原有单独 `sec-core` 选项保持既有行为。
+
+四框架接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
+替换可执行路径，并将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
+启动参数见 [AW 指南](aw.md#四框架使用同一份配置)。
+
+Provider 私有配置只接受 `{version: 1}`。固定 argv 为
+`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`；桥接通过 Protocol v2
+调用 `tokenless compress`，为该子进程设置 `TOKENLESS_DATA_DIR`。CLI 统计使用 AW
+提供的 Agent、Session 和工具调用标识。CLI 统计度量选中的压缩，不证明原生采用。
+
+AW Journal 与 Tokenless 统计具有独立的内容留存边界。Tokenless CLI 默认开启 SQLite
+统计和 SLS 日志，可由配置或继承的环境覆盖。产生压缩收益时，SQLite 统计可能将完整的
+压缩前后工具文本写入 `$TOKENLESS_DATA_DIR/stats.db`，即使恢复能力为 `none`。
+SLS sink 将指标和归属信息写入本地 JSONL，默认路径为
+`/var/log/anolisa/sls/ops/tokenless.jsonl`；当前实现不将工具正文写入 SLS，也不执行上传。
+若宿主运行 anolisa telemetry uploader 或 SLS/Logtail 采集，指标和归属标识可能由这些
+组件另行上传；该通道仍不含工具正文。
+如需关闭两个 sink，在启动 AW、绑定 Agent 之前设置 `TOKENLESS_STATS_ENABLED=0`
+和 `TOKENLESS_SLS_ENABLED=0`。这两个开关不会删除已有记录。
+
+## 结果与故障行为
+
+| 框架 | 模型可见结果替换入口 |
+| --- | --- |
+| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` 字符串 |
+| OpenClaw | 下一次模型请求前的 `registerAgentToolResultMiddleware` |
+| QwenPaw | Acting middleware 返回的最终 AgentScope `ToolResponse` |
+| Hermes | `transform_tool_result` 最终字符串回调 |
+
+OpenClaw 要求 middleware API 和显式插件启用；AW 生成的原生 profile 声明 middleware
+合同。观察型 `after_tool_call` 的返回值无法替换模型可见内容。
+
+仅投影受支持的单个文本槽。Media、多个 Content Block、流式中间块以及未成功的工具
+结果保持原样。替换保留原生 metadata 和 envelope 字段。Qoder 要求字符串替换，因此结构化
+envelope 会序列化到该字符串中。已知文件读取工具标为
+`file_content`；Shell 命令会交给 Tokenless，使其也能识别单纯的文件读取。其他工具
+使用 `api_response`。
+OpenClaw 的 after 事件 `tool_name` 统计和 AW Journal 元数据使用小写策略名
+（例如 `Bash` 变为 `exec`）；before 事件保留原名用于 sec-core 查找。跨阶段关联应使用
+Session/工具调用 ID，而不是工具名。
+
+恢复能力显式为 `none`，因此 Tokenless 只能采用无需授权恢复入口的允许候选。不追加
+压缩副本或上下文消息。`dry_run`、`no_savings` 和不可用恢复均保留原结果。CLI 失败、
+非法响应、身份不匹配、超时和输出超限属于 AW 故障，由 `on_error: report` 处理，原生
+结果保留。AW 持久 Journal 仍仅记录元数据，不保存替换文本。
+
+在 `tool.after.steps` 中保留既有完成观察和用户自定义 Hook，将压缩放在最后。
+启用结果替换时，Qoder、QwenPaw 和 Hermes 按声明顺序执行这些步骤，观察步骤看到原结果。
+只有最后一个结构化步骤可以请求 `replace_result`；替换后还有启用步骤，或有第二个
+替换步骤时，准入会拒绝。观察 Provider 保持原输入形态，只有替换 Provider 收到文本
+投影。所有步骤共享一个事件截止时间；观察或用户 Hook 故障按 `report` 处理，预算
+未耗尽时继续执行后续步骤。
+
+Qoder 保留独立的原生回调，仅在 AW 服务内部约束自身 after 调用的顺序，不强制设置
+原生 `sequential`，不改变外部 Hook 的调度。用户显式配置该选项时，仍遵循 Qoder
+对整个匹配计划生效的原生语义。QwenPaw 反向注册 after 链，使 middleware 解包时
+保持配置顺序；Hermes 保留完成观察，并在原生最终结果转换阶段压缩。
+
+OpenClaw 的原生完成事件发生在结果 middleware 之后，因此先压缩，再在原生 after
+点位按配置顺序执行完成观察。观察保留原生 `error`、`durationMs` 等完成字段，结果
+使用 OpenClaw 对压缩前内容的脱敏视图。两个阶段共享 AW 截止时间和单次执行声明。
+同一插件实例的所有会话合计最多保留 32 个待观察的原结果快照，完成或会话结束时清理。
+包含两个原生视图的序列化回调帧必须小于等于 1 MiB，因此可用工具文本大小更小，具体
+取决于 JSON 转义和元数据。达到快照数量或帧大小限制时跳过压缩。
+middleware API 缺失时警告并停用压缩，保留 before 阻断和原生完成观察。AW 步骤列表之外的 Hook 仍由框架调度。
+这些会话应禁用重叠的 Tokenless 原生插件，避免重复压缩和统计。
+
+Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若仅投影导致超限，AW 省略投影，
+保留原事件的审计；压缩降级为不替换。CLI 调用共享剩余 AW
+预算，并限制 stdout/stderr。Host 限制整个 Provider 进程；直接调用方必须关闭 stdin
+并自行限制生命周期。
+
+禁用时删除压缩步骤及其 Provider，停止 AW 后用新配置重新启动。已有会话不会
+热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
+
+## 从源码构建
+
+在 Linux 上从仓库根目录执行：
+
+```bash
+cargo build --locked --manifest-path src/aw/Cargo.toml -p aw-provider-tokenless
+cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
+```
+
+将生成的 `src/aw/target/debug/aw-provider-tokenless` 和
+`src/tokenless/target/debug/tokenless` 路径填入共用示例。干净源码的 Preview 构建器
+支持 `--component tokenless` 或 `--component all`。
