@@ -2164,14 +2164,31 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_watermark_scale_factor(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/watermark_scale_factor";
+    eval_watermark_scale_factor_at(info, recs, "/proc/sys/vm/watermark_scale_factor")
+}
+
+/// Path-injectable form of [`eval_watermark_scale_factor`] (the `eval_*_at`
+/// idiom) so the read is assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
+fn eval_watermark_scale_factor_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if info.memory_total_gb < 32 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 200 {
         recs.push(Recommendation {
             param: "vm.watermark_scale_factor".to_string(),
@@ -16399,6 +16416,35 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 16384 is below the floor");
         assert_eq!(recs[0].current_value, "16384");
         assert!(advice(&high).is_empty(), "a readable 67108 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn watermark_scale_factor_advice_needs_a_readable_value() {
+        // The rule fires below 200, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("watermark_scale_factor", b"200\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"10\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_watermark_scale_factor_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 10 is below the floor");
+        assert_eq!(recs[0].current_value, "10");
+        assert!(advice(&high).is_empty(), "a readable 200 is not");
         for path in &others {
             assert!(
                 advice(path).is_empty(),
