@@ -131,7 +131,7 @@ mod java_application_argument_regressions {
                 disk_type: DiskType::HDD,
                 scheduler: "mq-deadline".into(),
                 available_schedulers: vec!["mq-deadline".into()],
-                nr_requests: 128,
+                nr_requests: Some(128),
                 read_ahead_kb: Some(128),
                 rq_affinity: 1,
                 hidden: false,
@@ -194,7 +194,9 @@ pub struct DiskInfo {
     pub disk_type: DiskType,
     pub scheduler: String,
     pub available_schedulers: Vec<String>,
-    pub nr_requests: u64,
+    /// `None` when `queue/nr_requests` could not be read or parsed, so the
+    /// rules never size a queue from a value the host did not report.
+    pub nr_requests: Option<u64>,
     /// `None` when `queue/read_ahead_kb` could not be read or parsed, so the
     /// rules never size a window from a value the host did not report.
     pub read_ahead_kb: Option<u64>,
@@ -1316,12 +1318,11 @@ fn read_available_schedulers(dir: &Path) -> Vec<String> {
     }
 }
 
-fn read_nr_requests(dir: &Path) -> u64 {
+fn read_nr_requests(dir: &Path) -> Option<u64> {
     let path = dir.join("queue/nr_requests");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 fn read_read_ahead_kb(dir: &Path) -> Option<u64> {

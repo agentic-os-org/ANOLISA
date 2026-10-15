@@ -2460,14 +2460,20 @@ fn eval_nr_requests(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
         // depth (larger writes fail with EINVAL), and switching to `none`
         // resets it to that depth, so under `none` the value cannot be raised.
         let scheduler = nvme_scheduler_target(disk).unwrap_or(&disk.scheduler);
+        // An attribute that could not be read says nothing about the queue:
+        // the 0 it used to fall back to sits below the floor, so the rule
+        // reported a depth the host never showed and asked to raise it.
+        let Some(nr_requests) = disk.nr_requests else {
+            continue;
+        };
         if disk.disk_type == DiskType::NVMe
             && has_request_queue(disk)
-            && disk.nr_requests < 256
+            && nr_requests < 256
             && scheduler != "none"
         {
             recs.push(Recommendation {
                 param: format!("block/{}/nr_requests", disk.name),
-                current_value: disk.nr_requests.to_string(),
+                current_value: nr_requests.to_string(),
                 recommended_value: "1024".to_string(),
                 reason: "NVMe 硬件队列深度大，增大软件请求队列避免高并发 IO 时提前拥塞".to_string(),
                 confidence: Confidence::High,
@@ -11892,7 +11898,7 @@ mod tests {
                 disk_type: DiskType::NVMe,
                 scheduler: "mq-deadline".to_string(),
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
-                nr_requests: 256,
+                nr_requests: Some(256),
                 read_ahead_kb: Some(128),
                 rq_affinity: 1,
                 hidden: false,
@@ -12223,7 +12229,7 @@ mod tests {
     fn test_no_false_positive_when_optimal() {
         let mut info = make_test_info();
         info.disks[0].scheduler = "none".to_string();
-        info.disks[0].nr_requests = 1024;
+        info.disks[0].nr_requests = Some(1024);
         info.sysctl.swappiness = 10;
         info.sysctl.thp_enabled = "madvise".to_string();
         info.sysctl.dirty_ratio = 10;
@@ -12431,7 +12437,7 @@ mod tests {
     #[test]
     fn test_nvme_nr_requests() {
         let mut info = make_test_info();
-        info.disks[0].nr_requests = 128;
+        info.disks[0].nr_requests = Some(128);
         // Only an elevator that stays in place can take a deeper queue.
         info.disks[0].available_schedulers = vec!["mq-deadline".to_string()];
         let recs = evaluate(&info).unwrap().recommendations;
@@ -12452,7 +12458,7 @@ mod tests {
         for scheduler in ["none", "mq-deadline"] {
             let mut info = make_test_info();
             info.disks[0].scheduler = scheduler.to_string();
-            info.disks[0].nr_requests = 127;
+            info.disks[0].nr_requests = Some(127);
             let recs = evaluate(&info).unwrap().recommendations;
             assert!(
                 !recs.iter().any(|r| r.param.contains("nr_requests")),
@@ -12461,10 +12467,44 @@ mod tests {
         }
     }
 
+    /// `queue/nr_requests` fell back to 0 when it could not be read or parsed,
+    /// and 0 sits below the 256 the rule raises an NVMe queue from: a masked
+    /// or garbled attribute was reported as `current_value: "0"` and answered
+    /// with a write on a disk whose depth was never read.
+    #[test]
+    fn nr_requests_advice_needs_a_readable_depth() {
+        let dir = queue_attribute_tree(
+            "nr_requests",
+            ["nvme0n1", "nvme1n1", "nvme2n1", "nvme3n1", "nvme4n1"],
+            "nr_requests",
+            "128\n",
+            &[("queue/scheduler", "[mq-deadline]\n")],
+        );
+        let mut info = make_test_info();
+        info.disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        info.disks.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut recs = Vec::new();
+        eval_nr_requests(&info, &mut recs);
+        let advised: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.param.as_str(), r.current_value.as_str()))
+            .collect();
+        assert_eq!(
+            advised,
+            [("block/nvme0n1/nr_requests", "128")],
+            "only the depth the disk reported is raised"
+        );
+        let depths: Vec<Option<u64>> = info.disks.iter().map(|d| d.nr_requests).collect();
+        assert_eq!(depths, [Some(128), None, None, None, None]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_nvme_nr_requests_ok_when_high() {
         let mut info = make_test_info();
-        info.disks[0].nr_requests = 1024;
+        info.disks[0].nr_requests = Some(1024);
         let recs = evaluate(&info).unwrap().recommendations;
         let rec = recs.iter().find(|r| r.param.contains("nr_requests"));
         assert!(
@@ -12492,7 +12532,7 @@ mod tests {
         info.numa_nodes = 2;
         info.disks[0].scheduler = "unknown".to_string();
         info.disks[0].available_schedulers = Vec::new();
-        info.disks[0].nr_requests = 0;
+        info.disks[0].nr_requests = None;
         info.disks[0].rq_affinity = 0;
         let recs = evaluate(&info).unwrap().recommendations;
         for knob in ["scheduler", "nr_requests", "rq_affinity"] {
@@ -12800,7 +12840,7 @@ mod tests {
             disk_type: DiskType::SSD,
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["noop".to_string(), "cfq".to_string()],
-            nr_requests: 256,
+            nr_requests: Some(256),
             read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
@@ -12820,7 +12860,7 @@ mod tests {
             disk_type: DiskType::HDD,
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["cfq".to_string()],
-            nr_requests: 128,
+            nr_requests: Some(128),
             read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
@@ -12849,7 +12889,7 @@ mod tests {
             disk_type: DiskType::HDD,
             scheduler: "mq-deadline".to_string(),
             available_schedulers: vec!["mq-deadline".to_string()],
-            nr_requests: 128,
+            nr_requests: Some(128),
             read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
@@ -13081,7 +13121,7 @@ mod tests {
             disk_type: DiskType::HDD,
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["cfq".to_string()],
-            nr_requests: 128,
+            nr_requests: Some(128),
             read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
@@ -16720,7 +16760,7 @@ mod tests {
                 disk_type: DiskType::HDD,
                 scheduler: "mq-deadline".to_string(),
                 available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
-                nr_requests: 128,
+                nr_requests: Some(128),
                 read_ahead_kb: Some(128),
                 rq_affinity: 1,
                 hidden: false,
@@ -16732,7 +16772,7 @@ mod tests {
             disk_type: DiskType::SSD,
             scheduler: "mq-deadline".to_string(),
             available_schedulers: vec!["none".to_string(), "mq-deadline".to_string()],
-            nr_requests: 128,
+            nr_requests: Some(128),
             read_ahead_kb: Some(128),
             rq_affinity: 1,
             hidden: false,
