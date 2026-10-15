@@ -347,14 +347,12 @@ jobs:
             anolisa)        PREFIX="anolisa/v" ;;
           esac
 
-          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
-          if [ -z "$PREV_TAG" ]; then
-            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
-          else
-            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
-          fi
-
-          NOTES="## ${COMPONENT} v${VERSION}\n\n<!-- Add release notes here -->\n\n## What's Changed\n\n<!-- List the key changes in this release -->\n\n**Full Changelog**: ${COMPARE_URL}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          COMPARE_URL=$(python3 .github/scripts/generate_release_notes.py \
+            --tag "$TAG" \
+            --prefix "$PREFIX" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$NOTES_FILE")
 
           # Collect all assets to upload
           ASSETS=("$ARCHIVE")
@@ -388,7 +386,7 @@ jobs:
 
           gh release create "$TAG" \
             --title "${COMPONENT} v${VERSION}" \
-            --notes "$(printf '%b' "${NOTES}")" \
+            --notes-file "$NOTES_FILE" \
             --target "$(git rev-list -n 1 $TAG)" \
             "${ASSETS[@]}"
 
