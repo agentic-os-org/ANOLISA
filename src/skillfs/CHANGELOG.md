@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-15
+
+### Fixed
+
+- Managed stop, supervisor shutdown and orphan replacement now retain the
+  live Ledger backing alias and its directory when the FUSE mount remains busy.
+  If the mount becomes idle within the shared 10-second shutdown deadline,
+  cleanup releases both mounts and removes the SkillFS-created backing directory
+  while preserving source contents
+  ([#7297](https://github.com/agentic-os-org/ANOLISA/pull/7297)).
+- Large authenticated change notifications now request a whole-skill rescan
+  instead of exceeding the daemon's 64 KiB frame limit. Requests at the limit
+  retain their path hints, and the original event log remains unchanged
+  ([#7189](https://github.com/agentic-os-org/ANOLISA/pull/7189)).
+
 ## [0.5.1] - 2026-10-10
 
 This patch release consolidates filesystem boundary fixes and usability

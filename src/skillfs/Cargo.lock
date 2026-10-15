@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "clap",
  "libc",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "libc",
  "notify",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs-fuse"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "fuser",

@@ -9,6 +9,18 @@
 
 ## [未发布]
 
+## [0.5.2] - 2026-10-15
+
+### 修复
+
+- managed stop、supervisor 关停及孤儿 worker 替换时，若 FUSE 挂载仍被占用，
+  会保留有效的 Ledger backing 别名及其目录。若挂载在共用的 10 秒关停期限内
+  解除占用，则释放两处挂载并删除 SkillFS 创建的 backing 目录，保留来源内容
+  ([#7297](https://github.com/agentic-os-org/ANOLISA/pull/7297))。
+- 过大的认证变更通知改为请求重扫整个 Skill，避免超过 daemon 的 64 KiB 帧上限。
+  上限内的请求保留路径提示，原始事件日志保持不变
+  ([#7189](https://github.com/agentic-os-org/ANOLISA/pull/7189))。
+
 ## [0.5.1] - 2026-10-10
 
 本次补丁版本集中整理 0.5.0 之后合入的文件系统边界修复和易用性改进。
