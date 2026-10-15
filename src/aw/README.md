@@ -94,3 +94,5 @@ are independently versioned.
 - [Local service and client](docs/design/local-service.md)
 - [Bounded command execution](docs/design/bounded-execution.md)
 - [Core execution and durable journal](docs/design/core-execution.md)
+
+- [AgentSight lifecycle and phase-one contracts](docs/design/agentsight-integration.md)

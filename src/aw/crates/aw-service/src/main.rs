@@ -29,7 +29,7 @@ fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected run, install, validate, policy, serve, status, request or stop")?;
+        .ok_or("expected run, install, validate, policy, serve, status, request, stop")?;
     if command == "--help" {
         println!(
             "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\

@@ -15,6 +15,7 @@ QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 [组件接入教程](../../../developer-guide/zh/aw/integration.md)。随后使用下方共用配置验证
 原生工具行为。字段定义集中在[配置参考](../../../developer-guide/zh/aw/configuration.md)。
 
+
 ## 安装 Preview
 
 使用 [Preview 包](aw-preview.md) 安装并演示 AW + sec-core，无需编译。

@@ -18,6 +18,7 @@ for source builds and a policy you can verify without a model. Then use the
 shared configuration below to verify native tool behavior. Field definitions
 live in the [configuration reference](../../../developer-guide/en/aw/configuration.md).
 
+
 ## Current support
 
 | Capability | Status |

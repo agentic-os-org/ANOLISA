@@ -17,6 +17,7 @@ aw-exec = { workspace = true }
 aw-host = { workspace = true }
 aw-provider = { workspace = true }
 libc = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 semver = { workspace = true }
 serde_json = { workspace = true }

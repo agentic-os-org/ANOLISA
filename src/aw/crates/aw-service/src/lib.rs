@@ -10,6 +10,7 @@ mod runtime;
 mod server;
 mod wire;
 
+pub mod agentsight;
 pub mod launch_service;
 
 pub use client::Client;

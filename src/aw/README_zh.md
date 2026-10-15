@@ -79,3 +79,5 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 - [本地服务与客户端](docs/design/local-service_zh.md)
 - [有界命令执行](docs/design/bounded-execution_zh.md)
 - [Core 执行与持久 Journal](docs/design/core-execution_zh.md)
+
+- [AgentSight 生命周期与一期合同](docs/design/agentsight-integration_zh.md)
