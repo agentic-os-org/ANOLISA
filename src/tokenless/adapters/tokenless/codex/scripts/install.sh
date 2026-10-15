@@ -36,6 +36,7 @@ PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
+PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 
 # Resolve codex binary via shared helper (see _common.sh).
 
@@ -94,7 +95,7 @@ fi
 CODEX_BIN="$(resolve_codex)"
 if [[ -z "$CODEX_BIN" ]]; then
     echo "[tokenless] codex CLI not found — skipping plugin registration."
-    echo "[tokenless] Install codex first, then run: codex plugin add tokenless@${MARKETPLACE_NAME}"
+    echo "[tokenless] Install codex first, then run: codex plugin add ${PLUGIN_ID}"
     exit 0
 fi
 
@@ -144,8 +145,8 @@ echo "[tokenless] Registering marketplace '${MARKETPLACE_NAME}'..."
 "$CODEX_BIN" plugin marketplace add "$MARKETPLACE_DIR" 2>&1
 
 # 2d. Install the plugin from marketplace
-echo "[tokenless] Installing plugin 'tokenless@${MARKETPLACE_NAME}'..."
-"$CODEX_BIN" plugin add "tokenless@${MARKETPLACE_NAME}" 2>&1
+echo "[tokenless] Installing plugin '${PLUGIN_ID}'..."
+"$CODEX_BIN" plugin add "${PLUGIN_ID}" 2>&1
 
 echo "[tokenless] Codex plugin installation complete."
 echo "[tokenless] Verify: codex plugin list"
