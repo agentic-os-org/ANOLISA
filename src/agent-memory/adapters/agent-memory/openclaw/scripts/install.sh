@@ -213,6 +213,15 @@ install_target_writable() {
 # refusal transcript: the CLI's stderr surfaces on this script's stdout.
 INSTALL_CMD=(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
     "$OPENCLAW_BIN" plugins install "$PLUGIN_DIR" "${INSTALL_ARGS[@]}")
+
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Preview before the CLI runs: the install is the host write and the
+    # config-set below follows it. The help probe above is read-only and stays -
+    # it is what decided the negotiated flags this line names.
+    echo "DRY-RUN: ${INSTALL_CMD[*]}"
+    echo "DRY-RUN: ${OPENCLAW_BIN} config set plugins.entries.memory-anolisa.hooks.allowConversationAccess true (after a successful install)"
+    exit 0
+fi
 INSTALL_RC=0
 if [ "$CONSENT_WITHHELD" = "1" ]; then
     INSTALL_LOG="$(mktemp -t agent-memory-openclaw-install.XXXXXX)"

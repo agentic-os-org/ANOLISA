@@ -590,3 +590,54 @@ PYTEST
         done
     done
 done
+
+# ── ANOLISA_DRY_RUN previews the lifecycle without acting ───────────────────
+# The adapter family contract (tokenless's nine adapters, ws-ckpt's openclaw and
+# hermes scripts) is that ANOLISA_DRY_RUN=1 previews and changes nothing. A dry
+# run must name the negotiated install argv and the config-set that follows it.
+: > "$TEST_ARGV_LOG"
+rm -f "$TEST_INSTALLED"
+dry_install_out="$(env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    ANOLISA_DRY_RUN=1 TEST_HELP=modern TEST_GATE=new bash "$INSTALL_SH" 2>&1)" \
+    || fail 'dry-run install exited non-zero'
+case "$dry_install_out" in
+    *"DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN $(argv no yes)"*) : ;;
+    *) fail 'dry-run install did not name the negotiated install argv' ;;
+esac
+case "$dry_install_out" in
+    *"DRY-RUN: $OPENCLAW_BIN config set plugins.entries.memory-anolisa.hooks.allowConversationAccess true"*) : ;;
+    *) fail 'dry-run install did not name the config-set follow-up' ;;
+esac
+[ "$(awk '/^plugins install / && !/--help$/ {n++} END {print n+0}' "$TEST_ARGV_LOG")" = 0 ] \
+    || fail 'dry-run install invoked the installer'
+[ ! -f "$TEST_INSTALLED" ] || fail 'dry-run install marked the plugin installed'
+echo "PASS: dry-run install previews the install and the settings write"
+
+# A dry-run uninstall names the CLI deregistration and touches nothing.
+mkdir -p -- "$OPENCLAW_STATE_DIR/plugins/memory-anolisa"
+: > "$TEST_INSTALLED"
+: > "$TEST_ARGV_LOG"
+dry_uninstall_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
+    || fail 'dry-run uninstall exited non-zero'
+case "$dry_uninstall_out" in
+    *"DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins uninstall memory-anolisa --force"*) : ;;
+    *) fail 'dry-run uninstall did not name the CLI deregistration' ;;
+esac
+[ -f "$TEST_INSTALLED" ] || fail 'dry-run uninstall ran the CLI'
+[ "$(awk '/^plugins uninstall / {n++} END {print n+0}' "$TEST_ARGV_LOG")" = 0 ] \
+    || fail 'dry-run uninstall called the CLI'
+echo "PASS: dry-run uninstall previews the CLI deregistration"
+
+# Without the CLI the preview names the two direct removals instead.
+dry_manual_out="$(ANOLISA_DRY_RUN=1 OPENCLAW_BIN="$SANDBOX/absent-openclaw" \
+    bash "$UNINSTALL_SH" 2>&1)" || fail 'no-CLI dry-run uninstall exited non-zero'
+case "$dry_manual_out" in
+    *"DRY-RUN: rm -rf $OPENCLAW_STATE_DIR/plugins/memory-anolisa"*) : ;;
+    *) fail 'no-CLI dry-run uninstall did not name the plugin removal' ;;
+esac
+case "$dry_manual_out" in
+    *"DRY-RUN: rm -rf $OPENCLAW_STATE_DIR/extensions/memory-anolisa"*) : ;;
+    *) fail 'no-CLI dry-run uninstall did not name the extension removal' ;;
+esac
+[ -d "$OPENCLAW_STATE_DIR/plugins/memory-anolisa" ] || fail 'the no-CLI dry run removed the plugin tree'
+echo "PASS: a no-CLI dry-run uninstall names both direct removals"

@@ -23,6 +23,22 @@ fi
 
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
 
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Preview before the first removal, in the branch the resolved state takes:
+    # with a CLI the deregistration is the CLI's, without one the files are
+    # removed directly, and the config rewrite follows either way.
+    if command -v "$OPENCLAW_BIN" &>/dev/null; then
+        echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=${OPENCLAW_STATE_DIR} ${OPENCLAW_BIN} plugins uninstall ${PLUGIN_ID} --force"
+    else
+        echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID} (no ${OPENCLAW_BIN} on PATH)"
+        echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR}/extensions/memory-anolisa (no ${OPENCLAW_BIN} on PATH)"
+    fi
+    if [ -f "$OPENCLAW_CFG" ]; then
+        echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (jq, or python3 when jq is absent)"
+    fi
+    exit 0
+fi
+
 if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — removing plugin files manually."
     rm -rf "${OPENCLAW_STATE_DIR}/plugins/${PLUGIN_ID}" 2>/dev/null || true
