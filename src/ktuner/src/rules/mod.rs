@@ -5520,8 +5520,8 @@ const SYS_CLASS_BLOCK: &str = "/sys/class/block";
 /// A swap file prints a path instead of a device name, so it resolves through
 /// `stat()` — the device its filesystem sits on — and
 /// `/sys/dev/block/<major>:<minor>`, the block device that device number
-/// names; a partition directory resolves to the whole disk that carries the
-/// medium. Anything else — a zram node, a `/dev/mapper/<name>` alias, a file
+/// names, which then resolves like a device field above (see
+/// [`swap_file_on_a_rotational_disk`]). Anything else — a zram node, a `/dev/mapper/<name>` alias, a file
 /// on a filesystem whose device number has no entry in the block-device tree —
 /// resolves to no device and is left alone, so a medium this host cannot see
 /// keeps today's advice instead of losing it.
@@ -5548,10 +5548,13 @@ fn swap_on_a_rotational_disk_at(
             return false;
         };
         match area.strip_prefix(b"/dev/") {
-            Some(name) => device_on_a_rotational_disk(info, name, sys_class_block, STACK_DEPTH),
-            None => matches!(
-                swap_file_medium(Path::new(OsStr::from_bytes(area)), sys_dev_block),
-                Some(DiskType::HDD)
+            Some(name) => device_on_a_rotational_disk(info, name, sys_class_block, STACK_DEPTH)
+                .unwrap_or(false),
+            None => swap_file_on_a_rotational_disk(
+                info,
+                Path::new(OsStr::from_bytes(area)),
+                sys_dev_block,
+                sys_class_block,
             ),
         }
     })
@@ -5565,33 +5568,40 @@ const STACK_DEPTH: usize = 8;
 /// Whether the block device `name` sits on a rotational disk of the inventory:
 /// the disks that back it by name or as a holder, or, when none does, the
 /// disks under the members its `slaves` directory lists, `depth` levels down.
-/// A device with neither — a zram node, a member the inventory does not list,
-/// a tree that cannot be read — claims no medium.
+/// `None` when no inventory disk is reached that way — a zram node, a member
+/// the inventory does not list, a tree that cannot be read — so the caller
+/// decides what an unresolved device claims.
 fn device_on_a_rotational_disk(
     info: &SystemInfo,
     name: &[u8],
     sys_class_block: &Path,
     depth: usize,
-) -> bool {
+) -> Option<bool> {
     let mut backing = info
         .disks
         .iter()
         .filter(|disk| disk_backs_the_device(disk, name))
         .peekable();
     if backing.peek().is_some() {
-        return backing.any(|disk| disk.disk_type == DiskType::HDD);
+        return Some(backing.any(|disk| disk.disk_type == DiskType::HDD));
     }
-    let Some(depth) = depth.checked_sub(1) else {
-        return false;
-    };
-    let Ok(members) =
-        std::fs::read_dir(sys_class_block.join(OsStr::from_bytes(name)).join("slaves"))
-    else {
-        return false;
-    };
-    members.filter_map(|member| member.ok()).any(|member| {
-        device_on_a_rotational_disk(info, member.file_name().as_bytes(), sys_class_block, depth)
-    })
+    let depth = depth.checked_sub(1)?;
+    let members =
+        std::fs::read_dir(sys_class_block.join(OsStr::from_bytes(name)).join("slaves")).ok()?;
+    let mut resolved = None;
+    for member in members.filter_map(|member| member.ok()) {
+        match device_on_a_rotational_disk(
+            info,
+            member.file_name().as_bytes(),
+            sys_class_block,
+            depth,
+        ) {
+            Some(true) => return Some(true),
+            Some(false) => resolved = Some(false),
+            None => {}
+        }
+    }
+    resolved
 }
 
 /// Whether `disk` backs the device `name` as `/proc/swaps` spells it: the disk
@@ -5615,34 +5625,62 @@ fn disk_backs_the_device(disk: &DiskInfo, name: &[u8]) -> bool {
         })
 }
 
-/// Medium of the block device the file at `area` lives on, if the host can
-/// name it: the file's `st_dev` is the device its filesystem sits on, and
-/// `/sys/dev/block/<major>:<minor>` is the block device that number belongs
-/// to (the partition directory of one device number resolves to the whole
-/// disk, which holds the medium).
+/// Whether the file at `area` lives on a rotational disk: the file's `st_dev`
+/// is the device its filesystem sits on, and `/sys/dev/block/<major>:<minor>`
+/// is the block device that number belongs to.
 ///
-/// `None` when anything in that chain is missing — a file that no longer
+/// That device resolves like a `/dev` area, against the inventory and down its
+/// `slaves` ([`device_on_a_rotational_disk`]), so a file on an LV takes the
+/// medium of the disks under the LV. Reading the mapper node's own
+/// `rotational` instead let dm's derived flag (v6.6
+/// drivers/md/dm-table.c:1984-1987) speak for its members, and a virtual disk
+/// reporting rotational=1, which the inventory types as an SSD by name, made
+/// the file look like it sat on an HDD. A device the inventory cannot reach —
+/// a loop device, say — keeps the earlier reading: its own `queue/rotational`
+/// through the inventory's detector, a partition through its whole disk.
+///
+/// `false` when anything in that chain is missing — a file that no longer
 /// exists, a filesystem on a device number the tree has no entry for (tmpfs,
 /// overlayfs), an unreadable attribute — so the caller keeps today's advice.
-/// The medium itself is read with the inventory's own detector, so a virtual
-/// disk that reports rotational=1 is not mislabeled here either.
-fn swap_file_medium(area: &Path, sys_dev_block: &Path) -> Option<DiskType> {
-    let dev = std::fs::metadata(area).ok()?.dev();
-    let dir = std::fs::canonicalize(sys_dev_block.join(format!(
+fn swap_file_on_a_rotational_disk(
+    info: &SystemInfo,
+    area: &Path,
+    sys_dev_block: &Path,
+    sys_class_block: &Path,
+) -> bool {
+    let Ok(metadata) = std::fs::metadata(area) else {
+        return false;
+    };
+    let dev = metadata.dev();
+    let Ok(dir) = std::fs::canonicalize(sys_dev_block.join(format!(
         "{}:{}",
         libc::major(dev),
         libc::minor(dev)
-    )))
-    .ok()?;
+    ))) else {
+        return false;
+    };
+    let Some(name) = dir.file_name() else {
+        return false;
+    };
+    if let Some(rotational) =
+        device_on_a_rotational_disk(info, name.as_bytes(), sys_class_block, STACK_DEPTH)
+    {
+        return rotational;
+    }
     // A partition directory is the disk plus a suffix and carries no queue of
     // its own: the medium is the whole disk's.
     let disk_dir = if dir.join("partition").exists() {
-        dir.parent()?.to_path_buf()
+        let Some(parent) = dir.parent() else {
+            return false;
+        };
+        parent.to_path_buf()
     } else {
         dir
     };
-    let name = disk_dir.file_name()?.to_string_lossy().to_string();
-    Some(detect_disk_type(&disk_dir, &name))
+    let Some(name) = disk_dir.file_name() else {
+        return false;
+    };
+    detect_disk_type(&disk_dir, &name.to_string_lossy()) == DiskType::HDD
 }
 
 fn eval_rmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -16962,6 +17000,79 @@ mod tests {
         ] {
             assert_eq!(gate(area), expected, "{why}: {area}");
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A swap file on an LV resolves through its device number to the mapper
+    /// node, and the mapper node's own `queue/rotational` is derived from its
+    /// members: one virtio disk reporting rotational=1 makes the node read 1,
+    /// while the inventory types that disk as an SSD by name. Reading the
+    /// node's flag called such a file an HDD and withheld the advice the same
+    /// host got for a swap partition on that disk; the node now resolves down
+    /// its members like a `/dev` area.
+    #[test]
+    fn page_cluster_reads_a_swap_file_on_a_mapper_through_its_members() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_swap_file_mapper_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("swapfile");
+        std::fs::write(&file, b"swap").unwrap();
+        let dev = std::fs::metadata(&file).unwrap().dev();
+        let number = format!("{}:{}", libc::major(dev), libc::minor(dev));
+        let swaps = dir.join("swaps");
+        std::fs::write(
+            &swaps,
+            [
+                b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n".as_slice(),
+                format!("{}\t\tfile\t\t1048572\t\t0\t\t-3\n", file.display()).as_bytes(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        // The file's device number names a mapper node whose own flag reads
+        // rotational, the way dm derives it from a virtio member.
+        let sys_dev_block = dir.join("sysdev");
+        let node = dir.join("devices/virtual/block/dm-0");
+        std::fs::create_dir_all(node.join("queue")).unwrap();
+        std::fs::write(node.join("queue/rotational"), b"1\n").unwrap();
+        std::fs::create_dir_all(&sys_dev_block).unwrap();
+        std::os::unix::fs::symlink("../devices/virtual/block/dm-0", sys_dev_block.join(&number))
+            .unwrap();
+
+        let mut info = make_test_info();
+        for (name, disk_type) in [("sdb", DiskType::HDD), ("vda", DiskType::SSD)] {
+            let mut disk = info.disks[0].clone();
+            disk.name = name.to_string();
+            disk.disk_type = disk_type;
+            disk.holders = vec![];
+            info.disks.push(disk);
+        }
+        let gate = |member: Option<&str>| {
+            let class = dir.join(format!("class-{}", member.unwrap_or("none")));
+            std::fs::create_dir_all(class.join("dm-0/slaves")).unwrap();
+            if let Some(member) = member {
+                std::fs::write(class.join("dm-0/slaves").join(member), b"").unwrap();
+            }
+            swap_on_a_rotational_disk_at(&info, swaps.to_str().unwrap(), &sys_dev_block, &class)
+        };
+        assert!(
+            !gate(Some("vda2")),
+            "an LV on a virtual disk the inventory calls an SSD keeps the advice"
+        );
+        assert!(
+            gate(Some("sdb2")),
+            "an LV on a rotational disk's partition withholds it"
+        );
+        assert!(
+            gate(None),
+            "a node no member resolves keeps reading its own flag"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
