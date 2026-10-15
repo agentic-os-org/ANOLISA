@@ -72,14 +72,25 @@ const KNOWN_SERVICES: &[(&str, &str)] = &[
     // gate sized its mmap limit from `has_process_exact("node")` — the hole
     // the oracle entry closed for the database gates.
     ("node", "Node.js"),
+    // Debian and Ubuntu ship the same runtime as `nodejs` (the `node` name was
+    // taken by an unrelated package), so the running comm is `nodejs` on those
+    // hosts and the entry above — and the gate it mirrors — never matched.
+    // `is_generic_runtime` already knew both spellings; the report and the gate
+    // now do too.
+    ("nodejs", "Node.js"),
 ];
 
 pub fn detect_services(info: &SystemInfo) -> Vec<&'static str> {
-    KNOWN_SERVICES
-        .iter()
-        .filter(|(proc, _)| info.has_process(proc))
-        .map(|(_, label)| *label)
-        .collect()
+    let mut services: Vec<&'static str> = Vec::new();
+    for (proc, label) in KNOWN_SERVICES {
+        // Two entries can name one service (`httpd`/`apache2`,
+        // `node`/`nodejs`), and a host running both spellings is one host with
+        // one service: the report must list it once.
+        if info.has_process(proc) && !services.iter().any(|listed| listed == label) {
+            services.push(label);
+        }
+    }
+    services
 }
 
 #[cfg(test)]
@@ -269,5 +280,34 @@ mod tests {
         // entry must not report Node.js for a metrics-only host.
         let info = info_with(&["node_exporter"]);
         assert!(!detect_services(&info).contains(&"Node.js"));
+    }
+
+    #[test]
+    fn test_detect_services_reports_the_debian_node_spelling() {
+        // Debian/Ubuntu's package is `nodejs`, so that is the comm a Node.js
+        // host has there — `is_generic_runtime` already counted both spellings
+        // while this table and the max_map_count gate named only `node`.
+        let info = info_with(&["nodejs"]);
+        let svcs = detect_services(&info);
+        assert!(svcs.contains(&"Node.js"), "{svcs:?}");
+
+        // A host that runs both spellings has one service, not two entries.
+        let info = info_with(&["node", "nodejs"]);
+        let svcs = detect_services(&info);
+        assert_eq!(
+            svcs.iter().filter(|label| **label == "Node.js").count(),
+            1,
+            "two spellings, one service: {svcs:?}"
+        );
+
+        // The same rule for the Apache pair, which has carried two entries for
+        // longer: one service however many of its spellings are running.
+        let info = info_with(&["httpd", "apache2"]);
+        let svcs = detect_services(&info);
+        assert_eq!(
+            svcs.iter().filter(|label| **label == "Apache").count(),
+            1,
+            "two spellings, one service: {svcs:?}"
+        );
     }
 }

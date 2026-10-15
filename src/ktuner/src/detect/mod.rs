@@ -2322,6 +2322,15 @@ impl SystemInfo {
         self.processes.iter().any(|p| p.name == name)
     }
 
+    /// Whether a Node.js runtime is running, under either name the
+    /// distributions ship: `node` (upstream, nvm, the RHEL module) or `nodejs`
+    /// (Debian/Ubuntu's `nodejs` package). Both are exact matches, so a
+    /// collector named after the runtime (`node_exporter`) cannot stand in for
+    /// it.
+    pub fn has_node_runtime(&self) -> bool {
+        self.has_process_exact("node") || self.has_process_exact("nodejs")
+    }
+
     pub fn max_net_speed(&self) -> u64 {
         self.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0)
     }

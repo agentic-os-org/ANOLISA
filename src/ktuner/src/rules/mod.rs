@@ -2121,7 +2121,11 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
         // list still named only Elasticsearch, so an OpenSearch-only host kept
         // the default.
         || info.has_process("opensearch")
-        || info.has_process_exact("node"); // exact: avoid matching node_exporter
+        // Both spellings of the runtime: Debian/Ubuntu ship the binary as
+        // `nodejs`, which the detector's own runtime list already knows
+        // (`is_generic_runtime`). An exact match either way, so
+        // `node_exporter` is still not the runtime.
+        || info.has_node_runtime();
     if !needs_high {
         return 1;
     }
@@ -12174,7 +12178,7 @@ mod tests {
         let knob = dir.join("max_map_count");
         std::fs::write(&knob, "65530\n").unwrap();
 
-        for name in ["java", "elasticsearch", "opensearch"] {
+        for name in ["java", "elasticsearch", "opensearch", "node", "nodejs"] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
                 name: name.to_string(),
