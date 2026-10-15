@@ -37,6 +37,7 @@ BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 # Resolve codex binary via shared helper (see _common.sh).
 
@@ -104,6 +105,18 @@ fi
 # is installed under a root-owned prefix (e.g. /usr/share/anolisa).
 MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
 AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
+
+if [ "$DRY_RUN" = "1" ]; then
+    # Preview before the first write: a dry run must leave the marketplace tree,
+    # the plugin symlink, the manifest and the codex registrations alone.
+    echo "DRY-RUN: mkdir -p ${AGENTS_DIR}"
+    echo "DRY-RUN: ln -sfn ${PLUGIN_SRC} ${MARKETPLACE_DIR}/tokenless"
+    echo "DRY-RUN: write ${AGENTS_DIR}/marketplace.json"
+    echo "DRY-RUN: ${CODEX_BIN} plugin marketplace add ${MARKETPLACE_DIR}"
+    echo "DRY-RUN: ${CODEX_BIN} plugin add tokenless@${MARKETPLACE_NAME}"
+    exit 0
+fi
+
 mkdir -p "$AGENTS_DIR"
 
 # Symlink plugin at marketplace root (codex resolves plugin paths relative to

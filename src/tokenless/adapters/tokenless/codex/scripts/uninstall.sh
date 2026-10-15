@@ -41,6 +41,7 @@ CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 DEREGISTER_ONLY=0
 if [[ "${TOKENLESS_DEREGISTER_ONLY:-0}" == "1" ]]; then
@@ -56,6 +57,19 @@ echo "[tokenless] Codex plugin uninstall"
 
 # 1. Remove codex plugin registration
 CODEX_BIN="$(resolve_codex)"
+
+if [ "$DRY_RUN" = "1" ]; then
+    # Preview before the first removal: a dry run must leave the codex
+    # registrations, the marketplace tree and the component binary alone.
+    echo "DRY-RUN: ${CODEX_BIN:-codex} plugin remove tokenless@${MARKETPLACE_NAME}"
+    echo "DRY-RUN: ${CODEX_BIN:-codex} plugin marketplace remove ${MARKETPLACE_NAME}"
+    echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR}"
+    if [ "$DEREGISTER_ONLY" = "0" ]; then
+        echo "DRY-RUN: rm -f ${BINDIR}/tokenless"
+    fi
+    exit 0
+fi
+
 DEREGISTER_FAILED=0
 # A query that fails is not an empty answer. Piping `plugin list` straight into
 # grep turns a broken or refusing CLI into "nothing is registered", which reads as
