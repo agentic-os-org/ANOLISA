@@ -276,6 +276,21 @@ When a PR introduces any of the following changes, documentation MUST be updated
 
 **CHANGELOG update timing**: Daily feature/fix PRs update README and user-guide only; CHANGELOG is written exclusively in **release version bump PRs** that aggregate all user-perceivable changes since the last release.
 
+**Release-note requirement (all release components)**: Every component with a
+non-null `release_tag_prefix` in `.github/components.json` MUST include exactly
+one non-empty section for the release version in its English `CHANGELOG.md` in
+the next and every subsequent version bump PR. Match the version in the release tag, aggregate the
+user-visible changes, and include any breaking changes and migration steps.
+Keep `CHANGELOG_zh.md` semantically equivalent. The English version section at
+the tagged commit is the source of the GitHub Release body.
+
+This requirement also applies to first releases, including ktuner. Before
+pushing the first version tag, the version bump PR MUST finalize the applicable
+`Unreleased` content into the matching version section. `Unreleased` alone does
+not satisfy the requirement. A missing CHANGELOG, missing or duplicate matching
+section, or empty section stops publication before the GitHub Release is
+created; the workflow does not fall back to commit subjects or another version.
+
 ---
 
-*Last updated: 2026-07-29*
+*Last updated: 2026-10-15*

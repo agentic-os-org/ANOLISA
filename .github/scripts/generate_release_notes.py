@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Generate release notes from the tagged component's own Git history."""
+"""Publish the tagged component CHANGELOG version entry as release notes."""
 
 import argparse
 import json
+import posixpath
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 VersionKey = tuple[tuple[int, ...], bool, tuple[tuple[int, int | str], ...]]
 
@@ -47,6 +49,120 @@ def previous_tag(tag: str, prefix: str) -> str | None:
     return previous[1] if previous else None
 
 
+def markdown_lines(text: str) -> Iterator[tuple[str, bool]]:
+    """Identify fenced examples so their headings and links stay literal."""
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        literal = bool(fence or marker)
+        if fence:
+            if re.fullmatch(
+                r" {0,3}" + re.escape(fence[0]) + r"{" + str(len(fence)) + r",}[ \t]*\n?",
+                line,
+            ):
+                fence = ""
+        elif marker:
+            fence = marker[1]
+        yield line, literal
+
+
+def changelog_entry(text: str, version: str) -> str:
+    """Extract an exact version section, preserving its user-facing Markdown."""
+    headings = []
+    offset = 0
+    for line, literal in markdown_lines(text):
+        heading = re.match(r" {0,3}##[ \t]+(.+?)[ \t]*#*[ \t]*$", line)
+        if heading and not literal:
+            headings.append((offset, offset + len(line), heading[1]))
+        offset += len(line)
+    pattern = r"(?:\[v?" + re.escape(version) + r"\]|v?" + re.escape(version) + r")(?:[ \t]+.*)?"
+    matches = [i for i, (_, _, title) in enumerate(headings) if re.fullmatch(pattern, title)]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one CHANGELOG section for {version}; found {len(matches)}"
+        )
+    index = matches[0]
+    end = headings[index + 1][0] if index + 1 < len(headings) else len(text)
+    body = text[headings[index][1] : end].strip()
+    visible = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    visible = re.sub(r"(?m)^#{1,6}[ \t]+.*$|^\[[^\]]+\]:.*$|^(?:[-*_][ \t]*){3,}$", "", visible)
+    if not visible.strip():
+        raise ValueError(f"Empty CHANGELOG section for {version}")
+    # Reference definitions can live after all version sections in Keep a Changelog.
+    definitions = dict(
+        (match[1].casefold(), match[0])
+        for line, literal in markdown_lines(text)
+        if not literal
+        if (match := re.match(r" {0,3}\[([^\]]+)\]:[ \t]*.+", line))
+    )
+    for match in re.finditer(r"\[([^\]]+)\](?:\[([^\]]*)\])?", body):
+        label = (match[2] or match[1]).casefold()
+        definition = definitions.get(label)
+        if definition and definition not in body:
+            body += "\n\n" + definition
+    return body
+
+
+def release_links(body: str, path: str, commit: str, base_url: str) -> str:
+    """Resolve relative Markdown destinations against the immutable source file."""
+
+    def destination(target: str, image: bool = False) -> str:
+        angle = target.startswith("<") and target.endswith(">")
+        url = target[1:-1] if angle else target
+        parts = urlsplit(url)
+        if parts.scheme or parts.netloc:
+            return target
+        resolved = (
+            posixpath.normpath(posixpath.join(posixpath.dirname(path), parts.path))
+            if parts.path
+            else path
+        )
+        if url.startswith("/"):
+            resolved = parts.path.lstrip("/")
+        route = "raw" if image else "blob"
+        result = f"{base_url}/{route}/{commit}/{quote(resolved, safe='/%')}"
+        if parts.query:
+            result += "?" + parts.query
+        if parts.fragment:
+            result += "#" + parts.fragment
+        return "<" + result + ">" if angle else result
+
+    # Match inline code first, leaving example link syntax unchanged.
+    inline = re.compile(
+        r"(?P<code>(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`))"
+        r"|(?P<link>!?\[[^\]\n]*\]\()"
+        r"(?P<target><[^>\n]+>|(?:[^()\s]+|\([^()\s]*\))+)"
+        r"(?P<end>(?:[ \t]+[\"'][^\n]*?[\"'])?\))"
+        r"|(?P<reference_image>!\[(?P<alt>[^\]\n]*)\](?:\[(?P<label>[^\]\n]*)\])?)"
+    )
+    image_labels = {
+        (match["label"] or match["alt"]).casefold()
+        for line, literal in markdown_lines(body)
+        if not literal
+        for match in inline.finditer(line)
+        if match["reference_image"]
+    }
+    definition = re.compile(r"^( {0,3}\[([^\]]+)\]:[ \t]*)(<[^>\n]+>|\S+)")
+    output = []
+    for line, literal in markdown_lines(body):
+        if not literal:
+            line = inline.sub(
+                lambda m: (
+                    m[0]
+                    if m["code"] or m["reference_image"]
+                    else m["link"]
+                    + destination(m["target"], image=m["link"].startswith("!"))
+                    + m["end"]
+                ),
+                line,
+            )
+            line = definition.sub(
+                lambda m: m[1] + destination(m[3], image=m[2].casefold() in image_labels), line
+            )
+        output.append(line)
+    return "".join(output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
@@ -66,22 +182,18 @@ def main() -> None:
         parser.error(f"Tag {args.tag} does not match component prefix {args.prefix}")
     prefix = component["release_tag_prefix"]
     previous = previous_tag(args.tag, prefix)
-    revision = f"{previous}..{args.tag}" if previous else args.tag
-    # Summarize landed changes once, including merge commits that affect these paths.
-    history = git(
-        "log",
-        "--first-parent",
-        "--reverse",
-        "--format=%H%x00%s%x00%an",
-        revision,
-        "--",
-        *component["path_prefixes"],
-    )
+    path = component["path_prefixes"][0] + "CHANGELOG.md"
+    commit = git("rev-parse", args.tag + "^{commit}")
+    try:
+        changelog = git("show", f"{commit}:{path}")
+    except subprocess.CalledProcessError:
+        parser.error(f"Cannot read {path} at {args.tag}")
+    try:
+        body = changelog_entry(changelog, args.tag[len(prefix) :])
+    except ValueError as error:
+        parser.error(f"{path} at {args.tag}: {error}")
     base_url = f"https://github.com/{args.repository}"
-    changes = []
-    for line in history.splitlines():
-        sha, subject, author = line.split("\0")
-        changes.append(f"- {subject} ([{sha[:7]}]({base_url}/commit/{sha})) by {author}")
+    body = release_links(body, path, commit, base_url)
     encoded_tag = quote(args.tag, safe="/")
     if previous:
         compare_url = f"{base_url}/compare/{quote(previous, safe='/')}...{encoded_tag}"
@@ -89,8 +201,7 @@ def main() -> None:
         compare_url = f"{base_url}/commits/{encoded_tag}"
     args.output.write_text(
         f"## {component['display_name']} v{args.tag[len(prefix):]}\n\n"
-        "## What's Changed\n\n"
-        + ("\n".join(changes) if changes else "No changes in the component paths.")
+        + body
         + f"\n\n**Full Changelog**: {compare_url}\n",
         encoding="utf-8",
     )
