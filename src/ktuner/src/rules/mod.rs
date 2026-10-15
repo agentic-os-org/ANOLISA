@@ -3549,9 +3549,11 @@ fn eval_core_uses_pid_at(
             return 1;
         }
     }
-    // Any nonzero value is enabled, so -1 must not read as the value 0.
-    let current = read_sysctl_i64(path);
-    if current == 0 {
+    // Any nonzero value is enabled, so -1 must not read as the value 0 — and
+    // neither may a file the reader could not interpret, which the signed
+    // sysctl reader maps to 0 as well. Only a successfully read 0 is the
+    // disabled switch.
+    if read_switch_i64(path) == Some(0) {
         recs.push(Recommendation {
             param: "kernel.core_uses_pid".to_string(),
             current_value: "0".to_string(),
@@ -21067,6 +21069,41 @@ mod tests {
                 recs.len(),
                 usize::from(expects_rec),
                 "kernel.panic_on_oops = {value}: only 0 is the unhardened value"
+            );
+        }
+    }
+
+    #[test]
+    fn core_uses_pid_advice_needs_a_readable_switch() {
+        // The rule fires on the value 0 — core files are not suffixed with
+        // the PID — and read_sysctl_i64 maps an unreadable or unparseable
+        // file to that same 0, so a masked or garbled proc entry (a
+        // container's, typically) was reported as `current_value: "0"` and
+        // answered with a write of 1 on a host whose switch was never read.
+        let (off, on, others) = switch_fixture("core_uses_pid");
+        let pattern = off.with_file_name("core_pattern");
+        std::fs::write(&pattern, b"core\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_core_uses_pid_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                pattern.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 leaves the PID off");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 appends it");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable switch is not the value 0",
+                path.display()
             );
         }
     }
