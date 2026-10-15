@@ -2417,6 +2417,7 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
         Duration::from_millis(200),
         source.path().to_path_buf(),
         Some(pp_ctrl.clone()),
+        skillfs_core::DEFAULT_MAX_SKILL_SIZE,
     );
 
     let config = MountConfig {
