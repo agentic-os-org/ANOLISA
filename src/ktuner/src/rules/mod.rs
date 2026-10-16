@@ -25631,9 +25631,18 @@ mod tests {
         let checked = eval_hung_task_warnings(&info, &mut recs);
         if std::path::Path::new("/proc/sys/kernel/hung_task_warnings").exists() {
             assert_eq!(checked, 1);
-            let val = read_sysctl_u64("/proc/sys/kernel/hung_task_warnings");
-            if val == 0 {
-                assert!(recs.iter().any(|r| r.param == "kernel.hung_task_warnings"));
+            // Read SIGNED: kernel/hung_task.c registers the sysctl over
+            // [-1, INT_MAX], where -1 means "unlimited warnings" and 0 is the
+            // only disabled value. read_sysctl_u64 parsed "-1" to Err and fell
+            // back to 0, so a host configured for unlimited warnings read as
+            // the disabled switch and this test demanded a recommendation the
+            // rule (correctly) never emits.
+            match read_switch_i64("/proc/sys/kernel/hung_task_warnings") {
+                Some(0) => assert!(recs.iter().any(|r| r.param == "kernel.hung_task_warnings")),
+                Some(_) | None => assert!(
+                    recs.iter().all(|r| r.param != "kernel.hung_task_warnings"),
+                    "only a readable 0 disables the warnings"
+                ),
             }
         }
     }
