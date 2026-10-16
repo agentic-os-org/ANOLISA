@@ -19,12 +19,12 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
-| 搜索路径共享 | 取决于工作负载 | API 搜索列表（含 Claude 原生 Grep）可共享连续记录的文件路径并保留全部已收到命中；默认开启，通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭；命令输出保持原路由 |
+| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
-| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
+| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试

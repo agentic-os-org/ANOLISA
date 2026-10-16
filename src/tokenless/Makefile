@@ -368,7 +368,9 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
+# Hook counterfactuals need both real binaries to rule out fail-open success.
 test-rtk-integration: test-benchmark-rtk-probe
+	cargo build --locked -p tokenless-cli
 	bash scripts/setup-rtk.sh
 	cargo build --release --locked --manifest-path third_party/rtk/Cargo.toml
 	TOKENLESS_TEST_RTK_BINARY="$(CURDIR)/third_party/rtk/target/release/rtk" \

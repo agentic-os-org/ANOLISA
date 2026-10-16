@@ -64,7 +64,7 @@ pub struct RuntimeConfig {
     /// Whether compressed output is returned. Disabled mode calculates and
     /// records predicted savings but returns the original input.
     pub compression_enabled: bool,
-    /// Whether API search results share consecutive file paths. Enabled by default.
+    /// Whether search records and non-file path lists share paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,

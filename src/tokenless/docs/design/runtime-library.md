@@ -76,15 +76,54 @@ checks transport behavior, not model answer quality or billing savings.
 
 ## Search path sharing
 
-PostTool routes detected `search_results` through `SearchResultsCompressor` only when search path
-sharing is enabled, the origin is `api_response`, and text replacement is available. This is a
-content-based Core capability; it is not restricted to a particular agent ID. File content and
-command output do not enter it, including Bash output without RTK. Successful `path:line:text` listings with at least three records can share full
+PostTool routes detected `search_results` through `SearchResultsCompressor` when search path
+sharing is enabled and text replacement is available. Routing depends on content, not the command
+or agent name. Numbered search records require `api_response` origin. Successful `path:line:text` listings with at least three records can share full
 paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
 The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
 candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
 The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SHARING` in the
 Python SDK), with `lossless` recoverability and no Stash writes.
+
+Plain path lists can also share a common directory prefix for `command_output` and `api_response`
+origins. At least three POSIX paths are required, with uniform LF or CRLF endings; all received
+paths, their order, duplicates, and the final newline are retained. The entire input is validated,
+including beyond the detector's bounded sample. Blank lines, control characters, colon-bearing
+paths (including URLs and Windows paths), mixed endings, double-leading slashes, and ambiguous relative roots reject
+the candidate. Bare relative roots use letters, digits, `.`, `_`, or `-`; paths starting with `/`,
+`./`, or `../` can include spaces and quoted or backslash characters, encoded as JSON strings.
+The compressor never reads files or normalizes paths. Both `file_content` and `file_read` origins
+bypass this path-list strategy; existing file-read JSON, table, and log handling is unchanged.
+Established source and table detection takes precedence over plain path-list detection. A bounded
+path probe stops at its last complete line so a byte cut inside a path or CRLF is not a record.
+The selected path-list candidate is built once from the full input and reused for arbitration.
+
+The path-list view starts with
+`[Path list; all received paths retained; full path = base + each paths entry]`, followed by compact
+JSON with `base`, `paths`, `line_ending`, and `trailing_newline`. Concatenate `base` with each decoded
+`paths` entry, join with `line_ending`, and append that ending only when `trailing_newline` is true
+to reconstruct the input byte for byte. The shared prefix always ends at `/`. The full view,
+including its header and metadata, must reduce bytes and estimated tokens before arbitration.
+
+PreTool leaves recognized native `find` invocations unchanged so PostTool receives native results. This also
+preserves an entire compound command containing such a call; mixed output is not a path list and stays
+unchanged. The path-list route itself does not require `find`: other unoptimized tool results with
+the same content shape may use it. Transparent shell keywords (`noglob`, `command`, `builtin`,
+`exec`, `nocorrect`), `env`, process wrappers (`timeout`, `time`, `nice`, `nohup`), and `uv run`
+are inspected through nesting. Process wrappers mirror the pinned RTK v0.49.0 option grammar:
+value options, flags, attached values, numeric adjustments, `--`, and positional arguments.
+Unknown options stop recognition. The tokenizer removes shell backslash-newline continuations
+before inspecting the executable. RTK's source is unchanged. Custom `hooks.transparent_prefixes`
+are not read or inferred; a configured custom prefix can still let RTK rewrite wrapped `find`.
+
+This intentionally trades RTK coverage for faithful native execution: mixed compounds, `-print0`,
+`-ls`, `-printf`, and other non-path-list actions do not receive path-list compression, and lists
+with fewer than three paths or no profitable shared prefix remain unchanged. A leading `.` or bare
+start-point directory also rejects the strict path-list format; this version does not add a separate
+head-record encoding. In the deterministic
+three-command native-find replay, the 60-path list compresses; the mixed compound with two paths
+and the single-path query pass through, and every returned path can be read directly. This is fixture
+coverage, not a measurement of whole-Agent savings or a comparison with RTK token usage.
 
 Search path sharing is enabled by default. CLI callers can disable it with
 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`. When unset or empty it stays enabled; `1`, `true`,
@@ -93,6 +132,9 @@ is independent of the JSON config file.
 Rust callers use `RuntimeConfig.search_path_sharing_enabled`; Python callers use
 `TokenlessConfig(search_path_sharing_enabled=False)` or the matching `TokenlessRuntime` keyword.
 Disabling this domain returns search listings unchanged without computing a search candidate.
+Recognized native `find` calls still bypass RTK rewriting when path sharing is disabled. This is a correctness
+boundary independent of compression: disabling an optimization must not reintroduce summarized or
+altered lookup paths. Revert the change to restore the previous RTK routing policy completely.
 JSON, table, and log compression remain available for other tool names. The exact name `Grep`
 always excludes those domains to retain every received match; disabling path sharing does not
 restore pre-feature JSON/table/log dispatch for a custom tool named `Grep`.
@@ -100,7 +142,14 @@ The global compression switch still controls dry-run behavior for enabled domain
 Whole-task savings depend on the workload; preserving all received bytes does not guarantee
 fewer follow-up tool calls or lower total token use.
 
-The first line is the fixed format header. Subsequent `File=` lines contain a JSON-encoded path;
+Both views intentionally use `search_path_sharing` to identify the optimization family without
+changing Protocol v2. Statistics and `AppliedOperation.SEARCH_PATH_SHARING` cannot distinguish
+the two formats. The headers described here are internal rendering details, not versioned SDK
+discriminators; no public decoder or stable header constants are exported. These examples explain
+the lossless views rather than establishing a programmatic SDK decoding contract.
+
+The numbered-record view begins with `[Search results grouped by file; all received lines retained]`.
+Subsequent `File=` lines contain a JSON-encoded path;
 data lines always begin with ASCII digits followed by `:`, so they cannot be mistaken for file
 headers. To reconstruct, prefix each data line with the decoded current path and `:` and retain
 its original line ending. Repeated nonconsecutive paths receive separate headers.

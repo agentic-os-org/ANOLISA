@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RTK = Path(
     os.environ.get("TOKENLESS_TEST_RTK_BINARY", ROOT / "third_party/rtk/target/release/rtk")
+).resolve()
+TOKENLESS = Path(
+    os.environ.get("TOKENLESS_TEST_TOKENLESS_BINARY", ROOT / "target/debug/tokenless")
 ).resolve()
 
 
@@ -62,6 +67,81 @@ class RtkIntegrationTest(unittest.TestCase):
         result = self.run_rtk("rewrite", "git status")
         self.assertIn(result.returncode, (0, 3), result.stderr)
         self.assertEqual(result.stdout.strip(), "rtk git status")
+
+    def test_native_find_hooks_keep_paths_when_pinned_rtk_would_rewrite(self) -> None:
+        (self.bin_dir / "rtk").symlink_to(RTK)
+        (self.bin_dir / "tokenless").symlink_to(TOKENLESS)
+        self.env["TOKENLESS_AGENT_ID"] = "qwenwork"
+        self.env["HOME"] = str(self.root / "home")
+        Path(self.env["HOME"]).mkdir()
+        hooks = ROOT / "adapters/tokenless/common/hooks"
+        target = self.root / "project with spaces/long_directory_for_read_regression/records"
+        target.mkdir(parents=True)
+        for index in range(60):
+            (target / f"document {index}.json").write_text(str(index), encoding="utf-8")
+        quoted = shlex.quote(str(target))
+
+        def run_hook(script: str, payload: dict) -> dict:
+            result = subprocess.run(
+                [sys.executable, str(hooks / script)],
+                input=json.dumps(payload), env=self.env, cwd=self.root,
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        def pre_tool(command: str, call_id: str) -> dict:
+            return run_hook("rewrite_hook.py", {
+                "session_id": "find-counterfactual", "tool_use_id": call_id,
+                "tool_name": "Bash", "tool_input": {"command": command},
+            })
+
+        # This must rewrite: otherwise fail-open hooks could make every native
+        # assertion below pass without running the CLI or resolving RTK.
+        control = pre_tool("git status", "control")
+        self.assertIn("rtk", control["hookSpecificOutput"]["updatedInput"]["command"])
+        commands = [
+            f"{prefix} {quoted} -type f" for prefix in (
+                "find", "timeout 30 find", "timeout -k 5 -s TERM 30 find",
+                "timeout --signal=TERM 30 find", "time -p find", "nice -n10 find",
+                "time -f '' find", "timeout -s '' 30 find", "nice -n '' find",
+                "nice --adjustment=10 find", "nohup find", "/usr/bin/timeout 30 find",
+                "env FOO=1 timeout 20 find", "nohup nice -n 5 timeout 30 find", "uv run find",
+                "command \\\n  find", "noglob \\\n  find", "env \\\n  FOO=1 \\\n  find", "timeout 30 \\\n  find",
+            )
+        ]
+        for index, command in enumerate(commands):
+            with self.subTest(command=command):
+                counterfactual = self.run_rtk("rewrite", command)
+                self.assertEqual(counterfactual.returncode, 3, counterfactual.stderr)
+                self.assertIn("rtk find", counterfactual.stdout)
+                self.assertEqual(pre_tool(command, f"native-{index}"), {})
+
+        for index, prefix in enumerate(("timeout 30", "nice -n 10", "nohup", "command \\\n")):
+            command = f"{prefix} find {quoted} -type f"
+            call_id = f"read-{index}"
+            self.assertEqual(pre_tool(command, call_id), {})
+            executed = subprocess.run(
+                ["/bin/sh", "-c", command], env=self.env, cwd=self.root,
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            result = run_hook("compress_response_hook.py", {
+                "session_id": "find-counterfactual", "tool_use_id": call_id,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": executed.stdout,
+            })
+            slot = result["hookSpecificOutput"]
+            view = slot.get("updatedToolOutput", slot.get("updatedToolResponse"))
+            data = json.loads(view.split("\n", 1)[1])
+            paths = [data["base"] + path for path in data["paths"]]
+            restored = data["line_ending"].join(paths)
+            if data["trailing_newline"]:
+                restored += data["line_ending"]
+            self.assertEqual(restored, executed.stdout)
+            self.assertEqual(len(paths), 60)
+            for path in paths:
+                self.assertEqual(Path(path).read_text(), Path(path).stem.split()[-1])
 
     def test_pytest_error_count_survives_color_and_failure_exit(self) -> None:
         self.fake_pytest(

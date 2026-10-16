@@ -142,21 +142,34 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类，shell 工具随请求附带
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
-改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样；`Grep` 工具输出只允许进入无损的 Search Results
-路径共享。通过入口后按下表静态派发，每个领域各调用一次：
+改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
+且跳过新增的纯路径列表策略。`Grep` 工具输出只允许进入无损的 Search Results 路径共享。
+纯路径列表按内容识别，允许非文件来源的命令或 API 结果，不依赖 `find` 或特定工具名。
+通过入口后按下表静态派发，每个领域各调用一次：
 
 | ContentType | 前提 | 领域处理 | 默认 |
 |------|------|------|------|
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：CSV/TSV 视图，保留单元格或可恢复选取整行 | 启用 |
-| `search_results` | 来源为 `api_response`，宿主支持文本替换 | `SearchResultsCompressor`：连续行共享重复路径，无损 | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
+| `search_results` | 宿主支持文本替换；带行号记录要求 `api_response`，纯路径列表允许 `api_response` 或 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
 
 Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。Diff 与 HTML
 没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在 Shell `PATH` 中）时，即使已开启
 环境变量也原文透传。
+纯路径列表至少包含三条 POSIX 路径，统一使用 LF 或 CRLF。固定英文说明后接紧凑 JSON，
+字段为 `base`、`paths`、`line_ending`、`trailing_newline`；将 `base` 与每个解码后的路径项
+拼接，按 `line_ending` 连接，仅当 `trailing_newline` 为 true 时追加该行尾，即可逐字节还原。
+全部路径、顺序、重复项均保留。空行、混合输出、NUL 分隔或歧义格式透传；完整视图的字节数
+和估算 Token 均减少才采用。检测器只采样完整行，压缩器仍验证全部输入。
+
+PreTool 让包含已识别原生 `find` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
+`env`、`command`、`exec`、`noglob`、`nocorrect`、`builtin`、`timeout`、`time`、`nice`、`nohup`
+和 `uv run`；支持嵌套及反斜杠换行续行，进程 Wrapper 的未知参数会停止识别。
+不读取自定义 `hooks.transparent_prefixes`，这些前缀中的 `find` 仍可能被 RTK 改写。
+关闭搜索路径共享只停止后置压缩，仍保留原生 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
 其余 ContentType（如 `stack_trace`、`plain_text`）透传。
 Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
 `tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的

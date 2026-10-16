@@ -67,14 +67,46 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 
 ## 搜索路径共享
 
-PostTool 仅在搜索路径共享已开启、来源为 `api_response` 且支持文本替换时，将识别为
-`search_results` 的内容交给 `SearchResultsCompressor`。这是按内容派发的 Core 能力，不限定 Agent ID；
-文件内容和命令输出均不进入该域，包括未由 RTK 处理的 Bash 输出。
+PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
+`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
+带行号的搜索记录仍要求来源为 `api_response`。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
 实际采用时操作为 `search_path_sharing`，Python SDK 对应 `AppliedOperation.SEARCH_PATH_SHARING`；
 恢复等级为 `lossless`，不写入 Stash。
+
+纯路径列表也可共享公共目录前缀，允许 `command_output` 和 `api_response` 来源。
+至少包含三条 POSIX 路径，使用统一的 LF 或 CRLF；收到的全部路径、顺序、重复项及末尾换行均保留。
+压缩器验证完整输入，包括超出检测器采样窗口的部分。空行、控制字符、含冒号的路径
+（包括 URL 和 Windows 路径）、混合行尾、双前导斜杠或有歧义的相对根目录均拒绝压缩。
+不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
+可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
+`file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
+既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
+不会把路径中间或 CRLF 中间的字节截断片段视为记录。完整输入的路径列表候选只生成一次，随后复用到仲裁。
+
+路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
+开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。
+将 `base` 与每个解码后的 `paths` 项拼接，以 `line_ending` 连接，仅当 `trailing_newline`
+为 true 时补充末尾行尾，即可逐字节还原。公共前缀始终以 `/` 结束。完整视图（包括声明和元数据）
+的字节数和估算 Token 都减少后，才进入收益仲裁。
+
+PreTool 保留已识别的原生 `find` 调用，以便 PostTool 接收原生结果。包含此类调用的整条复合命令也保留原样；
+混合输出不属于路径列表，不进入该压缩策略。后置路由本身不要求命令为 `find`，其他未优化工具结果
+只要内容符合格式也可复用。检测会穿透嵌套的透明 Shell 关键字（`noglob`、`command`、
+`builtin`、`exec`、`nocorrect`）、`env`、进程 Wrapper（`timeout`、`time`、`nice`、`nohup`）
+和 `uv run`。进程 Wrapper 与固定的 RTK v0.49.0 参数语法一致：带值选项、Flag、附加值、
+数字调整量、`--` 及位置参数；未知选项会停止识别。Tokenizer 在识别可执行命令前移除 Shell
+反斜杠换行续行。RTK 源码不变。不会读取或推断自定义 `hooks.transparent_prefixes`；
+配置此类前缀后，其中的 `find` 仍可能被 RTK 改写。
+
+此设计有意以 RTK 覆盖率换取原生命令保真：混合复合命令、`-print0`、`-ls`、`-printf`
+等非路径列表动作不使用路径列表压缩，少于三条路径或公共前缀无净收益的列表保持原样。
+首条为 `.` 或不带路径分隔符的起始目录也不符合严格路径列表格式；此版本不引入单独的头部记录编码。
+确定性的三条原生 find 回放中，60 条路径的列表得到压缩；含两条路径的混合复合命令和单路径
+查询透传，所有返回路径均可直接读取。这只是 fixture 覆盖情况，不是 Agent 整轮收益度量，
+也不是与 RTK Token 用量的比较。
 
 Claude Code Adapter 仅提取无上下文选项的原生 Grep `mode=content` 响应，将其文本槽声明为
 API 响应，再只替换原输出对象的 `content` 字段。包括宿主限额在内的其他元数据保持不变；
@@ -87,11 +119,19 @@ API 响应，再只替换原输出对象的 `content` 字段。包括宿主限�
 Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 `TokenlessConfig(search_path_sharing_enabled=False)` 或 `TokenlessRuntime` 的同名参数。
 关闭该域时搜索列表原样返回且不计算搜索候选。其他工具名仍可使用 JSON、表格和日志压缩。
+关闭路径共享时，已识别的原生 `find` 仍跳过 RTK 改写。这是独立于压缩的正确性边界：停用优化
+不应重新引入摘要化或被改动的查询路径。完整恢复此前的 RTK 路由策略需要回退此变更。
 精确名称 `Grep` 始终排除这些域，以保留全部已收到命中；关闭路径共享不会恢复此功能引入前
 自定义 `Grep` 工具的 JSON、表格和日志派发。全局压缩开关仍控制已开启域的 dry-run。
 整任务节省取决于工作负载；保留全部收到的字节并不保证后续工具调用更少或总 Token 用量更低。
 
-首行为固定格式声明，后续 `File=` 行包含 JSON 编码的路径；数据行必以 ASCII 数字和 `:` 开头，
+两种视图有意共用 `search_path_sharing`，以该操作表示优化类别并保持 Protocol v2 不变。
+统计和 `AppliedOperation.SEARCH_PATH_SHARING` 无法区分两种格式。此处描述的头部是内部
+渲染细节，不是带版本保证的 SDK 判别字段；没有导出公开解码器或稳定的头部常量。
+这些示例用于说明无损视图，不构成 SDK 程序化解码契约。
+
+带行号记录的视图以 `[Search results grouped by file; all received lines retained]` 开头。
+后续 `File=` 行包含 JSON 编码的路径；数据行必以 ASCII 数字和 `:` 开头，
 因此不可能被误认为文件头。还原时在每个数据行前拼接当前解码路径与 `:`，保留原始行尾；
 同一路径在非连续位置出现时会生成新的文件头。
 

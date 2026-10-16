@@ -138,8 +138,13 @@ BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增�
 - `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
 
 `pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
-并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
-原生形式，使其输出只有一个 PostTool 所有者；其他受支持命令仍可由 RTK 改写。Agent-facing
+并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令，以及
+包含已识别原生 `find` 调用的整条命令保持原生形式，使其输出只有一个 PostTool 所有者。
+`find` 保护覆盖直接调用，以及 RTK 的内置前缀：`env`、`command`、`exec`、`noglob`、`nocorrect`、
+`builtin`、`timeout`、`time`、`nice`、`nohup` 和 `uv run`，支持嵌套和 Shell 反斜杠换行续行。
+进程 Wrapper 参数按随包 RTK 的语法识别，未知参数会停止识别。设置
+`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 后仍保持此行为。不会读取自定义 `hooks.transparent_prefixes`，
+此类前缀下的 `find` 仍可能被 RTK 改写；其他受支持命令也仍可由 RTK 改写。Agent-facing
 `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
 请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
@@ -172,7 +177,8 @@ RTK 支持跨多行处理已支持的命令，并对 Pipeline 应用保守规则
 Shell 表达式都会被重写。`sudo` 命令保持原样透传，自动重写不会将 RTK 插入特权命令。
 
 使用 `rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
-Tokenless 仍按上文规则让已识别的构建/测试命令保持原生形式，交给 PostTool 压缩。
+Tokenless 按上文规则让已识别的构建/测试命令及已识别的原生 `find` 调用（包括含此类调用的整条复合命令）
+跳过 RTK 改写。PostTool 可以共享有净收益的纯路径列表；混合输出和不支持的 `find` 格式保持原样。
 
 ### 输出恢复
 

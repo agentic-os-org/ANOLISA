@@ -117,8 +117,19 @@ impl PostToolPipeline {
         let tabular_candidate = !search_only
             && content_type == ContentType::Tabular
             && request.capabilities.replace_with_text;
+        let path_list_candidate = (config.search_path_sharing_enabled
+            && content_type == ContentType::SearchResults
+            && matches!(
+                request.content_origin,
+                ContentOrigin::CommandOutput | ContentOrigin::ApiResponse
+            )
+            && request.capabilities.replace_with_text)
+            .then(|| SearchResultsCompressor.compress_paths(&request.content))
+            .flatten();
         let search_candidate = config.search_path_sharing_enabled
-            && request.content_origin == ContentOrigin::ApiResponse
+            && (request.content_origin == ContentOrigin::ApiResponse
+                || (request.content_origin == ContentOrigin::CommandOutput
+                    && path_list_candidate.is_some()))
             && content_type == ContentType::SearchResults
             && request.capabilities.replace_with_text;
         if !diff_candidate
@@ -249,7 +260,8 @@ impl PostToolPipeline {
                 unrecoverable_truncations: None,
             }
         } else if search_candidate {
-            let output = SearchResultsCompressor.compress(&request.content);
+            let output =
+                path_list_candidate.or_else(|| SearchResultsCompressor.compress(&request.content));
             DomainCandidate {
                 operations: if output.is_some() {
                     vec![AppliedOperation::SearchPathSharing]
@@ -457,6 +469,7 @@ mod tests {
     use super::*;
     include!("tests/tabular_pipeline_tests.rs");
     include!("tests/html_pipeline_tests.rs");
+    include!("tests/path_list_pipeline_tests.rs");
     fn search_input() -> String {
         (1..30)
             .map(|line| format!("crates/long_directory/src/search_file.rs:{line}:  value  \r\n"))
