@@ -258,6 +258,44 @@ fn record_report_omits_oversized_content() {
 }
 
 #[test]
+fn record_report_omits_content_inflated_past_the_cap_by_pretty_printing() {
+    // A compact JSON document within the raw 1 MiB cap can expand well past
+    // it once pretty-printed for display; the size guard must bound the
+    // strings the differ consumes, not only the stored bytes.
+    let entries = (0..140_000)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let before = format!("[{entries}]");
+    let after = format!("[{entries},140000]");
+    assert!(before.len() <= MAX_DIFF_INPUT_BYTES);
+    assert!(after.len() <= MAX_DIFF_INPUT_BYTES);
+    let pretty_len = |text: &str| {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        serde_json::to_string_pretty(&value).unwrap().len()
+    };
+    assert!(pretty_len(&before) > MAX_DIFF_INPUT_BYTES);
+    assert!(pretty_len(&after) > MAX_DIFF_INPUT_BYTES);
+
+    let record = sample_record(
+        95,
+        OperationType::CompressResponse,
+        &before,
+        &after,
+        (1_000, 500),
+        None,
+        CompressionMode::Active,
+    );
+    let json = serde_json::to_value(record_report(&record, 3)).unwrap();
+
+    assert_eq!(json["chains"][0]["diff"]["available"], false);
+    assert_eq!(
+        json["chains"][0]["diff"]["omitted_reason"],
+        "content-too-large"
+    );
+}
+
+#[test]
 fn active_stages_link_without_double_counting_intermediate_tokens() {
     let first = sample_record(
         10,
