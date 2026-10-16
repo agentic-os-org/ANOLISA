@@ -2208,7 +2208,16 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
         // `nodejs`, which the detector's own runtime list already knows
         // (`is_generic_runtime`). An exact match either way, so
         // `node_exporter` is still not the runtime.
-        || info.has_node_runtime();
+        || info.has_node_runtime()
+        // mongod checks the knob itself: it warns "vm.max_map_count is too
+        // low" below twice its connection limit (MongoDB 7.0
+        // src/mongo/db/startup_warnings_mongod.cpp, 8.0
+        // src/mongo/transport/transport_layer_manager_impl.cpp; SERVER-51233),
+        // and the 64000-file limit its own service unit sets admits 51200
+        // connections (80% of the soft limit,
+        // src/mongo/transport/service_entry_point_impl.cpp), so the 65530
+        // default is already short of the 102400 it asks for.
+        || info.has_process("mongod");
     if !needs_high {
         return 1;
     }
@@ -2220,7 +2229,8 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
             param: "vm.max_map_count".to_string(),
             current_value: current.to_string(),
             recommended_value: "262144".to_string(),
-            reason: "JVM/Node 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败".to_string(),
+            reason: "JVM/Node/MongoDB 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败"
+                .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
             writable: true,
@@ -13186,6 +13196,38 @@ mod tests {
         assert!(recs.is_empty(), "262144 is already the target");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// mongod warns "vm.max_map_count is too low" below twice its connection
+    /// limit (SERVER-51233), which its stock 64000-file limit puts at 102400,
+    /// above the kernel's 65530 default; the gate never counted it.
+    #[test]
+    fn max_map_count_counts_mongod() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_mongod_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        std::fs::write(&knob, "65530\n").unwrap();
+        let advice = |name: &str| {
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(&[name]),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice("mongod");
+        assert_eq!(recs.len(), 1, "mongod must get the max_map_count advice");
+        assert_eq!(recs[0].recommended_value, "262144");
+        // The shell is a client, not the daemon.
+        assert!(advice("mongosh").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
