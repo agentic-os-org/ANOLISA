@@ -20168,9 +20168,32 @@ mod tests {
         let info = make_test_info();
         let mut recs = Vec::new();
         eval_sem(&info, &mut recs);
-        if let Some(rec) = recs.iter().find(|r| r.param == "kernel.sem") {
-            assert_eq!(rec.recommended_value, "1024 65536 256 4096");
-            assert_eq!(rec.category, Category::Performance);
+        // eval_sem reads the live kernel.sem and the recommendation is
+        // raise-only per field, so the expectation has to be recomputed from
+        // the live tuple: the fixed quadruple this test used to pin is what
+        // the raise-only fix replaced, and a host with a field the
+        // administrator raised above its floor (issue #4054's shape) fails
+        // against it.
+        let live: Vec<u64> = std::fs::read_to_string("/proc/sys/kernel/sem")
+            .map(|raw| {
+                raw.split_whitespace()
+                    .filter_map(|field| field.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match sem_recommendation(&live) {
+            Some(want) => {
+                let rec = recs
+                    .iter()
+                    .find(|r| r.param == "kernel.sem")
+                    .expect("a tuple below its floors is a finding");
+                assert_eq!(rec.recommended_value, want);
+                assert_eq!(rec.category, Category::Performance);
+            }
+            None => assert!(
+                recs.iter().all(|r| r.param != "kernel.sem"),
+                "a tuple that already meets the floors needs no advice"
+            ),
         }
     }
 
