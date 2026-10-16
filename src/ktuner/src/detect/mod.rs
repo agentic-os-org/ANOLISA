@@ -1279,11 +1279,12 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     // rotational flag would mislabel them HDD and apply spinning-disk tuning.
     // Treat them as SSD-like (the SSD optimizations are safe and beneficial,
     // and a real spinning disk presented as vd* in modern clouds is vanishingly
-    // rare). Hyper-V's storvsc disks are the same shape under a name that
-    // carries nothing — `sd*` is a real SCSI disk elsewhere — so they are
-    // identified by their device identity instead.
+    // rare). The emulated disks that arrive as ordinary SCSI devices — Hyper-V's
+    // storvsc and QEMU's scsi-hd — are the same shape under a name that carries
+    // nothing (`sd*` is a real SCSI disk elsewhere), so they are identified by
+    // their device identity instead.
     let is_virtual =
-        name.starts_with("vd") || name.starts_with("xvd") || is_hyperv_virtual_disk(dir);
+        name.starts_with("vd") || name.starts_with("xvd") || is_emulated_virtual_disk(dir);
 
     let rotational_path = dir.join("queue/rotational");
     if let Ok(val) = fs::read_to_string(rotational_path) {
@@ -1305,21 +1306,36 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     }
 }
 
-/// Whether the block device in `dir` is one of Hyper-V's virtual disks.
+/// Whether the block device in `dir` is an emulated virtual disk whose
+/// rotational flag follows the hypervisor rather than the backing medium.
 ///
-/// The storvsc driver presents the host's disks as ordinary SCSI devices with
+/// The storvsc driver presents Hyper-V's disks as ordinary SCSI devices with
 /// the vendor/product pair vmbus hands it — "Msft" and "Virtual Disk" — and,
 /// like virtio and Xen, the rotational flag follows what the hypervisor
 /// reports rather than the backing medium: every disk of a Hyper-V or Azure VM
-/// and of a WSL2 instance reads 1, including on an all-NVMe machine. The name
-/// carries nothing to key on, so the device identity decides.
-fn is_hyperv_virtual_disk(dir: &Path) -> bool {
+/// and of a WSL2 instance reads 1, including on an all-NVMe machine.
+///
+/// QEMU's `scsi-hd` disks (the device behind `virtio-scsi` and every guest
+/// disk attached to a SCSI HBA) are the same shape: the drive defaults to
+/// vendor "QEMU" / product "QEMU HARDDISK" with `rotation_rate` 0, which VPD
+/// page 0xb1 reports as "rotation rate not reported" — and the SCSI midlayer
+/// only clears the rotational flag for a reported rate of exactly 1
+/// (drivers/scsi/sd.c), so such a disk reads 1 whatever medium backs it. A
+/// Proxmox/libvirt/OpenStack guest therefore had its disk typed HDD: the
+/// streaming arm raised `read_ahead_kb` on non-rotating storage and the
+/// SSD-gated advice (the scheduler, `vm.page-cluster`, the database window)
+/// never fired.
+///
+/// The name carries nothing to key on, so the device identity decides.
+fn is_emulated_virtual_disk(dir: &Path) -> bool {
+    const IDENTITIES: [(&str, &str); 2] = [("Msft", "Virtual Disk"), ("QEMU", "QEMU HARDDISK")];
     let identity = |entry: &str| {
         fs::read_to_string(dir.join("device").join(entry))
             .map(|value| value.trim().to_string())
             .unwrap_or_default()
     };
-    identity("vendor") == "Msft" && identity("model") == "Virtual Disk"
+    let (vendor, model) = (identity("vendor"), identity("model"));
+    IDENTITIES.contains(&(vendor.as_str(), model.as_str()))
 }
 
 fn read_current_scheduler(dir: &Path) -> String {
@@ -3301,6 +3317,40 @@ mod tests {
             }
         }
         dir
+    }
+
+    #[test]
+    fn qemu_scsi_disks_are_not_hdds() {
+        // QEMU's scsi-hd - the device behind virtio-scsi and every guest disk
+        // attached to a SCSI HBA - defaults to vendor "QEMU" / product "QEMU
+        // HARDDISK" with rotation_rate 0, which VPD page 0xb1 reports as
+        // "rotation rate not reported"; the SCSI midlayer clears the
+        // rotational flag only for a reported rate of exactly 1
+        // (drivers/scsi/sd.c), so the guest disk reads rotational=1 whatever
+        // medium backs it. Typed HDD, a streaming host raised its
+        // read_ahead_kb and the SSD-gated advice (the scheduler,
+        // `vm.page-cluster`, the database window) never fired.
+        let qemu = device_tree(&[
+            ("device/", ""),
+            // sysfs pads the product string, so the identity compare trims.
+            ("device/vendor", "QEMU\n"),
+            ("device/model", "QEMU HARDDISK   \n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&qemu, "sda"), DiskType::SSD);
+
+        // The vendor alone is not the identity: another QEMU product keeps the
+        // rotational flag's answer, so a future emulated device is not swept in
+        // by the vendor string.
+        let other_product = device_tree(&[
+            ("device/", ""),
+            ("device/vendor", "QEMU\n"),
+            ("device/model", "QEMU DVD-ROM\n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&other_product, "sdb"), DiskType::HDD);
     }
 
     #[test]
