@@ -154,6 +154,26 @@ fn sanitize_hint(s: &str) -> String {
         .collect()
 }
 
+/// Values interpolated into the backtick-quoted spans fact bodies build.
+/// A raw backtick in a value would break the span structure —
+/// `normalize_relative_dates` pairs runs of equal length, so a stray
+/// backtick either mis-pairs delimiters or disables normalization for
+/// the rest of the fact. Swap it for an apostrophe; the value stays one
+/// span and stays readable.
+///
+/// Only fact content needs this: titles never go through the date
+/// normalizer, so their interpolated values stay verbatim.
+pub(crate) fn span_safe(value: &str) -> String {
+    value.replace('`', "'")
+}
+
+/// Quote a value as a code span, sanitized. Backticks and sanitization
+/// are inseparable here, so a rule cannot add the quoting without the
+/// sanitization.
+pub(crate) fn code_span(value: &str) -> String {
+    format!("`{}`", span_safe(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
