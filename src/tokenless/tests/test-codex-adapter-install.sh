@@ -45,9 +45,24 @@ STUB_LOG="$FAKE_HOME/.codex-stub.log"
 TOKENLESS_BIN="$PREFIX/bin/tokenless"
 CONFIG_TOML="$CODEX_HOME_DIR/config.toml"
 
-# install.sh resolves the component binary as `command -v tokenless` (scrubbed
-# below) and then from two absolute paths this sandbox cannot shadow. Resolve
-# the same way so the assertions name whatever the adapter would really use.
+write_tokenless_stub() {
+    cat > "$TOKENLESS_BIN" <<'STUBEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
+exit 0
+STUBEOF
+    chmod +x "$TOKENLESS_BIN"
+}
+
+# install.sh walks `command -v tokenless` (under the scrubbed PATH below), then
+# `$BINDIR/tokenless` - the sandbox stub - and only then /usr/local/bin and
+# /usr/bin. Ask the same question instead of recomputing that list, so the
+# expectation cannot drift from the resolution the adapter performs.
+EFFECTIVE_BIN="$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" bash -c 'command -v tokenless' || true)"
+[ -n "$EFFECTIVE_BIN" ] || EFFECTIVE_BIN="$TOKENLESS_BIN"
+
+# HOST_BIN only decides whether the no-binary scenario can run at all: that is
+# the context where the stub has been moved away and an absolute fallback wins.
 HOST_BIN=""
 for candidate in /usr/local/bin/tokenless /usr/bin/tokenless; do
     if [ -x "$candidate" ]; then
@@ -55,14 +70,8 @@ for candidate in /usr/local/bin/tokenless /usr/bin/tokenless; do
         break
     fi
 done
-EFFECTIVE_BIN="${HOST_BIN:-$TOKENLESS_BIN}"
 
-cat > "$TOKENLESS_BIN" <<'STUBEOF'
-#!/usr/bin/env bash
-[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
-exit 0
-STUBEOF
-chmod +x "$TOKENLESS_BIN"
+write_tokenless_stub
 
 # The codex CLI stand-in: it logs every call and answers both listings with an
 # empty inventory, so only the file operations under test are observable.
@@ -247,21 +256,19 @@ else
 fi
 # The real run in the same state: directory kept, binary gone, exit 1 - the
 # contract tests/test-install-script.sh pins for this shape.
-if env_for env CODEX_BIN="$SANDBOX/bin/missing-codex" \
-        bash "$UNINSTALL_SH" --non-interactive >/dev/null 2>&1; then
-    fail "an unconfirmable registration must exit 1"
+real_run_out="$(env_for env CODEX_BIN="$SANDBOX/bin/missing-codex" \
+        bash "$UNINSTALL_SH" --non-interactive 2>&1)"
+real_run_rc=$?
+# The exit code is the predicate; the output is kept for the failure message.
+if [ "$real_run_rc" -eq 0 ]; then
+    fail "an unconfirmable registration must exit 1: ${real_run_out}"
 elif [ -L "$PLUGIN_LINK" ] && [ ! -e "$TOKENLESS_BIN" ]; then
     pass "the real run keeps the marketplace directory and still removes the binary"
 else
-    fail "the real run did not mirror its preview (link=$([ -L "$PLUGIN_LINK" ] && echo present || echo gone), binary=$([ -e "$TOKENLESS_BIN" ] && echo present || echo gone))"
+    fail "the real run did not mirror its preview (link=$([ -L "$PLUGIN_LINK" ] && echo present || echo gone), binary=$([ -e "$TOKENLESS_BIN" ] && echo present || echo gone)): ${real_run_out}"
 fi
 # Restore the stub binary for the scenarios below.
-cat > "$TOKENLESS_BIN" <<'STUBEOF'
-#!/usr/bin/env bash
-[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
-exit 0
-STUBEOF
-chmod +x "$TOKENLESS_BIN"
+write_tokenless_stub
 
 # Without a record the real path does remove the directory, so the preview must
 # say so - that was the hidden `rm -rf` this branch used to omit.
