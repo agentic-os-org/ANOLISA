@@ -1228,11 +1228,11 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
         }
     }
 
-    resolve_md_array_types(&mut disks);
+    resolve_md_array_types(&mut disks, block_dir);
     Ok(disks)
 }
 
-/// Re-type an `md*` array from the members that carry it in `holders`.
+/// Re-type an `md*` array from the members that carry it.
 ///
 /// md derives the array's rotational flag from its members: it keeps
 /// `QUEUE_FLAG_NONROT` only while every active member is non-rotational and the
@@ -1244,17 +1244,28 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
 /// the medium-gated rules followed the array, the device the filesystem is
 /// actually on. The members' answer wins; an array whose members the inventory
 /// does not hold keeps its own.
-fn resolve_md_array_types(disks: &mut [DiskInfo]) {
+///
+/// A member is a whole disk *or a partition of one*: the holder link is created
+/// on the claimed bdev (`block/holder.c`), so an array assembled from
+/// partitions — the usual cloud layout, RAID1 on `vda1`/`vdb1` — records it on
+/// the partition's kobject, which the whole-disk `holders` directory cannot
+/// see. Such an array never counted a member, kept the members' rotational flag
+/// and was typed HDD while its disks read SSD. [`md_member_disk_names`] closes
+/// that gap from the array's own `slaves` directory.
+fn resolve_md_array_types(disks: &mut [DiskInfo], block_dir: &Path) {
     for index in 0..disks.len() {
         let name = disks[index].name.clone();
         if !name.starts_with("md") || disks[index].disk_type != DiskType::HDD {
             continue;
         }
 
+        let member_disks = md_member_disk_names(&block_dir.join(&name));
         let mut members = 0usize;
         let mut solid_state = true;
         for member in disks.iter() {
-            if member.holders.iter().any(|holder| holder == &name) {
+            if member.holders.iter().any(|holder| holder == &name)
+                || member_disks.iter().any(|disk| disk == &member.name)
+            {
                 members += 1;
                 solid_state &= matches!(member.disk_type, DiskType::SSD | DiskType::NVMe);
             }
@@ -1264,6 +1275,31 @@ fn resolve_md_array_types(disks: &mut [DiskInfo]) {
             disks[index].disk_type = DiskType::SSD;
         }
     }
+}
+
+/// The whole-disk names an `md*` directory holds in its `slaves` directory:
+/// every entry resolved to the disk that owns it.
+///
+/// A member may be a partition — sysfs marks one with a `partition` attribute
+/// — and its kobject then lives under the whole disk's, so the disk the
+/// inventory holds is the parent directory. The whole-disk member itself
+/// resolves to its own directory.
+fn md_member_disk_names(md_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(md_dir.join("slaves")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let target = fs::canonicalize(entry.path()).ok()?;
+            let name = target.file_name()?.to_string_lossy().to_string();
+            if target.join("partition").exists() {
+                Some(target.parent()?.file_name()?.to_string_lossy().to_string())
+            } else {
+                Some(name)
+            }
+        })
+        .collect()
 }
 
 /// Medium of the device in `dir`, named `name`: the one place the rotational
@@ -2548,6 +2584,82 @@ mod tests {
             "an array with no member in the inventory keeps its own answer"
         );
         assert_eq!(type_of("md3"), Some(DiskType::SSD));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn md_array_over_partitions_inherits_its_members_medium() {
+        // The holder link is created on the claimed bdev, so an array
+        // assembled from partitions - the usual cloud layout, RAID1 on
+        // vda1/vdb1 - records it on the partition's kobject, not in the whole
+        // disk's `holders` directory. Neither member was counted, the array
+        // kept the members' rotational flag and was typed HDD while both disks
+        // read SSD: the streaming arm raised its read_ahead_kb and the
+        // SSD-gated advice never fired.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_md_partition_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        for (name, rotational) in [
+            ("vda", "1"),
+            ("vdb", "1"),
+            ("md0", "1"),
+            ("sdc", "1"),
+            ("md1", "1"),
+        ] {
+            let disk = dir.join(name);
+            std::fs::create_dir_all(disk.join("queue")).expect("create queue");
+            std::fs::create_dir_all(disk.join("holders")).expect("create holders");
+            std::fs::write(disk.join("queue/rotational"), format!("{rotational}\n"))
+                .expect("write rotational");
+            std::fs::write(disk.join("queue/scheduler"), "none\n").expect("write scheduler");
+            std::fs::write(disk.join("hidden"), "0\n").expect("write hidden");
+        }
+
+        // md0 is assembled from the partitions vda1/vdb1; md1 from the whole
+        // spinning sdc, which keeps it mechanical.
+        std::fs::create_dir_all(dir.join("md0/slaves")).expect("create slaves");
+        for (disk, part) in [("vda", "vda1"), ("vdb", "vdb1")] {
+            std::fs::create_dir_all(dir.join(disk).join(part).join("holders"))
+                .expect("create the partition");
+            std::fs::write(dir.join(disk).join(part).join("partition"), "1\n")
+                .expect("write the partition marker");
+            std::os::unix::fs::symlink(
+                dir.join(disk).join(part),
+                dir.join("md0/slaves").join(part),
+            )
+            .expect("link the member");
+            std::os::unix::fs::symlink(
+                dir.join("md0"),
+                dir.join(disk).join(part).join("holders/md0"),
+            )
+            .expect("link the holder");
+        }
+        std::fs::write(dir.join("sdc/holders/md1"), "").expect("write holder");
+
+        let disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        let type_of = |name: &str| {
+            disks
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.disk_type.clone())
+        };
+        assert_eq!(type_of("vda"), Some(DiskType::SSD));
+        assert_eq!(type_of("vdb"), Some(DiskType::SSD));
+        assert_eq!(
+            type_of("md0"),
+            Some(DiskType::SSD),
+            "an array over those members' partitions is solid-state too"
+        );
+        assert_eq!(
+            type_of("md1"),
+            Some(DiskType::HDD),
+            "a spinning whole-disk member keeps its array mechanical"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
