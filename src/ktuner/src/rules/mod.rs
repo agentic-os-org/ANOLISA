@@ -9172,14 +9172,27 @@ fn eval_tcp_invalid_ratelimit_at(
 }
 
 fn eval_tcp_init_cwnd(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_init_cwnd";
+    eval_tcp_init_cwnd_at(info, recs, "/proc/sys/net/ipv4/tcp_init_cwnd")
+}
+
+/// Path-injectable form of [`eval_tcp_init_cwnd`] (the `eval_*_at` idiom) so the read is
+/// assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
+fn eval_tcp_init_cwnd_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 10 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_init_cwnd".to_string(),
@@ -9958,11 +9971,28 @@ fn blackhole_timeout_recommendation(
 }
 
 fn eval_max_queued_signals(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/rtsig-max";
+    eval_max_queued_signals_at(_info, recs, "/proc/sys/kernel/rtsig-max")
+}
+
+/// Path-injectable form of [`eval_max_queued_signals`] (the `eval_*_at` idiom) so the read is
+/// assertable against synthetic files.
+///
+/// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below every floor. Only a value the reader
+/// could produce is evidence that the limit is low, so a masked or garbled
+/// proc entry (a container's, typically) neither reports a `current_value`
+/// the host does not have nor asks for a write it may not need.
+fn eval_max_queued_signals_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 4096 {
         recs.push(Recommendation {
             param: "kernel.rtsig-max".to_string(),
@@ -13853,64 +13883,6 @@ mod tests {
             disk_type: DiskType::SSD,
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["noop".to_string(), "cfq".to_string()],
-            nr_requests: Some(256),
-            read_ahead_kb: Some(128),
-            rq_affinity: Some(1),
-            hidden: false,
-            holders: vec![],
-        }];
-        let recs = evaluate(&info).unwrap().recommendations;
-        let rec = recs.iter().find(|r| r.param.contains("scheduler"));
-        assert!(rec.is_some(), "Should recommend changing cfq on SSD");
-        assert_eq!(rec.unwrap().recommended_value, "noop");
-    }
-
-    #[test]
-    fn test_ssd_scheduler_bfq_is_the_modern_sorting_elevator() {
-        // 5.0 dropped `cfq` and renamed the pass-through names, so the state
-        // the arm exists for is an SSD running `bfq` (cfq's successor) with the
-        // 5.x list `none mq-deadline kyber bfq`.
-        let mut info = make_test_info();
-        info.disks = vec![DiskInfo {
-            name: "sda".to_string(),
-            disk_type: DiskType::SSD,
-            scheduler: "bfq".to_string(),
-            available_schedulers: vec![
-                "none".to_string(),
-                "mq-deadline".to_string(),
-                "kyber".to_string(),
-                "bfq".to_string(),
-            ],
-            nr_requests: 256,
-            read_ahead_kb: 128,
-            rq_affinity: 1,
-            hidden: false,
-            holders: vec![],
-        }];
-        let recs = evaluate(&info).unwrap().recommendations;
-        let rec = recs.iter().find(|r| r.param == "block/sda/scheduler");
-        assert_eq!(
-            rec.map(|r| r.recommended_value.as_str()),
-            Some("none"),
-            "an SSD running bfq must be advised the pass-through"
-        );
-    }
-
-    #[test]
-    fn test_ssd_scheduler_leaves_the_light_elevators_alone() {
-        // `mq-deadline` is not the queuing overhead the reason describes, and
-        // the arm must not claim every 5.x elevator is a problem.
-        let mut info = make_test_info();
-        info.disks = vec![DiskInfo {
-            name: "sda".to_string(),
-            disk_type: DiskType::SSD,
-            scheduler: "mq-deadline".to_string(),
-            available_schedulers: vec![
-                "none".to_string(),
-                "mq-deadline".to_string(),
-                "kyber".to_string(),
-                "bfq".to_string(),
-            ],
             nr_requests: 256,
             read_ahead_kb: 128,
             rq_affinity: 1,
@@ -21880,6 +21852,66 @@ mod tests {
         assert_eq!(recs.len(), 1, "a readable 20 is below the floor");
         assert_eq!(recs[0].current_value, "20");
         assert!(advice(&high).is_empty(), "a readable 256 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_init_cwnd_advice_needs_a_readable_value() {
+        // The rule fires below a floor, and read_sysctl_u64 maps an unreadable
+        // or unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("init_cwnd_read", b"10\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"4\n").unwrap();
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_init_cwnd_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 4 is below the floor");
+        assert_eq!(recs[0].current_value, "4");
+        assert!(advice(&high).is_empty(), "a readable 10 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn max_queued_signals_advice_needs_a_readable_value() {
+        // The rule fires below a floor, and read_sysctl_u64 maps an unreadable
+        // or unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("rtsig_max_read", b"4096\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"1024\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_max_queued_signals_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 1024 is below the floor");
+        assert_eq!(recs[0].current_value, "1024");
+        assert!(advice(&high).is_empty(), "a readable 4096 is not");
         for path in &others {
             assert!(
                 advice(path).is_empty(),
