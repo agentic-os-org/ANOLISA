@@ -26,7 +26,10 @@
 # matches a whole command line — without these stubs the test would signal real
 # host processes (a shell whose command line merely mentions the string).
 #
-# Usage: bash src/os-skills/ai/install-qwenpaw/scripts/test-setup-template-substitution.sh
+# Usage: bash src/os-skills/ai/install-qwenpaw/scripts/test_setup_template_substitution.sh
+#
+# The name follows the discovery rule in src/os-skills/tests/run-skill-regressions.sh
+# (`test_*.sh`); a dashed name would be silently skipped by the CI entry.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

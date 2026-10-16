@@ -37,4 +37,5 @@ jobs:
       # mean editing this file (the agentsight job runs its script the same way).
       - name: Run the skill regressions
         run: |
+          python3 src/os-skills/tests/test_skill_regression_runner.py
           bash src/os-skills/tests/run-skill-regressions.sh
