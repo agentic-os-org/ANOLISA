@@ -72,12 +72,17 @@ echo ""
 # Check kernel build directory
 echo "Kernel Build Directory:"
 BUILD_DIR="/lib/modules/$KERNEL_VER/build"
+BUILD_DIR_MISSING=false
 if [ -L "$BUILD_DIR" ] || [ -d "$BUILD_DIR" ]; then
     REAL_PATH=$(readlink -f "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
     echo -e "  ${GREEN}✓${NC} $BUILD_DIR -> $REAL_PATH"
 else
     echo -e "  ${RED}✗${NC} $BUILD_DIR (not found)"
-    MISSING+=("kernel-build-dir")
+    # The directory is not a package: it is what installing the kernel-devel
+    # package for this kernel creates. Listing a pseudo-package in MISSING made
+    # the suggested `yum install` fail as a whole ("No match for argument:
+    # kernel-build-dir"), so the real packages never got installed either.
+    BUILD_DIR_MISSING=true
 fi
 echo ""
 
@@ -95,21 +100,29 @@ echo ""
 echo "========================================"
 echo "  Summary"
 echo "========================================"
-if [ ${#MISSING[@]} -eq 0 ]; then
+if [ ${#MISSING[@]} -eq 0 ] && [ "$BUILD_DIR_MISSING" = false ]; then
     echo -e "${GREEN}✓ All dependencies are installed!${NC}"
     echo ""
     echo "You can now compile kernel modules."
     exit 0
 else
-    echo -e "${RED}✗ Missing ${#MISSING[@]} package(s):${NC}"
+    echo -e "${RED}✗ Missing dependencies:${NC}"
     for pkg in "${MISSING[@]}"; do
         echo "    - $pkg"
     done
+    if [ "$BUILD_DIR_MISSING" = true ]; then
+        echo "    - the build directory $BUILD_DIR (created by installing $DEVEL_PKG)"
+    fi
     echo ""
     echo -e "${YELLOW}To install missing packages, run:${NC}"
     echo ""
     if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "aarch64" ]; then
-        echo "  sudo yum install -y ${MISSING[*]}"
+        if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "  sudo yum install -y ${MISSING[*]}"
+        fi
+        if [ "$BUILD_DIR_MISSING" = true ]; then
+            echo "  sudo yum install -y $DEVEL_PKG"
+        fi
     else
         echo "  Please install the missing packages manually."
     fi
