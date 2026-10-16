@@ -769,6 +769,10 @@ export const AtifViewerPage: React.FC = () => {
     setNodePath(initialPath);
     setExpandedSections(new Set());
     setSelectedRound(null);
+    // The savings card renders from `savingsDetail` alone and is only
+    // re-requested for a document that names a session: a trajectory without
+    // one would otherwise keep showing the previous trajectory's numbers.
+    setSavingsDetail(null);
 
     try {
       let data: AtifDocument;
@@ -857,6 +861,10 @@ export const AtifViewerPage: React.FC = () => {
           return;
         }
         setDoc(parsed as AtifDocument);
+        // The imported document replaces the loaded one, and the import never
+        // asks for this document's own savings: keeping the old detail would
+        // attribute the previous trajectory's numbers to the imported file.
+        setSavingsDetail(null);
         setNodePath([]);
         const nextParams = new URLSearchParams(searchParamsRef.current);
         nextParams.delete('node');
