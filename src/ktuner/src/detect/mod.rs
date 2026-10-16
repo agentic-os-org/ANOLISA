@@ -1430,6 +1430,13 @@ fn read_network_info() -> Result<Vec<NetInfo>> {
 /// `net_dir` is a parameter so tests can build a fake sysfs tree.
 fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
     let mut nets = Vec::new();
+    // The interfaces this pass dropped as plumbing, and the ones that survived
+    // it together with the devices they report the link state of. A device
+    // that only forwards a piece of plumbing — a VLAN over a pair end, a
+    // bridge whose only port is one — shows the same fixed rate, so the skip
+    // below is transitive (see the propagation after the loop).
+    let mut plumbing: Vec<String> = Vec::new();
+    let mut kept: Vec<(String, u64, Vec<String>)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(net_dir) {
         let entries: Vec<fs::DirEntry> = entries.filter_map(|e| e.ok()).collect();
@@ -1494,14 +1501,46 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
                 || is_veth_end
                 || peer_is_external
             {
+                plumbing.push(name);
                 continue;
             }
 
-            nets.push(NetInfo {
-                name: name.clone(),
-                speed_mbps,
-            });
+            kept.push((name, speed_mbps, lower_link_names(&entry.path())));
         }
+
+        // The skip is transitive because the rate is. A VLAN and a bridge do
+        // not negotiate a link of their own: `vlan_dev_get_link_ksettings`
+        // forwards the real device's ksettings verbatim (v6.6
+        // net/8021q/vlan_dev.c:662-667) and `br_get_link_ksettings` reports
+        // the best UP/running port's (v6.6 net/bridge/br_device.c:267-292), so
+        // a VLAN over a pair end or a bridge whose only port is one carries
+        // the veth driver's fixed 10000 Mbps (drivers/net/veth.c:126-134) as
+        // the host link — the false positive the `veth*`/`cali*` marker and
+        // the pair test above close one device too low. A device is therefore
+        // plumbing when every device it reports the state of is plumbing; a
+        // macvlan over a real NIC, a bond over real ports and a bridge with a
+        // real port keep their reading, and a chain (a VLAN over a bridge over
+        // a pair end) settles over the repeats.
+        loop {
+            let mut survivors: Vec<(String, u64, Vec<String>)> = Vec::new();
+            let mut dropped = false;
+            for (name, speed_mbps, lowers) in kept {
+                if !lowers.is_empty() && lowers.iter().all(|lower| plumbing.contains(lower)) {
+                    plumbing.push(name);
+                    dropped = true;
+                } else {
+                    survivors.push((name, speed_mbps, lowers));
+                }
+            }
+            kept = survivors;
+            if !dropped {
+                break;
+            }
+        }
+        nets.extend(
+            kept.into_iter()
+                .map(|(name, speed_mbps, _)| NetInfo { name, speed_mbps }),
+        );
     }
 
     Ok(nets)
@@ -1633,6 +1672,25 @@ fn has_lower_link(dir: &Path) -> bool {
             .filter_map(|e| e.ok())
             .any(|entry| entry.file_name().to_string_lossy().starts_with("lower_"))
     })
+}
+
+/// The names of the devices `dir`'s interface reports the link state of: its
+/// `lower_<name>` adjacency links ([`has_lower_link`]).
+fn lower_link_names(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix("lower_")
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A sysfs attribute holding one unsigned number, `None` when the file is
@@ -3964,6 +4022,107 @@ mod tests {
             "the macvlan keeps its parent's reading, the pair end stays out: {names:?}"
         );
         assert_eq!(info.max_net_speed(), 10000);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A VLAN and a bridge do not negotiate a link of their own: the drivers
+    /// forward the device they run over (`vlan_dev_get_link_ksettings`, v6.6
+    /// net/8021q/vlan_dev.c:662-667; `br_get_link_ksettings`,
+    /// net/bridge/br_device.c:267-292), so a VLAN over a veth end or a bridge
+    /// whose only port is one carries the veth driver's fixed 10000 Mbps
+    /// (drivers/net/veth.c:126-134) as the host link. The veth marker and the
+    /// pair test drop the ends, but the device one step above them kept the
+    /// default and every 10 GbE-gated rule sized for a link the machine does
+    /// not have - the same false positive #6883/#7207/#7314 close one device
+    /// lower.
+    #[test]
+    fn network_info_ignores_a_vlan_and_bridge_over_a_veth_end() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_plumbing_upper_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // The one real NIC, backed by a bus device.
+        let eth0 = dir.join("eth0");
+        fs::create_dir_all(&eth0).expect("create eth0");
+        fs::write(eth0.join("speed"), "1000\n").expect("write speed");
+        fs::write(eth0.join("ifindex"), "2\n").expect("write ifindex");
+        fs::write(eth0.join("iflink"), "2\n").expect("write iflink");
+        fs::create_dir_all(eth0.join("device")).expect("create the bus-device link");
+
+        // The pair end the container uplink runs over: no bus device, no
+        // DEVTYPE, the driver's fixed 10000.
+        let veth = dir.join("h1");
+        fs::create_dir_all(&veth).expect("create the veth end");
+        fs::write(veth.join("speed"), "10000\n").expect("write speed");
+        fs::write(veth.join("ifindex"), "8\n").expect("write ifindex");
+        fs::write(veth.join("iflink"), "9\n").expect("write iflink");
+        fs::write(veth.join("uevent"), "INTERFACE=h1\nIFINDEX=8\n").expect("write uevent");
+
+        // A VLAN over that end: DEVTYPE=vlan, the forwarded 10000, and the
+        // adjacency link naming the lower device.
+        let vlan = dir.join("h1.100");
+        fs::create_dir_all(&vlan).expect("create the vlan");
+        fs::write(vlan.join("speed"), "10000\n").expect("write speed");
+        fs::write(vlan.join("ifindex"), "10\n").expect("write ifindex");
+        fs::write(vlan.join("iflink"), "8\n").expect("write iflink");
+        fs::write(vlan.join("uevent"), "DEVTYPE=vlan\nINTERFACE=h1.100\n").expect("write uevent");
+        std::os::unix::fs::symlink(&veth, vlan.join("lower_h1")).expect("link the lower device");
+
+        // A bridge whose only port is that same end.
+        let bridge = dir.join("br0");
+        fs::create_dir_all(&bridge).expect("create the bridge");
+        fs::write(bridge.join("speed"), "10000\n").expect("write speed");
+        fs::write(bridge.join("ifindex"), "11\n").expect("write ifindex");
+        fs::write(bridge.join("iflink"), "11\n").expect("write iflink");
+        fs::write(bridge.join("uevent"), "DEVTYPE=bridge\nINTERFACE=br0\n").expect("write uevent");
+        std::os::unix::fs::symlink(&veth, bridge.join("lower_h1")).expect("link the lower device");
+
+        // A VLAN over the real NIC keeps its parent's reading, and a bridge
+        // with the real NIC as one of its ports keeps the best port's.
+        let real_vlan = dir.join("eth0.200");
+        fs::create_dir_all(&real_vlan).expect("create the vlan");
+        fs::write(real_vlan.join("speed"), "1000\n").expect("write speed");
+        fs::write(real_vlan.join("ifindex"), "12\n").expect("write ifindex");
+        fs::write(real_vlan.join("iflink"), "2\n").expect("write iflink");
+        fs::write(
+            real_vlan.join("uevent"),
+            "DEVTYPE=vlan\nINTERFACE=eth0.200\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth0, real_vlan.join("lower_eth0")).expect("link the lower");
+        let mixed_bridge = dir.join("br1");
+        fs::create_dir_all(&mixed_bridge).expect("create the bridge");
+        fs::write(mixed_bridge.join("speed"), "1000\n").expect("write speed");
+        fs::write(mixed_bridge.join("ifindex"), "13\n").expect("write ifindex");
+        fs::write(mixed_bridge.join("iflink"), "13\n").expect("write iflink");
+        fs::write(
+            mixed_bridge.join("uevent"),
+            "DEVTYPE=bridge\nINTERFACE=br1\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth0, mixed_bridge.join("lower_eth0"))
+            .expect("link the lower device");
+        std::os::unix::fs::symlink(&veth, mixed_bridge.join("lower_h1"))
+            .expect("link the lower device");
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        let mut names: Vec<&str> = info.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["br1", "eth0", "eth0.200"],
+            "only the devices that read a real link survive: {names:?}"
+        );
+        assert_eq!(
+            info.max_net_speed(),
+            1000,
+            "the pair end's fixed rate must not decide the host link speed: {names:?}"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
