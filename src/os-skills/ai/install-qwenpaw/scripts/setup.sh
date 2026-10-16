@@ -37,6 +37,15 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 QWENPAW_DIR="$HOME/.qwenpaw"
 SECRET_DIR="$HOME/.qwenpaw.secret"
 
+# 把值放进模板替换段：替换点都在 JSON 字符串里，所以先按 JSON 转义
+# （`\` 与 `"`），再转义 sed 替换串的元字符 `\`/`&`/`|`。
+# 直接把值拼进表达式时 sed 会把它当表达式读：`&` 展开成被匹配到的占位符
+# 本身（密钥静默变成 "{DINGTALK_CLIENT_SECRET}"），`|` 提前结束 s 命令
+# （sed 报错、set -e 让整个安装中止），`\` 转义掉后一个字符。
+sed_replacement() {
+  printf '%s' "$1" | sed 's/[\"]/\\&/g; s/[\\&|]/\\&/g'
+}
+
 echo "=============================="
 echo " QwenPaw 安装部署"
 echo "=============================="
@@ -100,8 +109,8 @@ if [ ! -f "$CONFIG_TEMPLATE" ]; then
   exit 1
 fi
 sed \
-  -e "s|{DINGTALK_CLIENT_ID}|${DINGTALK_CLIENT_ID}|g" \
-  -e "s|{DINGTALK_CLIENT_SECRET}|${DINGTALK_CLIENT_SECRET}|g" \
+  -e "s|{DINGTALK_CLIENT_ID}|$(sed_replacement "$DINGTALK_CLIENT_ID")|g" \
+  -e "s|{DINGTALK_CLIENT_SECRET}|$(sed_replacement "$DINGTALK_CLIENT_SECRET")|g" \
   "$CONFIG_TEMPLATE" > "$QWENPAW_DIR/config.json"
 echo "  config.json 已写入"
 
@@ -111,7 +120,7 @@ if [ ! -f "$DASHSCOPE_TEMPLATE" ]; then
   echo "  错误: 找不到模板文件 $DASHSCOPE_TEMPLATE"
   exit 1
 fi
-sed "s|{DASHSCOPE_API_KEY}|${DASHSCOPE_API_KEY}|g" \
+sed "s|{DASHSCOPE_API_KEY}|$(sed_replacement "$DASHSCOPE_API_KEY")|g" \
   "$DASHSCOPE_TEMPLATE" > "$SECRET_DIR/providers/builtin/dashscope.json"
 chmod 600 "$SECRET_DIR/providers/builtin/dashscope.json"
 echo "  dashscope.json 已写入"
@@ -122,7 +131,7 @@ if [ ! -f "$ACTIVE_MODEL_TEMPLATE" ]; then
   echo "  错误: 找不到模板文件 $ACTIVE_MODEL_TEMPLATE"
   exit 1
 fi
-sed "s|{MODEL_NAME}|${MODEL_NAME}|g" \
+sed "s|{MODEL_NAME}|$(sed_replacement "$MODEL_NAME")|g" \
   "$ACTIVE_MODEL_TEMPLATE" > "$SECRET_DIR/providers/active_model.json"
 chmod 600 "$SECRET_DIR/providers/active_model.json"
 echo "  active_model.json 已写入"
