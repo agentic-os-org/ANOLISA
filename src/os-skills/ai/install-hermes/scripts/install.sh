@@ -785,7 +785,12 @@ clone_repo() {
                     log_warn "Local changes were stashed before updating."
                     log_warn "Restoring them may reapply local customizations onto the updated codebase."
                     printf "Restore local changes now? [Y/n] "
-                    read -r restore_answer
+                    # EOF (Ctrl-D, or the terminal going away) is not an
+                    # answer: fall through to the documented default instead of
+                    # letting errexit abort the install after the update has
+                    # already succeeded — the same guard prompt_yes_no applies
+                    # to every other prompt in this script.
+                    read -r restore_answer || restore_answer=""
                     case "$restore_answer" in
                         ""|y|Y|yes|YES|Yes) restore_now="yes" ;;
                         *) restore_now="no" ;;
