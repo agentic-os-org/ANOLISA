@@ -1569,6 +1569,125 @@ mod tests {
         );
     }
 
+    /// Exact canonical equality catches lost parallel responses and reordered
+    /// tool turns; a nonzero assertion would also pass for raw-JSON fallback.
+    #[test]
+    fn gemini_tool_turns_match_canonical_token_count() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hello"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                        {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"functionResponse": {
+                            "name": "list_dir",
+                            "response": {"entries": ["a", "b"]}
+                        }},
+                        {"functionResponse": {
+                            "name": "read_file",
+                            "response": {"content": "a body"}
+                        }}
+                    ]
+                }
+            ]
+        });
+        let canonical = json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"type": "function", "function": {
+                            "name": "list_dir", "arguments": {"path": "/tmp"}
+                        }},
+                        {"type": "function", "function": {
+                            "name": "read_file", "arguments": {"path": "/tmp/a"}
+                        }}
+                    ]
+                },
+                {"role": "tool", "name": "list_dir", "content": "{\"entries\":[\"a\",\"b\"]}"},
+                {"role": "tool", "name": "read_file", "content": "{\"content\":\"a body\"}"}
+            ]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("Gemini request is counted");
+        let expected = crate::analyzer::count_request_tokens(&canonical, &tokenizer, &tokenizer)
+            .expect("canonical request is counted");
+        assert_eq!(count.total_tokens, expected.total_tokens);
+        assert_eq!(count.by_role, expected.by_role);
+        let actual_messages: Vec<_> = count
+            .per_message
+            .iter()
+            .map(|message| (message.role.as_str(), message.tokens))
+            .collect();
+        let expected_messages: Vec<_> = expected
+            .per_message
+            .iter()
+            .map(|message| (message.role.as_str(), message.tokens))
+            .collect();
+        assert_eq!(actual_messages, expected_messages);
+        assert!(!count.by_role.contains_key("model"));
+    }
+
+    /// The analyze-chatml pipeline for the same shape: on main the Gemini
+    /// request event was skipped with a template warning, so a Gemini-only
+    /// trace answered "No valid http.request or http.response events found".
+    #[test]
+    fn gemini_requests_reach_the_breakdown() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![request_event(
+            json!({
+                "contents": [
+                    {"role": "user", "parts": [{"text": "hello"}]},
+                    {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}]
+                    },
+                    {
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": "list_dir",
+                                "response": {"entries": ["a", "b"]}
+                            }
+                        }]
+                    }
+                ]
+            }),
+            1,
+        )];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a Gemini request event must render");
+        assert_eq!(breakdowns.len(), 1);
+        let request_event = &breakdowns[0].events[0];
+        assert!(
+            request_event.tokens > 0,
+            "request tokens: {request_event:?}"
+        );
+        // system_prompt + the three mapped messages.
+        assert_eq!(
+            request_event.children.len(),
+            4,
+            "children: {:?}",
+            request_event
+                .children
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn sse(payload: &str) -> serde_json::Value {
         json!({ "data": payload })
     }

@@ -849,6 +849,11 @@ fn drain_fallback_counts_every_request_shape() {
             "/v1/chat/completions",
             r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}]}"#,
         ),
+        // Gemini parallel tool parts reach the same real drain fallback.
+        (
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"functionCall":{"name":"list_dir","args":{"path":"/tmp"}}},{"functionCall":{"name":"read_file","args":{"path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"list_dir","response":{"entries":["a","b"]}}},{"functionResponse":{"name":"read_file","response":{"content":"a body"}}}]}]}"#,
+        ),
         // Typed Responses content: the chat template cannot render a block
         // array, so the raw-message count is the one that must answer.
         (

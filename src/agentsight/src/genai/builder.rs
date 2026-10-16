@@ -1748,6 +1748,58 @@ mod tests {
         assert_eq!(input[2]["content"], "second question");
     }
 
+    #[test]
+    fn test_build_pending_from_request_gemini_keeps_parallel_tool_messages() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "inspect files"}]},
+                {"role": "model", "parts": [
+                    {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                    {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                ]},
+                {"role": "user", "parts": [
+                    {"functionResponse": {
+                        "name": "list_dir",
+                        "response": {"entries": ["a", "b"]}
+                    }},
+                    {"functionResponse": {
+                        "name": "read_file",
+                        "response": {"content": "a body"}
+                    }}
+                ]}
+            ]
+        }"#;
+        let req = make_request("/v1beta/models/gemini-2.5-pro:generateContent", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::from([(1_u32, "gemini-agent".to_string())]);
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("Gemini request creates a pending row");
+
+        assert_eq!(pending.user_query.as_deref(), Some("inspect files"));
+        let input: serde_json::Value = serde_json::from_str(
+            pending
+                .input_messages
+                .as_deref()
+                .expect("messages are recorded"),
+        )
+        .expect("input messages are valid JSON");
+        let messages = input.as_array().expect("messages are an array");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "list_dir");
+        assert_eq!(
+            messages[1]["tool_calls"][1]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["content"], r#"{"entries":["a","b"]}"#);
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["content"], r#"{"content":"a body"}"#);
+        assert!(messages[2].get("tool_call_id").is_none());
+        assert!(messages[3].get("tool_call_id").is_none());
+    }
+
     /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
     /// The pending builder read the wrapper only, so a drained SysOM call
     /// lost its model, streaming flag, messages and user query — every

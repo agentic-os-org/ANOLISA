@@ -122,6 +122,15 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
     // a `role` and a `parts` array) and their system prompt as
     // `systemInstruction.parts[].text`. Without this arm a drained Gemini
     // call's `input_tokens` stays NULL because no other shape matches.
+    //
+    // The contents are mapped onto the canonical `{role, content}` shape (see
+    // [`gemini_content_to_messages`]) instead of being returned verbatim: every
+    // consumer of the view — the chat-template renderers behind
+    // `count_request_tokens`, `drain_request_input_tokens` and the
+    // analyze-chatml CLI, and the semantic layer's `content`/`tool_calls`
+    // readers — reads the canonical shape, and a raw Gemini content carries
+    // its text in `parts` with the assistant role spelled `model`, so a
+    // verbatim return made the whole request render or parse as empty.
     if let Some(arr) = body.get("contents").and_then(|c| c.as_array()) {
         let system_text = body
             .get("systemInstruction")
@@ -136,9 +145,7 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
             })
             .filter(|s| !s.is_empty());
         return Some((
-            arr.iter()
-                .filter_map(gemini_content_to_text_message)
-                .collect(),
+            arr.iter().flat_map(gemini_content_to_messages).collect(),
             system_text,
         ));
     }
@@ -220,26 +227,100 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
     None
 }
 
-/// Convert Gemini text parts to the canonical message shape used by every
-/// downstream text reader. An empty content string keeps textless turns
-/// renderable by strict chat templates.
-fn gemini_content_to_text_message(content: &Value) -> Option<Value> {
-    let parts = content.get("parts").and_then(|p| p.as_array())?;
-    let text = parts
-        .iter()
-        .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+/// Map one Gemini `contents` entry to canonical messages.
+///
+/// Pending calls are flushed before following text, and pending text and calls
+/// are flushed before every response, so canonical messages retain part order
+/// and parallel responses cannot overwrite one another. Binary-only entries
+/// are dropped; text and call turns keep string `content`, including an empty
+/// string for a call-only turn.
+fn gemini_content_to_messages(content: &Value) -> Vec<Value> {
+    let Some(parts) = content.get("parts").and_then(|p| p.as_array()) else {
+        return Vec::new();
+    };
     let role = match content.get("role").and_then(|r| r.as_str()) {
         Some("model") => "assistant",
         Some(role) => role,
         None => "user",
     };
-    Some(serde_json::json!({
+    let mut messages = Vec::new();
+    let mut text_parts: Vec<&str> = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut has_text = false;
+
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+            if !tool_calls.is_empty() {
+                push_gemini_pending_message(
+                    &mut messages,
+                    role,
+                    &mut text_parts,
+                    &mut tool_calls,
+                    &mut has_text,
+                );
+            }
+            has_text = true;
+            if !text.is_empty() {
+                text_parts.push(text);
+            }
+        }
+        if let Some(call) = part.get("functionCall").filter(|c| c.is_object()) {
+            tool_calls.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": call.get("name").and_then(|n| n.as_str()).unwrap_or_default(),
+                    "arguments": call.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
+                },
+            }));
+        }
+        if let Some(response) = part.get("functionResponse").filter(|r| r.is_object()) {
+            push_gemini_pending_message(
+                &mut messages,
+                role,
+                &mut text_parts,
+                &mut tool_calls,
+                &mut has_text,
+            );
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "name": response
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default(),
+                "content": response.get("response").unwrap_or(&Value::Null).to_string(),
+            }));
+        }
+    }
+    push_gemini_pending_message(
+        &mut messages,
+        role,
+        &mut text_parts,
+        &mut tool_calls,
+        &mut has_text,
+    );
+    messages
+}
+
+fn push_gemini_pending_message(
+    messages: &mut Vec<Value>,
+    role: &str,
+    text_parts: &mut Vec<&str>,
+    tool_calls: &mut Vec<Value>,
+    has_text: &mut bool,
+) {
+    if !*has_text && tool_calls.is_empty() {
+        return;
+    }
+    let mut message = serde_json::json!({
         "role": role,
-        "content": text,
-    }))
+        "content": text_parts.join("\n"),
+    });
+    text_parts.clear();
+    *has_text = false;
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(std::mem::take(tool_calls));
+    }
+    messages.push(message);
 }
 
 /// Normalize the tool definitions from a parsed request body.
@@ -744,5 +825,119 @@ mod tests {
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(instructions, None);
+    }
+
+    /// Parallel calls and responses retain their order, responses stay
+    /// independent, and prose next to a response never contaminates its JSON.
+    #[test]
+    fn test_extract_messages_view_gemini_tool_parts_preserve_parallel_order() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "list the files"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {"text": "let me check"},
+                        {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                        {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": "results follow"},
+                        {"functionResponse": {
+                            "name": "list_dir",
+                            "response": {"entries": ["a", "b"]}
+                        }},
+                        {"functionResponse": {
+                            "name": "read_file",
+                            "response": {"content": "a body"}
+                        }},
+                        {"text": "both returned"}
+                    ]
+                }
+            ]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 6);
+        assert_eq!(msgs[0]["content"], "list the files");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "let me check");
+
+        let calls = msgs[1]["tool_calls"].as_array().expect("tool_calls exist");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "list_dir");
+        assert_eq!(calls[0]["function"]["arguments"]["path"], "/tmp");
+        assert_eq!(calls[1]["function"]["name"], "read_file");
+        assert_eq!(calls[1]["function"]["arguments"]["path"], "/tmp/a");
+        assert!(calls.iter().all(|call| call.get("id").is_none()));
+
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"], "results follow");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["name"], "list_dir");
+        let first: serde_json::Value =
+            serde_json::from_str(msgs[3]["content"].as_str().expect("content is a string"))
+                .expect("the first response is standalone JSON");
+        assert_eq!(first, serde_json::json!({"entries": ["a", "b"]}));
+        assert!(msgs[3].get("tool_call_id").is_none());
+
+        assert_eq!(msgs[4]["role"], "tool");
+        assert_eq!(msgs[4]["name"], "read_file");
+        let second: serde_json::Value =
+            serde_json::from_str(msgs[4]["content"].as_str().expect("content is a string"))
+                .expect("the second response is standalone JSON");
+        assert_eq!(second, serde_json::json!({"content": "a body"}));
+        assert!(msgs[4].get("tool_call_id").is_none());
+        assert_eq!(msgs[5]["role"], "user");
+        assert_eq!(msgs[5]["content"], "both returned");
+    }
+
+    #[test]
+    fn test_extract_messages_view_gemini_text_between_calls_keeps_wire_order() {
+        let body = serde_json::json!({
+            "contents": [{"role": "model", "parts": [
+                {"text": "first"},
+                {"functionCall": {"name": "list_dir", "args": {}}},
+                {"text": "second"},
+                {"functionCall": {"name": "read_file", "args": {}}}
+            ]}]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], "first");
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "list_dir");
+        assert_eq!(msgs[1]["content"], "second");
+        assert_eq!(msgs[1]["tool_calls"][0]["function"]["name"], "read_file");
+    }
+
+    /// A tool-call-only assistant turn carries no text: its `content` must be
+    /// an empty string (a null breaks the strict templates' concatenation the
+    /// same way a missing key does), and binary parts contribute nothing.
+    #[test]
+    fn test_extract_messages_view_gemini_binary_only_content_is_dropped() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "look"}]},
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "snap", "args": {}}}]
+                },
+                {
+                    "role": "user",
+                    "parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk="}}]
+                }
+            ]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(
+            msgs.len(),
+            2,
+            "the binary-only content contributes no message"
+        );
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "");
+        assert!(msgs[1]["tool_calls"].is_array());
     }
 }
