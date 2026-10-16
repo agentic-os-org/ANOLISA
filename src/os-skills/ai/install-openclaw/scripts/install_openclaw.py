@@ -158,6 +158,9 @@ OPENAI_THINKING_FORMAT_MODELS = {
 DINGTALK_PLUGIN_PACKAGE = "@soimy/dingtalk"
 DINGTALK_CHANNEL_ID = "dingtalk"
 
+EXISTING_CONFIG_SOURCE = "the existing OpenClaw config"
+GENERATED_CONFIG_SOURCE = "the generated OpenClaw config"
+
 
 def deep_merge(base, override):
     result = dict(base)
@@ -177,14 +180,69 @@ def ordered_unique(items):
     return result
 
 
+def describe_json_shape(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, list):
+        return "an array"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, (int, float)):
+        return "a number"
+    return f"a {type(value).__name__}"
+
+
+def validate_plugin_allow(config, source):
+    """Return ``plugins.allow`` of a config, rejecting malformed shapes.
+
+    Returns None when the config carries no plugin allowlist. A non-object
+    ``plugins`` value and any ``plugins.allow`` value that is not a list of
+    plugin name strings raise a configuration error instead of being
+    dereferenced or unpacked character by character.
+    """
+    if not isinstance(config, dict) or "plugins" not in config:
+        return None
+
+    plugins = config["plugins"]
+    if not isinstance(plugins, dict):
+        raise SystemExit(
+            f'Invalid OpenClaw config in {source}: "plugins" must be a JSON '
+            f"object, found {describe_json_shape(plugins)}. Fix or remove the "
+            "value, then rerun the installer."
+        )
+    if "allow" not in plugins:
+        return None
+
+    allow = plugins["allow"]
+    if not isinstance(allow, list):
+        raise SystemExit(
+            f'Invalid OpenClaw config in {source}: "plugins.allow" must be a '
+            f"JSON array of plugin names, found {describe_json_shape(allow)}. "
+            "Fix or remove the value, then rerun the installer."
+        )
+    for entry in allow:
+        if not isinstance(entry, str):
+            raise SystemExit(
+                f'Invalid OpenClaw config in {source}: every "plugins.allow" '
+                "entry must be a plugin name string, found "
+                f"{describe_json_shape(entry)}. Fix or remove the value, then "
+                "rerun the installer."
+            )
+    return allow
+
+
 def merge_plugin_allow(existing, merged):
-    existing_allow = existing.get("plugins", {}).get("allow", [])
-    merged_allow = merged.get("plugins", {}).get("allow")
+    existing_allow = validate_plugin_allow(existing, EXISTING_CONFIG_SOURCE)
+    merged_allow = validate_plugin_allow(merged, GENERATED_CONFIG_SOURCE)
     if merged_allow is None:
         return merged
 
     merged.setdefault("plugins", {})["allow"] = ordered_unique(
-        [*existing_allow, *merged_allow]
+        [*(existing_allow or []), *merged_allow]
     )
     return merged
 
@@ -535,6 +593,10 @@ def apply_config(config, config_path, *, dry_run=False):
                 existing = json.load(fh)
         except json.JSONDecodeError as exc:
             raise SystemExit(f"Invalid JSON in {config_path}: {exc}") from exc
+        # Reject malformed plugins / plugins.allow shapes up front, so the
+        # installer never backs up or overwrites the file with a config it
+        # could not merge.
+        validate_plugin_allow(existing, str(config_path))
 
     merged = deep_merge(existing, config)
     merged = merge_plugin_allow(existing, merged)
