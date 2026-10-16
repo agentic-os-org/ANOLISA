@@ -19,6 +19,8 @@ What it updates in every XML file under <work_dir>:
   - <conditionalFormatting sqref="..."> ranges
   - <dataValidations sqref="..."> ranges
   - <dimension ref="A1:D20"> extent marker
+  - Worksheet-level <autoFilter ref="...">, <sortState ref="..."> and
+    <sortCondition ref="..."> ranges
   - Table <table ref="A1:D20"> in xl/tables/*.xml
   - Chart series <numRef><f> and <strRef><f> range references in xl/charts/*.xml
   - PivotCache source <worksheetSource ref="..."> in xl/pivotCaches/*.xml
