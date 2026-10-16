@@ -126,8 +126,12 @@ pub struct SysomToolUseItem {
     /// in array order, so an absent index must not fail the frame.
     #[serde(default)]
     pub index: u32,
+    #[serde(default)]
     pub id: String,
-    #[serde(rename = "type")]
+    /// Item kind. Providers may leave it out and nothing here reads it; the
+    /// call is identified by its function, so an absent kind must not fail the
+    /// frame.
+    #[serde(default, rename = "type")]
     pub item_type: String,
     pub function: SysomFunction,
 }
@@ -534,5 +538,27 @@ mod tests {
             .expect("a call without an index must still be kept");
         assert_eq!(tool_use[0].id, "call_no_index");
         assert_eq!(tool_use[0].function.name, "read_file");
+    }
+
+    /// A tool_use entry may leave out the item `type`: the SysOM client reads
+    /// only index, id and function from an entry. Requiring it dropped the
+    /// call the frame carried.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_a_type() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "index": 0,
+                "id": "call_no_type",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an item type must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_type");
     }
 }
