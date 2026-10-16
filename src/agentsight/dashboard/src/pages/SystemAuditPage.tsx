@@ -360,7 +360,7 @@ export const SystemAuditPage: React.FC = () => {
     }
     setError(failures.length ? errorText((failures[0] as PromiseRejectedResult).reason, t) : '');
     setLoading(false);
-  }, [caseOffset, eventOffset, sessionOffset, t]);
+  }, [caseOffset, eventOffset, sessionOffset, caseAgentFilter, caseStatusFilter, caseBlockedOnly, t]);
 
   useEffect(() => {
     void load();
@@ -530,8 +530,30 @@ export const SystemAuditPage: React.FC = () => {
     }
   };
 
+  // The case list is filtered server-side, so a filter change has to re-issue
+  // the query (the loader's dependency list above carries the filters) and it
+  // has to start from the first page: keeping the old offset would ask the
+  // narrowed list for a page it no longer has, which the pager hides and the
+  // user cannot leave.
+  const changeCaseStatusFilter = (status: 'all' | SecurityReviewStatus) => {
+    setCaseStatusFilter(status);
+    setCaseOffset(0);
+  };
+
+  const changeCaseBlockedOnly = (blocked: boolean) => {
+    setCaseBlockedOnly(blocked);
+    setCaseOffset(0);
+  };
+
+  const clearCaseFilters = () => {
+    setCaseStatusFilter('all');
+    setCaseBlockedOnly(false);
+    setCaseOffset(0);
+  };
+
   const clearAgentFilter = () => {
     setCaseAgentFilter(null);
+    setCaseOffset(0);
     const next = new URLSearchParams(searchParams);
     next.delete('agent_id');
     setSearchParams(next);
@@ -584,14 +606,14 @@ export const SystemAuditPage: React.FC = () => {
           labelKey="audit.stats.open.label"
           value={openCases}
           hintKey="audit.stats.open.hint"
-          onClick={() => { setActiveTab('cases'); setCaseBlockedOnly(false); setCaseStatusFilter('open'); }}
+          onClick={() => { setActiveTab('cases'); changeCaseBlockedOnly(false); changeCaseStatusFilter('open'); }}
           active={activeTab === 'cases' && caseStatusFilter === 'open' && !caseBlockedOnly}
         />
         <StatCard
           labelKey="audit.stats.blocked.label"
           value={blockedCases}
           hintKey="audit.stats.blocked.hint"
-          onClick={() => { setActiveTab('cases'); setCaseStatusFilter('all'); setCaseBlockedOnly(true); }}
+          onClick={() => { setActiveTab('cases'); changeCaseStatusFilter('all'); changeCaseBlockedOnly(true); }}
           active={activeTab === 'cases' && caseBlockedOnly}
         />
       </section>
@@ -620,7 +642,7 @@ export const SystemAuditPage: React.FC = () => {
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                 <select
                   value={caseStatusFilter}
-                  onChange={(event) => setCaseStatusFilter(event.target.value as 'all' | SecurityReviewStatus)}
+                  onChange={(event) => changeCaseStatusFilter(event.target.value as 'all' | SecurityReviewStatus)}
                   className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-700"
                 >
                   <option value="all">全部状态</option>
@@ -641,13 +663,13 @@ export const SystemAuditPage: React.FC = () => {
                   <option value="risk">按风险分</option>
                 </select>
                 <label className="flex items-center gap-1 text-gray-600">
-                  <input type="checkbox" checked={caseBlockedOnly} onChange={(event) => setCaseBlockedOnly(event.target.checked)} />
+                  <input type="checkbox" checked={caseBlockedOnly} onChange={(event) => changeCaseBlockedOnly(event.target.checked)} />
                   仅已拦截
                 </label>
                 {(caseStatusFilter !== 'all' || caseBlockedOnly) && (
                   <button
                     type="button"
-                    onClick={() => { setCaseStatusFilter('all'); setCaseBlockedOnly(false); }}
+                    onClick={clearCaseFilters}
                     className="text-blue-600"
                   >
                     清除筛选
