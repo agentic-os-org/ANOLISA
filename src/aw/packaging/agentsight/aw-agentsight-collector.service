@@ -1,0 +1,17 @@
+[Unit]
+Description=AgentSight trajectory collector for AW
+
+ConditionPathExists=%h/.config/aw/agentsight.json
+
+[Service]
+Type=simple
+UMask=0077
+# The official component package remains owned by the distribution installer.
+ExecStart=/usr/local/bin/agentsight trace --no-ebpf --config %h/.config/aw/agentsight.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

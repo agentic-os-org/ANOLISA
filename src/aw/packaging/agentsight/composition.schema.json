@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AW and independent AgentSight release composition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "platform", "aw", "agentsight"],
+  "properties": {
+    "format": {"const": 1},
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch"],
+      "properties": {
+        "os": {"const": "linux"},
+        "arch": {"enum": ["x86_64", "aarch64"]}
+      }
+    },
+    "aw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archive", "sha256", "components"],
+      "properties": {
+        "archive": {"const": "aw.tar.gz"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "components": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/awComponent"}
+        }
+      }
+    },
+    "agentsight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archive", "sha256", "version", "release", "contract", "installer", "ownership"],
+      "properties": {
+        "archive": {"const": "agentsight.tar.gz"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "release": {"type": "string", "pattern": "^https://github\\.com/(agentic-os-org/ANOLISA|alibaba/anolisa)/releases/tag/sight/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "contract": {"const": ".anolisa/component.toml"},
+        "installer": {"const": "anolisa"},
+        "ownership": {"const": "independent"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "awComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "component", "version", "source_commit", "os", "arch", "provider_protocol", "requires", "files"],
+      "properties": {
+        "format": {"const": 1},
+        "component": {"enum": ["aw-core", "aw-provider-sec-core", "aw-provider-tokenless"]},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+-preview\\.[0-9]+$"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "os": {"const": "linux"},
+        "arch": {"enum": ["x86_64", "aarch64"]},
+        "provider_protocol": {"const": "aw-provider/v1alpha1"},
+        "requires": {"type": "object", "additionalProperties": {"type": "string"}},
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sha256", "mode"],
+            "properties": {
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "mode": {"enum": [420, 493]}
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -319,6 +319,14 @@ fn stage(
                     cancel,
                 )?;
             }
+            add(
+                &root,
+                "share/aw/agentsight/aw-agentsight-collector.service",
+                &repo.join("src/aw/packaging/agentsight/aw-agentsight-collector.service"),
+                false,
+                &mut files,
+                cancel,
+            )?;
         } else if *name == "aw-provider-tokenless" {
             for (binary, directory) in [
                 ("aw-provider-tokenless", aw.clone()),

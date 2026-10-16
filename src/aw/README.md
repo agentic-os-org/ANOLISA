@@ -21,6 +21,7 @@ The current release is a Preview.
 | Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
 | Compress model-visible tool results | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
+| Combine a separate AgentSight release and optional collector profile | [AgentSight](../../docs/user-guide/en/user-entrypoint/aw-preview.md#independent-agentsight-composition) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
 Optional AgentSight observation follows `aw run`; loopback HTTP needs no token,

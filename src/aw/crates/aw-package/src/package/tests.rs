@@ -112,6 +112,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -256,6 +257,7 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -263,6 +265,17 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "fixture").unwrap();
     }
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/agentsight/aw-agentsight-collector.service"),
+        repo.join("src/aw/packaging/agentsight/aw-agentsight-collector.service"),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/aw/packaging/agentsight/aw-agentsight-query.service"),
+        "ExecStart=/usr/local/bin/agentsight serve --host 127.0.0.1 --port 7396",
+    )
+    .unwrap();
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
     let archives = stage(
@@ -293,6 +306,25 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     let manifest = crate::inspect(&unpacked).unwrap();
     assert_eq!(manifest.components.len(), 1);
     assert!(manifest.components[0].requires.is_empty());
+    let path = "share/aw/agentsight/aw-agentsight-collector.service";
+    assert_eq!(manifest.components[0].files[path].mode, 0o644);
+    assert_eq!(
+        manifest.components[0].files[path].sha256,
+        digest(&unpacked.join("payload").join(path)).unwrap()
+    );
+    // A stale query template in the source fixture must never become a listener.
+    let query = "share/aw/agentsight/aw-agentsight-query.service";
+    assert!(!manifest.components[0].files.contains_key(query));
+    assert!(!unpacked.join("payload").join(query).exists());
+    let collector = fs::read_to_string(
+        unpacked.join("payload/share/aw/agentsight/aw-agentsight-collector.service"),
+    )
+    .unwrap();
+    let commands: Vec<_> = collector
+        .lines()
+        .filter(|line| line.starts_with("Exec"))
+        .collect();
+    assert_eq!(commands, ["ExecStart=/usr/local/bin/agentsight trace --no-ebpf --config %h/.config/aw/agentsight.json"]);
     assert!(!unpacked.join("payload/libexec").exists());
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!repo.join("src/tokenless").exists());
@@ -320,6 +352,7 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -407,6 +440,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
