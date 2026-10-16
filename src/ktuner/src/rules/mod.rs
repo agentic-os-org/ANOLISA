@@ -2780,12 +2780,19 @@ fn eval_numa_balancing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
     if !is_db {
         return 1;
     }
+    // Since 6.0 the knob is a bitmask (Documentation/admin-guide/sysctl/
+    // kernel.rst): bit 0 is the normal page-fault sampling, bit 1 the
+    // memory-tiering promotion. Top-tier pages are unmapped for hinting faults
+    // only while the normal bit is set (v6.6 mm/mprotect.c), so a tiered host
+    // running both (3) has the same stalls as 1; clearing that bit alone keeps
+    // the promotion the operator turned on.
+    const NUMA_BALANCING_NORMAL: u64 = 1;
     let current = read_sysctl_u64(path);
-    if current == 1 {
+    if current & NUMA_BALANCING_NORMAL != 0 {
         recs.push(Recommendation {
             param: "kernel.numa_balancing".to_string(),
-            current_value: "1".to_string(),
-            recommended_value: "0".to_string(),
+            current_value: current.to_string(),
+            recommended_value: (current & !NUMA_BALANCING_NORMAL).to_string(),
             reason: "数据库进程自行管理内存亲和性，内核 NUMA balancing 的页面迁移会引发延迟抖动"
                 .to_string(),
             confidence: Confidence::Medium,
@@ -11844,6 +11851,42 @@ mod tests {
             recs.iter().all(|r| r.param != "kernel.numa_balancing"),
             "a build job is not a database"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Since Linux 6.0 `kernel.numa_balancing` is a bitmask: 1 is the normal
+    /// page-fault sampling the rule turns off, 2 the memory-tiering promotion.
+    /// A tiered host running both reads 3, and its top-tier pages are still
+    /// unmapped for hinting faults (v6.6 mm/mprotect.c skips them only when
+    /// the normal bit is clear), yet the rule only fired on an exact 1.
+    #[test]
+    fn numa_balancing_rule_clears_the_normal_bit_of_a_tiered_mode() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_numa_mask_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("numa_balancing");
+        let mut info = info_with_processes(&["postgres"]);
+        info.numa_nodes = 2;
+        let advice = |content: &str| {
+            std::fs::write(&path, content).unwrap();
+            let mut recs = Vec::new();
+            eval_numa_balancing_at(&info, &mut recs, path.to_str().unwrap());
+            recs.into_iter()
+                .find(|r| r.param == "kernel.numa_balancing")
+                .map(|r| (r.current_value, r.recommended_value))
+        };
+
+        // Normal and tiering: drop the normal bit, keep the promotion.
+        assert_eq!(advice("3\n"), Some(("3".to_string(), "2".to_string())));
+        // Normal alone: unchanged advice.
+        assert_eq!(advice("1\n"), Some(("1".to_string(), "0".to_string())));
+        // Tiering alone or off: top-tier pages are not scanned, nothing to do.
+        assert_eq!(advice("2\n"), None);
+        assert_eq!(advice("0\n"), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
