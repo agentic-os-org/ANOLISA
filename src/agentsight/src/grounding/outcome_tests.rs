@@ -196,6 +196,30 @@ fn weak_prefix_only_counts_inside_the_opening_window() {
 }
 
 #[test]
+fn a_lowercase_error_line_opens_a_flagless_failure() {
+    // The same flagless payload, spelled with a lowercase token, was graded
+    // `Ok`: the anchored signatures are matched case-insensitively because
+    // "the same condition is reported with different capitalisation by
+    // different tools", and the sibling scans of the same payloads read
+    // `error:` the same way (the grader's error signal, and the opt ledger's
+    // error markers). The weak prefix alone let one letter decide the verdict.
+    let lower = classify(&plain_call(), "error: cannot find value `rows`");
+    assert_eq!(
+        lower.status,
+        CallStatus::Failed,
+        "a flagless failure spelled in lowercase is still this call's: rule={}",
+        lower.matched_rule
+    );
+    assert_eq!(lower.confidence, Confidence::Medium);
+    assert_eq!(lower.matched_rule, "R5");
+
+    // The opening-window guard is unchanged: an error word deep in the body
+    // still describes something the tool merely reported.
+    let far = format!("{}\nerror: disk full", "x".repeat(WEAK_SIGNAL_WINDOW + 10));
+    assert_eq!(classify(&plain_call(), &far).status, CallStatus::Ok);
+}
+
+#[test]
 fn http_error_counts_only_at_line_start() {
     let at_start = classify(&plain_call(), "HTTP 503 Service Unavailable");
     assert_eq!(at_start.status, CallStatus::Failed);
