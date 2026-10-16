@@ -110,7 +110,24 @@ impl SessionLogService {
         // one step where a swapped pathname would matter most, and the one
         // that can be done without touching the pathname at all.
         base.mkdir_child(sid.as_str(), 0o700)?;
-        std::fs::create_dir_all(&scratch)?;
+        // `mkdir_child` tolerates an existing `<sid>` ("a session may be
+        // reopened"), so whatever was left in that directory is trusted
+        // from here on. A symlink (or any non-directory) at `scratch/`
+        // would redirect every later scratch path outside the session
+        // tree: `resolve_in_scratch` canonicalises against
+        // `scratch_root()` itself, so the link's target would pass the
+        // containment check. Refuse anything that is not a real
+        // directory, checked without following it.
+        match std::fs::symlink_metadata(&scratch) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(MemoryError::Other(format!(
+                    "{} is not a directory; refusing it as a session scratch root",
+                    scratch.display()
+                )));
+            }
+            Err(_) => std::fs::create_dir_all(&scratch)?,
+        }
         // Enforce 0700 on session root so only the owner can read
         // meta.toml (owner_user_id, agent_id, mount_ns) and log.jsonl
         // (per-tool-call path/bytes/errors). ULID session ids provide
@@ -129,7 +146,17 @@ impl SessionLogService {
         };
         let meta = toml::to_string(&meta_struct)
             .map_err(|e| MemoryError::Other(format!("serialize session meta: {e}")))?;
-        std::fs::write(root.join(META_FILE), meta)?;
+        // Same O_NOFOLLOW defense as the log file below: a reopened
+        // session directory may hold a symlink planted at the meta.toml
+        // name, and a plain `fs::write` would follow it and clobber
+        // whatever it points at with this session's metadata.
+        let mut meta_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(root.join(META_FILE))?;
+        meta_file.write_all(meta.as_bytes())?;
 
         // Pre-touch the log so reading it during an empty session yields "" not NotFound.
         // O_NOFOLLOW refuses to reopen if log.jsonl has been swapped for a
@@ -333,5 +360,78 @@ impl SessionLogService {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn start(base: &Path, sid: &str) -> Result<SessionLogService> {
+        SessionLogService::start(
+            base,
+            SessionId::from_string(sid).unwrap(),
+            "alice",
+            None,
+            "test",
+            None,
+        )
+    }
+
+    #[test]
+    fn reopen_refuses_a_symlinked_scratch_dir() {
+        let base = tempdir().unwrap();
+        // Simulate a leftover session dir whose scratch/ was replaced by a
+        // symlink to a directory outside the session tree.
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"outside the sandbox").unwrap();
+        std::fs::create_dir(base.path().join("ses_re")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), base.path().join("ses_re").join(SCRATCH_DIR))
+            .unwrap();
+
+        let result = start(base.path(), "ses_re");
+        assert!(
+            result.is_err(),
+            "a symlinked scratch/ must not be accepted on reopen"
+        );
+    }
+
+    #[test]
+    fn reopen_refuses_a_swapped_meta_toml_symlink() {
+        let base = tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("ses_meta").join(SCRATCH_DIR)).unwrap();
+        let victim = base.path().join("victim.txt");
+        std::fs::write(&victim, b"do not clobber").unwrap();
+        std::os::unix::fs::symlink(&victim, base.path().join("ses_meta").join(META_FILE)).unwrap();
+
+        let result = start(base.path(), "ses_meta");
+        assert!(
+            result.is_err(),
+            "a symlinked meta.toml must not be followed on reopen"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not clobber",
+            "the symlink target must be left untouched"
+        );
+    }
+
+    #[test]
+    fn reopen_of_a_real_session_dir_still_works() {
+        let base = tempdir().unwrap();
+        let svc = start(base.path(), "ses_again").unwrap();
+        svc.end(EndAction::Keep).unwrap();
+        // Reopening the same id must keep working: mkdir_child tolerates
+        // EEXIST and a real scratch/ directory is exactly that.
+        let reopened = start(base.path(), "ses_again");
+        assert!(
+            reopened.is_ok(),
+            "reopening a well-formed session dir must keep working: {:?}",
+            reopened.err()
+        );
+        let svc = reopened.unwrap();
+        assert!(svc.scratch_root().is_dir());
+        assert!(svc.log_path().is_file());
     }
 }
