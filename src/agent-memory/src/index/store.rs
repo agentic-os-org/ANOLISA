@@ -298,17 +298,18 @@ impl BM25Store {
 
     /// Search with optional agent scope filter.
     /// `agent_scope` can be:
-    /// - None: return all results (shared mode, default)
+    /// - None or Some("shared"): return all results (shared mode, default)
     /// - Some("isolated:<agent_id>"): only results tagged with this agent_id
     /// - Some("filter:<agent_id>"): results tagged with this agent_id plus
     ///   any unscoped (agent_id IS NULL) memories
     ///
-    /// Returns `InvalidArgument` when the scope prefix is recognised but the
-    /// agent_id contains characters that would let it escape the parameterised
-    /// binding path (`'`, `"`, `;`, `\`, `/`, control bytes). Callers must
-    /// surface the error rather than silently falling back to shared mode,
-    /// otherwise a misconfigured `MCP_CLIENT_NAME` would silently widen the
-    /// visibility domain.
+    /// Returns `InvalidArgument` for any other value: an unrecognised or
+    /// malformed scope (`"isolated"` without its `:<agent_id>` suffix, for
+    /// instance), or one whose agent_id contains characters that would let it
+    /// escape the parameterised binding path (`'`, `"`, `;`, `\`, `/`, control
+    /// bytes). Callers must surface the error rather than silently falling back
+    /// to shared mode, otherwise a misconfigured `MCP_CLIENT_NAME` would
+    /// silently widen the visibility domain.
     pub fn search_scoped(
         &self,
         query: &str,
@@ -1093,14 +1094,39 @@ enum ScopeKind {
 /// misconfigured `MCP_CLIENT_NAME` can't widen the visibility domain.
 type AgentScope = Option<(ScopeKind, String)>;
 
+/// Resolve the scope string accepted by [`BM25Store::search_scoped`].
+///
+/// Exactly three spellings mean anything — `"shared"`, `"isolated:<id>"` and
+/// `"filter:<id>"` — and every other value is rejected with
+/// `InvalidArgument`. An unrecognised value must never resolve to shared:
+/// a typo such as `agent_scope="isolated"` (prefix without its `:<id>`
+/// suffix) would otherwise silently widen the visibility domain from one
+/// agent to every agent's memories.
 fn resolve_agent_scope(agent_scope: Option<&str>) -> Result<AgentScope> {
     let Some(scope) = agent_scope else {
         return Ok(None);
     };
-    if !scope.starts_with("isolated:") && !scope.starts_with("filter:") {
+    // The empty string is this codebase's "no scope given" sentinel — the MCP
+    // tool layer maps `""` to `None` and `[memory].agent_scope` treats it as
+    // `shared` — so it stays shared instead of becoming an error.
+    if scope.is_empty() || scope == "shared" {
         return Ok(None);
     }
-    let agent_id = scope.split_once(':').map(|x| x.1).unwrap_or("");
+    // `split_once` leaves any further colons inside the agent_id, so
+    // `"isolated:team:alpha"` keeps working as before. A prefix with an empty
+    // id (`"isolated:"`, which an empty `MCP_CLIENT_NAME` produces) stays
+    // accepted too: it binds `agent_id = ''` and so matches no row, i.e. it
+    // fails closed rather than widening.
+    let (kind, agent_id) = match scope.split_once(':') {
+        Some(("isolated", id)) => (ScopeKind::Isolated, id),
+        Some(("filter", id)) => (ScopeKind::Filter, id),
+        _ => {
+            return Err(MemoryError::InvalidArgument(format!(
+                "invalid agent_scope {scope:?}; expected \"shared\", \
+                 \"isolated:<id>\" or \"filter:<id>\""
+            )));
+        }
+    };
     if agent_id.contains(|c: char| {
         c == '\''
             || c == '"'
@@ -1115,11 +1141,6 @@ fn resolve_agent_scope(agent_scope: Option<&str>) -> Result<AgentScope> {
             "agent_scope contains invalid characters: {agent_id:?}"
         )));
     }
-    let kind = if scope.starts_with("isolated:") {
-        ScopeKind::Isolated
-    } else {
-        ScopeKind::Filter
-    };
     Ok(Some((kind, agent_id.to_string())))
 }
 
@@ -2079,5 +2100,48 @@ mod tests {
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_scope_malformed_prefix_errors_not_shared() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("a/alpha.md", 100, 10, "agent alpha note", Some("alpha"))
+            .unwrap();
+        s.upsert("b/beta.md", 100, 10, "agent beta note", Some("beta"))
+            .unwrap();
+
+        // Regression (GH-4310): a scope whose prefix is recognised but whose
+        // `:<id>` suffix is missing used to fall through to shared and hand
+        // back *every* agent's rows. Any unrecognised spelling must error.
+        for bad in [
+            "isolated",
+            "filter",
+            "nonsense",
+            "Isolated:alpha",
+            "shared:alpha",
+        ] {
+            let err = s.search_scoped("agent", 10, true, Some(bad)).unwrap_err();
+            assert!(
+                matches!(err, MemoryError::InvalidArgument(_)),
+                "expected InvalidArgument for {bad:?}, got {err:?}"
+            );
+        }
+
+        // The documented unscoped spellings still see both rows.
+        for shared in [None, Some("shared"), Some("")] {
+            let hits = s.search_scoped("agent", 10, true, shared).unwrap();
+            assert_eq!(
+                hits.len(),
+                2,
+                "scope {shared:?} should stay unscoped and see both rows"
+            );
+        }
+
+        // A well-formed scope is unaffected: alpha still cannot see beta.
+        let hits = s
+            .search_scoped("agent", 10, true, Some("isolated:alpha"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["a/alpha.md"]);
     }
 }

@@ -277,6 +277,48 @@ fn search_returns_empty_when_no_matches() {
     assert!(hits.is_empty());
 }
 
+#[test]
+fn search_malformed_agent_scope_param_errors() {
+    // Regression (GH-4310): the explicit `agent_scope` parameter is passed
+    // straight through to `resolve_agent_scope`, which used to map anything
+    // without an `isolated:`/`filter:` prefix to *shared* — so a malformed
+    // `agent_scope="isolated"` silently returned every agent's rows instead
+    // of erroring.
+    let (_tmp, svc) = setup();
+    svc.write("a/alpha.md", "zephyr note owned by alpha", false)
+        .unwrap();
+    svc.write("b/beta.md", "zephyr note owned by beta", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 3));
+
+    for bad in ["isolated", "filter", "nonsense"] {
+        let err = svc
+            .memory_search("zephyr", 10, None, None, Some(bad))
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(_)),
+            "expected InvalidArgument for agent_scope={bad:?}, got {err:?}"
+        );
+    }
+
+    // The documented spellings are unaffected: "shared" stays unscoped ...
+    let hits = svc
+        .memory_search("zephyr", 10, None, None, Some("shared"))
+        .unwrap();
+    let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths.len(), 2, "shared scope should see both notes");
+
+    // ... and a well-formed isolated scope still keeps other agents out.
+    let hits = svc
+        .memory_search("zephyr", 10, None, None, Some("isolated:nobody"))
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "isolated:nobody should see no rows, got {:?}",
+        hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+    );
+}
+
 // ---------- mode parameter ----------
 
 #[test]
