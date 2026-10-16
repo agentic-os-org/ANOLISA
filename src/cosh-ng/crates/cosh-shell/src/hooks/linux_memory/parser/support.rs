@@ -380,9 +380,9 @@ pub(in crate::hooks::linux_memory) fn free_unit_factors(command: &str) -> Memory
             if short_options.contains('g') {
                 factors.no_suffix = 1024.0;
             }
-            if short_options.contains('t') {
-                factors.no_suffix = 1024.0 * 1024.0;
-            }
+            // NOTE: `t` is deliberately not treated as a unit selector here.
+            // procps `free` has no short form for `--tebi`; `-t`/`--total`
+            // only appends a totals row and keeps the default KiB units.
         }
     }
 
