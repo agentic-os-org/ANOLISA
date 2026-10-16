@@ -1075,6 +1075,9 @@ def clear_read_only_operator_pairings(args):
     if changed:
         tmp_path = path.with_name(path.name + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as fh:
+            # A retained pairing entry carries its operator token: pin the mode
+            # before writing, exactly like the device-auth rewrite below.
+            restrict_to_owner(tmp_path)
             json.dump(data, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
         os.replace(tmp_path, path)

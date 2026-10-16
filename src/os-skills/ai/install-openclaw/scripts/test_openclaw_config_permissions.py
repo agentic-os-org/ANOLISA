@@ -2,14 +2,14 @@
 """Tests for the credential file modes written by install_openclaw.py (#4901).
 
 The installer publishes ``~/.openclaw/openclaw.json`` (Model Studio API key in
-cleartext) and rewrites ``identity/device-auth.json`` (operator tokens) through
-a freshly created ``.tmp`` file plus ``os.replace``, and keeps a ``.bak`` of
-whatever it replaces. Neither the temp inode nor the backup had a mode set, so
+cleartext) and rewrites ``identity/device-auth.json`` and ``devices/paired.json``
+(operator tokens) through a freshly created ``.tmp`` file plus ``os.replace``,
+and keeps a ``.bak`` of whatever it replaces. Neither the temp inode nor the backup had a mode set, so
 all of them inherited the caller's umask: 0644 under the default 022, readable
 by every local user. Because ``os.replace`` publishes the temp inode's mode, a
 re-run also downgraded a user-hardened 0600 config back to 0644.
 
-Baseline on unchanged main: the four mode assertions fail with 0644 (420 != 384)
+Baseline on unchanged main: every mode assertion fails with 0644 (420 != 384)
 and the helper contract test errors out - the helper does not exist yet.
 """
 
@@ -178,6 +178,43 @@ class OpenClawConfigPermissionsTestCase(unittest.TestCase):
                 0o600,
                 "the retained bytes still carry the operator tokens",
             )
+
+    def test_paired_devices_rewrite_stays_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "openclaw.json"
+            paired = Path(tmp) / "devices" / "paired.json"
+            paired.parent.mkdir(parents=True, exist_ok=True)
+            paired.write_text(
+                json.dumps(
+                    {
+                        # Dropped by the rewrite: an operator pairing without a
+                        # write scope, still carrying its operator token.
+                        "read-only-device": {
+                            "role": "operator",
+                            "scopes": ["operator.read"],
+                            "tokens": {"operator": {"accessToken": OPERATOR_TOKEN}},
+                        },
+                        "admin-device": {"role": "operator", "scopes": ["operator.admin"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paired.chmod(0o644)
+            args = argparse.Namespace(config=str(config_path))
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.installer.clear_read_only_operator_pairings(args)
+
+            remaining = json.loads(paired.read_text(encoding="utf-8"))
+            self.assertNotIn("read-only-device", remaining)
+            self.assertIn("admin-device", remaining)
+            self.assertEqual(
+                mode_of(paired),
+                0o600,
+                "a retained pairing entry carries its operator token, so the "
+                "rewrite must stay owner-only",
+            )
+            self.assertEqual(list(paired.parent.glob("*.tmp")), [])
 
     def test_restrict_to_owner_is_best_effort(self):
         with tempfile.TemporaryDirectory() as tmp:
