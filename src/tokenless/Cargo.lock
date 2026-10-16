@@ -1713,6 +1713,7 @@ dependencies = [
 name = "tokenless-schema"
 version = "0.8.7"
 dependencies = [
+ "libc",
  "regex",
  "serde_json",
  "tempfile",

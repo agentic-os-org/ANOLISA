@@ -424,7 +424,9 @@ fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
     if let Some(env_path) = state_path_override("TOKENLESS_STATS_DB", "DSH_TOKENLESS_STATS_DB") {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"),
+            Err(reason) => warn_soft(&format!(
+                "[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"
+            )),
         }
     }
     let data_dir = data_dir.map_err(str::to_string)?;
@@ -467,7 +469,7 @@ fn try_open_recorder(paths: &DatabasePathResolver) -> Option<StatsRecorder> {
     match open_recorder_with(paths) {
         Ok(recorder) => Some(recorder),
         Err((message, _)) => {
-            warn_stats(&format!(
+            warn_soft(&format!(
                 "[tokenless-stats] WARNING: failed to open stats recorder: {message}"
             ));
             None
@@ -475,13 +477,18 @@ fn try_open_recorder(paths: &DatabasePathResolver) -> Option<StatsRecorder> {
     }
 }
 
-/// Best-effort stderr warning whose own write failure cannot fail the
+/// Best-effort stderr notice whose own write failure cannot fail the
 /// command. `eprintln!` panics when writing to stderr fails (a full
-/// filesystem behind redirected logs), which turned the fail-soft stats
-/// warning into exit 101 while the compression output itself was fine.
+/// filesystem behind redirected logs, a closed or EPIPE'd descriptor),
+/// which turned every fail-soft notice into exit 101 while the command's
+/// own output was fine: the stats warnings, the rejected-path and
+/// stash-disabled fallbacks, and the no-savings, passthrough, dry-run and
+/// mode-mismatch notices all sit on paths that otherwise succeed.
 /// Write errors are discarded: there is no fallback channel, and
-/// failing the command here is the regression to avoid.
-fn warn_stats(message: &str) {
+/// failing the command here is the regression to avoid. `main`'s fatal
+/// `Error:` printer goes through [`report_fatal`] instead — it is on
+/// the failure path, where the exit code itself is the contract.
+fn warn_soft(message: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(message.as_bytes());
@@ -582,13 +589,15 @@ fn get_stash_db_path_with(
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
         match validate_db_path(Path::new(p), home, data_dir.ok()) {
             Ok(valid) => return Ok(valid),
-            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {p}: {reason}"),
+            Err(reason) => warn_soft(&format!("[tokenless] rejecting --stash-db {p}: {reason}")),
         }
     }
     if let Some(env_path) = state_path_override("TOKENLESS_STASH_DB", "DSH_TOKENLESS_STASH_DB") {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {reason}"),
+            Err(reason) => warn_soft(&format!(
+                "[tokenless] ignoring TOKENLESS_STASH_DB: {reason}"
+            )),
         }
     }
     let data_dir = data_dir.map_err(str::to_string)?;
@@ -624,7 +633,7 @@ fn open_stash_store_with(
     match open_stash_store_or_err_with(paths, override_path) {
         Ok(store) => Some(store),
         Err(e) => {
-            eprintln!("[tokenless] stash disabled: {e}");
+            warn_soft(&format!("[tokenless] stash disabled: {e}"));
             None
         }
     }
@@ -706,7 +715,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             if let Response::PostTool(response) = &outcome.response.response
                 && response.disposition == Disposition::NoSavings
             {
-                eprintln!("tokenless: compression did not reduce size, outputting original");
+                warn_soft("tokenless: compression did not reduce size, outputting original");
             }
 
             let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
@@ -765,9 +774,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let before_tokens = estimate_tokens(&input);
             let after_tokens = estimate_tokens(&after_compact);
             let output_text = if after_tokens >= before_tokens {
-                eprintln!(
+                warn_soft(&format!(
                     "tokenless: schema compression did not reduce size ({before_tokens} -> {after_tokens} est. tokens), outputting original"
-                );
+                ));
                 // Discarded compressed output never reaches the LLM, so roll
                 // back stash keys created during this compress — otherwise
                 // markers live only in `after_compact` and orphan stash rows.
@@ -781,10 +790,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
             let stash_size = stash.as_ref().map(|s| s.len());
             if matches!(stash_errors, Some(e) if e > 0) {
-                eprintln!(
+                warn_soft(&format!(
                     "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
                     stash_errors.expect("checked Some above")
-                );
+                ));
             }
 
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
@@ -870,16 +879,16 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // deletes; a non-zero count means the stash path is broken and
             // retrievals will miss.
             if matches!(result.stash_errors, Some(errors) if errors > 0) {
-                eprintln!(
+                warn_soft(&format!(
                     "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
                     result.stash_errors.expect("checked Some above")
-                );
+                ));
             }
             if result.disposition == Disposition::NoSavings {
-                eprintln!(
+                warn_soft(&format!(
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
                     result.before_tokens, result.after_tokens
-                );
+                ));
             }
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
@@ -1168,16 +1177,16 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 })?;
             match result.disposition {
                 Disposition::Passthrough => {
-                    eprintln!(
+                    warn_soft(&format!(
                         "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
                         input.chars().count()
-                    );
+                    ));
                 }
                 Disposition::NoSavings => {
-                    eprintln!(
+                    warn_soft(&format!(
                         "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
                         result.before_tokens, result.after_tokens
-                    );
+                    ));
                 }
                 _ => {}
             }
@@ -1263,9 +1272,9 @@ fn resolve_mode(
     if compression_on {
         CompressionMode::Active
     } else {
-        eprintln!(
+        warn_soft(&format!(
             "tokenless: dry-run mode (compression disabled) — emitted original, predicted {before_tokens} -> {after_tokens} est. tokens"
-        );
+        ));
         CompressionMode::DryRun
     }
 }
@@ -1300,12 +1309,12 @@ fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: Compressio
     }
     let mismatched = records.iter().filter(|r| r.mode != expected).count();
     if mismatched > 0 {
-        eprintln!(
+        warn_soft(&format!(
             "tokenless: warning — {} session has {} record(s) not in {} mode (comparison may be inaccurate)",
             label,
             mismatched,
             expected.as_str()
-        );
+        ));
     }
 }
 
@@ -1402,7 +1411,7 @@ fn record_compression_stats(
         && let Some(recorder) = try_open_recorder(database_paths)
         && let Err(e) = recorder.record(&record)
     {
-        warn_stats(&format!(
+        warn_soft(&format!(
             "[tokenless-stats] WARNING: failed to record stats entry: {e}"
         ));
     }
