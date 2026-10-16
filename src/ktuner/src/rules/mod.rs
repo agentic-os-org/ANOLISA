@@ -6454,23 +6454,51 @@ fn eval_tcp_retries1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_limit_output_bytes_at(info, recs, "/proc/sys/net/ipv4/tcp_limit_output_bytes")
+    eval_tcp_limit_output_bytes_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_limit_output_bytes",
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_limit_output_bytes`] (the `eval_*_at`
-/// idiom) so the read is assertable against synthetic files.
+/// idiom) so the read and the congestion control are assertable against
+/// synthetic files.
 ///
 /// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
 /// unparseable file to 0, which is below every floor. Only a value the reader
 /// could produce is evidence that the limit is low, so a masked or garbled
 /// proc entry (a container's, typically) neither reports a `current_value`
 /// the host does not have nor asks for a write it may not need.
+///
+/// The congestion control this rule judges is the one the run's *plan* leaves
+/// in force: the sibling `net.ipv4.tcp_congestion_control` rule raises a
+/// non-BBR host to bbr whenever bbr is registered or loadable
+/// ([`bbr_will_be_in_force`]), and BBR is the algorithm that makes this knob
+/// unread anyway. `tcp_small_queue_check()` applies the sysctl only to an
+/// unpaced socket (`sk->sk_pacing_status == SK_PACING_NONE`, v6.6
+/// net/ipv4/tcp_output.c:2677-2679), while BBR's init marks every socket it
+/// owns as paced (`cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE,
+/// SK_PACING_NEEDED)`, net/ipv4/tcp_bbr.c:1077). Judging the pre-plan value
+/// let one plan carry `cc = bbr` and a raised `tcp_limit_output_bytes`
+/// together — the promise "limits single-connection throughput" cannot hold for
+/// the connections that plan creates, the same no-op the slow_start_after_idle,
+/// pacing-ratio and min_tso_segs gates were fixed to refuse.
 fn eval_tcp_limit_output_bytes_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    congestion_control_path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
 ) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    if bbr_will_be_in_force(info, congestion_control_path, avail_path, module_tree) {
         return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
@@ -19475,8 +19503,15 @@ mod tests {
         // entry (a container's, typically) was reported as `current_value: "0"`
         // and answered with a raise on a host whose value was never read.
         let (_, high, others) = zero_switch_paths("tcp_limit_output_bytes_read", b"1048576\n");
+        let dir = high.parent().expect("the fixture directory").to_path_buf();
         let low = high.with_file_name("low");
         std::fs::write(&low, b"262144\n").unwrap();
+        // A congestion control the plan does not move to BBR, so these cases
+        // exercise the value read alone.
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        std::fs::write(&cc, b"cubic\n").unwrap();
+        std::fs::write(&available, b"reno cubic\n").unwrap();
         let mut info = make_test_info();
         info.network = vec![NetInfo {
             name: "eth0".to_string(),
@@ -19484,7 +19519,14 @@ mod tests {
         }];
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_limit_output_bytes_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_limit_output_bytes_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                None,
+            );
             recs
         };
 
@@ -19499,6 +19541,67 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_limit_output_bytes_vanishes_under_bbr() {
+        // tcp_small_queue_check() applies the sysctl only to an unpaced socket
+        // (sk->sk_pacing_status == SK_PACING_NONE, tcp_output.c:2677-2679) and
+        // BBR's init paces the sockets it owns (cmpxchg(... SK_PACING_NEEDED),
+        // tcp_bbr.c:1077), so the plan that switches the host to BBR cannot
+        // deliver the reason's promise for the connections it creates - the
+        // same no-op the slow_start_after_idle, pacing-ratio and min_tso_segs
+        // siblings already refuse.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_tsq_bbr_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let limit = dir.join("tcp_limit_output_bytes");
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        std::fs::write(&limit, b"262144\n").unwrap();
+        std::fs::write(&cc, b"cubic\n").unwrap();
+
+        let mut info = make_test_info();
+        info.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 10000,
+        }];
+        let advice = |available_body: &[u8], cc_body: &[u8]| {
+            std::fs::write(&available, available_body).unwrap();
+            std::fs::write(&cc, cc_body).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_limit_output_bytes_at(
+                &info,
+                &mut recs,
+                limit.to_str().unwrap(),
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                None,
+            );
+            recs
+        };
+
+        // A registered bbr: the sibling rule moves the host onto it, so the
+        // raise is not carried.
+        assert!(
+            advice(b"reno cubic bbr\n", b"cubic\n").is_empty(),
+            "the plan switches this host to BBR"
+        );
+        // BBR already selected is the same no-op.
+        assert!(
+            advice(b"reno cubic bbr\n", b"bbr\n").is_empty(),
+            "an unpaced socket is not what BBR leaves behind"
+        );
+        // No BBR on the host: the raise still belongs to the plan.
+        assert_eq!(
+            advice(b"reno cubic\n", b"cubic\n").len(),
+            1,
+            "a host the plan cannot move to BBR keeps the advice"
+        );
     }
 
     #[test]
