@@ -125,8 +125,19 @@ impl TokenParser {
         // Gemini signal.
         let gemini_input =
             find_u64(data, "promptTokenCount").or_else(|| find_u64(data, "prompt_token_count"));
+        // Thinking models report the reasoning budget in a counter of its
+        // own, outside `candidatesTokenCount`, while `totalTokenCount`
+        // covers both — the direct parse folds it into the output count
+        // (`extract_usage_object`'s Gemini arm), so the scan must read it
+        // the same way or a thinking-model chunk split across TLS records
+        // under-reports the call by the whole budget: 1 output token where
+        // the same payload parsed whole reports 816.
+        let thoughts =
+            find_u64(data, "thoughtsTokenCount").or_else(|| find_u64(data, "thoughts_token_count"));
         let gemini_output = find_u64(data, "candidatesTokenCount")
-            .or_else(|| find_u64(data, "candidates_token_count"));
+            .or_else(|| find_u64(data, "candidates_token_count"))
+            .map(|candidates| candidates.saturating_add(thoughts.unwrap_or(0)))
+            .or(thoughts);
         let is_gemini = gemini_input.is_some() || gemini_output.is_some();
         let input = find_u64(data, "input_tokens")
             .or_else(|| find_u64(data, "prompt_tokens"))
@@ -470,6 +481,51 @@ mod tests {
             LLMProvider::Gemini,
             "the gateway spelling still bills like Gemini (cache sits inside the prompt count)"
         );
+    }
+
+    /// The direct parse folds `thoughtsTokenCount` into the output count
+    /// (`test_parse_gemini_thinking_usage_reconciles_with_total`); the
+    /// continuation-buffer scan read only the candidate counter, so a
+    /// thinking model's chunk split across TLS records recovered 1 output
+    /// token where the same payload parsed whole reported 816 — the
+    /// recovery is the only usage source for a call that ended there.
+    #[test]
+    fn test_scan_partial_usage_gemini_thinking_counts_reasoning_budget() {
+        // Deliberately not valid JSON: the last TLS record was cut.
+        let data = r#"data:{"candidates":[{"content":{"parts":[{"text":"4"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"thoughtsTokenCount":815,"totalTokenCount":826"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("truncated thinking usage must still parse");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(
+            usage.output_tokens, 816,
+            "thinking tokens are billed as output tokens"
+        );
+        assert_eq!(usage.total_tokens(), 826, "reconciles with totalTokenCount");
+        // Gemini bills the cached prefix inside the prompt count, so the
+        // provider label must stay Gemini for the folded shape too.
+        assert_eq!(usage.provider, LLMProvider::Gemini);
+    }
+
+    /// The gateway spellings (`prompt_token_count` and friends) are the
+    /// other form the scan keeps; their thinking counter folds the same
+    /// way, so a truncated gateway-spelled chunk answers what the same
+    /// payload parsed whole answers.
+    #[test]
+    fn test_scan_partial_usage_gemini_gateway_thinking_spellings() {
+        // Deliberately not valid JSON: the last TLS record was cut.
+        let data = r#"data:{"candidates":[{"content":{"parts":[{"text":"4"}],"role":"model"},"index":0}],"usageMetadata":{"prompt_token_count":10,"candidates_token_count":1,"thoughts_token_count":815,"total_token_count":826"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("truncated gateway-spelled thinking usage must still parse");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(
+            usage.output_tokens, 816,
+            "the gateway spelling folds thinking tokens the same way"
+        );
+        assert_eq!(usage.provider, LLMProvider::Gemini);
     }
 
     /// Regression guard from **real captured traffic**: Anthropic-protocol
