@@ -2402,7 +2402,8 @@ fn eval_overcommit_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 ///
 /// The rule fires on a zero — the kernel guesses, which is the mode the
 /// fork-based persistence of Redis and Valkey can fail under — and on strict
-/// accounting (2) when no database needs it, and [`read_sysctl_u64`] maps an
+/// accounting (2) where [`strict_overcommit_refused`] holds, and
+/// [`read_sysctl_u64`] maps an
 /// unreadable or unparseable file to that same 0. Only a zero the reader
 /// could produce is evidence of the guessing mode, so a
 /// masked or garbled proc entry (a container's, typically) neither reports a
@@ -2421,33 +2422,63 @@ fn eval_overcommit_memory_at(
     // overcommit must be enabled! Without it, a background save or
     // replication may fail under low memory condition"), because fork-based
     // RDB/AOF persistence is unchanged.
-    let needs_overcommit = info.has_process("redis-server") || info.has_process("valkey-server");
-    if !needs_overcommit {
+    let forks = info.has_process("redis-server") || info.has_process("valkey-server");
+    let refuses_strict = strict_overcommit_refused(info);
+    if !forks && !refuses_strict {
         return 1;
     }
     // Redis 7 and Valkey check for exactly 1 ("Memory overcommit must be
     // enabled!", src/syscheck.c `checkOvercommit`), and strict accounting (2)
     // charges the fork for a full copy of the dataset, so it fails sooner than
-    // the guessing mode. A database on the same host keeps its strict mode:
-    // `overcommit_ratio_recommendation` sizes that mode for it, and a switch
-    // to 1 would make that advice a no-op.
+    // the guessing mode. MongoDB and ClickHouse accept the guessing mode but
+    // warn on strict accounting; see [`strict_overcommit_refused`] for when the
+    // strict mode is left to a database that asks for it.
     let current = match read_switch(path) {
-        Some(0) => 0,
-        Some(2) if !is_database_present(info) => 2,
+        Some(0) if forks => 0,
+        Some(2) if refuses_strict => 2,
         _ => return 1,
+    };
+    let reason = if forks {
+        format!(
+            "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory={current} 可能导致 fork 失败"
+        )
+    } else {
+        "MongoDB/ClickHouse 在严格超额模式（overcommit_memory=2）下内存分配易失败，二者启动检查均建议改为 1"
+            .to_string()
     };
     recs.push(Recommendation {
         param: "vm.overcommit_memory".to_string(),
         current_value: current.to_string(),
         recommended_value: "1".to_string(),
-        reason: format!(
-            "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory={current} 可能导致 fork 失败"
-        ),
+        reason,
         confidence: Confidence::High,
         category: Category::Performance,
         writable: true,
     });
     1
+}
+
+/// Whether strict overcommit accounting (`vm.overcommit_memory = 2`) is refused
+/// by a service on this host and wanted by none, so the plan should move the
+/// host to 1.
+///
+/// Redis and Valkey require exactly 1 (src/syscheck.c `checkOvercommit`,
+/// Redis 7.2.4 and Valkey 8.0.1). mongod warns on 2 ("Journaling and memory
+/// allocation work best if overcommit_memory is set to 1", MongoDB 8.0.4
+/// src/mongo/db/startup_warnings_mongod.cpp; 7.0 asks for 0 or 1), and
+/// ClickHouse warns "Linux memory overcommit is disabled" on 2 (24.8
+/// programs/server/Server.cpp). PostgreSQL is the one database here that
+/// documents strict mode as its recommended setting (PostgreSQL 16, 19.4.4
+/// "Linux Memory Overcommit"), so a host running it keeps the mode, and
+/// `overcommit_ratio_recommendation` sizes it. Both rules read this one
+/// predicate, so the plan never pairs a switch to 1 with ratio advice that
+/// the switch would make a no-op.
+fn strict_overcommit_refused(info: &SystemInfo) -> bool {
+    let refuses = info.has_process("redis-server")
+        || info.has_process("valkey-server")
+        || info.has_process("mongod")
+        || info.has_process("clickhouse");
+    refuses && !info.has_process("postgres")
 }
 
 // ─── IO/Disk Rules ───────────────────────────────────────────────────────────
@@ -10963,7 +10994,9 @@ fn eval_overcommit_ratio_at(
     } else {
         0
     };
-    overcommit_ratio_recommendation(oc_mode, ratio, kbytes, is_database_present(info), recs);
+    // A host the overcommit_memory rule moves off strict mode needs no ratio.
+    let sized_db = is_database_present(info) && !strict_overcommit_refused(info);
+    overcommit_ratio_recommendation(oc_mode, ratio, kbytes, sized_db, recs);
     1
 }
 
@@ -22502,6 +22535,79 @@ mod tests {
             advice(&["redis-server", "postgres"]).is_empty(),
             "a database's strict mode is left to the overcommit_ratio rule"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// mongod and ClickHouse warn on strict accounting at startup (MongoDB
+    /// "Journaling and memory allocation work best if overcommit_memory is set
+    /// to 1", ClickHouse "Linux memory overcommit is disabled"), while the
+    /// overcommit_ratio rule sized that same strict mode for them as
+    /// databases. Only PostgreSQL documents strict mode as its setting, so the
+    /// mode moves to 1 unless it runs, and the ratio advice steps aside.
+    #[test]
+    fn strict_overcommit_moves_for_services_that_refuse_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_overcommit_refused_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let strict = write("strict", b"2\n");
+        let guess = write("guess", b"0\n");
+        let ratio = write("ratio", b"50\n");
+        let kbytes = write("kbytes", b"0\n");
+        let memory = |procs: &[&str], mode: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_overcommit_memory_at(
+                &info_with_processes(procs),
+                &mut recs,
+                mode.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| (r.current_value, r.recommended_value))
+                .collect::<Vec<_>>()
+        };
+        let ratio_advice = |procs: &[&str]| {
+            let mut recs = Vec::new();
+            eval_overcommit_ratio_at(
+                &info_with_processes(procs),
+                &mut recs,
+                ratio.to_str().unwrap(),
+                strict.to_str().unwrap(),
+                kbytes.to_str().unwrap(),
+            );
+            recs.len()
+        };
+
+        for procs in [
+            &["mongod"][..],
+            &["clickhouse"],
+            &["redis-server", "mysqld"],
+        ] {
+            assert_eq!(
+                memory(procs, &strict),
+                [("2".to_string(), "1".to_string())],
+                "{procs:?}: strict mode is refused"
+            );
+            assert_eq!(
+                ratio_advice(procs),
+                0,
+                "{procs:?}: no ratio for a mode that moves"
+            );
+        }
+        // The guessing mode is fine for mongod and ClickHouse.
+        assert!(memory(&["mongod"], &guess).is_empty());
+        // PostgreSQL asks for strict mode: it stays, and its ratio is sized.
+        assert!(memory(&["mongod", "postgres"], &strict).is_empty());
+        assert_eq!(ratio_advice(&["mongod", "postgres"]), 1);
+        // A database nobody refuses strict mode for keeps the ratio advice.
+        assert_eq!(ratio_advice(&["mysqld"]), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }
