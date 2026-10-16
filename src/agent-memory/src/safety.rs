@@ -134,9 +134,16 @@ pub fn contains_secrets(text: &str) -> bool {
 /// (label, regex_pattern) pairs ordered from most-specific to broadest.
 static SECRET_PATTERNS: &[(&str, &str)] = &[
     // Anthropic API key: sk-ant-...
-    ("anthropic-key", r"sk-ant-[a-zA-Z0-9]{20,}"),
-    // OpenAI API key: sk-...
+    // Bodies of current keys carry hyphens (sk-ant-api03-<base64url>), so the
+    // character class must accept `-`/`_`; `\b` keeps the pattern from firing
+    // inside ordinary hyphenated words such as "task-ant-eater".
+    ("anthropic-key", r"\bsk-ant-[\w-]{20,}"),
+    // OpenAI API key (legacy format): sk-<48 alnum>.
     ("openai-key", r"sk-[a-zA-Z0-9]{20,}"),
+    // OpenAI project key: sk-proj-<base64url>.
+    ("openai-project-key", r"\bsk-proj-[\w-]{20,}"),
+    // OpenAI service-account key: sk-svcacct-<dot-separated base64url>.
+    ("openai-svcacct-key", r"\bsk-svcacct-[\w.-]{20,}"),
     // GitHub personal access token: ghp_...
     ("github-token", r"ghp_[a-zA-Z0-9]{36}"),
     // GitHub fine-grained token: github_pat_...
@@ -267,6 +274,60 @@ mod tests {
         let result = redact_secrets(text);
         assert!(!result.contains("sk-abc"));
         assert!(result.contains("[REDACTED:openai-key]"));
+    }
+
+    #[test]
+    fn redacts_modern_anthropic_key_with_hyphenated_prefix() {
+        // Current Anthropic keys are sk-ant-api03-<base64url>; the body
+        // contains hyphens/underscores that the alnum-only class rejected.
+        let text = "key: sk-ant-api03-abc123def456ghi789jkl012mno345pqr678stu901vwx";
+        let result = redact_secrets(text);
+        assert!(!result.contains("sk-ant-api03-"));
+        assert!(result.contains("[REDACTED:anthropic-key]"));
+    }
+
+    #[test]
+    fn redacts_openai_project_key() {
+        let text = "OPENAI_PROJECT_KEY=sk-proj-abc123def456ghi789jkl012mno345pqr678";
+        let result = redact_secrets(text);
+        assert!(!result.contains("sk-proj-"));
+        assert!(result.contains("[REDACTED:openai-project-key]"));
+    }
+
+    #[test]
+    fn redacts_openai_service_account_key() {
+        // Service-account keys are dot-separated base64url segments.
+        let text = "sk-svcacct-abc123def456ghi789jkl012mno345.pqr678stu901";
+        let result = redact_secrets(text);
+        assert!(!result.contains("sk-svcacct-"));
+        assert!(result.contains("[REDACTED:openai-svcacct-key]"));
+    }
+
+    #[test]
+    fn contains_secrets_detects_modern_key_formats() {
+        assert!(contains_secrets(
+            "leaked: sk-ant-api03-abc123def456ghi789jkl012mno345"
+        ));
+        assert!(contains_secrets(
+            "sk-proj-abc123def456ghi789jkl012mno345pqr678"
+        ));
+        assert!(contains_secrets(
+            "sk-svcacct-abc123def456ghi789jkl012mno345.yz"
+        ));
+    }
+
+    #[test]
+    fn scikit_style_hyphenated_words_are_not_secrets() {
+        // The new prefix patterns must not fire on ordinary hyphenated text
+        // ("sk-learn" notes), and the legacy alnum-only pattern cannot match
+        // because the hyphen breaks the run.
+        let text = "sk-learn-model-comparison-pipeline-with-long-hyphenated-name";
+        assert!(!contains_secrets(text));
+        assert_eq!(redact_secrets(text), text);
+        // "task-ant-eater" contains the literal substring "sk-ant-" but not
+        // at a word boundary, so it must survive untouched as well.
+        let text2 = "task-ant-eater-behavior-research-notes-2026-edition";
+        assert_eq!(redact_secrets(text2), text2);
     }
 
     #[test]
