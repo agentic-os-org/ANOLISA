@@ -82,6 +82,43 @@ fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> 
     Some(messages)
 }
 
+/// Estimate input tokens for callers that retain their own empty-message semantics.
+///
+/// A failed render has no formatted output to carry the tool definitions, so the
+/// raw fallback must count them alongside the messages.
+pub(crate) fn estimate_input_tokens(
+    mut messages: Vec<serde_json::Value>,
+    tools_json: Option<Vec<serde_json::Value>>,
+    tokenizer: &LlmTokenizer,
+) -> usize {
+    for msg in &mut messages {
+        if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            for tool_call in tool_calls {
+                if let Some(function) = tool_call.get_mut("function") {
+                    if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                            function["arguments"] = parsed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
+        Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+        Err(e) => {
+            log::warn!("Failed to apply chat template: {e}, falling back to raw count");
+            messages
+                .iter()
+                .chain(tools_json.iter().flatten())
+                .filter_map(|value| serde_json::to_string(value).ok())
+                .map(|text| tokenizer.count(&text).unwrap_or(0))
+                .sum()
+        }
+    }
+}
+
 /// Count tokens in a request JSON using the provided tokenizer and chat template
 ///
 /// # Arguments
@@ -956,64 +993,14 @@ impl Analyzer {
         // Extract provider from path
         let provider = manual_provider_from_path(path);
 
-        // Count input tokens from request messages using chat template. The
-        // same parser as `count_request_tokens`: OpenAI chat completions,
-        // Responses `input` + `instructions`, DashScope native `input.messages`
-        // and the Anthropic top-level `system`.
-        let messages_owned: Option<Vec<serde_json::Value>> = request_messages(request_json_ref);
-
-        let input_tokens = if let Some(messages) = messages_owned {
-            if messages.is_empty() {
-                0
-            } else {
-                // Clone messages for in-place modification of tool_calls.arguments
-                let mut msgs = messages;
-
-                // Process tool_calls arguments: parse JSON string to object in place
-                for msg in msgs.iter_mut() {
-                    if let Some(tool_calls) =
-                        msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
-                    {
-                        for tool_call in tool_calls.iter_mut() {
-                            if let Some(func) = tool_call.get_mut("function") {
-                                if let Some(args) = func.get("arguments") {
-                                    if let Some(args_str) = args.as_str() {
-                                        // Try to parse arguments string as JSON object
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<serde_json::Value>(args_str)
-                                        {
-                                            func["arguments"] = parsed;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> =
-                    crate::parser::llm::extract_tools_view(request_json_ref);
-                let tools_slice = tools_json.as_deref();
-
-                // Apply chat template with tools to get the actual prompt sent to LLM
-                match tokenizer.apply_chat_template_with_tools(&msgs, tools_slice, true) {
-                    Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
-                    Err(e) => {
-                        log::warn!("Failed to apply chat template: {e}, falling back to raw count");
-                        // Fallback: count raw message content
-                        let mut total = 0u64;
-                        for msg in &msgs {
-                            if let Ok(msg_str) = serde_json::to_string(msg) {
-                                total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
-                            }
-                        }
-                        total
-                    }
-                }
-            }
-        } else {
-            0
+        let input_tokens = match request_messages(request_json_ref) {
+            Some(messages) if messages.is_empty() => 0,
+            Some(messages) => estimate_input_tokens(
+                messages,
+                crate::parser::llm::extract_tools_view(request_json_ref),
+                &tokenizer,
+            ) as u64,
+            None => 0,
         };
 
         // Count output tokens from SSE events content. The shared merge counts

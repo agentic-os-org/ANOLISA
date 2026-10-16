@@ -1366,12 +1366,10 @@ mod tests {
         assert_eq!(count.per_message.len(), 1);
     }
 
-    /// Tool definitions ride along in the same fallback: a body the template
-    /// cannot render that also declares `tools` must count the definitions on
-    /// top of the raw messages (they never reached the template, and there is
-    /// no tool-role message to fold them into).
+    /// The detailed breakdown and the shared manual/drain estimator must count
+    /// unrenderable tool definitions exactly once and return the same total.
     #[test]
-    fn unrenderable_content_still_counts_tool_definitions() {
+    fn unrenderable_counters_count_tool_definitions_once() {
         let tokenizer = fixture_tokenizer();
         let with_tools = json!({
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}],
@@ -1387,18 +1385,52 @@ mod tests {
         let without_tools = json!({
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
         });
+        let tools = crate::parser::llm::extract_tools_view(&with_tools).expect("tools");
+        let expected_tool_tokens: usize = tools
+            .iter()
+            .map(|tool| {
+                let text = serde_json::to_string(tool).expect("tool serializes");
+                tokenizer.count(&text).expect("tool counts")
+            })
+            .sum();
+        assert!(expected_tool_tokens > 0);
+
         let counted = crate::analyzer::count_request_tokens(&with_tools, &tokenizer, &tokenizer)
             .expect("request is counted");
         let baseline =
             crate::analyzer::count_request_tokens(&without_tools, &tokenizer, &tokenizer)
                 .expect("request is counted");
-        assert!(
-            counted.total_tokens > baseline.total_tokens,
-            "the tool definitions must reach the fallback count: {} vs {}",
+        assert_eq!(counted.tools_tokens, expected_tool_tokens);
+        assert_eq!(
             counted.total_tokens,
-            baseline.total_tokens
+            baseline.total_tokens + expected_tool_tokens
         );
-        assert!(counted.tools_tokens > 0);
+
+        let estimate = |body: &serde_json::Value| {
+            let messages = body["messages"].as_array().expect("messages").clone();
+            crate::analyzer::estimate_input_tokens(
+                messages,
+                crate::parser::llm::extract_tools_view(body),
+                &tokenizer,
+            )
+        };
+        assert_eq!(
+            estimate(&with_tools),
+            estimate(&without_tools) + expected_tool_tokens
+        );
+        assert_eq!(estimate(&with_tools), counted.total_tokens);
+        assert_eq!(estimate(&without_tools), baseline.total_tokens);
+
+        let mut with_tool_message = with_tools.clone();
+        with_tool_message["messages"]
+            .as_array_mut()
+            .expect("messages")
+            .push(json!({"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}));
+        let folded =
+            crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
+                .expect("request with a tool message is counted");
+        assert_eq!(estimate(&with_tool_message), folded.total_tokens);
+        assert_eq!(folded.tools_tokens, expected_tool_tokens);
     }
 
     /// The Responses API repeats the whole answer in `*.done` events; folding

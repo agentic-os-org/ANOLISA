@@ -3202,41 +3202,11 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
     if let Some(system) = instructions.filter(|text| !text.is_empty()) {
         messages.insert(0, serde_json::json!({"role": "system", "content": system}));
     }
-    // Parse tool_calls.arguments from string to object
-    for msg in messages.iter_mut() {
-        if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-            for tc in tcs.iter_mut() {
-                if let Some(f) = tc.get_mut("function") {
-                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
-                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
-                            f["arguments"] = p;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // DashScope/Bailian native requests nest their tool definitions under
-    // "parameters" (the OpenAI-compatible spelling is top level), the same
-    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
-    // this the drained call is estimated without tools the template renders.
-    let tools_json: Option<Vec<serde_json::Value>> = body
-        .get("tools")
-        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
-        .and_then(|t| t.as_array())
-        .map(|a| a.to_vec());
-    let count =
-        match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
-            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-            Err(_) => {
-                // Fallback: raw message count
-                messages
-                    .iter()
-                    .filter_map(|m| serde_json::to_string(m).ok())
-                    .map(|s| tokenizer.count(&s).unwrap_or(0))
-                    .sum()
-            }
-        };
+    let count = crate::analyzer::estimate_input_tokens(
+        messages,
+        crate::parser::llm::extract_tools_view(body),
+        tokenizer,
+    );
     if count > 0 { Some(count as i64) } else { None }
 }
 
