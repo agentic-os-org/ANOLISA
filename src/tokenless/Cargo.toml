@@ -31,6 +31,10 @@ license = "Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Same insertion-ordered map `serde_json` uses once `preserve_order` is unified
+# on (via toon-format). The exact JSON tree must iterate members in source order
+# or compaction would silently reorder every multi-key object.
+indexmap = "2"
 csv = "1.4"
 html5ever = "0.39"
 regex = "1.10"

@@ -1050,6 +1050,7 @@ version = "0.8.7"
 dependencies = [
  "csv",
  "html5ever",
+ "indexmap",
  "serde_json",
  "thiserror 2.0.18",
  "tokenless-ccr",

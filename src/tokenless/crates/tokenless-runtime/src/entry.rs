@@ -2483,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_preserves_numbers_the_parser_cannot_represent() {
+    fn post_tool_retains_numbers_the_parser_cannot_represent() {
         for literal in [
             "18446744073709551617",
             "-9223372036854775809",
@@ -2500,11 +2500,25 @@ mod tests {
                 request.content_origin = ContentOrigin::ApiResponse;
                 request.capabilities.replace_with_text = replace_with_text;
                 let outcome = post_tool_with_store(&request, &options(), None).unwrap();
-                assert_eq!(outcome.response.disposition, Disposition::NoSavings);
+                // One unrepresentable number no longer costs the whole
+                // response its compression: the literal is retained and the
+                // rest of the document is compacted around it.
+                assert_eq!(outcome.response.disposition, Disposition::Applied);
                 assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
-                assert!(outcome.response.applied_operations.is_empty());
+                assert_eq!(
+                    outcome.response.applied_operations,
+                    [AppliedOperation::JsonCleanup]
+                );
                 assert!(outcome.response.stash_keys.is_empty());
-                assert_eq!(outcome.response.output, content);
+                assert!(
+                    outcome
+                        .response
+                        .output
+                        .contains(&format!("\"value\":{literal},")),
+                    "{literal} missing from {}",
+                    outcome.response.output
+                );
+                assert!(outcome.response.output.len() < content.len());
             }
         }
     }
