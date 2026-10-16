@@ -1886,11 +1886,22 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// coordination node runs. Keeper is a separate program with its own
 /// configuration, so the program name decides, exactly as it does for the
 /// client tools of the same package.
+///
+/// `oracle-cloud-agent` is the same shape for the Oracle database: it is the
+/// cloud platform's instance-management agent (with its `-updater` sibling),
+/// not an instance of the database, and both keep `oracle` as their first name
+/// run. A host running only the agent — the default on that platform's images
+/// — reported an Oracle database, classified as its workload and was handed
+/// the database/cache program (swappiness, the dirty limits,
+/// `vm.vfs_cache_pressure`, `kernel.shmmni`, `vm.nr_hugepages`, the busy-poll
+/// pair), while the real database binary is the process named `oracle`.
 const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "consul-template",
     "consul-esm",
     "grafana-agent",
     "clickhouse-keeper",
+    "oracle-cloud-agent",
+    "oracle-cloud-agent-updater",
 ];
 
 /// Whether the program `program` is a *tool* of a service rather than the
@@ -4398,6 +4409,11 @@ mod tests {
             // (including `vm.nr_hugepages` and `kernel.shmmni`) then ran on a
             // host whose only ClickHouse process is a Raft store.
             ("clickhouse-keeper", "clickhouse", "ClickHouse"),
+            // Oracle's instance-management agent and its updater: both keep
+            // `oracle` as their first name run, so a host that runs only the
+            // platform's default agents reported an Oracle database.
+            ("oracle-cloud-agent", "oracle", "Oracle"),
+            ("oracle-cloud-agent-updater", "oracle", "Oracle"),
         ] {
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
