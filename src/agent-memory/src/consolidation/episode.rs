@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::fact::{ConsolidatedFact, FactCategory};
+use super::fact::{ConsolidatedFact, FactCategory, code_span, code_span_verbatim, span_safe};
 use super::heuristics::OwnedAuditEntry;
 
 /// A single step within an episode.
@@ -97,7 +97,7 @@ impl Episode {
         for step in &self.chain {
             out.push_str(&format!("## Step {}: {}\n", step.step, step.tool));
             if !step.input.is_empty() {
-                out.push_str(&format!("- Input: `{}`\n", step.input));
+                out.push_str(&format!("- Input: {}\n", code_span(&step.input)));
             }
             if !step.result.is_empty() {
                 out.push_str(&format!("- Result: {}\n", step.result));
@@ -115,10 +115,16 @@ impl Episode {
 
     /// Convert to a ConsolidatedFact for integration with consolidation.
     pub fn to_fact(&self) -> ConsolidatedFact {
+        // Interpolated values are path-or-error text of arbitrary shape.
+        // Paths (chain inputs, the trigger) are quoted through code_span
+        // so the date normalizer copies them verbatim — span_safe alone
+        // only strips backticks and leaves the text open to rewriting.
+        // The bare step results stay prose: sanitization plus the
+        // normalizer's path-context guard protect them.
         let chain_summary = self
             .chain
             .iter()
-            .map(|s| format!("{}: {}", s.tool, s.input))
+            .map(|s| format!("{}: {}", s.tool, code_span_verbatim(&s.input)))
             .collect::<Vec<_>>()
             .join(" → ");
 
@@ -126,10 +132,10 @@ impl Episode {
             "Episode ({} steps, {}): {}\n\n{}\n\nChain: {}",
             self.chain.len(),
             self.outcome,
-            self.trigger,
+            code_span_verbatim(&self.trigger),
             self.chain
                 .iter()
-                .map(|s| format!("Step {}: {} → {}", s.step, s.tool, s.result))
+                .map(|s| format!("Step {}: {} → {}", s.step, s.tool, span_safe(&s.result)))
                 .collect::<Vec<_>>()
                 .join("\n"),
             chain_summary,
@@ -556,6 +562,7 @@ fn make_step(step: usize, entry: &OwnedAuditEntry) -> EpisodeStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consolidation::quality::normalize_relative_dates;
     use chrono::Utc;
 
     fn make_entry(
@@ -617,6 +624,97 @@ mod tests {
             vec![0, 1, 2, 3],
             "the episode must retain exactly the cycle's four entries"
         );
+    }
+
+    #[test]
+    fn episodic_fact_paths_survive_normalization_verbatim() {
+        // #7810 for the episodic rule, through the real extractors: the
+        // promote-chain trigger embeds the raw store path in prose and
+        // the edit-cycle trigger embeds the raw search query, so both
+        // are exactly the shapes the normalizer rewrites when
+        // unprotected.
+        let promote_entries = vec![
+            make_entry("mem_read", "notes/today/a.md", true, None, Some(200)),
+            make_entry("mem_write", "scratch/draft.md", true, None, Some(10)),
+            make_entry("mem_promote", "notes/today/a.md", true, None, Some(10)),
+        ];
+        let episodes = extract_promote_chain(&promote_entries, "test-sid");
+        assert_eq!(episodes.len(), 1);
+        let fact = episodes[0].episode.to_fact();
+        let normalized = normalize_relative_dates(&fact.content);
+        // Occurrence conservation: every narrated path must appear
+        // exactly as often after normalization as before — one rewritten
+        // occurrence would break the count and leave the body
+        // disagreeing with the related_paths frontmatter.
+        for path in &fact.related_paths {
+            assert_eq!(
+                fact.content.matches(path.as_str()).count(),
+                normalized.matches(path.as_str()).count(),
+                "body/related_paths disagree for {path:?}\n{normalized}"
+            );
+        }
+
+        let edit_entries = vec![
+            make_entry(
+                "memory_search",
+                "bm25:today standup notes",
+                true,
+                None,
+                Some(3),
+            ),
+            make_entry("mem_read", "notes/today/standup.md", true, None, Some(200)),
+            make_entry("mem_edit", "notes/today/standup.md", true, None, Some(1)),
+            make_entry("mem_read", "notes/today/standup.md", true, None, Some(200)),
+        ];
+        let episodes = extract_edit_cycle(&edit_entries, "test-sid");
+        assert_eq!(episodes.len(), 1);
+        let fact = episodes[0].episode.to_fact();
+        let normalized = normalize_relative_dates(&fact.content);
+        // The trigger quotes the raw query through code_span, so the
+        // query — date keyword included — survives verbatim.
+        assert!(
+            normalized.contains("bm25:today standup notes"),
+            "{normalized}"
+        );
+        for path in &fact.related_paths {
+            assert_eq!(
+                fact.content.matches(path.as_str()).count(),
+                normalized.matches(path.as_str()).count(),
+                "body/related_paths disagree for {path:?}\n{normalized}"
+            );
+        }
+    }
+
+    #[test]
+    fn episodic_error_text_sanitizes_backticks_and_still_normalizes() {
+        // Repro B: the step result is the raw Display output of a failed
+        // tool call; a stray backtick must be sanitized (not disable
+        // normalization for the rest of the fact) and prose dates after
+        // it must still rewrite.
+        let entries = vec![
+            make_entry(
+                "mem_edit",
+                "notes/today/a.md",
+                false,
+                Some("missing `config.toml entry, deployed yesterday"),
+                None,
+            ),
+            make_entry("mem_read", "notes/today/a.md", true, None, Some(100)),
+        ];
+        let episodes = extract_error_recovery(&entries, "test-sid");
+        assert_eq!(episodes.len(), 1);
+        let fact = episodes[0].episode.to_fact();
+        let normalized = normalize_relative_dates(&fact.content);
+        assert!(!normalized.contains("`config"), "{normalized}");
+        assert!(normalized.contains("'config.toml entry"), "{normalized}");
+        assert!(!normalized.contains("yesterday"), "{normalized}");
+        for path in &fact.related_paths {
+            assert_eq!(
+                fact.content.matches(path.as_str()).count(),
+                normalized.matches(path.as_str()).count(),
+                "body/related_paths disagree for {path:?}\n{normalized}"
+            );
+        }
     }
 
     #[test]
