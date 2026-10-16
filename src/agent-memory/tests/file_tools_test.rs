@@ -303,6 +303,38 @@ fn diff_missing_file_errors() {
     assert!(matches!(err, MemoryError::NotFound(_)));
 }
 
+#[test]
+fn diff_rejects_file_exceeding_cap() {
+    // Both inputs are slurped before diffy runs, so the cap has to hold in
+    // either argument position — big.md is checked as the left and as the
+    // right operand.
+    let (_t, svc) = setup_with_read_cap(10);
+    svc.write("big.md", "this content is way more than ten bytes", false)
+        .unwrap();
+    svc.write("small.md", "abc", false).unwrap();
+
+    for (p1, p2) in [("big.md", "small.md"), ("small.md", "big.md")] {
+        let err = svc.diff(p1, p2).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(_)),
+            "diff({p1}, {p2}) expected InvalidArgument, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("exceeds read limit"),
+            "diff({p1}, {p2}) expected a read limit error, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn diff_allows_files_within_cap() {
+    let (_t, svc) = setup_with_read_cap(100);
+    svc.write("a.md", "line1\n", false).unwrap();
+    svc.write("b.md", "line1 changed\n", false).unwrap();
+    let patch = svc.diff("a.md", "b.md").unwrap();
+    assert!(patch.contains("line1 changed"));
+}
+
 // mem_promote happy / error paths are exercised in tests/session_test.rs
 // (promote_copies_scratch_to_store, promote_missing_scratch_file_returns_not_found,
 //  session_log_degrades_gracefully_when_session_dir_unavailable).

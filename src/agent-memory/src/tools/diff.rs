@@ -2,7 +2,7 @@ use std::os::fd::AsFd;
 use std::path::Path;
 
 use crate::audit::AuditEntry;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::ns::paths::{relative_to_mount, resolve_path};
 use crate::safe_fs;
 use crate::service::MemoryService;
@@ -37,6 +37,41 @@ pub fn diff(svc: &MemoryService, path1: &str, path2: &str) -> Result<String> {
 
     let rel1 = relative_to_mount(&svc.mount, &r1);
     let rel2 = relative_to_mount(&svc.mount, &r2);
+
+    // Reject inputs exceeding the configured read cap before either body is
+    // read. mem_diff holds both files *and* the generated patch in memory at
+    // once, so an oversized input costs strictly more here than the same
+    // input handed to mem_read. Statting both up front means an oversized
+    // second argument cannot slurp the first one on the way to the error.
+    // metadata() is the same root_fd-anchored, symlink-refusing stat mem_read
+    // uses, so it adds no new resolution path.
+    let cap = svc.config.memory.max_read_bytes;
+    for rel in [&rel1, &rel2] {
+        let meta = match safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(rel)) {
+            Ok(m) => m,
+            Err(e) => {
+                svc.audit_log(
+                    AuditEntry::new(TOOL)
+                        .path(rel.as_str())
+                        .error(e.to_string()),
+                );
+                return Err(e);
+            }
+        };
+        if meta.len() > cap {
+            let err = MemoryError::InvalidArgument(format!(
+                "file '{rel}' exceeds read limit: {} > {} bytes",
+                meta.len(),
+                cap
+            ));
+            svc.audit_log(
+                AuditEntry::new(TOOL)
+                    .path(rel.as_str())
+                    .error(err.to_string()),
+            );
+            return Err(err);
+        }
+    }
 
     let body1 = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), Path::new(&rel1)) {
         Ok(b) => b,
