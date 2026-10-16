@@ -156,11 +156,40 @@ impl SessionBase {
     /// `mkdirat` a direct child of this base, i.e. create it relative to the
     /// descriptor without re-resolving the base pathname at all.
     ///
+    /// `name` must be a single, non-relative path component: empty, `.`, `..`,
+    /// anything containing `/`, is refused before any syscall.
+    ///
     /// An existing child is not an error — a session may be reopened — but
     /// whatever occupies the name has to be a real directory, checked
     /// without following it. A name that is a symlink would quietly send
     /// every later write to its target.
+    ///
+    /// # Errors
+    /// - `InvalidArgument` if `name` is not a single child name.
+    /// - `Other` if `mkdirat`/`fstatat` fails, or the name is occupied by a
+    ///   non-directory.
     pub fn mkdir_child(&self, name: &str, mode: u32) -> Result<()> {
+        // "." and ".." always exist, so `mkdirat` would return EEXIST and
+        // the `fstatat` below — which resolves them relative to the base
+        // descriptor — would happily report a directory: the session tree
+        // would then be anchored on the base itself (or its parent)
+        // instead of a child of it. An absolute name defeats the anchor
+        // outright: `mkdirat`/`fstatat` ignore the descriptor for
+        // absolute paths. Refuse anything that is not a single, normal,
+        // non-relative component before the syscall — an embedded NUL
+        // included: the kernel would reject it with EINVAL, but as a
+        // syscall failure rather than a bad-name refusal.
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\0')
+        {
+            return Err(MemoryError::InvalidArgument(format!(
+                "mkdir_child({}): {name:?} is not a single child name",
+                self.display.display()
+            )));
+        }
         let bits = Mode::from_bits_truncate(mode);
         match nix::sys::stat::mkdirat(Some(self.fd()), name, bits) {
             Ok(()) | Err(Errno::EEXIST) => {}
@@ -192,4 +221,43 @@ fn io_error(e: Errno) -> std::io::Error {
 
 fn mem_io_error(e: Errno) -> MemoryError {
     MemoryError::Io(io_error(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn mkdir_child_refuses_relative_names() {
+        let tmp = tempdir().unwrap();
+        let base = SessionBase::open_nofollow(tmp.path()).unwrap();
+        // "." and ".." already exist, so mkdirat returns EEXIST and the
+        // directory check alone cannot catch them — the refusal must come
+        // from the name check, before any syscall.
+        assert!(base.mkdir_child(".", 0o700).is_err());
+        assert!(base.mkdir_child("..", 0o700).is_err());
+        // An absolute name ignores the descriptor entirely (mkdirat
+        // resolves it from "/"), which would build the session tree
+        // outside the base — the same refusal must catch it, along with
+        // the empty name. The escape target lives inside the test's own
+        // tempdir: still an absolute path, so the refusal still has to
+        // come from the name check, and nothing outside the test can
+        // create it or fail the assertion for the wrong reason.
+        let escaped = tmp.path().join("escaped");
+        assert!(base.mkdir_child(&escaped.to_string_lossy(), 0o700).is_err());
+        assert!(!escaped.exists());
+        assert!(base.mkdir_child("", 0o700).is_err());
+        // An embedded NUL is a bad name, not a syscall failure: the
+        // kernel would reject it with EINVAL, but the guard classifies
+        // it before any syscall.
+        assert!(matches!(
+            base.mkdir_child("a\0b", 0o700),
+            Err(MemoryError::InvalidArgument(_))
+        ));
+        // Regular child names keep working, including a repeated create.
+        assert!(base.mkdir_child("real", 0o700).is_ok());
+        assert!(base.mkdir_child("real", 0o700).is_ok());
+        assert!(tmp.path().join("real").is_dir());
+    }
 }
