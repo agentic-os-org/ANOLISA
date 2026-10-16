@@ -248,23 +248,54 @@ impl SessionLogService {
     /// `MAX_SESSION_LOG_BYTES`. When the log exceeds the cap, the most
     /// recent entries are returned (tail truncation) so the model can see
     /// what it has done most recently.
+    ///
+    /// The returned window spans whole records only: it starts at a line
+    /// boundary and ends just past the last newline, so an unterminated
+    /// trailing fragment is dropped instead of failing the read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Io`] when the log cannot be read, and
+    /// [`MemoryError::Other`] if the bytes between two record boundaries are
+    /// not valid UTF-8.
     pub fn read_log(&self) -> Result<String> {
         // Hold the write-side lock while reading so we get a consistent
         // snapshot (no half-written lines) — not to prevent concurrent
         // corruption, which O_APPEND already guarantees.
         let _g = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
         let raw = std::fs::read(&self.log_path)?;
-        if raw.len() <= Self::MAX_SESSION_LOG_BYTES as usize {
-            return String::from_utf8(raw).map_err(|e| MemoryError::Other(e.to_string()));
-        }
-        // Return the tail: find a line boundary near the end of the cap.
         let cap = Self::MAX_SESSION_LOG_BYTES as usize;
-        let start = raw[raw.len() - cap..]
+
+        // Start at the first line boundary inside the final `cap` bytes when
+        // over the cap, so the tail kept is the most recent records.
+        let start = if raw.len() > cap {
+            let tail_from = raw.len() - cap;
+            raw[tail_from..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| tail_from + p + 1)
+                .unwrap_or(tail_from)
+        } else {
+            0
+        };
+
+        // End just past the last newline. `append_log` terminates every
+        // record, so bytes after it are a writer interrupted mid-append —
+        // never a completed record, and able to stop inside a multi-byte
+        // character, which would fail the decode for the whole window. Both
+        // boundaries then sit on ASCII, hence on char boundaries. The
+        // append-only writer re-opens at EOF, so the dropped fragment is
+        // either overwritten by the next append or discarded with the
+        // session. `max(start)` keeps the window empty rather than inverted
+        // when the cap holds no newline at all.
+        let end = raw
             .iter()
-            .position(|&b| b == b'\n')
-            .map(|p| raw.len() - cap + p + 1)
-            .unwrap_or(raw.len() - cap);
-        String::from_utf8(raw[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+            .max(start);
+
+        String::from_utf8(raw[start..end].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
     }
 
     /// Copy a file from `<scratch>/<src_in_scratch>` to `<mount.root>/<dst_in_store>`.

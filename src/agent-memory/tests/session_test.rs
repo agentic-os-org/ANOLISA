@@ -396,3 +396,168 @@ fn audit_log_is_mirrored_to_session() {
     assert!(store_audit.contains("\"tool\":\"mem_write\""));
     assert!(session_log.contains("\"tool\":\"mem_write\""));
 }
+
+// ---------- torn trailing line (crash mid-append) ----------
+//
+// `append_log` terminates every record with '\n', so a log whose last line has
+// no newline was interrupted mid-write — a crash or SIGKILL between the record's
+// bytes reaching the file and its terminator. Such a fragment can end inside a
+// multi-byte UTF-8 character, and `read_log` used to hand the whole window to
+// `String::from_utf8`, which then failed for every complete line in it: the tail
+// truncation that exists to survive dirty logs was tripped before it could help,
+// because the dirty bytes are at the end, not the start.
+
+/// A jsonl record shaped like a real entry, carrying multi-byte UTF-8 so a torn
+/// tail lands inside a character rather than between two.
+fn cjk_record(i: usize) -> String {
+    format!("{{\"tool\":\"mem_write\",\"path\":\"笔记/文件-{i}.md\",\"bytes\":{i}}}\n")
+}
+
+/// Append raw bytes to the session log the way an interrupted writer would —
+/// straight to the file, with no trailing newline.
+fn append_raw(session: &SessionLogService, bytes: &[u8]) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(session.log_path())
+        .expect("open the session log for a raw append");
+    f.write_all(bytes).expect("append the torn tail");
+    f.flush().expect("flush the torn tail");
+}
+
+/// The exact state a crash mid-append leaves behind: a valid record cut short
+/// plus the first byte of a multi-byte character.
+const TORN_TAIL: &[u8] = b"{\"tool\":\"mem_wr";
+const TORN_TAIL_MID_CHAR: u8 = 0xE5;
+
+#[test]
+fn read_log_survives_torn_trailing_line_under_cap() {
+    let tmp = tempdir().unwrap();
+    let session = SessionLogService::start(
+        tmp.path(),
+        SessionId::from_string("ses_torn_small").unwrap(),
+        "alice",
+        None,
+        "user-alice",
+        None,
+    )
+    .unwrap();
+
+    for i in 0..3 {
+        append_raw(&session, cjk_record(i).as_bytes());
+    }
+    append_raw(&session, TORN_TAIL);
+    append_raw(&session, &[TORN_TAIL_MID_CHAR]);
+
+    let log = session
+        .read_log()
+        .expect("a torn tail must not fail the read");
+
+    assert!(
+        log.ends_with('\n'),
+        "the unterminated fragment must be dropped: {log:?}"
+    );
+    assert!(!log.contains("mem_wr\""), "torn fragment leaked: {log:?}");
+    // Every complete line survives, and stays parseable.
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 3, "lost complete lines: {log:?}");
+    for (i, line) in lines.iter().enumerate() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("complete record parses");
+        assert_eq!(v["path"], format!("笔记/文件-{i}.md"));
+    }
+}
+
+#[test]
+fn read_log_survives_torn_trailing_line_over_cap() {
+    let tmp = tempdir().unwrap();
+    let session = SessionLogService::start(
+        tmp.path(),
+        SessionId::from_string("ses_torn_big").unwrap(),
+        "alice",
+        None,
+        "user-alice",
+        None,
+    )
+    .unwrap();
+
+    // Comfortably more than the 1 MiB cap, so the tail-truncation path runs.
+    let records = 30_000;
+    let mut body = String::new();
+    for i in 0..records {
+        body.push_str(&cjk_record(i));
+    }
+    assert!(body.len() > 1_048_576, "fixture must exceed the cap");
+    append_raw(&session, body.as_bytes());
+    append_raw(&session, TORN_TAIL);
+    append_raw(&session, &[TORN_TAIL_MID_CHAR]);
+
+    let log = session
+        .read_log()
+        .expect("a torn tail must not fail the read");
+
+    assert!(
+        log.len() <= 1_048_576,
+        "window must stay within the cap: {}",
+        log.len()
+    );
+    assert!(
+        log.ends_with('\n'),
+        "the unterminated fragment must be dropped: {:?}",
+        &log[log.len().saturating_sub(64)..]
+    );
+    // Tail truncation still keeps the most recent complete records, and each
+    // one is a whole line that parses.
+    let lines: Vec<&str> = log.lines().collect();
+    let last: serde_json::Value =
+        serde_json::from_str(lines.last().expect("at least one line")).expect("last record parses");
+    assert_eq!(last["path"], format!("笔记/文件-{}.md", records - 1));
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("complete record parses");
+        assert_eq!(v["tool"], "mem_write");
+    }
+}
+
+#[test]
+fn read_log_of_a_log_with_no_complete_line_is_empty() {
+    // The degenerate case: the session died on its very first append, so the
+    // log holds one fragment and nothing else. There is no complete record to
+    // recover — an empty string, not an error, is the honest answer.
+    let tmp = tempdir().unwrap();
+    let session = SessionLogService::start(
+        tmp.path(),
+        SessionId::from_string("ses_torn_only").unwrap(),
+        "alice",
+        None,
+        "user-alice",
+        None,
+    )
+    .unwrap();
+
+    append_raw(&session, TORN_TAIL);
+    append_raw(&session, &[TORN_TAIL_MID_CHAR]);
+
+    let log = session
+        .read_log()
+        .expect("a torn tail must not fail the read");
+    assert!(log.is_empty(), "no complete record exists: {log:?}");
+}
+
+#[test]
+fn mem_session_log_survives_a_torn_trailing_line() {
+    // The user-visible surface: `mem_session_log` must still return the
+    // session's audit history after the log was torn.
+    let (_store_tmp, _session_tmp, svc) = setup_service();
+    svc.write("a.md", "hello", false).unwrap();
+
+    let session = svc.session.as_ref().expect("session ready");
+    append_raw(session, TORN_TAIL);
+    append_raw(session, &[TORN_TAIL_MID_CHAR]);
+
+    let log = svc
+        .session_log()
+        .expect("a torn tail must not fail the tool");
+    assert!(
+        log.contains("\"tool\":\"mem_write\""),
+        "audit history lost: {log:?}"
+    );
+}
