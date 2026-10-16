@@ -52,7 +52,7 @@ framework-specific native commands. Completion observers and user Hooks can
 precede one final replacement step (OpenClaw observes natively after compression); the combined sec-core/Tokenless template
 retains scanning/observation and adds Tokenless PreTool retry suggestions before
 execution plus final PostTool compression. Suggested commands require a fresh call
-and pass sec-core/native permissions again; RTK is an external PreTool dependency.
+and pass sec-core/native permissions again; Preview Tokenless packages include the pinned RTK for PreTool; PostTool stays usable without it.
 RTK ownership survives quoted arguments, symlinked state paths and the execution
 prefix forms listed in the user guide. After-event coverage varies by framework.
 If OpenClaw lacks the replacement middleware API, startup reports degraded

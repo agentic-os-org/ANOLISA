@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -26,6 +27,50 @@ class GateFixture(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+
+
+class PackageWorkflowTests(GateFixture):
+    def test_real_cli_paths_use_the_container_workspace(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        step = workflow.split(
+            "      - name: Verify Tokenless PreTool and PostTool contracts\n", 1
+        )[1]
+        step = step.split("      - name: Verify installed packages", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        workspace = self.root / "container workspace"
+        expected = [
+            workspace / "src/tokenless/target/release/tokenless",
+            workspace / "src/aw/target/release/rtk",
+        ]
+        for executable in expected:
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+        binary = self.root / "bin"
+        binary.mkdir()
+        cargo = binary / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$AW_TOKENLESS_TEST_CLI\" "
+            '"$AW_TOKENLESS_TEST_RTK" >> "$AW_PACKAGE_CAPTURE"\n'
+        )
+        cargo.chmod(0o700)
+        capture = self.root / "paths"
+        environment = {
+            **os.environ,
+            "PATH": str(binary),
+            "GITHUB_WORKSPACE": str(workspace),
+            "AW_PACKAGE_CAPTURE": str(capture),
+            "AW_TOKENLESS_TEST_CLI": "/host/runner/src/tokenless/target/release/tokenless",
+            "AW_TOKENLESS_TEST_RTK": "/host/runner/src/aw/target/release/rtk",
+        }
+        subprocess.run(
+            ["/bin/sh", "-eu", "-c", script],
+            env=environment,
+            cwd=self.root,
+            check=True,
+            timeout=10,
+        )
+        self.assertEqual(capture.read_text().splitlines(), [str(p) for p in expected] * 2)
 
 
 class ScopeTests(GateFixture):

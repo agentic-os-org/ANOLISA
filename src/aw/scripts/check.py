@@ -174,7 +174,7 @@ def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
         "aw-package": {"serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile", "aw-config", "aw-exec", "aw-service"},
-        "aw-provider-tokenless": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"},
+        "aw-provider-tokenless": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "sha2", "aw-provider-sec-core"},
         "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc", "jsonschema"},
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},

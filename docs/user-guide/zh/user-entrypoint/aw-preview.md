@@ -26,7 +26,7 @@ export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-默认构建只生成 core；`--component all` 生成四个包。`aw-core` 包含 `aw` 和 `aw-package`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接和 Tokenless CLI；`aw-all-in-one` 包含完全相同的三个组件。分包安装时，分别解压 core 和 Provider，依次用包内 `aw-package install` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
+默认构建只生成 core；`--component all` 生成四个包。`aw-core` 包含 `aw` 和 `aw-package`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。分包安装时，分别解压 core 和 Provider，依次用包内 `aw-package install` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
 
 安装器校验哈希、权限、架构、版本及源码提交，拒绝覆盖，并在 `.aw-packages` 记录文件归属。安装过程中收到 Ctrl-C（SIGINT）或 SIGTERM 会回滚本次写入，随后可重试；强制终止（SIGKILL）不在自动回滚范围内。校验和用于发现损坏，不是发布者签名。安装父目录须归安装用户所有，且不可被其他用户写入。系统后端的安装由 root 管理；若连接已有后端，也支持普通用户安装到自己的目录。
 
@@ -310,7 +310,7 @@ Rust 构建器编译锁定依赖的 release 二进制，检查原生 ELF 架构�
 ## 可选 Tokenless PostTool 包
 
 `--component tokenless` 构建 `aw-provider-tokenless`；`--component all` 也将它纳入
-`aw-all-in-one`。扩展包含桥接和 Tokenless CLI，要求匹配的 core，沿用 sec-core 的
+`aw-all-in-one`。扩展包含桥接、Tokenless CLI 和固定版本带补丁的 RTK，要求匹配的 core，沿用 sec-core 的
 收据与完整性规则。通过 `configure --provider tokenless` 或
 `--provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
 结果槽和故障行为见 [Tokenless 指南](aw-tokenless.md)。

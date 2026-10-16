@@ -1,4 +1,4 @@
-# Replace all absolute path placeholders; native profiles and model credentials stay external.
+# Replace paths and RTK_SHA256_FROM_RECEIPT; native profiles and credentials stay external.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata:
@@ -45,6 +45,10 @@ spec:
           - /absolute/path/to/tokenless
           - --data-dir
           - /absolute/path/to/tokenless-state
+          - --rtk
+          - /absolute/path/to/prefix/libexec/aw/providers/tokenless/rtk
+          - --rtk-sha256
+          - RTK_SHA256_FROM_RECEIPT
       timeout_ms: 2000
       max_output_bytes: 1048576
       config:

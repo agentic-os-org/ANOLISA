@@ -11,13 +11,32 @@ compression. Schema compression and authorized retrieval remain separate.
 ## Install and enable
 
 Use the [AW Preview packages](aw-preview.md). `aw-provider-tokenless` contains
-`aw-provider-tokenless` and the `tokenless` CLI built from the same source commit.
-It requires matching `aw-core`; `aw-all-in-one` includes core, sec-core and
-Tokenless. PostTool works without RTK. PreTool additionally requires a compatible
-RTK installation resolvable by the Agent environment, following the
-[Tokenless installation guide](../token-saving/tokenless/QUICKSTART.md); the AW
-package does not bundle RTK. Python wheels and Tokenless native plugins are not
-needed. Agent installations and their runtime dependencies remain external.
+its bridge and Tokenless CLI from the same source commit, plus RTK v0.49.0 pinned
+at `b1c0dc00649c50fbe8930f849c800d4d6ca12091` with Tokenless's statistics and pytest
+patches. It requires matching `aw-core`; `aw-all-in-one` combines the same component
+payload and receipts with core and sec-core. Python wheels and Tokenless native
+plugins are not needed. Agent installations and runtime dependencies remain external.
+
+RTK lives at `libexec/aw/providers/tokenless/rtk` within the immutable prefix.
+Its source pin, setup script, two patches, shared Tokenless home/path-policy sources
+and Apache-2.0 license are owned files
+under `share/doc/aw-provider-tokenless/rtk`; their hashes and the binary hash are
+in the Tokenless component receipt. `provenance.json` records upstream and ANOLISA
+source revisions, each input's origin and hash, and why RTK includes the shared
+home/path-policy modules. Source builds use the official setup script
+with a fresh owned destination, preserving existing RTK source caches and local
+edits; the temporary source is removed after packaging. No user RTK or global PATH
+is replaced. A managed RTK installation prefix must be representable in PATH
+and cannot contain `:`; configuration rejects it before publication.
+PostTool works without RTK. Package-generated PreTool validates the managed RTK
+and its direct parent: both must belong to the current user or root and must not
+be world-writable; the parent must be a real directory, not a symlink. Group-write
+permission alone is allowed, matching Tokenless's dependency trust rules. It
+prepends its directory only to the Tokenless child's controlled PATH; retry
+suggestions use the absolute executable path. Missing, modified, nonexecutable or
+unusable managed RTK yields a Provider error governed by the existing `on_error`
+policy, without falling back to a user RTK. PostTool and read-only view continue.
+The existing view/schema and its unknown readiness fields are unchanged.
 
 After installing core, install the matching Tokenless extension into the same
 prefix, or install all-in-one into a new prefix. For Qoder/OpenClaw, initialize
@@ -29,16 +48,21 @@ does not enable it. The existing plain `sec-core` selection retains its behavior
 
 For supported targets, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml),
-replace its executable paths, and keep both state directories outside the immutable
-installation prefix. Use the framework-specific profile and launch flags from the
+replace its executable paths and `RTK_SHA256_FROM_RECEIPT` with the RTK entry's
+`sha256` from `PREFIX/.aw-packages/aw-provider-tokenless.json`, and keep both state
+directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
 [AW guide](aw.md#use-one-configuration-for-four-frameworks).
 
 Pi uses the SDK application factory described in the [Pi launch guide](aw.md#start-a-pi-sdk-worker);
 the package configuration generator still targets Qoder/OpenClaw.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
-`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`; it calls
-`tokenless compress` using Protocol v2 and sets `TOKENLESS_DATA_DIR` for that child.
+`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`, optionally followed by
+`--rtk ABS_FILE --rtk-sha256 HEX`. The package generator adds both managed arguments
+using the verified installed payload; hand-written configurations without them
+retain native Tokenless dependency discovery. The view command omits them.
+The bridge calls `tokenless compress` using Protocol v2 and sets
+`TOKENLESS_DATA_DIR` for that child.
 CLI statistics use the Agent, session and tool-call identifiers supplied by AW.
 The CLI's statistics measure selected compression, not verified native adoption.
 
