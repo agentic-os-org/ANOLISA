@@ -293,6 +293,19 @@ fn stage(
                     cancel,
                 )?;
             }
+            for profile in [
+                "aw-agentsight-collector.service",
+                "aw-agentsight-query.service",
+            ] {
+                add(
+                    &root,
+                    &format!("share/aw/agentsight/{profile}"),
+                    &repo.join("src/aw/packaging/agentsight").join(profile),
+                    false,
+                    &mut files,
+                    cancel,
+                )?;
+            }
         } else if *name == "aw-provider-tokenless" {
             for (binary, directory) in [
                 ("aw-provider-tokenless", aw.clone()),

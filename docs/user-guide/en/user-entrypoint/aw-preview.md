@@ -338,3 +338,119 @@ requires matching core, and follows the same receipt/integrity rules as sec-core
 Use `configure --provider tokenless` or `--provider sec-core+tokenless --socket ABS_FILE`
 to enable compression explicitly. See the [Tokenless guide](aw-tokenless.md) for
 four-framework configuration, native result slots and failure behavior.
+
+## Independent AgentSight composition
+
+AgentSight remains a separately versioned component, installed through
+`sudo anolisa install agentsight` (or its RPM alternative). AW's all-in-one archive
+continues to contain only core and the two matching Provider packages. It does
+not claim ownership of AgentSight binaries, its original component contract,
+services or installation receipts. Upgrading or rolling back one component does
+not require giving it the other component's version or source commit.
+
+Release maintainers can combine an existing AW all-in-one archive and an official
+AgentSight Linux raw archive with `src/aw/scripts/compose.py`. This source-side
+release utility requires Python 3.11 or later; the installed AW/Provider binaries
+and AgentSight do not acquire a Python dependency. The general AW development
+gate retains its Python 3.9 minimum: it explicitly skips only these composition
+Python tests on 3.9/3.10; CI uses 3.12 and executes them. Supply archive hashes from the
+reviewed publisher checksum records, rather than computing and trusting a hash
+from an unverified download. From the repository root:
+
+```bash
+python3 src/aw/scripts/compose.py \
+  --aw-archive "$AW_ARCHIVE" --aw-sha256 "$AW_ARCHIVE_SHA256" \
+  --sight-archive "$SIGHT_ARCHIVE" --sight-sha256 "$SIGHT_ARCHIVE_SHA256" \
+  --sight-version 0.14.1 \
+  --sight-release https://github.com/agentic-os-org/ANOLISA/releases/tag/sight/v0.14.1 \
+  --arch aarch64 --output "$PWD/target/aw-sight-composition"
+```
+
+Use `--arch x86_64` for matching x86-64 archives. The output parent must exist and
+the output directory must be absent. Composition retains both archives byte for
+byte and records their hashes, AW's original receipts, and AgentSight's own
+version/release/contract reference in `composition.json`. It validates matching AW
+component identity, the raw contract's platform/version and AgentSight ELF
+architecture; it rejects archive links, special files, traversal, duplicate
+entries and excessive size/member counts. AW installation still verifies all
+payloads through the existing strict installer. The composition record is not an
+installation receipt, runtime readiness evidence or independent proof of release
+provenance. The schema and synthetic fixture live in
+`src/aw/packaging/agentsight/`; they do not change `aw inspect` or Provider view.
+This utility does not download, install, start or stop either component.
+
+### Optional trajectory-only service profile
+
+AW core ships two inactive templates in `share/aw/agentsight/`:
+`aw-agentsight-collector.service` runs `trace --no-ebpf`, and
+`aw-agentsight-query.service` runs `serve --host 127.0.0.1 --port 7396`.
+They are separate user services, share an explicitly supplied configuration,
+enable no enforcer, grant no capabilities and have no lifecycle dependency on an
+AW Agent. Agent exit therefore does not stop a shared query/collector service.
+
+Reuse an existing suitable AgentSight deployment instead of starting competing
+collectors or listeners. The supplied profiles expect the official system-mode
+binary at `/usr/local/bin/agentsight`; check the installed package path first and
+adapt the unit if a different distribution layout is used. Configuration must
+exist before the services can start. Copy the **complete configuration from the
+matching AgentSight release** to `$HOME/.config/aw/agentsight.json`; preserve Agent
+discovery rules because partial configuration replaces the defaults. Set
+`storage.base_path` to the same absolute, user-writable private directory for both
+workers. Give the configuration mode `0600`, and its parent and data directory
+mode `0700`. Do not use a privileged deployment's private data directory.
+
+Once the official binary and configuration are provisioned, the installation
+stage may explicitly enable these profiles. With `AW_PREFIX` set to the installed
+AW prefix, first confirm that neither destination exists:
+
+```bash
+(
+set -eu
+install -d -m 0700 "$HOME/.config/systemd/user"
+test ! -e "$HOME/.config/systemd/user/aw-agentsight-collector.service"
+test ! -e "$HOME/.config/systemd/user/aw-agentsight-query.service"
+install -m 0644 "$AW_PREFIX/share/aw/agentsight/aw-agentsight-collector.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-collector.service"
+install -m 0644 "$AW_PREFIX/share/aw/agentsight/aw-agentsight-query.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-query.service"
+systemctl --user daemon-reload
+systemctl --user enable --now aw-agentsight-collector.service aw-agentsight-query.service
+)
+```
+
+Daily Agent startup remains `aw run`. These profiles provide services only.
+Merged #7655 supplies automatic native association for Qoder, OpenClaw, QwenPaw
+and Hermes when the target has a configured `evidence` source; reuse its
+[configuration and evidence contract](https://github.com/agentic-os-org/ANOLISA/blob/895f0e90596ee2214e66222144c0d8a03a08e98d/docs/user-guide/en/user-entrypoint/aw-agentsight.md).
+Use matching client, callbacks and daemon from a build supporting
+`aw-service/v1alpha3`. These profiles do not configure that connection or provide
+a complete worker installation. There is no new `aw inspect` component card in
+this delivery. A query health response proves neither collector operation nor
+trajectory coverage. Service activity is separate from query compatibility,
+collection mode, native association and evidence coverage; absent evidence remains
+unknown. Loopback HTTP is unauthenticated observation and cannot authorize tools.
+
+`--no-ebpf` needs no root or BTF but collects supported native trajectory files
+only; it does not provide eBPF token metering, audit or interruption detection.
+The official Linux raw install contract currently requires BTF, independently of
+this profile. A supported no-BTF **installation** profile remains a component-side
+dependency; this change does not bypass package checks. Full eBPF tracing requires
+root or suitable BPF/PERFMON capabilities and a supported kernel/BTF deployment.
+The official system service may start an enforcer and expose its query listener
+more widely, so these user profiles deliberately do not start that service.
+
+To roll back profiles installed by the above procedure, stop and disable only
+these two services, remove the two unit copies after checking they are still
+owned by this deployment, then reload the user manager:
+
+```bash
+systemctl --user disable --now aw-agentsight-collector.service aw-agentsight-query.service
+rm -- "$HOME/.config/systemd/user/aw-agentsight-collector.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-query.service"
+systemctl --user daemon-reload
+```
+
+Retain configuration and collected data until separately approved for deletion.
+Remove AgentSight with its owning distribution installer; AW uninstall neither
+removes nor stops it. Discarding an unused composition directory removes only
+release staging artifacts and does not uninstall either component.

@@ -309,3 +309,96 @@ Rust 构建器编译锁定依赖的 release 二进制，检查原生 ELF 架构�
 收据与完整性规则。通过 `configure --provider tokenless` 或
 `--provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
 结果槽和故障行为见 [Tokenless 指南](aw-tokenless.md)。
+
+## 独立 AgentSight 组合交付
+
+AgentSight 保持独立版本，使用 `sudo anolisa install agentsight` 安装（或使用其
+RPM 方案）。AW 的 all-in-one 压缩包继续只包含 core 和两个匹配的 Provider 包，
+不接管 AgentSight 二进制、原组件契约、服务或安装回执。升级、回滚其中一个组件时，
+无需将它的版本或源码提交改成另一个组件的值。
+
+发行维护者可通过 `src/aw/scripts/compose.py`，组合已有 AW all-in-one 压缩包和
+官方 AgentSight Linux raw 压缩包。这个源码侧发行工具需要 Python 3.11 或更高版本；
+安装后的 AW/Provider 二进制和 AgentSight 不增加 Python 依赖。AW 通用开发门禁
+仍支持 Python 3.9：3.9/3.10 明确跳过这组组合工具 Python 测试；CI 使用 3.12，
+必须执行该组测试。哈希应取自经过
+审查的发布方校验记录，不能只对未经核验的下载计算哈希并直接信任。从仓库根目录执行：
+
+```bash
+python3 src/aw/scripts/compose.py \
+  --aw-archive "$AW_ARCHIVE" --aw-sha256 "$AW_ARCHIVE_SHA256" \
+  --sight-archive "$SIGHT_ARCHIVE" --sight-sha256 "$SIGHT_ARCHIVE_SHA256" \
+  --sight-version 0.14.1 \
+  --sight-release https://github.com/agentic-os-org/ANOLISA/releases/tag/sight/v0.14.1 \
+  --arch aarch64 --output "$PWD/target/aw-sight-composition"
+```
+
+x86-64 包使用 `--arch x86_64`。输出父目录必须存在，输出目录必须尚未创建。
+组合保留两个压缩包的原始字节，在 `composition.json` 中记录哈希、AW 原回执以及
+AgentSight 自己的版本、release 和契约引用。工具验证 AW 组件身份匹配、raw 契约的
+平台/版本及 AgentSight ELF 架构，拒绝链接、特殊文件、路径穿越、重复条目以及超出
+体积/条目数限制的压缩包。AW 安装仍由原有严格安装器验证全部 payload。组合记录
+不是安装回执、运行时就绪证据或独立的来源证明。schema 和合成 fixture 位于
+`src/aw/packaging/agentsight/`，不修改 `aw inspect` 或 Provider view。
+本工具不下载、安装、启动或停止任何组件。
+
+### 可选的纯轨迹服务 profile
+
+AW core 在 `share/aw/agentsight/` 交付两个默认不启用的模板：
+`aw-agentsight-collector.service` 执行 `trace --no-ebpf`；
+`aw-agentsight-query.service` 执行 `serve --host 127.0.0.1 --port 7396`。
+它们是分离的用户服务，共用显式指定的配置，不启用 enforcer、不授予 capabilities，
+不依赖 AW Agent 的生命周期。因此 Agent 退出不会停止共享查询或采集服务。
+
+已有合适的 AgentSight 部署时直接复用，避免重复采集或端口冲突。模板使用官方
+system-mode 路径 `/usr/local/bin/agentsight`；先核对实际安装路径，其他发行布局
+需要调整 unit。启动前必须准备配置。将**与 AgentSight 版本匹配的完整配置**复制到
+`$HOME/.config/aw/agentsight.json`；保留 Agent discovery 规则，因为局部配置会替换
+默认值。将 `storage.base_path` 设置为两个 worker 共用的绝对、当前用户可写私有目录。
+配置权限为 `0600`，配置父目录及数据目录权限为 `0700`，不要使用特权部署的私有数据目录。
+
+正式二进制和配置就绪后，安装阶段可以显式启用这些 profile。设置 `AW_PREFIX` 为
+AW 安装前缀，先确认两个目标文件不存在：
+
+```bash
+(
+set -eu
+install -d -m 0700 "$HOME/.config/systemd/user"
+test ! -e "$HOME/.config/systemd/user/aw-agentsight-collector.service"
+test ! -e "$HOME/.config/systemd/user/aw-agentsight-query.service"
+install -m 0644 "$AW_PREFIX/share/aw/agentsight/aw-agentsight-collector.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-collector.service"
+install -m 0644 "$AW_PREFIX/share/aw/agentsight/aw-agentsight-query.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-query.service"
+systemctl --user daemon-reload
+systemctl --user enable --now aw-agentsight-collector.service aw-agentsight-query.service
+)
+```
+
+日常 Agent 入口仍是 `aw run`。这些 profile 只提供后台服务。已合入的 #7655 为
+配置了 `evidence` 来源的 Qoder、OpenClaw、QwenPaw 和 Hermes 提供自动原生关联，
+复用其[配置与证据合同](https://github.com/agentic-os-org/ANOLISA/blob/895f0e90596ee2214e66222144c0d8a03a08e98d/docs/user-guide/zh/user-entrypoint/aw-agentsight.md)。
+client、回调与 daemon 必须来自支持 `aw-service/v1alpha3` 的同一构建。这些 profile
+不自动配置该连接，也不提供完整 worker 安装；本次交付没有新增 `aw inspect` 组件卡片。
+查询健康响应不能证明采集器运行或轨迹覆盖。服务进程状态、查询兼容性、采集模式、
+原生关联和证据覆盖分别取证，没有证据时保持 unknown。loopback HTTP 属于未认证
+观察信息，不能据此授权工具执行。
+
+`--no-ebpf` 不需要 root 或 BTF，但只采集受支持的原生轨迹文件，不提供 eBPF Token
+计量、审计或中断检测。官方 Linux raw 安装契约当前仍要求 BTF，与这个运行 profile
+相互独立；支持无 BTF 的正式**安装** profile 仍是组件侧依赖，本次不会绕过包检查。
+完整 eBPF 采集需要 root 或合适的 BPF/PERFMON capabilities，以及受支持的内核/BTF。
+官方系统服务可能启动 enforcer，且查询监听范围更广，因此这些用户 profile 不启动它。
+
+回滚上述过程安装的 profile 时，只停止和禁用这两个服务，确认仍归本次部署管理后
+删除两个 unit 副本，再刷新用户 manager：
+
+```bash
+systemctl --user disable --now aw-agentsight-collector.service aw-agentsight-query.service
+rm -- "$HOME/.config/systemd/user/aw-agentsight-collector.service" \
+  "$HOME/.config/systemd/user/aw-agentsight-query.service"
+systemctl --user daemon-reload
+```
+
+配置和采集数据保留到另行确认可删除。AgentSight 使用原发行安装器卸载；AW 卸载
+不会删除或停止它。删除未使用的组合输出目录只清理发行暂存文件，不卸载任何组件。

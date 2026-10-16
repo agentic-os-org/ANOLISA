@@ -261,11 +261,22 @@ sys.exit(not result.wasSuccessful())
     )
 
 
+def composition_tests() -> None:
+    """Keep release-only Python 3.11 tests outside the Python 3.9 gate baseline."""
+    if sys.version_info < (3, 11):
+        print("AW composition tests skipped: release tooling requires Python 3.11+; "
+              "the general AW gate supports Python 3.9+", flush=True)
+        return
+    run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests",
+         "-p", "test_composition.py"], AW, timeout=120)
+
+
 def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
     selftest()
     run(["cargo", "fmt", "--all", "--", "--check"], AW)
+    composition_tests()
     structure(
         json.loads(
             run(
