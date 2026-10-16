@@ -982,6 +982,50 @@ pub fn param_to_path(param: &str) -> String {
     }
 }
 
+/// The kernel file a ledger entry's restore belongs to: the path the ledger
+/// recorded, or — when that path is an older translation of the same parameter
+/// and is gone — the file the parameter name resolves to now.
+///
+/// A record's identity is its parameter, not the string it recorded:
+/// [`merge_entries`] re-points such a record on the next write,
+/// [`recorded_previous_value`] and [`imported_category`] answer for the key,
+/// and [`render_persistence`] already renders the boot line from the key.
+/// Restoring through the recorded string alone made the undo path blind to
+/// that rule: `Path::exists()` failed, the entry was reported `missing`, the
+/// ledger was kept, and the tuned value kept being re-applied at every boot
+/// with no CLI form able to undo it (the symptom issue #6483 named, which its
+/// merge-side fix left in place for every record the merge never meets again).
+///
+/// Only a recorded path that IS another translation of the parameter may be
+/// adopted: the pre-`5448` spelling of a dotted interface, where the blanket
+/// dot-to-slash translation produced `.../conf/Br0/100/forwarding` where the
+/// name resolves to `.../conf/Br0.100/forwarding` (two spellings of one kernel
+/// file — the pair [`heal_alias_duplicates`] exists to collapse). A path that
+/// is simply gone — an unplugged device, an unloaded module, a removed
+/// interface — is not a translation of anything, so that entry keeps its
+/// `missing` verdict instead of being redirected at whatever file the name
+/// happens to address now.
+fn resolved_entry_path(param: &str, entry: &RollbackEntry) -> String {
+    if Path::new(&entry.path).exists() {
+        return entry.path.clone();
+    }
+    let resolved = param_to_path(param);
+    if is_stale_translation_of(param, &entry.path) && resolved != entry.path {
+        return resolved;
+    }
+    entry.path.clone()
+}
+
+/// Whether `recorded` is the pre-`5448` dot-to-slash translation of `param`'s
+/// kernel path: the spelling an older ktuner wrote for a dotted interface
+/// name. The interface segment is the only place the two spellings differ,
+/// because [`param_to_path`] keeps it verbatim ([`net_iface_path`]) while the
+/// blanket translation split it — so the comparison is exact on both sides and
+/// cannot match a path that names a different knob or device.
+fn is_stale_translation_of(param: &str, recorded: &str) -> bool {
+    recorded == format!("/proc/sys/{}", param.replace('.', "/"))
+}
+
 /// Resolve `net.<proto>.{conf,neigh}.<interface>.<property>` (dotted or
 /// slashed spelling) with the INTERFACE segment kept verbatim. Under
 /// /proc/sys/net/{ipv4,ipv6}/{conf,neigh}/ every interface is a directory
@@ -1967,7 +2011,7 @@ fn preview_entries(data: &RollbackData) -> Vec<RollbackPreview> {
     data.entries
         .iter()
         .map(|(param, entry)| {
-            let (live, drifted) = live_reading(&entry.path, &entry.applied);
+            let (live, drifted) = live_reading(&resolved_entry_path(param, entry), &entry.applied);
             // Read off the published set, not the whole ledger: a clearer the
             // selection left out cannot be named, and a name the listing does
             // not carry would address no row.
@@ -2942,12 +2986,13 @@ fn restore_entries_with(
         .collect();
     for (param, entry) in ordered {
         // The deny-list is enforced on BOTH fields: the parameter name (what a
-        // ktuner-written ledger records) and the recorded path, which is the
-        // file the kernel actually receives. Every ledger ktuner writes has the
-        // two in agreement, but a ledger that was edited or written by another
-        // version can point an innocent parameter at `kernel.core_pattern` —
-        // and restore runs as root.
-        if is_forbidden_param(param) || is_forbidden_resolved_path(&entry.path) {
+        // ktuner-written ledger records) and the path the restore will write,
+        // which is the file the kernel actually receives. Every ledger ktuner
+        // writes has the two in agreement, but a ledger that was edited or
+        // written by another version can point an innocent parameter at
+        // `kernel.core_pattern` — and restore runs as root.
+        let path = resolved_entry_path(param, entry);
+        if is_forbidden_param(param) || is_forbidden_resolved_path(&path) {
             if !quiet {
                 progress!("  {} {} : 拒绝恢复（代码执行参数）", "✗".red(), param);
             }
@@ -2980,8 +3025,8 @@ fn restore_entries_with(
             });
             continue;
         }
-        if Path::new(&entry.path).exists() {
-            match write_value(&entry.path, &entry.previous) {
+        if Path::new(&path).exists() {
+            match write_value(&path, &entry.previous) {
                 Ok(()) => {
                     // Confirm the write with the same read-back the tune path
                     // uses (#5717): fs::write returning Ok only means the
@@ -2990,7 +3035,7 @@ fn restore_entries_with(
                     // not count as restored, or rollback reports Full and
                     // deletes the ledger while the system is still tuned. It
                     // is a failure, which keeps the ledger for a retry.
-                    match readback_verdict(&entry.path, &entry.previous) {
+                    match readback_verdict(&path, &entry.previous) {
                         ReadbackVerdict::Verified { .. } => {
                             if !quiet {
                                 progress!(
@@ -3057,7 +3102,7 @@ fn restore_entries_with(
     for param in &verified {
         let entry = &data.entries[*param];
         if let ReadbackVerdict::Clamped { effective } =
-            readback_verdict(&entry.path, &entry.previous)
+            readback_verdict(&resolved_entry_path(param, entry), &entry.previous)
         {
             if !quiet {
                 progress!(
@@ -3088,10 +3133,11 @@ fn restore_entries_with(
     // read-back), so only a readable, matching value counts.
     for (param, error) in refused {
         let entry = &data.entries[param];
-        let live = fs::read_to_string(&entry.path).ok();
+        let path = resolved_entry_path(param, entry);
+        let live = fs::read_to_string(&path).ok();
         let restored_by_twin = live.is_some_and(|live| {
             matches!(
-                classify_readback_for_path(&entry.path, &entry.previous, live.trim()),
+                classify_readback_for_path(&path, &entry.previous, live.trim()),
                 ReadbackVerdict::Verified { .. }
             )
         });
@@ -4017,6 +4063,70 @@ mod tests {
             outcome.failed(),
             outcome.skipped()
         ));
+    }
+
+    #[test]
+    fn restore_adopts_a_stale_recorded_path() {
+        // The recorded path of a pre-5448 ledger spells a dotted interface the
+        // way the old blanket dot-to-slash translation did, so the file is
+        // gone while the knob is live at the path its name resolves to
+        // (issue #6483's shape, which its merge-side fix left in place for
+        // every record the merge never meets again). Restoring the recorded
+        // string alone reported the entry `missing`, kept the ledger, and let
+        // the boot replay stand.
+        assert!(is_stale_translation_of(
+            "net.ipv4.conf.Br0.100.forwarding",
+            "/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+        ));
+        assert!(is_stale_translation_of(
+            "net/ipv4/conf.Br0.100/forwarding",
+            "/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+        ));
+        // Any other path is not a translation of the parameter: a dotted
+        // interface name that resolves to the same file, a scalar knob, a
+        // sysfs device path, or a path that names a different knob entirely.
+        assert!(!is_stale_translation_of(
+            "net.ipv4.conf.Br0.100.forwarding",
+            "/proc/sys/net/ipv4/conf/Br0.100/forwarding"
+        ));
+        for (param, recorded) in [
+            ("vm.swappiness", "/proc/sys/vm/other"),
+            ("block/sda/scheduler", "/sys/block/other/queue/scheduler"),
+            ("kafka.queues", "/tmp/gone/kafka.queues"),
+        ] {
+            assert!(
+                !is_stale_translation_of(param, recorded),
+                "{param}: {recorded} names something else"
+            );
+        }
+
+        // A record that names something else stays `missing` when its path is
+        // gone: an unplugged device or a removed file is not a stale
+        // translation of a live knob.
+        let dir = AtomicTestDir::new("stale_restore_path");
+        let absent = BTreeMap::from([(
+            "block/ktuner_absent_disk/scheduler".to_string(),
+            RollbackEntry {
+                previous: "none".into(),
+                applied: "bfq".into(),
+                path: dir.0.join("absent/scheduler").to_str().unwrap().to_string(),
+                category: None,
+            },
+        )]);
+        let mut writes = 0usize;
+        let outcome = restore_entries_with(
+            &RollbackData {
+                version: 1,
+                entries: absent,
+            },
+            true,
+            &mut |_, _| {
+                writes += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(writes, 0);
+        assert_eq!(outcome.missing.len(), 1);
     }
 
     use super::*;
