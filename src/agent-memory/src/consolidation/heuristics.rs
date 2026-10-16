@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::audit::AuditEntry;
 use crate::config::ConsolidationConfig;
 
-use super::fact::{ConsolidatedFact, FactCategory};
+use super::fact::{ConsolidatedFact, FactCategory, code_span, code_span_verbatim, span_safe};
 
 /// Owned version of AuditEntry for deserialization from session logs.
 /// The real AuditEntry uses `&'static str` for `tool` which can't be
@@ -165,10 +165,11 @@ fn rule_working_context(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Co
             let count = unique_paths.len();
             let title = format!("在 {dir} 下工作了 {count} 个文件");
             let content = format!(
-                "Agent 在 `{dir}` 目录下创建/修改了 {count} 个文件：{}。",
+                "Agent 在 {} 目录下创建/修改了 {count} 个文件：{}。",
+                code_span_verbatim(&dir),
                 unique_paths
                     .iter()
-                    .map(|p| format!("`{p}`"))
+                    .map(|p| code_span_verbatim(p))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -201,7 +202,11 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
             };
             if query.len() > 3 {
                 let title = format!("搜索: {query}");
-                let content = format!("Agent 通过 `{}` 搜索了 `{}`。", e.tool, query);
+                let content = format!(
+                    "Agent 通过 {} 搜索了 {}。",
+                    code_span(&e.tool),
+                    code_span(&query)
+                );
                 // Shorter, more specific queries are more interesting.
                 let confidence = 0.5 + (0.3 / (query.len() as f64)).min(0.3);
                 facts.push(ConsolidatedFact::new(
@@ -274,7 +279,10 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
     for path in &verified_paths {
         let count = edit_counts.get(path).copied().unwrap_or(1);
         let title = format!("修改并验证: {path}");
-        let content = format!("Agent 对 `{path}` 进行了 {count} 次编辑，并回读验证了修改结果。");
+        let content = format!(
+            "Agent 对 {} 进行了 {count} 次编辑，并回读验证了修改结果。",
+            code_span_verbatim(path)
+        );
         facts.push(ConsolidatedFact::new(
             session_id,
             FactCategory::Change,
@@ -292,8 +300,10 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
         .filter(|(path, count)| *count >= 2 && !verified_paths.contains(path))
         .for_each(|(path, count)| {
             let title = format!("对 {path} 进行了 {count} 次编辑");
-            let content =
-                format!("Agent 对 `{path}` 进行了 {count} 次编辑，表明该文件是重点关注对象。");
+            let content = format!(
+                "Agent 对 {} 进行了 {count} 次编辑，表明该文件是重点关注对象。",
+                code_span_verbatim(&path)
+            );
             let confidence = 0.6 + (count as f64 * 0.1).min(0.3);
             facts.push(ConsolidatedFact::new(
                 session_id,
@@ -331,9 +341,18 @@ fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
             // Categorize the error.
             let error_type = classify_error(error);
             let title = format!("{error_type} 错误: {path}");
+            // The error text is arbitrary Display output that can quote
+            // paths or embed markdown; sanitize it so a stray backtick
+            // cannot disable date normalization for the rest of the fact.
+            // The category is a fixed literal today, but it goes through
+            // the same sanitizer so the every-interpolation-is-sanitized
+            // contract has no exceptions for a future refactor to break.
             let content = format!(
-                "在调用 `{}` 时遇到 {} 错误（路径: `{}`）: {}。",
-                e.tool, error_type, path, error
+                "在调用 {} 时遇到 {} 错误（路径: {}）: {}。",
+                code_span(&e.tool),
+                span_safe(error_type),
+                code_span_verbatim(&path),
+                span_safe(error)
             );
 
             ConsolidatedFact::new(
@@ -381,7 +400,10 @@ fn rule_promoted(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
         .map(|e| {
             // Path format: "scratch/<file> -> <store_path>"
             let title = format!("提升为持久记忆: {}", e.path);
-            let content = format!("Agent 将 `{}` 从临时 session 提升为持久记忆。", e.path);
+            let content = format!(
+                "Agent 将 {} 从临时 session 提升为持久记忆。",
+                code_span_verbatim(&e.path)
+            );
             // Promoting is a strong signal — the agent explicitly marked this as important.
             ConsolidatedFact::new(
                 session_id,
@@ -437,7 +459,7 @@ fn rule_session_summary(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Co
         error_count,
         tools
             .iter()
-            .map(|t| format!("`{t}`"))
+            .map(|t| code_span(t))
             .collect::<Vec<_>>()
             .join(", "),
         total_bytes
@@ -471,6 +493,7 @@ fn parse_duration_secs(first: &str, last: &str) -> u64 {
 mod tests {
     use super::*;
     use crate::config::ConsolidationConfig;
+    use crate::consolidation::quality::normalize_relative_dates;
 
     fn default_config() -> ConsolidationConfig {
         ConsolidationConfig::default()
@@ -537,6 +560,138 @@ mod tests {
         let facts = rule_interest(&entries, "sid");
         assert_eq!(facts.len(), 1);
         assert!(facts[0].title.contains("rust ownership"));
+    }
+
+    #[test]
+    fn path_values_survive_verbatim_including_backticks() {
+        // A backtick is a legal byte in a POSIX filename: the persisted
+        // body must name a file that actually exists on disk, or the fact
+        // is unreadable and disagrees with `related_paths` of the very
+        // same entry. Path-class interpolation therefore quotes with a
+        // delimiter one longer than the longest run inside the value
+        // instead of swapping the byte for an apostrophe.
+        let entries = vec![
+            make_entry("mem_write", "notes/we`ird/a.md", true, None),
+            make_entry("mem_write", "notes/we`ird/b.md", true, None),
+            make_entry("mem_write", "notes/we`ird/c.md", true, None),
+        ];
+        let facts = rule_working_context(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        let fact = &facts[0];
+        assert!(
+            fact.content.contains("notes/we`ird/a.md"),
+            "the backtick path must survive verbatim: {}",
+            fact.content
+        );
+        assert!(
+            !fact.content.contains("notes/we'ird"),
+            "the path must not be rewritten to an apostrophe: {}",
+            fact.content
+        );
+        assert!(fact.related_paths.iter().any(|p| p == "notes/we`ird/a.md"));
+        // The verbatim span still blocks date rewriting inside it.
+        let entries = vec![
+            make_entry("mem_write", "notes/today/a.md", true, None),
+            make_entry("mem_write", "notes/today/b.md", true, None),
+            make_entry("mem_write", "notes/today/c.md", true, None),
+        ];
+        let facts = rule_working_context(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.contains("notes/today/a.md"),
+            "verbatim spans keep excluding date rewriting"
+        );
+    }
+
+    #[test]
+    fn repeated_edit_paths_survive_verbatim_including_backticks() {
+        // The repeated-edit branch of rule_change interpolates the path
+        // into the fact body; it must not be the one branch that still
+        // swaps a legal filename byte for an apostrophe while the title
+        // and related_paths keep it — the persisted fact would name a
+        // file that does not exist.
+        let entries = vec![
+            make_entry("mem_edit", "notes/we`ird/a.md", true, None),
+            make_entry("mem_edit", "notes/we`ird/a.md", true, None),
+        ];
+        let facts = rule_change(&entries, "sid");
+        let fact = facts
+            .iter()
+            .find(|f| f.content.contains("2 次编辑"))
+            .expect("the repeated-edit fact must be emitted");
+        assert!(
+            fact.content.contains("notes/we`ird/a.md"),
+            "the backtick path must survive verbatim: {}",
+            fact.content
+        );
+        assert!(
+            !fact.content.contains("notes/we'ird"),
+            "the path must not be rewritten to an apostrophe: {}",
+            fact.content
+        );
+        assert!(
+            fact.title.contains("notes/we`ird/a.md"),
+            "title keeps the raw path: {}",
+            fact.title
+        );
+        assert!(fact.related_paths.iter().any(|p| p == "notes/we`ird/a.md"));
+    }
+
+    #[test]
+    fn interpolated_values_cannot_break_the_span_structure() {
+        // A query pasted from markdown can carry backticks; the emitted
+        // fact must keep the value inside its single quoted span
+        // (backticks swapped for apostrophes) so the date normalizer's
+        // run pairing stays intact.
+        let entries = vec![make_entry(
+            "memory_search",
+            "bm25:``today`` and `yesterday` notes",
+            true,
+            None,
+        )];
+        let facts = rule_interest(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            !facts[0].content.contains("``"),
+            "no backtick run may survive interpolation, got: {}",
+            facts[0].content
+        );
+        // The sanitized value stays one span and survives the date
+        // normalizer verbatim, keywords included.
+        let normalized = normalize_relative_dates(&facts[0].content);
+        assert!(
+            normalized.contains("'today'") && normalized.contains("'yesterday'"),
+            "the sanitized span must survive normalization verbatim, got: {normalized}"
+        );
+    }
+
+    #[test]
+    fn rule_lesson_sanitizes_error_text_backticks() {
+        // rule_lesson interpolates the arbitrary Display output of a
+        // failed tool call; a stray backtick there would mis-pair span
+        // delimiters and disable normalization for the rest of the fact.
+        let entries = vec![make_entry(
+            "mem_edit",
+            "notes/a.md",
+            false,
+            Some("missing `config.toml entry, deployed yesterday"),
+        )];
+        let facts = rule_lesson(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.contains("'config.toml"),
+            "the stray backtick must be sanitized, got: {}",
+            facts[0].content
+        );
+        let normalized = normalize_relative_dates(&facts[0].content);
+        assert!(
+            !normalized.contains("yesterday"),
+            "the prose date after the sanitized error must still normalize, got: {normalized}"
+        );
+        assert!(
+            normalized.contains("'config.toml"),
+            "the sanitized error text must survive verbatim, got: {normalized}"
+        );
     }
 
     #[test]
