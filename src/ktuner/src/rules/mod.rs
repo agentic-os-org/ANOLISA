@@ -2224,11 +2224,21 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 262144 {
+    // Cassandra maps its SSTables and asks for four times the JVM floor: its
+    // startup check warns below 1048575 whenever a disk access mode is mmap,
+    // the default (`StartupChecks.checkMaxMapCount`, Cassandra 4.1 and 5.0),
+    // so 262144 left it short and silenced the rule on a host Cassandra still
+    // warns about.
+    let target: u64 = if info.has_process("cassandra") {
+        1048575
+    } else {
+        262144
+    };
+    if current < target {
         recs.push(Recommendation {
             param: "vm.max_map_count".to_string(),
             current_value: current.to_string(),
-            recommended_value: "262144".to_string(),
+            recommended_value: target.to_string(),
             reason: "JVM/Node/MongoDB 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败"
                 .to_string(),
             confidence: Confidence::High,
@@ -13226,6 +13236,45 @@ mod tests {
         assert_eq!(recs[0].recommended_value, "262144");
         // The shell is a client, not the daemon.
         assert!(advice("mongosh").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cassandra's startup check (`StartupChecks.checkMaxMapCount`) warns below
+    /// 1048575 under its default mmap disk access mode, so the JVM floor of
+    /// 262144 is not enough for it: the rule stopped at 262144 on a host
+    /// Cassandra still warns about.
+    #[test]
+    fn max_map_count_sizes_cassandra_to_its_own_check() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_cassandra_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        let advice = |procs: &[&str], value: &str| {
+            std::fs::write(&knob, value).unwrap();
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(procs),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| r.recommended_value)
+                .collect::<Vec<_>>()
+        };
+
+        // The JVM marker and the resolved service name, as read_processes
+        // pushes them for a Cassandra node.
+        let cassandra = ["java", "cassandra"];
+        assert_eq!(advice(&cassandra, "65530\n"), ["1048575"]);
+        assert_eq!(advice(&cassandra, "262144\n"), ["1048575"]);
+        assert!(advice(&cassandra, "1048575\n").is_empty());
+        // Other JVMs keep the existing floor.
+        assert_eq!(advice(&["java"], "65530\n"), ["262144"]);
+        assert!(advice(&["java"], "262144\n").is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
