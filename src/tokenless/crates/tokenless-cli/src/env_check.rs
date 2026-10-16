@@ -15,9 +15,30 @@ use std::sync::LazyLock;
 // `split_whitespace().last()` is fragile: tools like `curl` print
 // "curl 8.1.2 (x86_64-linux-gnu)" where `.last()` gives the arch suffix,
 // and `jq-1.6` has no whitespace around the version. A targeted regex
-// anchored on digit groups avoids these false matches.
+// anchored on digit groups avoids these false matches. The patch group is
+// optional: common tools report only `major.minor` (jq "jq-1.6", GNU Make
+// "GNU Make 4.3", gzip "gzip 1.10") — a strict three-group pattern
+// extracts nothing for those and every
+// comparison degrades to "0.0.0", falsely reporting VersionLow.
 static VERSION_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap());
+
+/// Extract the installed version from `--version` output.
+///
+/// Returns the first version-like token (at least `major.minor`), or
+/// `"0.0.0"` when the output carries no version at all. Used by
+/// `check_dep`. The widened pattern trades a new shape for the ones it
+/// fixes: a two-component number in a diagnostic line ("Warning: TLS
+/// 1.2 deprecated" ahead of "nginx 1.24.0") now wins the first match
+/// where the strict three-group pattern skipped it. Recorded rather
+/// than fixed: `check_dep` is hard-bypassed in release builds, and the
+/// first-match rule is the same one the inline extraction used.
+fn installed_version_from(output: &str) -> String {
+    VERSION_RE
+        .find(output)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
 
 fn tool_ready_hard_bypassed() -> bool {
     // Release builds always bypass Tool Ready. Unit tests retain a test-only
@@ -624,16 +645,7 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 let required_version = extract_required_version(version);
                 let version_output = Command::new(&path).arg("--version").output();
                 let installed_version = match version_output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        // Use regex to find the first version-like token
-                        // (digits.digits.digits), not split_whitespace().last()
-                        // which fails for "curl 8.1.2 (x86_64...)" and "jq-1.6".
-                        VERSION_RE
-                            .find(&stdout)
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_else(|| "0.0.0".to_string())
-                    }
+                    Ok(out) => installed_version_from(&String::from_utf8_lossy(&out.stdout)),
                     Err(_) => "0.0.0".to_string(),
                 };
 
