@@ -407,9 +407,16 @@ impl OpenAIParser {
         // normalized chat view must carry it into `max_tokens` so the
         // downstream consumers of the chat shape (token-limit interruption
         // rules, telemetry) see the cap.
+        // Only a value the typed field can hold is copied, as for the chat
+        // `max_completion_tokens`: anything else was an unknown key before and
+        // must not turn the whole request into a parse failure.
         if body.get("max_tokens").is_none() {
-            if let Some(max_output_tokens) = body.get("max_output_tokens") {
-                normalized["max_tokens"] = max_output_tokens.clone();
+            if let Some(cap) = body
+                .get("max_output_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                normalized["max_tokens"] = serde_json::json!(cap);
             }
         }
 
@@ -2055,6 +2062,28 @@ mod tests {
         let request = OpenAIParser::parse_request(&json);
         assert!(request.is_some());
         assert_eq!(request.unwrap().max_tokens, Some(512));
+    }
+
+    /// The Responses cap is copied onto `max_tokens` like the chat
+    /// `max_completion_tokens`, so a value the typed u32 field cannot hold
+    /// must be ignored the same way rather than fail the whole request.
+    #[test]
+    fn test_parse_request_responses_ignores_an_unusable_max_output_tokens() {
+        for cap in [
+            serde_json::json!("512"),
+            serde_json::json!(4_294_967_296u64),
+            serde_json::json!(-1),
+        ] {
+            let json = serde_json::json!({
+                "model": "gpt-5",
+                "input": "Hello",
+                "max_output_tokens": cap
+            });
+            let request = OpenAIParser::parse_request(&json)
+                .unwrap_or_else(|| panic!("{cap}: the request must still parse"));
+            assert_eq!(request.max_tokens, None, "{cap}");
+            assert_eq!(request.messages.len(), 1, "{cap}");
+        }
     }
 
     #[test]
