@@ -78,6 +78,20 @@ fn read_workspace_path_from(root: &Path, pid: u32) -> Option<String> {
         .and_then(|path| path.to_str().map(str::to_owned))
 }
 
+/// Outcome of one HTTP probe request.
+///
+/// Split out of `probe_agent` so the port loop can decide whether another
+/// address family is worth trying without duplicating the ureq call.
+#[derive(Debug)]
+enum ProbeOutcome {
+    /// An HTTP response arrived (any status code) — the latency observed.
+    Answered(u64),
+    /// The connection was refused or unreachable outright.
+    Refused(String),
+    /// The connection was established but the response timed out.
+    TimedOut(String),
+}
+
 /// Background health checker that periodically probes discovered agents
 pub struct HealthChecker {
     store: Arc<RwLock<HealthStore>>,
@@ -500,7 +514,8 @@ impl HealthChecker {
 
     /// Probe an agent's ports via HTTP and return its health status.
     ///
-    /// Tries each port in order.
+    /// Tries each port in order on IPv4 loopback, and on IPv6 loopback when
+    /// the IPv4 attempt was refused.
     /// - 2xx/3xx/4xx/5xx response         → Healthy
     /// - Read timeout (process is hung)   → Hung
     /// - Connection refused / unreachable → Unhealthy
@@ -518,76 +533,52 @@ impl HealthChecker {
         let mut timed_out = false;
 
         for &port in ports {
-            let url = format!("http://127.0.0.1:{port}/");
-            let start = Instant::now();
-
-            let result = ureq::AgentBuilder::new()
-                .timeout_connect(self.http_timeout)
-                .timeout_read(self.http_timeout)
-                .build()
-                .get(&url)
-                .call();
-
-            let latency = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(_) => {
-                    return AgentHealthStatus {
-                        pid: agent.pid,
-                        agent_name: agent.agent_info.name.clone(),
-                        category: agent.agent_info.category.clone(),
-                        exe_path: agent.exe_path.clone(),
-                        workspace_path: workspace_path.clone(),
-                        ports: ports.to_vec(),
-                        status: AgentHealthState::Healthy,
-                        last_check_time: now_ms(),
-                        latency_ms: Some(latency),
-                        error_message: None,
-                        restart_cmd,
-                        offline_since: None,
-                        role: role.clone(),
-                        parent_pid,
-                        has_crash: false,
-                    };
-                }
-                Err(ureq::Error::Status(_code, _resp)) => {
-                    // 非 2xx 响应 — 进程仍在响应
-                    return AgentHealthStatus {
-                        pid: agent.pid,
-                        agent_name: agent.agent_info.name.clone(),
-                        category: agent.agent_info.category.clone(),
-                        exe_path: agent.exe_path.clone(),
-                        workspace_path: workspace_path.clone(),
-                        ports: ports.to_vec(),
-                        status: AgentHealthState::Healthy,
-                        last_check_time: now_ms(),
-                        latency_ms: Some(latency),
-                        error_message: None,
-                        restart_cmd,
-                        offline_since: None,
-                        role: role.clone(),
-                        parent_pid,
-                        has_crash: false,
-                    };
-                }
-                Err(ureq::Error::Transport(e)) => {
-                    let msg = e.to_string();
-                    // ureq 的读超时 / 写超时消息均包含 "timed out"
-                    if msg.to_lowercase().contains("timed out") {
-                        timed_out = true;
-                        last_error = format!("响应超时 ({latency}ms): {msg}");
-                    } else {
-                        last_error = msg.clone();
+            // detect_listening_ports reports the port from /proc/net/tcp6 as
+            // well, and a listener bound to the IPv6 loopback only refuses
+            // the IPv4 probe while serving happily. Retry the same port on
+            // [::1] before writing it off; a refused connect returns
+            // immediately, so a genuinely dead port pays one extra syscall.
+            for url in [
+                format!("http://127.0.0.1:{port}/"),
+                format!("http://[::1]:{port}/"),
+            ] {
+                match self.probe_url(&url) {
+                    ProbeOutcome::Answered(latency) => {
+                        return AgentHealthStatus {
+                            pid: agent.pid,
+                            agent_name: agent.agent_info.name.clone(),
+                            category: agent.agent_info.category.clone(),
+                            exe_path: agent.exe_path.clone(),
+                            workspace_path: workspace_path.clone(),
+                            ports: ports.to_vec(),
+                            status: AgentHealthState::Healthy,
+                            last_check_time: now_ms(),
+                            latency_ms: Some(latency),
+                            error_message: None,
+                            restart_cmd: restart_cmd.clone(),
+                            offline_since: None,
+                            role: role.clone(),
+                            parent_pid,
+                            has_crash: false,
+                        };
                     }
-                    log::debug!(
-                        "Health probe failed for {} (pid={}) on port {}: {}",
-                        agent.agent_info.name,
-                        agent.pid,
-                        port,
-                        msg
-                    );
+                    ProbeOutcome::TimedOut(message) => {
+                        // 任一地址超时都视为 hung；不再尝试其它地址。
+                        timed_out = true;
+                        last_error = message;
+                        break;
+                    }
+                    ProbeOutcome::Refused(message) => {
+                        last_error = message;
+                    }
                 }
             }
+            log::debug!(
+                "Health probe failed for {} (pid={}) on port {}",
+                agent.agent_info.name,
+                agent.pid,
+                port
+            );
         }
 
         // 所有端口均失败 — 根据错误类型决定状态
@@ -613,6 +604,39 @@ impl HealthChecker {
             role,
             parent_pid,
             has_crash: false,
+        }
+    }
+
+    /// GET one probe URL once.
+    ///
+    /// Any HTTP response — 2xx through 5xx — means the process is alive and
+    /// answering, so it maps to [`ProbeOutcome::Answered`] with the observed
+    /// latency. A transport failure is split by whether it timed out (the
+    /// process accepted the connection but never answered) or was refused
+    /// outright; the caller decides whether another address family is worth
+    /// trying.
+    fn probe_url(&self, url: &str) -> ProbeOutcome {
+        let start = Instant::now();
+        let result = ureq::AgentBuilder::new()
+            .timeout_connect(self.http_timeout)
+            .timeout_read(self.http_timeout)
+            .build()
+            .get(url)
+            .call();
+        let latency = start.elapsed().as_millis() as u64;
+        match result {
+            Ok(_) => ProbeOutcome::Answered(latency),
+            // 非 2xx 响应 — 进程仍在响应
+            Err(ureq::Error::Status(..)) => ProbeOutcome::Answered(latency),
+            Err(ureq::Error::Transport(e)) => {
+                let msg = e.to_string();
+                // ureq 的读超时 / 写超时消息均包含 "timed out"
+                if msg.to_lowercase().contains("timed out") {
+                    ProbeOutcome::TimedOut(format!("响应超时 ({latency}ms): {msg}"))
+                } else {
+                    ProbeOutcome::Refused(msg)
+                }
+            }
         }
     }
 
@@ -769,6 +793,93 @@ mod tests {
     fn test_read_ppid_current_process() {
         // Whatever the parent is, our own stat entry parses.
         assert!(read_ppid(std::process::id()).is_some());
+    }
+
+    /// A gateway bound to the IPv6 loopback only is still a listener
+    /// `detect_listening_ports` reports (it reads /proc/net/tcp6 as well),
+    /// but the probe used to try 127.0.0.1 alone — the IPv4 connect is
+    /// refused by a healthy ::1-bound server, so the agent showed up as
+    /// Unhealthy with "Connection refused" while serving fine.
+    #[test]
+    fn probe_reports_an_ipv6_loopback_listener_as_healthy() {
+        use std::io::Write;
+
+        let listener = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(listener) => listener,
+            Err(error) => {
+                // No IPv6 loopback in this environment (for example a
+                // container with IPv6 disabled): nothing to probe.
+                eprintln!("skipping: cannot bind [::1] ({error})");
+                return;
+            }
+        };
+        let port = listener.local_addr().expect("local addr").port();
+        // Serve exactly the one request the probe makes. The thread is left
+        // detached on purpose: the probe only reaches it after the fix, so a
+        // pristine-main run leaves it blocked in accept() — joining would
+        // hang the red run instead of failing it.
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let agent = crate::discovery::DiscoveredAgent {
+            pid: std::process::id(),
+            agent_info: crate::discovery::AgentInfo::new(
+                "FixtureGateway",
+                vec![],
+                "fixture gateway for probe tests",
+                "gateway",
+            ),
+            exe_path: "/usr/bin/fixture".to_string(),
+            cmdline_args: vec!["fixture".to_string()],
+        };
+        let checker = HealthChecker::new(
+            Arc::new(RwLock::new(HealthStore::new())),
+            Duration::from_secs(5),
+        );
+        let status = checker.probe_agent(&agent, &[port], None, AgentRole::Gateway, None);
+
+        assert_eq!(
+            status.status,
+            AgentHealthState::Healthy,
+            "a ::1-bound listener must answer the probe on [::1]: {}",
+            status.error_message.unwrap_or_default()
+        );
+        assert!(status.latency_ms.is_some());
+    }
+
+    /// A port with nothing listening on either loopback must stay Unhealthy —
+    /// the [::1] retry is a fallback, not a second chance for dead ports.
+    #[test]
+    fn probe_keeps_a_dead_port_unhealthy() {
+        // Grab a port the kernel guarantees to be closed.
+        let port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+            let port = probe.local_addr().expect("local addr").port();
+            drop(probe);
+            port
+        };
+
+        let agent = crate::discovery::DiscoveredAgent {
+            pid: std::process::id(),
+            agent_info: crate::discovery::AgentInfo::new(
+                "FixtureGateway",
+                vec![],
+                "fixture gateway for probe tests",
+                "gateway",
+            ),
+            exe_path: "/usr/bin/fixture".to_string(),
+            cmdline_args: vec!["fixture".to_string()],
+        };
+        let checker = HealthChecker::new(
+            Arc::new(RwLock::new(HealthStore::new())),
+            Duration::from_secs(5),
+        );
+        let status = checker.probe_agent(&agent, &[port], None, AgentRole::Gateway, None);
+        assert_eq!(status.status, AgentHealthState::Unhealthy);
+        assert!(status.error_message.is_some());
     }
 
     /// `/proc/<pid>/stat` embeds the process name in parentheses, and the
