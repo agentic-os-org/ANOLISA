@@ -31,3 +31,9 @@ jobs:
           python3 -m unittest discover -s src/os-skills/tests -p test_raw_packaging.py
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh
+      # The skill installers keep their regressions next to the scripts; without
+      # a step here they never run, and a broken installer ships with a green
+      # package job. The agentsight job runs its own script the same way.
+      - name: Run the skill installer regressions
+        run: |
+          bash src/os-skills/ai/install-qwenpaw/scripts/test-setup-template-substitution.sh

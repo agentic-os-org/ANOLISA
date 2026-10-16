@@ -37,13 +37,37 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 QWENPAW_DIR="$HOME/.qwenpaw"
 SECRET_DIR="$HOME/.qwenpaw.secret"
 
-# 把值放进模板替换段：替换点都在 JSON 字符串里，所以先按 JSON 转义
-# （`\` 与 `"`），再转义 sed 替换串的元字符 `\`/`&`/`|`。
-# 直接把值拼进表达式时 sed 会把它当表达式读：`&` 展开成被匹配到的占位符
-# 本身（密钥静默变成 "{DINGTALK_CLIENT_SECRET}"），`|` 提前结束 s 命令
-# （sed 报错、set -e 让整个安装中止），`\` 转义掉后一个字符。
-sed_replacement() {
-  printf '%s' "$1" | sed 's/[\"]/\\&/g; s/[\\&|]/\\&/g'
+# 把值写进模板：按 JSON 字符串转义后做**一次性**字面替换。
+#
+# 早先用 sed 替换串：值被当表达式读（`&`/`|`/`\` 是元字符），命令替换会剥掉
+# 尾部换行（密钥带一个尾随换行会被静默截断成另一个值），串联的两个 `-e` 还会
+# 把前一个字段的值当后一个占位符再展开一次。python3 在步骤 5 已是硬依赖，
+# 用它做替换可一次解决这三类问题，且任何合法 UTF-8 的值都原样往返
+# （控制字符由 json.dumps 转义，落盘仍是合法 JSON）。
+render_template() {  # <template> <output> <placeholder> <value> [...]
+  python3 - "$@" <<'PYEOF'
+import json
+import re
+import sys
+
+template, output = sys.argv[1], sys.argv[2]
+pairs = sys.argv[3:]
+values = {pairs[index]: pairs[index + 1] for index in range(0, len(pairs) - 1, 2)}
+# One pass over the template: replacing sequentially would re-scan the text just
+# inserted, so a value that happens to read like the other placeholder was
+# expanded a second time (the field next to it received the wrong secret).
+pattern = re.compile("|".join(re.escape(placeholder) for placeholder in values))
+with open(template, encoding="utf-8") as handle:
+    content = handle.read()
+# json.dumps already knows what a JSON string needs; the slice drops its quoting
+# so the escape lands inside the template's own string.
+rendered = pattern.sub(
+    lambda match: json.dumps(values[match.group(0)], ensure_ascii=False)[1:-1],
+    content,
+)
+with open(output, "w", encoding="utf-8") as handle:
+    handle.write(rendered)
+PYEOF
 }
 
 echo "=============================="
@@ -108,10 +132,9 @@ if [ ! -f "$CONFIG_TEMPLATE" ]; then
   echo "  错误: 找不到模板文件 $CONFIG_TEMPLATE"
   exit 1
 fi
-sed \
-  -e "s|{DINGTALK_CLIENT_ID}|$(sed_replacement "$DINGTALK_CLIENT_ID")|g" \
-  -e "s|{DINGTALK_CLIENT_SECRET}|$(sed_replacement "$DINGTALK_CLIENT_SECRET")|g" \
-  "$CONFIG_TEMPLATE" > "$QWENPAW_DIR/config.json"
+render_template "$CONFIG_TEMPLATE" "$QWENPAW_DIR/config.json" \
+  "{DINGTALK_CLIENT_ID}" "$DINGTALK_CLIENT_ID" \
+  "{DINGTALK_CLIENT_SECRET}" "$DINGTALK_CLIENT_SECRET"
 echo "  config.json 已写入"
 
 # 3b: dashscope.json — 百炼提供商
@@ -120,8 +143,8 @@ if [ ! -f "$DASHSCOPE_TEMPLATE" ]; then
   echo "  错误: 找不到模板文件 $DASHSCOPE_TEMPLATE"
   exit 1
 fi
-sed "s|{DASHSCOPE_API_KEY}|$(sed_replacement "$DASHSCOPE_API_KEY")|g" \
-  "$DASHSCOPE_TEMPLATE" > "$SECRET_DIR/providers/builtin/dashscope.json"
+render_template "$DASHSCOPE_TEMPLATE" "$SECRET_DIR/providers/builtin/dashscope.json" \
+  "{DASHSCOPE_API_KEY}" "$DASHSCOPE_API_KEY"
 chmod 600 "$SECRET_DIR/providers/builtin/dashscope.json"
 echo "  dashscope.json 已写入"
 
@@ -131,8 +154,8 @@ if [ ! -f "$ACTIVE_MODEL_TEMPLATE" ]; then
   echo "  错误: 找不到模板文件 $ACTIVE_MODEL_TEMPLATE"
   exit 1
 fi
-sed "s|{MODEL_NAME}|$(sed_replacement "$MODEL_NAME")|g" \
-  "$ACTIVE_MODEL_TEMPLATE" > "$SECRET_DIR/providers/active_model.json"
+render_template "$ACTIVE_MODEL_TEMPLATE" "$SECRET_DIR/providers/active_model.json" \
+  "{MODEL_NAME}" "$MODEL_NAME"
 chmod 600 "$SECRET_DIR/providers/active_model.json"
 echo "  active_model.json 已写入"
 
