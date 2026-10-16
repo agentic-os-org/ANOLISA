@@ -1,9 +1,11 @@
 //! Phase 4: Index Worker + Tier B integration tests.
 //!
 //! These tests need the inotify/FSEvents watcher; they sleep briefly to give
-//! events time to land. Time budgets are conservative (≤ 2s per case).
+//! events time to land. Most cases resolve in ≤ 2s; the stale-row regressions
+//! poll for up to 4s before declaring failure.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -221,6 +223,113 @@ fn skips_binary_extensions() {
         .memory_search("fake-png-bytes", 5, None, None, None)
         .unwrap();
     assert!(hits.is_empty(), "binary file got indexed: {hits:?}");
+}
+
+/// Poll until `query` stops returning hits, up to `deadline_ms`. Returns the
+/// last hit list so the caller can report what survived.
+fn wait_until_no_hits(
+    svc: &MemoryService,
+    query: &str,
+    deadline_ms: u64,
+) -> Vec<agent_memory::index::SearchHit> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(deadline_ms);
+    let mut last = svc.memory_search(query, 5, None, None, None).unwrap();
+    while !last.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        last = svc.memory_search(query, 5, None, None, None).unwrap();
+    }
+    last
+}
+
+#[test]
+fn unindexes_file_that_grows_past_size_cap() {
+    let (_tmp, svc) = setup();
+    // A small, indexable .log file (the `.log` extension is on the indexable
+    // list, and log files grow) with a distinctive keyword.
+    svc.write("logs/app.log", "kernel snapshot marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2)); // README + this file
+    let hits = svc.memory_search("kernel", 5, None, None, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "logs/app.log");
+
+    // Grow the same file past the 4 MiB indexable cap (raw write so the
+    // watcher, not the service, handles the event).
+    let big = "x".repeat(5 * 1024 * 1024);
+    std::fs::write(svc.mount.root.join("logs/app.log"), big).unwrap();
+
+    // The modify flush must drop the entry, exactly like full_scan's
+    // seen-set pruning would — not keep serving the pre-growth body.
+    let last = wait_until_no_hits(&svc, "kernel", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived growing past the size cap: {last:?}"
+    );
+}
+
+#[test]
+fn unindexes_file_that_becomes_non_utf8() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/binary.md", "mojibake marker text", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+    assert_eq!(
+        svc.memory_search("mojibake", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Overwrite the file with bytes that are not valid UTF-8.
+    std::fs::write(
+        svc.mount.root.join("notes/binary.md"),
+        [0xff_u8, 0xfe, 0x00, 0x80, 0x81, 0x82],
+    )
+    .unwrap();
+
+    let last = wait_until_no_hits(&svc, "mojibake", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived a non-UTF-8 overwrite: {last:?}"
+    );
+}
+
+#[test]
+fn directory_events_do_not_cascade_delete_the_subtree() {
+    // A directory attribute event must not delete anything under it. Since
+    // ab5f41cc's (mtime, size) dedup, phase 2c skips the files that phase 1
+    // expanded out of the directory, so nothing re-upserts them within the
+    // same flush: a cascading `to_remove` now shows up here as an empty hit
+    // list, and in the vector case below as a lost embedding.
+    let (_tmp, svc) = setup();
+    svc.write("notes/deep/a.md", "cascade guard marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+    assert_eq!(
+        svc.memory_search("cascade", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A pure directory attribute event (chmod on the directory itself)
+    // used to push the directory path into to_remove, which
+    // cascade-deletes every indexed row under it — vectors included.
+    // Directory events must be skipped: a same-name directory replacing
+    // a file cannot arrive without the file's own Remove event.
+    let dir = svc.mount.root.join("notes");
+    let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&dir, perms).unwrap();
+
+    std::thread::sleep(Duration::from_millis(1500));
+    let hits = svc.memory_search("cascade", 5, None, None, None).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a directory attribute event must not drop the subtree: {hits:?}"
+    );
+    assert_eq!(hits[0].path, "notes/deep/a.md");
 }
 
 #[test]
@@ -671,6 +780,38 @@ impl EmbeddingProvider for KeywordEmbedding {
     }
 }
 
+/// Provider mock that can be switched to failing mid-test: once `fail` is
+/// set, `embed` returns `Other("provider down")`, which `embed_sync` maps
+/// to `None` — the silent vector loss that
+/// `directory_attrib_event_keeps_vectors_when_embed_fails` reproduces.
+struct FlakyEmbedding {
+    dim: usize,
+    fail: AtomicBool,
+}
+
+#[async_trait]
+impl EmbeddingProvider for FlakyEmbedding {
+    async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(MemoryError::Other("provider down".into()));
+        }
+        let mut v = vec![0.0_f32; self.dim];
+        let t = text.to_lowercase();
+        if t.contains("rust") {
+            v[0] = 1.0;
+        } else if t.contains("python") {
+            v[1] = 1.0;
+        } else {
+            v[3] = 1.0;
+        }
+        Ok(Embedding { vector: v })
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_and_hybrid_search_with_provider_hit_without_panic() {
     let tmp = tempdir().unwrap();
@@ -841,5 +982,64 @@ fn reindex_file_tags_the_row_with_the_observing_agent() {
     assert!(
         !others.iter().any(|p| p == "notes/observed/virtual.md"),
         "filter:beta must not see a row tagged for alpha: {others:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_attrib_event_keeps_vectors_when_embed_fails() {
+    // A directory attribute event must not cascade-delete the subtree's
+    // vectors. Since ab5f41cc's (mtime, size) dedup, phase 2c skips the
+    // files phase 1 expanded out of the directory, so nothing re-upserts
+    // them within the same flush: a cascading `to_remove` empties the BM25
+    // hit list (the sibling test above) and permanently loses the vector
+    // here, because embed_sync returns None while the provider errors.
+    // What does NOT come back is the vector — store.remove drops the
+    // vector row too, and upsert_vec only happens when embed_sync returns
+    // Some, which a failing provider never does. So: index a file under
+    // notes/, break the provider, then chmod the directory (a pure
+    // IN_ATTRIB event — no file inside notes/ changed). The vector must
+    // survive; without the guard it is lost until a manual re-embed.
+    //
+    // multi_thread is required: the worker drives embed_sync from its own
+    // std thread via the runtime handle IndexHandle::open captures on the
+    // calling thread. The assertion queries search_vec with an explicit
+    // vector so the failing provider cannot take the query side down with
+    // it.
+    let (_tmp, mut svc) = setup();
+    let mock = Arc::new(FlakyEmbedding {
+        dim: 8,
+        fail: AtomicBool::new(false),
+    });
+    svc.embedding = Some(mock.clone());
+    let new_index = IndexHandle::open(&svc.mount, Some(mock.clone()), 0.01, 0.3, true).unwrap();
+    svc.index = Some(Arc::new(new_index));
+
+    svc.write("notes/deep/a.md", "cascade vector marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2), "BM25 index did not reach 2 rows");
+    // Vectors are flushed in the same batch as the rows; the extra beat
+    // makes the pre-assertion independent of that batching detail.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let q = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let hits = svc.index.as_ref().unwrap().search_vec(&q, 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.path == "notes/deep/a.md"),
+        "vector missing before the directory event: {hits:?}"
+    );
+
+    // Provider goes down: every re-embed attempt now silently no-ops.
+    mock.fail.store(true, Ordering::SeqCst);
+
+    let dir = svc.mount.root.join("notes");
+    let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&dir, perms).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let hits = svc.index.as_ref().unwrap().search_vec(&q, 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.path == "notes/deep/a.md"),
+        "directory attribute event dropped the subtree's vectors: {hits:?}"
     );
 }
