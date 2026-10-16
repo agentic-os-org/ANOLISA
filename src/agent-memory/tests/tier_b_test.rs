@@ -144,6 +144,75 @@ fn skips_binary_extensions() {
     assert!(hits.is_empty(), "binary file got indexed: {hits:?}");
 }
 
+/// Poll until `query` stops returning hits, up to `deadline_ms`. Returns the
+/// last hit list so the caller can report what survived.
+fn wait_until_no_hits(
+    svc: &MemoryService,
+    query: &str,
+    deadline_ms: u64,
+) -> Vec<agent_memory::index::SearchHit> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(deadline_ms);
+    let mut last = svc.memory_search(query, 5, None, None, None).unwrap();
+    while !last.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        last = svc.memory_search(query, 5, None, None, None).unwrap();
+    }
+    last
+}
+
+#[test]
+fn unindexes_file_that_grows_past_size_cap() {
+    let (_tmp, svc) = setup();
+    // A small, indexable .log file (the `.log` extension is on the indexable
+    // list, and log files grow) with a distinctive keyword.
+    svc.write("logs/app.log", "kernel snapshot marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2)); // README + this file
+    let hits = svc.memory_search("kernel", 5, None, None, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "logs/app.log");
+
+    // Grow the same file past the 4 MiB indexable cap (raw write so the
+    // watcher, not the service, handles the event).
+    let big = "x".repeat(5 * 1024 * 1024);
+    std::fs::write(svc.mount.root.join("logs/app.log"), big).unwrap();
+
+    // The modify flush must drop the entry, exactly like full_scan's
+    // seen-set pruning would — not keep serving the pre-growth body.
+    let last = wait_until_no_hits(&svc, "kernel", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived growing past the size cap: {last:?}"
+    );
+}
+
+#[test]
+fn unindexes_file_that_becomes_non_utf8() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/binary.md", "mojibake marker text", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+    assert_eq!(
+        svc.memory_search("mojibake", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Overwrite the file with bytes that are not valid UTF-8.
+    std::fs::write(
+        svc.mount.root.join("notes/binary.md"),
+        [0xff_u8, 0xfe, 0x00, 0x80, 0x81, 0x82],
+    )
+    .unwrap();
+
+    let last = wait_until_no_hits(&svc, "mojibake", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived a non-UTF-8 overwrite: {last:?}"
+    );
+}
+
 #[test]
 fn search_returns_chinese_hits() {
     let (_tmp, svc) = setup();

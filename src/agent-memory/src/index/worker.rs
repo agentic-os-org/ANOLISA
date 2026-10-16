@@ -308,11 +308,24 @@ fn flush(
             continue;
         }
         if !is_indexable(rel_path, meta.len()) {
+            // The file still exists but is no longer indexable — typically
+            // it grew past MAX_INDEXABLE_BYTES. full_scan prunes such rows
+            // via its seen-set; the incremental path must agree, or the
+            // store keeps serving the pre-change body as a stale search hit
+            // until the next overflow/restart rescan.
+            to_remove.push(rel);
             continue;
         }
         let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
             Some(b) => b,
-            None => continue,
+            // A body that no longer reads as UTF-8 (binary overwrite,
+            // mojibake) would leave the previous text indexed. Drop the
+            // row, mirroring full_scan's seen-set pruning of extract
+            // failures — the two paths must not diverge.
+            None => {
+                to_remove.push(rel);
+                continue;
+            }
         };
         let mtime = super::store::mtime_ms_of(&meta);
         to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
