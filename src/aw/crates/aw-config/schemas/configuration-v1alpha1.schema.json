@@ -240,6 +240,7 @@
       "properties": {
         "adapter": {
           "enum": [
+            "pi",
             "qwenpaw",
             "qoder",
             "openclaw",

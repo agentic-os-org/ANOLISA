@@ -4,7 +4,7 @@
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
-Qoder、OpenClaw、QwenPaw 和 Hermes 共用一份 Provider 配置，支持 PreTool 重试建议
+Qoder、OpenClaw、QwenPaw、Hermes 和 Pi 共用一份 Provider 配置，支持 PreTool 重试建议
 与 PostTool 压缩。Schema 压缩和授权恢复仍是独立能力。
 
 ## 安装与启用
@@ -22,9 +22,12 @@ Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生
 sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。
 
-四框架接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
+五框架接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
 替换可执行路径，并将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
 启动参数见 [AW 指南](aw.md#四框架使用同一份配置)。
+
+Pi 使用 [Pi 启动指南](aw.md#启动-pi-sdk-worker)中的 SDK 应用工厂；
+包配置生成器仍只面向 Qoder/OpenClaw。
 
 Provider 私有配置只接受 `{version: 1}`。固定 argv 为
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`；桥接通过 Protocol v2
@@ -72,6 +75,7 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，�
 | OpenClaw | 下一次模型请求前的 `registerAgentToolResultMiddleware` |
 | QwenPaw | Acting middleware 返回的最终 AgentScope `ToolResponse` |
 | Hermes | `transform_tool_result` 最终字符串回调 |
+| Pi SDK | 原 callback 之后的 Core `afterToolCall` content override |
 
 OpenClaw 要求 middleware API 和显式插件启用；AW 生成的原生 profile 声明 middleware
 合同。观察型 `after_tool_call` 的返回值无法替换模型可见内容。
@@ -91,7 +95,7 @@ Session/工具调用 ID，而不是工具名。
 结果保留。AW 持久 Journal 仍仅记录元数据，不保存替换文本。
 
 在 `tool.after.steps` 中保留既有完成观察和用户自定义 Hook，将压缩放在最后。
-启用结果替换时，Qoder、QwenPaw 和 Hermes 按声明顺序执行这些步骤，观察步骤看到原结果。
+启用结果替换时，Qoder、QwenPaw、Hermes 和 Pi 按声明顺序执行这些步骤，观察步骤看到原结果。
 只有最后一个结构化步骤可以请求 `replace_result`；替换后还有启用步骤，或有第二个
 替换步骤时，准入会拒绝。观察 Provider 保持原输入形态，只有替换 Provider 收到文本
 投影。所有步骤共享一个事件截止时间；观察或用户 Hook 故障按 `report` 处理，预算

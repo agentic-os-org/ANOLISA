@@ -5,7 +5,7 @@
 AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过受支持的原生入口
 启动 Qoder CLI >=1.1.64、OpenClaw、QwenPaw 和 Hermes，运行外部 Provider，并在 Agent
 会话结束后保留执行元数据。框架继续管理自己的界面、模型配置、调度与权限。
-当前交付为 Preview。
+同时支持公开 Pi SDK worker 的受管启动。当前交付为 Preview。
 
 ## 从这里开始
 
@@ -32,6 +32,7 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 | OpenClaw | 2026.9.6 | 新 Gateway |
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
+| Pi Coding Agent / Core | 0.84.2 / 0.84.2 | AW 管理的前台 Node worker 中的公共 SDK 工厂 |
 
 运行时支持工具前 `observe`/`block`、工具后 `observe` 或单文本 `replace_result`，以及各框架的原生命令。
 完成观察和用户 Hook 可位于最后一个替换步骤之前（OpenClaw 在压缩后执行原生观察）；sec-core/Tokenless 联合模板保留扫描及观察，新增执行前的 Tokenless PreTool 重试建议和最终 PostTool 压缩。
@@ -41,6 +42,8 @@ OpenClaw 缺少替换 middleware API 时，启动会报告压缩降级，保留 
 不同框架的 after 事件覆盖不同。配置词汇包含尚未接通的事件/效果，静态校验本身
 不能证明原生效果生效。跨 Agent 审批、输入改写和 OS 强制执行不在当前
 Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南。
+Pi 使用应用工厂模块与 `adapter: pi`，复用 PreTool 重试理由和 PostTool 单文本替换；
+每次调用的 UUID 配对前后 Hook，保留 SDK 会话和模型原工具 ID。见 [SDK 启动指南](../../docs/user-guide/zh/user-entrypoint/aw.md#启动-pi-sdk-worker)。
 
 ## 基本使用
 

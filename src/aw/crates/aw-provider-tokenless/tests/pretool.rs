@@ -51,6 +51,7 @@ print(json.dumps({{'protocol_version':2,'operation':r['operation'], 'attribution
         let tool = match adapter {
             "qoder" => "Bash",
             "hermes" => "terminal",
+            "pi" => "bash",
             _ => "exec",
         };
         json!({"api_version":VERSION,"method":"invoke","request_id":"request","operation":"pre_tool","config":{"version":1},"config_revision":"b".repeat(64),"budget_ms":1000,"allowed_effects":["block"],"event":{"name":"tool.before","agent":{"adapter":adapter,"binding_id":"target","instance_id":"instance"},"session_id":"session","tool":{"name":tool,"native_name":tool,"call_id":"blocked-call","input":{"command":"git status","cwd":"/original"},"result":null},"native":{}}})
@@ -72,8 +73,8 @@ print(json.dumps({{'protocol_version':2,'operation':r['operation'], 'attribution
 }
 
 #[test]
-fn four_adapters_block_original_and_carry_retry_ownership_into_after() {
-    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes"] {
+fn adapters_block_original_and_carry_retry_ownership_into_after() {
+    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi"] {
         let f = Fixture::new("suggest");
         let before = f.request(adapter);
         let reply = f.run(before.clone());

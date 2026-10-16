@@ -6,7 +6,7 @@ AW provides a shared configuration and local service for Agent policies. On
 Linux, it starts Qoder CLI >=1.1.64, OpenClaw, QwenPaw and Hermes through supported native
 entrypoints, runs external Providers and retains execution metadata after Agent
 sessions end. Frameworks keep their native interfaces, model configuration,
-scheduling and permissions. The current release is a Preview.
+scheduling and permissions. It also manages public Pi SDK workers. The current release is a Preview.
 
 ## Start here
 
@@ -34,6 +34,7 @@ includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 | OpenClaw | 2026.9.6 | A new Gateway |
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
+| Pi Coding Agent / Core | 0.84.2 / 0.84.2 | Public SDK factory in an AW-owned foreground Node worker |
 
 Runtime supports tool-before `observe`/`block` and tool-after `observe` or single-text
 `replace_result`, plus
@@ -50,6 +51,10 @@ The configuration vocabulary includes more events/effects than the runtime
 supports; static validation alone does not certify native adoption. Cross-Agent
 approval, input rewriting and OS enforcement are outside this Preview.
 See the user guide for each Adapter's profile requirements and coexistence.
+Pi uses an application factory module with `adapter: pi` and shares PreTool retry
+reasons and PostTool single-text replacement. Its per-invocation UUID pairs both
+hooks while preserving the SDK session and original tool ID; see the
+[SDK launch guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-a-pi-sdk-worker).
 
 ## Basic use
 

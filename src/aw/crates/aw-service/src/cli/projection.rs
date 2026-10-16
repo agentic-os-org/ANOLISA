@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
-        "qoder" | "qwenpaw" => &native["tool_response"],
+        "qoder" | "qwenpaw" | "pi" => &native["tool_response"],
         "openclaw" => &native["event"]["result"],
         "hermes" => &native["extra"]["result"],
         _ => &Value::Null,
@@ -50,6 +50,10 @@ fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
         "openclaw" => (
             native["event"]["toolName"].as_str().unwrap_or(""),
             &native["event"]["params"],
+        ),
+        "pi" => (
+            native["tool_call"]["name"].as_str().unwrap_or(""),
+            &native["tool_call"]["input"],
         ),
         "qwenpaw" => (
             native["tool_call"]["name"].as_str().unwrap_or(""),
@@ -186,7 +190,7 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
         "hermes" => {
             json!({"aw_replacement": if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}})
         }
-        "openclaw" | "qwenpaw" => json!({"aw_replacement":value}),
+        "openclaw" | "qwenpaw" | "pi" => json!({"aw_replacement":value}),
         _ => return Err("unsupported result replacement adapter".into()),
     };
     Ok(HookOutput {
@@ -202,7 +206,7 @@ mod tests {
 
     #[test]
     fn empty_or_unbounded_replacements_are_rejected_for_every_adapter() {
-        for adapter in ["qoder", "openclaw", "qwenpaw", "hermes"] {
+        for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi"] {
             assert!(reply(adapter, &json!({}), "").is_err());
             assert!(reply(
                 adapter,
@@ -210,6 +214,27 @@ mod tests {
                 &"x".repeat(aw_provider::MAX_MESSAGE_BYTES + 1)
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn pi_projects_object_arguments_and_effective_sdk_error_status() {
+        let mut native = json!({"tool_call":{"name":"bash","input":{"command":"git status"}},
+            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false,"details":{"preserved":true}}});
+        let projected = project("pi", &native).unwrap();
+        assert_eq!(
+            projected,
+            json!({"text":"original","status":"success","content_origin":"command_output","command":"git status"})
+        );
+        native["tool_response"]["isError"] = json!(true);
+        assert_eq!(project("pi", &native).unwrap()["status"], "error");
+        for content in [
+            json!([{"type":"image","data":"opaque"}]),
+            json!([{"type":"text","text":"a"},{"type":"text","text":"b"}]),
+        ] {
+            native["tool_response"]["content"] = content;
+            assert!(project("pi", &native).is_none());
+            assert!(reply("pi", &native, "compact").is_err());
         }
     }
 
@@ -266,7 +291,7 @@ mod tests {
 
     #[test]
     fn text_replacement_preserves_native_metadata_and_does_not_add_a_copy() {
-        for adapter in ["openclaw", "qwenpaw"] {
+        for adapter in ["openclaw", "qwenpaw", "pi"] {
             let original = json!({"content":[{"type":"text","text":"original","annotations":{"kept":true}}],"metadata":{"kept":42},"state":"success"});
             let native = if adapter == "openclaw" {
                 json!({"event":{"result":original}})

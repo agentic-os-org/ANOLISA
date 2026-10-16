@@ -133,16 +133,45 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         },
         deadline,
     )?)?;
-    let output = client.call(
-        Operation::InvokeStep {
-            event_id: handle.event_id,
-            instance_id: binding.binding.instance_id,
-            step_id: step.into(),
-            native_environment: Some(std::env::vars_os().collect()),
-        },
-        deadline,
-    )?;
-    response(adapter, event, on_error, output, &binding.adapter, &value)
+    let result: Result<HookOutput> = client
+        .call(
+            Operation::InvokeStep {
+                event_id: handle.event_id.clone(),
+                instance_id: binding.binding.instance_id.clone(),
+                step_id: step.into(),
+                native_environment: Some(std::env::vars_os().collect()),
+            },
+            deadline,
+        )
+        .map_err(Into::into)
+        .and_then(|output| response(adapter, event, on_error, output, &binding.adapter, &value));
+    // Pi stops its SDK callback loop on JSON denial (exit 0), including a
+    // fail-closed callback error. Unvisited steps must not keep the lease live.
+    if binding.adapter == "pi"
+        && event == "tool.before"
+        && handle.steps.last().map(String::as_str) != Some(step)
+        && pi_stops_before(&result, on_error)
+    {
+        if let Err(error) = client.call(
+            Operation::CloseEvent {
+                event_id: handle.event_id,
+                instance_id: binding.binding.instance_id,
+            },
+            deadline,
+        ) {
+            // Cleanup failure must not turn a denial into report-mode allow.
+            eprintln!("aw hook event close failed: {error}");
+        }
+    }
+    emit(result?)
+}
+
+fn pi_stops_before(result: &Result<HookOutput>, on_error: &str) -> bool {
+    match result {
+        Ok(output) => serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|value| value["block"] == true),
+        Err(_) => on_error == "block",
+    }
 }
 
 fn project_within_limit(event: &mut Value, projection: Value) -> Result<()> {
@@ -163,7 +192,7 @@ fn response(
     output: Value,
     adapter_id: &str,
     native: &Value,
-) -> Result<Exit> {
+) -> Result<HookOutput> {
     if !matches!(on_error, "report" | "block") {
         return Err("invalid failure action".into());
     }
@@ -180,11 +209,14 @@ fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
-        std::io::stdout().write_all(&stdout)?;
-        std::io::stdout().flush()?;
-        std::io::stderr().write_all(&stderr)?;
-        std::io::stderr().flush()?;
-        return Ok(exit);
+        if adapter_id == "pi" {
+            validate_pi_native(event, &exit, &stdout)?;
+        }
+        return Ok(HookOutput {
+            exit,
+            stdout,
+            stderr,
+        });
     }
     if output["kind"] != "provider" {
         return Err("invalid step response kind".into());
@@ -206,11 +238,11 @@ fn response(
         {
             return Err("invalid result replacement".into());
         }
-        return emit(super::projection::reply(
+        return super::projection::reply(
             adapter_id,
             native,
             effect["text"].as_str().ok_or("missing replacement text")?,
-        )?);
+        );
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
@@ -225,10 +257,36 @@ fn response(
         {
             super::adapter::block_reason(adapter_id, &mut reply, text)?;
         }
-        return emit(reply);
+        return Ok(reply);
     }
     // Neutral output preserves the Agent's independent permission checks.
-    emit(adapter.reply(false))
+    Ok(adapter.reply(false))
+}
+
+// Validate raw native output before returning to the SDK so an invalid directive
+// and a nonzero/signal exit share the same error action and early-close path.
+fn validate_pi_native(event: &str, exit: &Exit, stdout: &[u8]) -> Result<()> {
+    if !matches!(exit, Exit::Code(0)) {
+        return Err("Pi native callback must exit zero".into());
+    }
+    let value: Value = if stdout.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(stdout)?
+    };
+    let object = value
+        .as_object()
+        .ok_or("Pi native directive must be an object")?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "block" | "reason"))
+        || object.get("block").is_some_and(|value| !value.is_boolean())
+        || object.get("reason").is_some_and(|value| !value.is_string())
+        || (event == "tool.after" && value["block"] == true)
+    {
+        return Err("unsupported Pi native directive".into());
+    }
+    Ok(())
 }
 
 fn emit(output: HookOutput) -> Result<Exit> {
@@ -279,5 +337,56 @@ fn read_input(deadline: Instant) -> Result<Vec<u8>> {
         if input.len() > 1024 * 1024 {
             return Err("native hook stdin exceeds one MiB".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pi_early_close_uses_json_denial_even_with_report_errors() {
+        let adapter = adapter::select("pi").unwrap();
+        assert!(pi_stops_before(&Ok(adapter.reply(true)), "report"));
+        assert!(!pi_stops_before(&Ok(adapter.reply(false)), "block"));
+        assert!(pi_stops_before(&Err("failure".into()), "block"));
+        assert!(!pi_stops_before(&Err("failure".into()), "report"));
+    }
+
+    #[test]
+    fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
+        for valid in [
+            b"".as_slice(),
+            br#"{}"#,
+            br#"{"block":true,"reason":"retry"}"#,
+        ] {
+            assert!(validate_pi_native("tool.before", &Exit::Code(0), valid).is_ok());
+        }
+        for invalid in [
+            b" ".as_slice(),
+            b"invalid",
+            b"null",
+            b"[]",
+            br#"{"block":"yes"}"#,
+            br#"{"reason":null}"#,
+            br#"{"aw_replacement":{"content":[]}}"#,
+            br#"{"approval":true}"#,
+        ] {
+            assert!(validate_pi_native("tool.before", &Exit::Code(0), invalid).is_err());
+        }
+        assert!(validate_pi_native("tool.after", &Exit::Code(0), br#"{"block":true}"#).is_err());
+        assert!(validate_pi_native("tool.before", &Exit::Code(2), b"{}").is_err());
+        assert!(validate_pi_native("tool.before", &Exit::Signal(15), b"{}").is_err());
+        let output = json!({"status":"ok","kind":"native","native":{"stdout":br#"{"aw_replacement":{}}"#.to_vec(),"stderr":[],"exit_code":0,"signal":null}});
+        assert!(response(
+            adapter::select("pi").unwrap(),
+            "tool.after",
+            "report",
+            output,
+            "pi",
+            &json!({})
+        )
+        .is_err());
     }
 }

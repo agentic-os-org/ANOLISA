@@ -23,7 +23,7 @@ pub struct ProviderEvidence {
 /// claims. Admission does not probe the Agent or certify the supplied version.
 #[derive(Clone, Debug)]
 pub struct AdapterCapabilities {
-    /// One of the four adapters declared by the configuration contract.
+    /// One of the adapters declared by the configuration contract.
     pub adapter: String,
     /// The actual Agent version whose capabilities were established by the caller.
     pub version: String,
@@ -133,7 +133,7 @@ pub fn preflight(
         agent["adapter"] == capabilities.adapter
             && matches!(
                 capabilities.adapter.as_str(),
-                "qoder" | "openclaw" | "hermes" | "qwenpaw"
+                "qoder" | "openclaw" | "hermes" | "qwenpaw" | "pi"
             ),
         "Adapter evidence does not match the configured target",
     )?;

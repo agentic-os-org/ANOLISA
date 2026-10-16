@@ -5,8 +5,7 @@
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
 checks replacement bounds; it does not independently prove semantic losslessness.
-Qoder, OpenClaw, QwenPaw and
-Hermes share one Provider configuration for PreTool retry suggestions and PostTool
+Qoder, OpenClaw, QwenPaw, Hermes and Pi share one Provider configuration for PreTool retry suggestions and PostTool
 compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
@@ -28,11 +27,14 @@ checks before execution, append PreTool, retain its completion observer, and app
 compression after the existing after steps. Installing a component
 does not enable it. The existing plain `sec-core` selection retains its behavior.
 
-For all four frameworks, copy the
+For all five frameworks, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml),
 replace its executable paths, and keep both state directories outside the immutable
 installation prefix. Use the framework-specific profile and launch flags from the
 [AW guide](aw.md#use-one-configuration-for-four-frameworks).
+
+Pi uses the SDK application factory described in the [Pi launch guide](aw.md#start-a-pi-sdk-worker);
+the package configuration generator still targets Qoder/OpenClaw.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`; it calls
@@ -88,6 +90,7 @@ PreTool does not provide those capabilities or Schema compression.
 | OpenClaw | `registerAgentToolResultMiddleware` before the next model request |
 | QwenPaw | Final AgentScope `ToolResponse` returned by acting middleware |
 | Hermes | `transform_tool_result` final string callback |
+| Pi SDK | Core `afterToolCall` content override after the original callback |
 
 OpenClaw requires its middleware API and explicit plugin enablement; AW's generated
 native profile declares the middleware contract. An observational `after_tool_call`
@@ -111,7 +114,7 @@ limits are AW failures handled by `on_error: report`; the native result is retai
 AW's persistent journal remains metadata-only and does not store replacement text.
 
 Keep existing completion observers and custom Hooks before compression in the
-`tool.after.steps` list. Qoder, QwenPaw and Hermes run these steps in their declared order when result
+`tool.after.steps` list. Qoder, QwenPaw, Hermes and Pi run these steps in their declared order when result
 replacement is enabled; all observers see the original result. Only the final structured
 step may request `replace_result`. A replacement followed by another enabled step
 or a second replacement is rejected during admission. Earlier observers retain

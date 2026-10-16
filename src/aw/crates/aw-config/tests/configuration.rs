@@ -37,7 +37,7 @@ fn starter_example_needs_no_policy_program_and_requests_only_tool_events() {
 #[test]
 fn one_configuration_covers_all_four_adapters_and_sixteen_event_names() {
     let mut value = example();
-    for adapter in ["qwenpaw", "qoder", "openclaw", "hermes"] {
+    for adapter in ["qwenpaw", "qoder", "openclaw", "hermes", "pi"] {
         value["spec"]["agents"][adapter] = json!({
             "adapter": adapter,
             "argv": ["/nonexistent/agent", "--argument", ""]

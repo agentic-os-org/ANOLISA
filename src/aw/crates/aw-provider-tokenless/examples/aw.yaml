@@ -27,6 +27,9 @@ spec:
     hermes:
       adapter: hermes
       argv: [/absolute/path/to/hermes, chat]
+    pi:
+      adapter: pi
+      argv: [/absolute/path/to/node, /absolute/path/to/pi-application.mjs]
   providers:
     tokenless:
       protocol: aw-provider/v1alpha1

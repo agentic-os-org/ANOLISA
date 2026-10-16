@@ -85,10 +85,12 @@ pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) ->
     }
     match adapter {
         "qoder" | "qwenpaw" => reply.stderr = format!("{text}\n").into_bytes(),
-        "openclaw" | "hermes" => {
+        "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
                 "blockReason"
+            } else if adapter == "pi" {
+                "reason"
             } else {
                 "message"
             }] = serde_json::json!(text);
@@ -110,6 +112,7 @@ pub(super) trait Adapter: Sync {
 
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
     match name {
+        "pi" => Ok(&super::adapters::pi::Pi),
         "qoder" => Ok(&super::qoder::Qoder),
         "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
         "hermes" => Ok(&super::adapters::hermes::Hermes),
@@ -172,7 +175,7 @@ mod tests {
     #[test]
     fn retry_reasons_preserve_every_dialects_denial_and_never_emit_updates() {
         let message = "Retry: literal ; $(touch NEVER) ' spaces\nnot executable";
-        for name in ["qoder", "qwenpaw", "hermes", "openclaw"] {
+        for name in ["qoder", "qwenpaw", "hermes", "openclaw", "pi"] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
             block_reason(name, &mut reply, message).unwrap();
@@ -188,6 +191,8 @@ mod tests {
                         value,
                         serde_json::json!({"block":true,"blockReason":message})
                     );
+                } else if name == "pi" {
+                    assert_eq!(value, serde_json::json!({"block":true,"reason":message}));
                 } else {
                     assert_eq!(
                         value,
