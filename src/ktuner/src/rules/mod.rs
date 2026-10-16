@@ -509,10 +509,15 @@ fn eval_swappiness(
 
 fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // Databases and caches whose latency profile THP's collapse/split stalls
-    // hurt. mongod sits in every sibling db list (eval_swappiness,
-    // eval_dirty_ratio, the readahead rule, the classify gate) and MongoDB's
-    // production notes ask for THP to be off outright; etcd is the
-    // coordination store of the same cache family redis/memcached belong to.
+    // hurt; etcd is the coordination store of the same cache family
+    // redis/memcached belong to. mongod is left out on purpose although it is
+    // a database everywhere else: its own startup check wants the opposite of
+    // this advice depending on the build. MongoDB 8.0 with its default Google
+    // TCMalloc warns unless THP is `always` (`kWronglyDisabledOnSystem`), and
+    // the legacy allocator, like 7.0, warns when it is (8.0.4
+    // src/mongo/db/startup_warnings_mongod.cpp `getTHPEnablementWarningCase`).
+    // Nothing on the host tells the two apart, so either answer is wrong for
+    // some mongod, and mongod's own warning names the setting it needs.
     // oracle is the one OLTP database is_database_present already counts for
     // the IPC gates; its own Linux guidance asks for THP off outright too
     // (MOS 1557478.1 "Disabling Transparent Hugepages", and the 19c
@@ -544,7 +549,6 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
-        || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("oracle")
         || info.has_process("etcd")
@@ -12929,22 +12933,31 @@ mod tests {
 
     #[test]
     fn test_thp_with_mongod_and_etcd() {
-        // mongod is a database in every sibling list (swappiness, dirty_ratio,
-        // classify) and MongoDB's production notes ask for THP off outright;
-        // etcd is the coordination store of the same cache family. Both must
-        // get the always->madvise recommendation; a streaming workload must not.
-        for name in ["mongod", "etcd"] {
-            let mut info = make_test_info();
-            info.processes = vec![ProcessInfo {
-                name: name.to_string(),
-            }];
-            let recs = evaluate(&info).unwrap().recommendations;
-            let thp_rec = recs
-                .iter()
-                .find(|r| r.param.contains("hugepage"))
-                .unwrap_or_else(|| panic!("{name} must get the THP recommendation"));
-            assert_eq!(thp_rec.recommended_value, "madvise");
-        }
+        // etcd is the coordination store of the same cache family and must get
+        // the always->madvise recommendation; a streaming workload must not.
+        // mongod must not either: MongoDB 8.0's default build asks for THP
+        // `always` while the legacy allocator and 7.0 ask for it off, and the
+        // host does not say which one runs.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "mongod".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "transparent_hugepage/enabled"),
+            "mongod's THP needs depend on its build"
+        );
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "etcd".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let thp_rec = recs
+            .iter()
+            .find(|r| r.param.contains("hugepage"))
+            .unwrap_or_else(|| panic!("etcd must get the THP recommendation"));
+        assert_eq!(thp_rec.recommended_value, "madvise");
         let mut info = make_test_info();
         info.processes = vec![ProcessInfo {
             name: "kafka".to_string(),
