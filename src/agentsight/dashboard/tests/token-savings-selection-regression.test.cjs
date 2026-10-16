@@ -152,6 +152,7 @@ function loadPageModule(relativePath, moduleStubs, hooks) {
   const requireStub = (name) => {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
+    if (name === '../utils/savingsSort') return loadPageModule('src/utils/savingsSort.ts', moduleStubs, hooks);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
