@@ -105,6 +105,21 @@ pub fn run_consolidation_owned(
             && !crate::safety::looks_like_prompt_injection(&f.content)
     });
 
+    // Redact secrets before the facts are persisted to L1 storage. The rules
+    // embed untrusted audit-derived text — search queries from `path`, error
+    // messages, file paths — and `redact_secrets` exists exactly for this
+    // write path: a key that leaked into a query or an error string must not
+    // be amplified into a long-lived memory fact. Doing it here covers every
+    // rule and the episodic extractor at once.
+    for fact in &mut facts {
+        fact.title = crate::safety::redact_secrets(&fact.title);
+        fact.content = crate::safety::redact_secrets(&fact.content);
+        for path in &mut fact.related_paths {
+            *path = crate::safety::redact_secrets(path);
+        }
+        fact.token_estimate = ConsolidatedFact::estimate_tokens(&fact.content);
+    }
+
     // Sort by confidence descending, truncate to max_facts.
     facts.sort_by(|a, b| {
         b.confidence
@@ -639,5 +654,72 @@ mod tests {
                 f.content
             );
         }
+    }
+
+    #[test]
+    fn lesson_facts_redact_secrets_from_error_text() {
+        // An error message that echoes a credential (a rejected auth header,
+        // a failing command line) must not be persisted verbatim into an
+        // L1 fact.
+        let mut config = default_config();
+        config.min_tool_calls = 1;
+        let entries = vec![make_entry(
+            "mem_read",
+            "notes/deploy.md",
+            false,
+            Some("auth failed for ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+        )];
+        let facts = run_consolidation_owned(&entries, "sec-sid", &config);
+        let lesson = facts
+            .iter()
+            .find(|f| f.category == FactCategory::Lesson)
+            .expect("a lesson fact should be emitted");
+        assert!(
+            !lesson
+                .content
+                .contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            "raw token survived in content: {}",
+            lesson.content
+        );
+        assert!(lesson.content.contains("[REDACTED:github-token]"));
+        for f in &facts {
+            assert!(!f.title.contains("ghp_"), "raw token in title: {}", f.title);
+            assert!(
+                !f.content.contains("ghp_"),
+                "raw token in content: {}",
+                f.content
+            );
+            assert!(
+                !f.related_paths.iter().any(|p| p.contains("ghp_")),
+                "raw token in related_paths: {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn interest_facts_redact_secrets_from_search_queries() {
+        // Queries ride in the audit `path` field ("mode:query"); rule 2
+        // copies them into fact titles, so a query for a leaked AWS key
+        // must be redacted before persistence.
+        let mut config = default_config();
+        config.min_tool_calls = 1;
+        let entries = vec![make_entry(
+            "memory_search",
+            "bm25:AKIAIOSFODNN7EXAMPLE",
+            true,
+            None,
+        )];
+        let facts = run_consolidation_owned(&entries, "sec-sid-2", &config);
+        let interest = facts
+            .iter()
+            .find(|f| f.category == FactCategory::Interest)
+            .expect("an interest fact should be emitted");
+        assert!(
+            !interest.title.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw key survived in title: {}",
+            interest.title
+        );
+        assert!(interest.title.contains("[REDACTED:aws-key]"));
+        assert!(!interest.content.contains("AKIAIOSFODNN7EXAMPLE"));
     }
 }
