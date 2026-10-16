@@ -1532,6 +1532,76 @@ mod tests {
         assert!(req.stream);
     }
 
+    /// An agentic Gemini request rides its tool interaction as `functionCall`
+    /// / `functionResponse` parts of `contents`. The shared view maps them onto
+    /// `tool_calls` / tool-role messages, so the semantic layer records the
+    /// interaction it already understands for every other protocol — before,
+    /// every Gemini message parsed with an empty `parts` list.
+    #[test]
+    fn gemini_tool_interaction_survives_request_parsing() {
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "list the files"}]},
+                {"role": "model", "parts": [
+                    {"text": "let me check"},
+                    {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}
+                ]},
+                {"role": "user", "parts": [{
+                    "functionResponse": {
+                        "name": "list_dir",
+                        "response": {"entries": ["a", "b"]}
+                    }
+                }]}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.messages.len(), 3);
+        assert_eq!(req.messages[0].role, "user");
+        match req.messages[0].parts.as_slice() {
+            [MessagePart::Text { content }] => assert_eq!(content, "list the files"),
+            other => panic!("expected the user text, got {other:?}"),
+        }
+        assert_eq!(req.messages[1].role, "assistant");
+        match req.messages[1].parts.as_slice() {
+            [
+                MessagePart::Text { content },
+                MessagePart::ToolCall {
+                    name, arguments, ..
+                },
+            ] => {
+                assert_eq!(content, "let me check");
+                assert_eq!(name, "list_dir");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str()),
+                    Some("/tmp")
+                );
+            }
+            other => panic!("expected text + tool call, got {other:?}"),
+        }
+        assert_eq!(req.messages[2].role, "tool");
+        match req.messages[2].parts.as_slice() {
+            [MessagePart::ToolCallResponse { response, .. }] => {
+                // The response arrives as the serialized JSON string, the same
+                // shape an OpenAI tool message's content carries.
+                let parsed: serde_json::Value = serde_json::from_str(
+                    response.as_str().expect("response is the serialized JSON"),
+                )
+                .expect("response is valid JSON");
+                assert_eq!(
+                    parsed
+                        .get("entries")
+                        .and_then(|e| e.get(0))
+                        .and_then(|e| e.as_str()),
+                    Some("a")
+                );
+            }
+            other => panic!("expected a tool response, got {other:?}"),
+        }
+    }
+
     /// Legacy `function_call` payloads (finish_reason `function_call`) carry the
     /// tool request in the pre-`tool_calls` spelling; dropping them made the
     /// turn look like plain text.
