@@ -751,6 +751,13 @@ impl OpenAIParser {
         if !refusal_buf.is_empty() {
             message["refusal"] = serde_json::Value::String(refusal_buf);
         }
+        // The calls are part of the output whatever ended the stream; only
+        // the finish reason below gives way to a cut, as in the
+        // non-streaming normalizer.
+        let has_tool_calls = !tool_calls.is_empty();
+        if has_tool_calls {
+            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
         let finish_reason = if output_capped {
             // The cap ended the stream: report the truncation even when a
             // tool call was in flight (its arguments may be cut mid-JSON,
@@ -758,8 +765,7 @@ impl OpenAIParser {
             "length"
         } else if output_filtered {
             "content_filter"
-        } else if !tool_calls.is_empty() {
-            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        } else if has_tool_calls {
             "tool_calls"
         } else {
             "stop"
@@ -2040,6 +2046,56 @@ mod tests {
             resp.choices[0].finish_reason,
             Some("content_filter".to_string())
         );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_incomplete_keeps_tool_calls() {
+        // A stream cut after the model already emitted a function call: the
+        // terminal reason outranks "tool_calls", but the call itself is part
+        // of the output and must stay on the message, as it does for the
+        // non-streaming response and the chat-completions stream.
+        for reason in ["max_output_tokens", "content_filter"] {
+            let chunks = vec![
+                serde_json::json!({"type": "response.created", "response": {"id": "resp_cut_tc", "model": "qwen-plus"}}),
+                serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_cut"}}),
+                serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+                serde_json::json!({"type": "response.incomplete", "response": {
+                    "id": "resp_cut_tc",
+                    "model": "qwen-plus",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": reason},
+                    "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+                }}),
+            ];
+
+            let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+                .expect("should aggregate");
+            let expected = if reason == "max_output_tokens" {
+                "length"
+            } else {
+                "content_filter"
+            };
+            assert_eq!(resp.choices[0].finish_reason, Some(expected.to_string()));
+            let tc = resp.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap_or_else(|| panic!("{reason}: the emitted call must be kept"));
+            assert_eq!(tc.len(), 1);
+            assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_cut");
+            assert_eq!(
+                tc[0]
+                    .get("function")
+                    .unwrap()
+                    .get("arguments")
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+                "{\"city\":\"Beijing\"}"
+            );
+        }
     }
 
     #[test]
