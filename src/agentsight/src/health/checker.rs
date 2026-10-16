@@ -365,13 +365,21 @@ impl HealthChecker {
                                 .or_default()
                                 .push((call_id.clone(), session_id.clone()));
                         }
-                        // Dedup against trace mode only: check once before the
-                        // loop. A per-iteration check would also match the
-                        // events this loop itself inserts, so for a single-pid
-                        // multi-session agent (OpenClaw) every conversation
-                        // after the first would be silently skipped.
-                        let trace_recorded_crash =
-                            istore.agent_crash_exists_recent(rep.pid as i32, 120);
+                        // Snapshot trace-mode keys before the loop so our own
+                        // inserts cannot suppress later conversations. Consult
+                        // every pid because trace may record a sibling's exit,
+                        // but dedup only the conversation it actually covered.
+                        let trace_recorded_convs = match istore
+                            .agent_crash_conversations_recent(&pids, 120)
+                        {
+                            Ok(convs) => convs,
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to query trace-recorded agent_crash for pids={pids:?}: {e}"
+                                );
+                                HashSet::new()
+                            }
+                        };
                         for ((session_id, conversation_id), calls) in &by_conv {
                             let dedup_key = (
                                 agent_name.clone(),
@@ -384,12 +392,11 @@ impl HealthChecker {
                                 );
                                 continue;
                             }
-                            // Dedup: skip if trace-mode already recorded a
-                            // recent agent_crash for this PID (within 120s).
-                            if trace_recorded_crash {
+                            if trace_recorded_convs
+                                .contains(&(session_id.clone(), conversation_id.clone()))
+                            {
                                 log::debug!(
-                                    "Skipping agent_crash for pid={} — already recorded by trace mode",
-                                    rep.pid,
+                                    "Skipping agent_crash for pids={pids:?} session={session_id:?} conversation={conversation_id:?} — already recorded by trace mode",
                                 );
                                 continue;
                             }
@@ -1307,6 +1314,233 @@ mod tests {
                 .is_empty(),
             "all pending calls of the dead pid must be interrupted"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A multi-process agent (Cosh parent + worker) shares one offline group.
+    /// Trace mode records its crash under whichever pid it observed dying —
+    /// the parent here — while the group's representative is the worker (the
+    /// largest pid). The dedup guard used to consult the representative only,
+    /// so the backup path wrote a second agent_crash event for the very
+    /// conversation trace had already covered, breaking the "at most one
+    /// event per (agent, session, conversation) triple" contract this method
+    /// documents.
+    #[test]
+    fn trace_recorded_crash_under_a_sibling_pid_dedups_the_backup_path() {
+        let parent = 4_100_012_i32;
+        let worker = 4_100_013_i32;
+        let dir = unique_tmp_dir("sibling-crash");
+        let genai_store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .expect("genai store"),
+        );
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        // The worker's in-flight call belongs to the conversation whose crash
+        // trace recorded under the parent.
+        genai_store
+            .insert_pending(&crate::storage::sqlite::genai::PendingCallInfo {
+                call_id: "hc-call-sibling-crash".to_string(),
+                trace_id: None,
+                conversation_id: Some("conv-a".to_string()),
+                session_id: Some("sess-a".to_string()),
+                start_timestamp_ns: 1_000_000_000,
+                pid: worker,
+                process_name: "test".to_string(),
+                agent_name: Some("cosh-core".to_string()),
+                http_method: Some("POST".to_string()),
+                http_path: Some("/v1/chat/completions".to_string()),
+                input_messages: None,
+                system_instructions: None,
+                user_query: None,
+                is_sse: false,
+                model: Some("gpt-4".to_string()),
+                provider: Some("openai".to_string()),
+                call_kind: "main".to_string(),
+                pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+                pending_match_key: None,
+            })
+            .expect("insert_pending");
+
+        // Trace mode already recorded the crash under the PARENT pid.
+        istore
+            .insert(&crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::AgentCrash,
+                Some("sess-a".to_string()),
+                None,
+                Some("conv-a".to_string()),
+                Some("hc-call-sibling-crash".to_string()),
+                Some(parent),
+                Some("cosh-core".to_string()),
+                (now_ms() as i64) * 1_000_000,
+                None,
+            ))
+            .expect("insert the trace-recorded crash");
+
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(30))
+            .with_interruption_store(Arc::clone(&istore))
+            .with_genai_store(Arc::clone(&genai_store));
+        // Both pids go offline in the same scan, forming one group whose
+        // representative is the worker.
+        store
+            .write()
+            .unwrap()
+            .update(parent as u32, offline_status(parent as u32));
+        store
+            .write()
+            .unwrap()
+            .update(worker as u32, offline_status(worker as u32));
+
+        checker.record_offline_agent_crashes(&[
+            offline_status(parent as u32),
+            offline_status(worker as u32),
+        ]);
+
+        let events = list_crash_events(&istore);
+        assert_eq!(
+            events.len(),
+            1,
+            "a trace-recorded crash under a sibling pid must dedup the backup path"
+        );
+        // The worker's still-pending call must be marked interrupted — the
+        // dedup skips the duplicate event, not the cleanup.
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[worker])
+                .expect("list pending")
+                .is_empty(),
+            "the leftover pending call of the crashed worker must be interrupted"
+        );
+        // Both offline entries keep the crash flag for the health page and
+        // the crash notifier.
+        for entry in store.read().unwrap().all_agents() {
+            assert!(
+                entry.has_crash,
+                "pid {} must keep its crash flag",
+                entry.pid
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A trace event under one sibling must not suppress backup events for
+    /// other conversations still pending in the same agent_name group.
+    #[test]
+    fn trace_recorded_crash_under_a_sibling_pid_preserves_other_conversations() {
+        let parent = 4_100_014_i32;
+        let worker = 4_100_015_i32;
+        let dir = unique_tmp_dir("sibling-crash-multiconv");
+        let genai_store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .expect("genai store"),
+        );
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        let pending_a = crate::storage::sqlite::genai::PendingCallInfo {
+            call_id: "hc-call-sibling-multiconv-a".to_string(),
+            trace_id: None,
+            conversation_id: Some("conv-a".to_string()),
+            session_id: Some("sess-a".to_string()),
+            start_timestamp_ns: 1_000_000_000,
+            pid: worker,
+            process_name: "test".to_string(),
+            agent_name: Some("cosh-core".to_string()),
+            http_method: Some("POST".to_string()),
+            http_path: Some("/v1/chat/completions".to_string()),
+            input_messages: None,
+            system_instructions: None,
+            user_query: None,
+            is_sse: false,
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            call_kind: "main".to_string(),
+            pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+            pending_match_key: None,
+        };
+        genai_store
+            .insert_pending(&pending_a)
+            .expect("insert first pending");
+        let pending_b = crate::storage::sqlite::genai::PendingCallInfo {
+            call_id: "hc-call-sibling-multiconv-b".to_string(),
+            conversation_id: Some("conv-b".to_string()),
+            session_id: Some("sess-b".to_string()),
+            start_timestamp_ns: 2_000_000_000,
+            ..pending_a
+        };
+        genai_store
+            .insert_pending(&pending_b)
+            .expect("insert second pending");
+
+        istore
+            .insert(&crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::AgentCrash,
+                Some("sess-a".to_string()),
+                None,
+                Some("conv-a".to_string()),
+                None,
+                Some(parent),
+                Some("cosh-core".to_string()),
+                (now_ms() as i64) * 1_000_000,
+                None,
+            ))
+            .expect("insert the trace-recorded crash");
+
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(30))
+            .with_interruption_store(Arc::clone(&istore))
+            .with_genai_store(Arc::clone(&genai_store));
+        store
+            .write()
+            .unwrap()
+            .update(parent as u32, offline_status(parent as u32));
+        store
+            .write()
+            .unwrap()
+            .update(worker as u32, offline_status(worker as u32));
+
+        checker.record_offline_agent_crashes(&[
+            offline_status(parent as u32),
+            offline_status(worker as u32),
+        ]);
+
+        let events = list_crash_events(&istore);
+        let conversations: HashSet<Option<String>> =
+            events.iter().map(|e| e.conversation_id.clone()).collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "trace must dedup conv-a without suppressing conv-b, got {conversations:?}"
+        );
+        assert_eq!(conversations.len(), 2, "each conversation needs one event");
+        assert!(conversations.contains(&Some("conv-a".to_string())));
+        assert!(conversations.contains(&Some("conv-b".to_string())));
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[parent, worker])
+                .expect("list pending")
+                .is_empty(),
+            "dedup skips duplicate events, not pending-call cleanup"
+        );
+        for entry in store.read().unwrap().all_agents() {
+            assert!(
+                entry.has_crash,
+                "pid {} must keep its crash flag",
+                entry.pid
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

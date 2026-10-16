@@ -4,6 +4,7 @@ mod maintenance;
 
 use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::{Connection, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -695,6 +696,49 @@ impl InterruptionStore {
             params![call_id, session_id],
         )?;
         Ok(updated)
+    }
+
+    /// Return session/conversation keys for recent crashes recorded under any
+    /// of `pids`, allowing serve mode to dedup only conversations trace covered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query or row decoding fails.
+    pub fn agent_crash_conversations_recent(
+        &self,
+        pids: &[i32],
+        window_secs: u64,
+    ) -> Result<HashSet<(Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+        if pids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let cutoff_ns = now_ns - (window_secs as i64 * 1_000_000_000);
+        let placeholders = pids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT session_id, conversation_id FROM interruption_events
+             WHERE interruption_type='agent_crash' AND occurred_at_ns > ?1
+               AND pid IN ({placeholders})"
+        );
+        let params = std::iter::once(cutoff_ns).chain(pids.iter().map(|&pid| i64::from(pid)));
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        let mut result = HashSet::new();
+        for row in rows {
+            result.insert(row?);
+        }
+        Ok(result)
     }
 
     /// Check if a recent agent_crash event exists for the given PID.
