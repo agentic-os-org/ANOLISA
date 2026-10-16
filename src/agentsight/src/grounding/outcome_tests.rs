@@ -120,6 +120,32 @@ fn t6_nested_exception_annotates_without_failing() {
 }
 
 #[test]
+fn a_payload_that_opens_with_its_exception_is_a_failure() {
+    // `nested_error` reports only an exception *quoted inside* a payload and
+    // documents the leading one as this call's own failure, "handled by
+    // find_signature" — which had a rule for a leading Python traceback but
+    // none for the JVM/SQL classes its own marker list names. A tool that
+    // crashed with its exception as the payload's first line therefore graded
+    // as Ok at High confidence, and its error text stayed usable as evidence
+    // for the very values it mentions.
+    let v = classify(
+        &plain_call(),
+        "java.lang.NullPointerException: Cannot invoke \"java.util.List.size()\" because \"rows\" is null",
+    );
+    assert_eq!(
+        v.status,
+        CallStatus::Failed,
+        "the exception opens the payload, so it is this call's failure: rule={}",
+        v.matched_rule
+    );
+    assert_eq!(v.matched_rule, "R4");
+    assert!(
+        v.evidence_quote.is_some(),
+        "a verdict needs a quotable basis"
+    );
+}
+
+#[test]
 fn t7_placeholder_payload_is_unknown_not_ok() {
     let v = classify(&bash_call("make build"), "[dws-bash:pending-post-tool-use]");
     assert_eq!(v.status, CallStatus::Unknown);
