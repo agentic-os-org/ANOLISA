@@ -77,6 +77,10 @@ git bundle verify "$BUNDLE_FILE"
 
 ### MySQL / MariaDB
 
+> 以下为基础示例。涉及一致性语义（`--single-transaction` 与 FTWRL 的
+> 交互）、binlog 位点、GTID 或高危确认流程时，以 `mysql-admin` 技能
+> （`devops/mysql-admin`）的规则为准。
+
 ```bash
 DB_NAME="myapp"
 DB_USER="root"
@@ -157,6 +161,10 @@ git remote set-url origin <原始远程地址>
 ```
 
 ### MySQL / MariaDB 恢复
+
+> 以下为基础示例。恢复前的完整性校验、目标确认与回滚准备等
+> 高危流程，以 `mysql-admin` 技能（`devops/mysql-admin`）的
+> 安全检查清单为准。
 
 ```bash
 # 恢复前建议先备份当前数据库（避免误操作）
