@@ -5401,6 +5401,19 @@ fn eval_nmi_watchdog_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path:
     if !info.param_exists(path) {
         return 1;
     }
+    // Since 6.5 the kernel registers the switch read-only when no hard-lockup
+    // detector could be started, while it still reads its default 1, and
+    // refuses a write with -ENOTSUPP (v6.6 kernel/watchdog.c
+    // `watchdog_sysctl_init`, `proc_nmi_watchdog`). No detector runs then, so
+    // there is no counter or interrupt for the advice to save. Only the mode
+    // bits tell: a read-only mount or an unprivileged caller says nothing
+    // about the detector.
+    let registered_writable = std::fs::metadata(path).is_ok_and(|metadata| {
+        std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o222 != 0
+    });
+    if !registered_writable {
+        return 1;
+    }
     let current = read_sysctl_u64(path);
     if current == 1 {
         recs.push(Recommendation {
@@ -7466,7 +7479,9 @@ fn eval_hardlockup_panic_at(
 ///
 /// Hard-lockup detection rides on the NMI watchdog, so the panic setting only
 /// matters while that watchdog runs — and ktuner itself turns it off: the perf
-/// rule writes `kernel.nmi_watchdog = 0` on every host that reads 1. Judging
+/// rule writes `kernel.nmi_watchdog = 0` on every host that reads 1 and runs a
+/// detector (a read-only switch has none, and then there is no hard lockup
+/// for the panic setting to act on either). Judging
 /// the current value alone therefore let a plan contain both
 /// `nmi_watchdog = 0` (Medium, Performance) and `hardlockup_panic = 1`
 /// (High, Security), where the first write disarms the detector the second
@@ -17097,6 +17112,46 @@ mod tests {
         }
     }
 
+    /// Since Linux 6.5 the kernel registers `nmi_watchdog` read-only when no
+    /// hard-lockup detector could be started (a guest without a virtual PMU,
+    /// typically), while the switch still reads its default 1 (v6.6
+    /// kernel/watchdog.c). Nothing runs to disable then, and a write is refused
+    /// with -ENOTSUPP, so the advice must not appear.
+    #[test]
+    fn nmi_watchdog_advice_needs_a_running_detector() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_nmi_watchdog_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let switch = |name: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"1\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let running = switch("running", 0o644);
+        let unavailable = switch("unavailable", 0o444);
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_nmi_watchdog_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&running);
+        assert_eq!(recs.len(), 1, "a running detector is disabled");
+        assert_eq!(recs[0].recommended_value, "0");
+        assert!(
+            advice(&unavailable).is_empty(),
+            "a read-only switch has no detector behind it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn stat_interval_advice_needs_a_readable_value() {
         // The rule fires below 2, and read_sysctl_u64 maps an unreadable or
@@ -18298,7 +18353,8 @@ mod tests {
     #[test]
     fn hardlockup_panic_defers_to_the_watchdog_the_plan_disables() {
         // The perf rule writes kernel.nmi_watchdog = 0 on EVERY host that
-        // reads 1 (eval_nmi_watchdog), and the hardlockup detector is driven
+        // reads 1 and runs a detector (eval_nmi_watchdog_at), and the
+        // hardlockup detector is driven
         // by that watchdog: with the two entries in one plan the first write
         // disarms the detector the second one needs, so the High-confidence
         // security advice could never fire. The guard must therefore read the
