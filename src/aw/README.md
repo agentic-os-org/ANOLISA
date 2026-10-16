@@ -26,6 +26,10 @@ credentials. Core works without sec-core or any Provider. The source walkthrough
 includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 [boolean policy](crates/aw-service/examples/check-tool.py) that need no backend.
 
+The sec-core package also includes its authenticated health helper and official
+service/configuration reference assets. Optional explicit diagnostics are documented
+in the sec-core guide; `aw inspect` remains unchanged and does not probe the backend.
+
 ## Supported native entrypoints
 
 | Framework | Native prerequisite | Entrypoint |

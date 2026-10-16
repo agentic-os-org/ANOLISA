@@ -24,6 +24,9 @@ AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package
 源码教程提供[共用 YAML](crates/aw-service/examples/aw.shared.yaml)和无需后端的
 [布尔策略](crates/aw-service/examples/check-tool.py)。
 
+sec-core 包还包含认证健康探测 helper 和官方服务/配置参考资产。可选显式诊断见
+sec-core 指南；`aw inspect` 保持原合同，不探测后台。
+
 ## 支持的原生入口
 
 | 框架 | 原生前提 | 入口 |

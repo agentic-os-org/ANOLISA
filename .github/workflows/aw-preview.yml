@@ -5,6 +5,9 @@ on:
     paths:
       - 'src/aw/crates/aw-package/**'
       - 'src/aw/crates/aw-provider-tokenless/**'
+      - 'src/aw/crates/aw-provider-sec-core/**'
+      - 'src/agent-sec-core/v2/**'
+      - 'src/agent-sec-core/packaging/systemd/**'
       - 'src/tokenless/crates/**'
       - 'src/tokenless/Cargo.*'
       - 'src/aw/Cargo.*'
@@ -55,6 +58,12 @@ jobs:
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
+      - name: Verify sec-core authenticated health contract
+        env:
+          AW_SEC_HEALTH_TEST_HELPER: ${{ github.workspace }}/src/agent-sec-core/v2/target/release/agent-sec-daemon-health
+        run: |
+          cargo test --locked --manifest-path src/aw/Cargo.toml \
+            -p aw-provider-sec-core --test health -- --ignored
       - name: Verify Tokenless PreTool and PostTool contracts
         env:
           AW_TOKENLESS_TEST_CLI: ${{ github.workspace }}/src/tokenless/target/release/tokenless

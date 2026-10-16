@@ -12,6 +12,11 @@ stat = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()
 (root / "cli.pid").write_text(f"{os.getpid()} {stat[19]}")
 (root / "argv.json").write_text(json.dumps(sys.argv[1:]))
 case = json.loads((root / "case.json").read_text())
+if case.get("record_health_environment"):
+    (root / "environment.json").write_text(json.dumps({
+        key: os.environ.get(key) for key in ["AGENT_SEC_DAEMON_SOCKET",
+        "AGENT_SEC_HEALTH_TIMEOUT_SECONDS", "AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK"]
+    }))
 time.sleep(case.get("sleep", 0))
 sys.stderr.write(case.get("stderr", "") + "e" * case.get("stderr_repeat", 0))
 sys.stderr.flush()

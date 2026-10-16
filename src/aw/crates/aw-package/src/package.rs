@@ -312,12 +312,27 @@ fn stage(
                 ("aw-provider-sec-core", &aw),
                 ("agent-sec-cli", &sec),
                 ("agent-sec-daemon", &sec),
+                ("agent-sec-daemon-health", &sec),
             ] {
                 add(
                     &root,
                     &format!("libexec/aw/providers/sec-core/{binary}"),
                     &directory.join(binary),
                     true,
+                    &mut files,
+                    cancel,
+                )?;
+            }
+        }
+        if *name == "aw-provider-sec-core" {
+            for asset in ["agent-sec-core-v2.service.in", "skillsec.json"] {
+                add(
+                    &root,
+                    &format!("share/aw/providers/sec-core/{asset}"),
+                    &repo
+                        .join("src/agent-sec-core/packaging/systemd")
+                        .join(asset),
+                    false,
                     &mut files,
                     cancel,
                 )?;

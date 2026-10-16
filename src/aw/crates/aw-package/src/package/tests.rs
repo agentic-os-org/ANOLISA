@@ -87,6 +87,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         ("tokenless", "src/tokenless"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
+        ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
     ] {
         let binary = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
@@ -99,6 +100,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         .set_len(32 * 1024 * 1024)
         .unwrap();
     for name in [
+        "src/agent-sec-core/packaging/systemd/agent-sec-core-v2.service.in",
+        "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
@@ -295,12 +298,15 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         ("aw-provider-sec-core", "src/aw"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
+        ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
     ] {
         let path = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::copy("/bin/true", path).unwrap();
     }
     for name in [
+        "src/agent-sec-core/packaging/systemd/agent-sec-core-v2.service.in",
+        "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
@@ -339,6 +345,28 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     );
     assert!(!package.join("payload/bin/aw").exists());
     assert!(!repo.join("src/aw/target/release/aw").exists());
+    let component = &manifest.components[0];
+    for name in [
+        "libexec/aw/providers/sec-core/agent-sec-daemon-health",
+        "share/aw/providers/sec-core/agent-sec-core-v2.service.in",
+        "share/aw/providers/sec-core/skillsec.json",
+    ] {
+        let metadata = &component.files[name];
+        assert_eq!(
+            metadata.sha256,
+            crate::digest(&package.join("payload").join(name)).unwrap()
+        );
+        assert_eq!(
+            metadata.mode,
+            if name.starts_with("libexec/") {
+                0o755
+            } else {
+                0o644
+            }
+        );
+    }
+    assert!(!package.join("payload/etc").exists());
+    assert!(!package.join("payload/usr/lib/systemd").exists());
 }
 
 #[test]

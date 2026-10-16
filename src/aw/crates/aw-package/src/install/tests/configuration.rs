@@ -241,6 +241,7 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
             "libexec/aw/providers/sec-core/aw-provider-sec-core",
             "libexec/aw/providers/sec-core/agent-sec-cli",
             "libexec/aw/providers/sec-core/agent-sec-daemon",
+            "libexec/aw/providers/sec-core/agent-sec-daemon-health",
         ] {
             for damage in ["bytes", "missing", "mode", "setuid"] {
                 let f = Fixture::new();

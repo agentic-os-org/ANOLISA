@@ -201,6 +201,11 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
   --socket /run/aw-preview-sec/daemon.sock --skillsec-config /etc/aw-preview/skillsec.json
 ```
 
+包内还包含认证探测 `agent-sec-daemon-health` 和由回执校验的官方服务/配置
+参考资产。持久后台应复用已有 root 系统服务或独立安装 sec-core 系统包。
+AW 安装/卸载不会修改该服务或 `/etc`，不得让 root 服务执行用户可写前缀中的程序。
+参见[后台归属和健康诊断](aw-sec-core.md#包内后台与显式健康诊断)。
+
 ## 3. 生成一份 AW 配置
 
 另外准备 Qoder CLI >=1.1.64、OpenClaw **2026.9.6** 及兼容的 Node.js。Qoder 须保留
@@ -300,7 +305,7 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
 
 Rust 构建器编译锁定依赖的 release 二进制，检查原生 ELF 架构，只生成所选压缩包及 `SHA256SUMS`。默认 `--component core` 不编译或读取 sec-core；`--component sec-core` 生成扩展包，`--component all` 生成四种包。扩展安装仍要求同一源码提交和版本的 core。发布失败或取消时，只清理本次创建的链接，以便重试；清理失败会报告具体残留路径。安装包 CI 使用真实 sec-core 扫描器，通过模拟事件验证两种工具映射及审计恢复，不将其作为原生 Agent 验收。真实模型会话按上文另行验证。AW 通用开发门禁仍保留交付链路之外的 Python 测试工具。
 
-包 CI 自动覆盖 package crate、AW manifests、本指南和工作流变更；其他 AW/sec-core 变更在分发前需要针对确切源码提交手动运行。成功的 PR 产物保留 3 天，手动产物保留 14 天；失败时保留诊断证据，不上传安装包。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
+包 CI 自动覆盖 package/Provider crate、sec-core V2 和 systemd 资产、AW manifests、本指南和工作流变更；其他 AW 变更在分发前需要针对确切源码提交手动运行。成功的 PR 产物保留 3 天，手动产物保留 14 天；失败时保留诊断证据，不上传安装包。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
 
 ## 可选 Tokenless PostTool 包
 
