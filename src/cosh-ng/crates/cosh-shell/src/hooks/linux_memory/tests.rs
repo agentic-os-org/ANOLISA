@@ -565,6 +565,40 @@ Comm:          22000       18000        4000
 }
 
 #[test]
+fn free_total_row_flag_alone_keeps_default_kib_units() {
+    // `-t`/`--total` only appends a totals row; without another unit flag the
+    // values are still KiB. Treating `-t` as a TeB selector inflated every
+    // absolute number by 2^20 and forced a bogus low-confidence downgrade.
+    let output = "\
+               total        used        free      shared  buff/cache   available
+Mem:        33554432    31457280     2097152      131072     2097152     1572864
+Swap:        4194304      524288     3670016
+Total:      37748736    31981568     5767168
+";
+    let hook = MemoryPressureHook::new();
+    for command in ["free -t", "free -tw", "free -t -v"] {
+        let finding = hook.evaluate(&make_input(command, output)).unwrap();
+        assert_eq!(finding.severity, FindingSeverity::Critical, "{command}");
+        assert!(
+            finding.title.contains("1536 MiB / 32768 MiB"),
+            "{command}: {}",
+            finding.title
+        );
+        assert!(
+            !finding.description.contains("Confidence is lower"),
+            "{command}: {}",
+            finding.description
+        );
+        match hook.builtin_facts(&make_input(command, output)) {
+            Some(BuiltinFindingFacts::MemoryPressure(facts)) => {
+                assert_eq!(facts.confidence, MetricsConfidence::High, "{command}");
+            }
+            other => panic!("{command}: unexpected facts {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn free_low_high_extra_rows_are_ignored() {
     let output = "\
                total        used        free      shared  buff/cache   available
