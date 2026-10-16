@@ -498,8 +498,8 @@ fn warn_stats(message: &str) {
 /// stopped reading. ktuner settled this shape under the same name: a broken
 /// pipe means the consumer left while the work was finished, so the command
 /// ends gracefully and keeps its exit code; any other write error fails it
-/// through the operation-failure code the byte-exact writers already use. The
-/// bytes are what `println!` wrote: the payload plus one LF.
+/// through the operation-failure code the CLI already reports for a failed
+/// write. The bytes are what `println!` wrote: the payload plus one LF.
 fn write_stdout(payload: &str) -> Result<(), (String, i32)> {
     let mut stdout = io::stdout().lock();
     stdout_result(
@@ -511,9 +511,12 @@ fn write_stdout(payload: &str) -> Result<(), (String, i32)> {
 }
 
 /// `write_stdout` without the trailing LF, for a payload the caller has
-/// already shaped - the `stats clear` confirmation prompt. Flushed before
-/// returning so the prompt reaches the terminal ahead of the stdin read that
-/// follows it.
+/// already shaped. Flushed before returning so the bytes reach the consumer
+/// while the command is still in the write - the `stats clear` confirmation
+/// prompt has a stdin read waiting on it, and `retrieve` / `compress-toon`
+/// must reproduce their payload byte-for-byte because the documented detection
+/// contract compares that stdout against the input. Same broken-pipe policy,
+/// same operation-error shape.
 fn write_stdout_raw(payload: &str) -> Result<(), (String, i32)> {
     let mut stdout = io::stdout().lock();
     stdout_result(
@@ -888,11 +891,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let payload = retrieve_recorded(store.as_ref(), &hash, recorder.as_ref(), "cli")
                 .map_err(|error| (error.to_string(), 1))?;
             // Byte-exact restore: do not append a trailing newline.
-            let mut out = io::stdout().lock();
-            out.write_all(payload.as_bytes())
-                .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
-            out.flush()
-                .map_err(|e| (format!("failed to flush retrieved payload: {e}"), 1))?;
+            write_stdout_raw(&payload)?;
         }
         Commands::Stats(stats_cmd) => {
             match stats_cmd {
@@ -1160,13 +1159,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // runs must reproduce the input verbatim. `println!` would append
             // a LF (added for inputs without one, doubled for inputs with
             // one) and break that comparison.
-            {
-                let mut stdout = io::stdout().lock();
-                stdout
-                    .write_all(result.output.as_bytes())
-                    .and_then(|()| stdout.flush())
-                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
-            }
+            write_stdout_raw(&result.output)?;
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
