@@ -194,7 +194,7 @@ Usage notes:
 
 Example usage:
 <example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a signficant piece of code
+"code-reviewer": use this agent after you are done writing a significant piece of code
 "greeting-responder": use this agent when to respond to user greetings with a friendly joke
 </example_agent_description>
 
@@ -213,7 +213,7 @@ function isPrime(n) {
 }
 </code>
 <commentary>
-Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
 </commentary>
 assistant: Now let me use the code-reviewer agent to review the code
 assistant: Uses the Task tool to launch the with the code-reviewer agent
