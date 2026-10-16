@@ -349,8 +349,10 @@ impl OpenAIParser {
                         // an assistant message with `tool_calls`, and a tool
                         // message paired by `call_id`. Flattening them into a
                         // user message holding their JSON dropped the whole
-                        // tool interaction from the recorded request.
-                        "function_call" => {
+                        // tool interaction from the recorded request. A custom
+                        // (freeform) tool is replayed the same way, with its
+                        // text in `input` instead of `arguments`.
+                        "function_call" | "custom_tool_call" => {
                             messages.push(serde_json::json!({
                                 "role": "assistant",
                                 "tool_calls": [{
@@ -363,13 +365,14 @@ impl OpenAIParser {
                                             .unwrap_or_default(),
                                         "arguments": item
                                             .get("arguments")
+                                            .or_else(|| item.get("input"))
                                             .cloned()
                                             .unwrap_or(serde_json::Value::Null),
                                     },
                                 }],
                             }));
                         }
-                        "function_call_output" => {
+                        "function_call_output" | "custom_tool_call_output" => {
                             // `content` must be text: the chat content type is
                             // string-or-parts, so a structured output is carried
                             // as its JSON text and re-parsed by the consumer.
@@ -1511,6 +1514,50 @@ mod tests {
         );
         assert_eq!(request.messages[2].role, MessageRole::Tool);
         assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_parse_request_responses_custom_tool_items() {
+        // A custom (freeform) tool call is replayed the same way as a function
+        // call, with its text in `input` instead of `arguments`: Codex sends
+        // its apply_patch edits like this. Both items used to be flattened
+        // into user messages holding their raw JSON.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "fix the typo"},
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_2",
+                    "output": "Success"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the custom_tool_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_2"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("apply_patch")
+        );
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_2"));
     }
 
     #[test]
