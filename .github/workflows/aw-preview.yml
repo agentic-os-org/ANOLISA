@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'src/aw/crates/aw-package/**'
+      - 'src/aw/packaging/**'
+      - 'src/aw/scripts/compose.py'
       - 'src/aw/crates/aw-provider-tokenless/**'
       - 'src/tokenless/crates/**'
       - 'src/tokenless/Cargo.*'

@@ -18,6 +18,7 @@ scheduling and permissions. It also manages public Pi SDK workers. The current r
 | Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
 | Compress model-visible results across six frameworks, including Pi and Claude SDK | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
+| Combine a separate AgentSight release and optional user services | [AgentSight](../../docs/user-guide/en/user-entrypoint/aw-preview.md#independent-agentsight-composition) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
 AW is not yet distributed through `anolisa install` or RPM. Preview package

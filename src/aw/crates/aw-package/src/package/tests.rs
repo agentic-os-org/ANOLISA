@@ -101,6 +101,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
+        "src/aw/packaging/agentsight/aw-agentsight-query.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -243,6 +245,8 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
+        "src/aw/packaging/agentsight/aw-agentsight-query.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -279,6 +283,17 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     let manifest = crate::inspect(&unpacked).unwrap();
     assert_eq!(manifest.components.len(), 1);
     assert!(manifest.components[0].requires.is_empty());
+    for profile in [
+        "aw-agentsight-collector.service",
+        "aw-agentsight-query.service",
+    ] {
+        let path = format!("share/aw/agentsight/{profile}");
+        assert_eq!(manifest.components[0].files[&path].mode, 0o644);
+        assert_eq!(
+            manifest.components[0].files[&path].sha256,
+            digest(&unpacked.join("payload").join(path)).unwrap()
+        );
+    }
     assert!(!unpacked.join("payload/libexec").exists());
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!repo.join("src/tokenless").exists());
@@ -303,6 +318,8 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
+        "src/aw/packaging/agentsight/aw-agentsight-query.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -359,6 +376,8 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/aw/packaging/agentsight/aw-agentsight-collector.service",
+        "src/aw/packaging/agentsight/aw-agentsight-query.service",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {

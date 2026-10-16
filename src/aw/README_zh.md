@@ -17,6 +17,7 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 | 四框架共用策略、验证并清理 | [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md#四框架使用同一份配置) |
 | 六框架（含 Pi 与 Claude SDK）模型可见结果压缩 | [Tokenless Provider](../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md) |
 | 使用已有 sec-core 后端 | [sec-core Provider](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md) |
+| 组合独立 AgentSight 发行包和可选用户服务 | [AgentSight](../../docs/user-guide/zh/user-entrypoint/aw-preview.md#独立-agentsight-组合交付) |
 | 容器部署与审计持久化 | [运行与持久化](../../docs/user-guide/zh/user-entrypoint/aw.md#容器与持久化数据) |
 
 AW 尚未通过 `anolisa install` 或 RPM 分发。Preview 包使用 `aw-package` 安装，

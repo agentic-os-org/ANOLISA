@@ -1,6 +1,8 @@
 """Exercise the AW gate's failure boundaries without compiling Rust."""
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -313,6 +315,22 @@ class GateTests(GateFixture):
         alias.symlink_to(source)
         with self.assertRaises(ValueError):
             gate.structure(metadata, self.root)
+
+    def test_composition_tooling_preserves_the_general_python_baseline(self) -> None:
+        for version in [(3, 9), (3, 10), (3, 11), (3, 12)]:
+            with self.subTest(version=version), patch.object(
+                gate.sys, "version_info", version
+            ), patch.object(gate, "run") as run, contextlib.redirect_stdout(io.StringIO()) as output:
+                gate.composition_tests()
+                if version < (3, 11):
+                    run.assert_not_called()
+                    self.assertIn("composition tests skipped", output.getvalue())
+                    self.assertIn("general AW gate supports Python 3.9+", output.getvalue())
+                else:
+                    run.assert_called_once_with(
+                        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests",
+                         "-p", "test_composition.py"], gate.AW, timeout=120
+                    )
 
     def test_commands_fail_and_stop_the_sequence(self) -> None:
         commands = self.root / "commands.jsonl"

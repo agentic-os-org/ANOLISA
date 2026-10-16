@@ -1,0 +1,59 @@
+{
+  "format": 1,
+  "platform": {
+    "os": "linux",
+    "arch": "aarch64"
+  },
+  "aw": {
+    "archive": "aw.tar.gz",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "components": [
+      {
+        "format": 1,
+        "component": "aw-core",
+        "version": "0.1.0-preview.1",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "os": "linux",
+        "arch": "aarch64",
+        "provider_protocol": "aw-provider/v1alpha1",
+        "requires": {},
+        "files": {}
+      },
+      {
+        "format": 1,
+        "component": "aw-provider-sec-core",
+        "version": "0.1.0-preview.1",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "os": "linux",
+        "arch": "aarch64",
+        "provider_protocol": "aw-provider/v1alpha1",
+        "requires": {
+          "aw-core": "0.1.0-preview.1"
+        },
+        "files": {}
+      },
+      {
+        "format": 1,
+        "component": "aw-provider-tokenless",
+        "version": "0.1.0-preview.1",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "os": "linux",
+        "arch": "aarch64",
+        "provider_protocol": "aw-provider/v1alpha1",
+        "requires": {
+          "aw-core": "0.1.0-preview.1"
+        },
+        "files": {}
+      }
+    ]
+  },
+  "agentsight": {
+    "archive": "agentsight.tar.gz",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "version": "0.14.1",
+    "release": "https://github.com/agentic-os-org/ANOLISA/releases/tag/sight/v0.14.1",
+    "contract": ".anolisa/component.toml",
+    "installer": "anolisa",
+    "ownership": "independent"
+  }
+}

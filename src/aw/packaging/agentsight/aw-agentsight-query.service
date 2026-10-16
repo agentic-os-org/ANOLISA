@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentSight loopback query service for AW
+
+ConditionPathExists=%h/.config/aw/agentsight.json
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=/usr/local/bin/agentsight serve --host 127.0.0.1 --port 7396 --config %h/.config/aw/agentsight.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
