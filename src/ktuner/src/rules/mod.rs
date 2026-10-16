@@ -5392,7 +5392,12 @@ fn eval_busy_read_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &s
 }
 
 fn eval_nmi_watchdog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/nmi_watchdog";
+    eval_nmi_watchdog_at(info, recs, "/proc/sys/kernel/nmi_watchdog")
+}
+
+/// Path-injectable form of [`eval_nmi_watchdog`] (the `eval_*_at` idiom) so
+/// the switch is assertable against synthetic files.
+fn eval_nmi_watchdog_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
