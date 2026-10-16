@@ -1798,6 +1798,101 @@ mod tests {
         assert!(req.stream);
     }
 
+    /// Parallel Gemini interactions retain call/response order in the semantic
+    /// model. Missing wire IDs stay missing so positional matching is not
+    /// confused by synthetic identifiers.
+    #[test]
+    fn gemini_parallel_tool_interaction_survives_request_parsing() {
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "list the files"}]},
+                {"role": "model", "parts": [
+                    {"text": "let me check"},
+                    {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}},
+                    {"functionCall": {"name": "read_file", "args": {"path": "/tmp/a"}}}
+                ]},
+                {"role": "user", "parts": [
+                    {"functionResponse": {
+                        "name": "list_dir",
+                        "response": {"entries": ["a", "b"]}
+                    }},
+                    {"functionResponse": {
+                        "name": "read_file",
+                        "response": {"content": "a body"}
+                    }}
+                ]}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.messages.len(), 4);
+        match req.messages[0].parts.as_slice() {
+            [MessagePart::Text { content }] => assert_eq!(content, "list the files"),
+            other => panic!("expected the user text, got {other:?}"),
+        }
+        assert_eq!(req.messages[1].role, "assistant");
+        match req.messages[1].parts.as_slice() {
+            [
+                MessagePart::Text { content },
+                MessagePart::ToolCall {
+                    id: first_id,
+                    name: first_name,
+                    arguments: first_arguments,
+                },
+                MessagePart::ToolCall {
+                    id: second_id,
+                    name: second_name,
+                    arguments: second_arguments,
+                },
+            ] => {
+                assert_eq!(content, "let me check");
+                assert_eq!(first_name, "list_dir");
+                assert_eq!(second_name, "read_file");
+                assert!(first_id.is_none());
+                assert!(second_id.is_none());
+                assert_eq!(
+                    first_arguments
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str()),
+                    Some("/tmp")
+                );
+                assert_eq!(
+                    second_arguments
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|p| p.as_str()),
+                    Some("/tmp/a")
+                );
+            }
+            other => panic!("expected text + two ordered tool calls, got {other:?}"),
+        }
+
+        assert_eq!(req.messages[2].role, "tool");
+        match req.messages[2].parts.as_slice() {
+            [MessagePart::ToolCallResponse { id, response }] => {
+                assert!(id.is_none());
+                let parsed: serde_json::Value = serde_json::from_str(
+                    response.as_str().expect("response is the serialized JSON"),
+                )
+                .expect("the first response is standalone JSON");
+                assert_eq!(parsed, serde_json::json!({"entries": ["a", "b"]}));
+            }
+            other => panic!("expected the first tool response, got {other:?}"),
+        }
+        assert_eq!(req.messages[3].role, "tool");
+        match req.messages[3].parts.as_slice() {
+            [MessagePart::ToolCallResponse { id, response }] => {
+                assert!(id.is_none());
+                let parsed: serde_json::Value = serde_json::from_str(
+                    response.as_str().expect("response is the serialized JSON"),
+                )
+                .expect("the second response is standalone JSON");
+                assert_eq!(parsed, serde_json::json!({"content": "a body"}));
+            }
+            other => panic!("expected the second tool response, got {other:?}"),
+        }
+    }
+
     /// Legacy `function_call` payloads (finish_reason `function_call`) carry the
     /// tool request in the pre-`tool_calls` spelling; dropping them made the
     /// turn look like plain text.

@@ -2041,12 +2041,11 @@ mod tests {
         assert_eq!(call.response.messages[0].parts.len(), 1);
     }
 
-    /// Exercise the remaining Gemini part shapes and the absent-response
-    /// branch: a `functionResponse` becomes a tool result, an empty
-    /// `functionCall` name is ignored, and `response: None` yields no
+    /// The typed path preserves parallel calls and responses in wire order;
+    /// an empty call name is ignored, and a missing HTTP response yields no
     /// messages instead of panicking.
     #[test]
-    fn gemini_function_response_and_missing_response_are_handled() {
+    fn gemini_parallel_function_parts_and_missing_response_are_handled() {
         use crate::analyzer::message::gemini::{
             GeminiContent, GeminiFunctionCall, GeminiFunctionResponse, GeminiPart, GeminiRequest,
         };
@@ -2062,13 +2061,22 @@ mod tests {
             contents: vec![
                 GeminiContent {
                     role: Some("model".to_string()),
-                    parts: vec![GeminiPart {
-                        function_call: Some(GeminiFunctionCall {
-                            name: "lookup".to_string(),
-                            args: Some(serde_json::json!({"q": "x"})),
-                        }),
-                        ..Default::default()
-                    }],
+                    parts: vec![
+                        GeminiPart {
+                            function_call: Some(GeminiFunctionCall {
+                                name: "lookup".to_string(),
+                                args: Some(serde_json::json!({"q": "x"})),
+                            }),
+                            ..Default::default()
+                        },
+                        GeminiPart {
+                            function_call: Some(GeminiFunctionCall {
+                                name: "read".to_string(),
+                                args: Some(serde_json::json!({"path": "/tmp/a"})),
+                            }),
+                            ..Default::default()
+                        },
+                    ],
                 },
                 GeminiContent {
                     role: Some("user".to_string()),
@@ -2077,6 +2085,13 @@ mod tests {
                             function_response: Some(GeminiFunctionResponse {
                                 name: "lookup".to_string(),
                                 response: Some(serde_json::json!({"ok": true})),
+                            }),
+                            ..Default::default()
+                        },
+                        GeminiPart {
+                            function_response: Some(GeminiFunctionResponse {
+                                name: "read".to_string(),
+                                response: Some(serde_json::json!({"content": "a body"})),
                             }),
                             ..Default::default()
                         },
@@ -2103,15 +2118,25 @@ mod tests {
         let built = builder.build_request(&parsed, &http, false);
         assert_eq!(built.messages.len(), 2);
         assert_eq!(built.messages[0].role, "assistant");
+        assert_eq!(built.messages[0].parts.len(), 2);
         assert!(matches!(
             &built.messages[0].parts[0],
-            MessagePart::ToolCall { name, .. } if name == "lookup"
+            MessagePart::ToolCall { id: None, name, .. } if name == "lookup"
         ));
-        assert_eq!(built.messages[1].parts.len(), 1);
+        assert!(matches!(
+            &built.messages[0].parts[1],
+            MessagePart::ToolCall { id: None, name, .. } if name == "read"
+        ));
+        assert_eq!(built.messages[1].parts.len(), 2);
         assert!(matches!(
             &built.messages[1].parts[0],
-            MessagePart::ToolCallResponse { response, .. }
+            MessagePart::ToolCallResponse { id: None, response }
                 if response == &serde_json::json!({"ok": true})
+        ));
+        assert!(matches!(
+            &built.messages[1].parts[1],
+            MessagePart::ToolCallResponse { id: None, response }
+                if response == &serde_json::json!({"content": "a body"})
         ));
 
         let response = builder.build_response(&parsed, &http, &None, true, false);
