@@ -55,10 +55,11 @@ stub() {  # <name> <body>
 # Steps 1/2 install uv and QwenPaw when they are missing.
 stub uv 'exit 0'
 stub qwenpaw 'exit 0'
-# Step 6: nothing must see the host process table, and no real process may be
-# signalled — `pgrep` reports "no match" so the kill branch is not even entered.
+# Step 6 must not see the host process table. `pgrep` is the gate: it prints
+# nothing and reports "no match", so setup.sh's kill branch is not entered — and
+# even if it were, the builtin `kill` would receive no pid. (A `kill` stub would
+# be dead code: `kill` is a shell builtin, and builtins win over PATH.)
 stub pgrep 'exit 1'
-stub kill 'exit 0'
 stub nohup 'exit 0'
 # Step 6 also polls the service; 200 keeps the deterministic branch.
 stub curl 'echo 200'

@@ -45,7 +45,12 @@ SECRET_DIR="$HOME/.qwenpaw.secret"
 # 用它做替换可一次解决这三类问题，且任何合法 UTF-8 的值都原样往返
 # （控制字符由 json.dumps 转义，落盘仍是合法 JSON）。
 render_template() {  # <template> <output> <placeholder> <value> [...]
-  python3 - "$@" <<'PYEOF'
+  local template="$1" output="$2"
+  shift 2
+  # Stage beside the destination: a render that fails must not leave a truncated
+  # 0-byte config behind, and the failure reads like step 4's other errors.
+  local staged="${output}.staged.$$"
+  if ! python3 - "$template" "$staged" "$@" <<'PYEOF'
 import json
 import re
 import sys
@@ -68,6 +73,12 @@ rendered = pattern.sub(
 with open(output, "w", encoding="utf-8") as handle:
     handle.write(rendered)
 PYEOF
+  then
+    echo "  错误: 渲染模板失败: $template" >&2
+    rm -f "$staged"
+    return 1
+  fi
+  mv "$staged" "$output"
 }
 
 echo "=============================="
