@@ -64,7 +64,39 @@ pub fn is_derivable(content: &str) -> bool {
 
 /// Normalize relative dates in content to absolute ISO 8601 dates.
 /// Handles English and Chinese relative date expressions.
+///
+/// Backtick-quoted spans are copied through verbatim: every consolidation
+/// rule embeds the paths it talks about in backticks, and rewriting a date
+/// keyword inside such a span would corrupt the path (`notes/today/a.md`
+/// would become `notes/2026-10-16/a.md`, which does not exist on disk) and
+/// leave the fact body disagreeing with the `related_paths` frontmatter of
+/// the very same file.
 pub fn normalize_relative_dates(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(open) = rest.find('`') {
+        let (head, tail) = rest.split_at(open);
+        out.push_str(&normalize_unquoted(head));
+        match tail[1..].find('`') {
+            Some(rel) => {
+                let close = rel + 1;
+                out.push_str(&tail[..=close]);
+                rest = &tail[close + 1..];
+            }
+            None => {
+                // Unclosed backtick: keep the remainder verbatim rather
+                // than guess where the span was meant to end.
+                out.push_str(tail);
+                return out;
+            }
+        }
+    }
+    out.push_str(&normalize_unquoted(rest));
+    out
+}
+
+/// The date rewrite itself, applied to prose that contains no code spans.
+fn normalize_unquoted(content: &str) -> String {
     let today = Local::now().date_naive();
     let mut result = content.to_string();
 
@@ -301,5 +333,52 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         assert!(result.contains(&expected));
+    }
+
+    // ── quoted code spans must not be rewritten ───────────────────
+
+    #[test]
+    fn quoted_paths_are_not_date_normalized() {
+        // rule_working_context embeds the directory and every touched file
+        // in backticks. A directory legitimately named `today` must survive
+        // normalization: the rewritten path would not exist on disk and
+        // would disagree with the related_paths frontmatter of the same
+        // fact.
+        let content = "Agent 在 `notes/today/` 目录下创建/修改了 2 个文件：`notes/today/a.md`, `notes/today/b.md`。";
+        let out = normalize_relative_dates(content);
+        assert!(
+            out.contains("notes/today/a.md"),
+            "the quoted path must stay verbatim, got: {out}"
+        );
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert!(
+            !out.contains(&today),
+            "no date may be written into a quoted path, got: {out}"
+        );
+    }
+
+    #[test]
+    fn quoted_chinese_paths_are_not_date_normalized() {
+        let content = "Agent 在 `计划/明天/` 目录下创建/修改了 1 个文件：`计划/明天/上线.md`。";
+        let out = normalize_relative_dates(content);
+        assert!(
+            out.contains("计划/明天/上线.md"),
+            "the quoted Chinese path must stay verbatim, got: {out}"
+        );
+    }
+
+    #[test]
+    fn prose_around_quoted_paths_still_normalizes() {
+        let content = "Discussed this today; see `notes/today/standup.md` for details.";
+        let out = normalize_relative_dates(content);
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert!(
+            out.contains(&today),
+            "the prose keyword must still be normalized, got: {out}"
+        );
+        assert!(
+            out.contains("notes/today/standup.md"),
+            "the quoted path must stay verbatim, got: {out}"
+        );
     }
 }
