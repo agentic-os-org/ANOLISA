@@ -520,6 +520,22 @@ def preflight_model_call(args, metadata):
     print("  [OK] API key, baseUrl, and model id accepted by endpoint")
 
 
+def restrict_to_owner(path):
+    """Best-effort owner-only mode for a credential file.
+
+    Everything this installer writes under the OpenClaw state directory can hold
+    a cleartext API key or an operator token. A plain open()/write_bytes()
+    inherits the caller's umask (0644 under the default 022), and os.replace()
+    publishes the temp inode's mode, so the mode has to be pinned on the temp
+    file before the replace. Filesystems without POSIX modes must not fail the
+    install, hence the swallowed OSError.
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def apply_config(config, config_path, *, dry_run=False):
     print("\n--- Writing OpenClaw config ---\n")
     if dry_run:
@@ -543,9 +559,14 @@ def apply_config(config, config_path, *, dry_run=False):
     if config_path.exists():
         backup_path = config_path.with_name(config_path.name + ".bak")
         backup_path.write_bytes(config_path.read_bytes())
+        # The backup keeps the previous API key in cleartext.
+        restrict_to_owner(backup_path)
 
     tmp_path = config_path.with_name(config_path.name + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as fh:
+        # Pin the mode before the first secret byte lands; os.replace() then
+        # publishes this inode, so a re-run cannot downgrade a hardened config.
+        restrict_to_owner(tmp_path)
         json.dump(merged, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
     os.replace(tmp_path, config_path)
@@ -1088,6 +1109,8 @@ def clear_cached_operator_device_auth(args):
     except (OSError, json.JSONDecodeError):
         backup = path.with_name(path.name + ".bak")
         backup.write_bytes(path.read_bytes())
+        # The unreadable-but-retained bytes still carry the operator tokens.
+        restrict_to_owner(backup)
         path.unlink()
         print(f"  cleared unreadable cached device auth: {path}")
         return
@@ -1104,6 +1127,8 @@ def clear_cached_operator_device_auth(args):
     if changed:
         tmp_path = path.with_name(path.name + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as fh:
+            # Device auth holds operator tokens: pin the mode before writing.
+            restrict_to_owner(tmp_path)
             json.dump(data, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
         os.replace(tmp_path, path)
