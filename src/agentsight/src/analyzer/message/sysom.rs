@@ -121,6 +121,10 @@ pub struct SysomRequest {
 /// A single tool-use item in the SysOM response (array format, differs from OpenAI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomToolUseItem {
+    /// Provider-assigned position. Providers may omit it entirely — the array
+    /// position is then the index — and the aggregation below keeps the calls
+    /// in array order, so an absent index must not fail the frame.
+    #[serde(default)]
     pub index: u32,
     pub id: String,
     #[serde(rename = "type")]
@@ -507,5 +511,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("{body}: the tool call must be kept"));
             assert_eq!(tool_use[0].id, "call_abc123");
         }
+    }
+
+    /// A provider may omit `index` from its tool_use entries entirely, in
+    /// which case the array position is the index. The frame used to fail to
+    /// parse, so a provider that never sends the key recorded no call at all.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_an_index() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "id": "call_no_index",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an index must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_index");
+        assert_eq!(tool_use[0].function.name, "read_file");
     }
 }
