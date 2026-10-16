@@ -47,6 +47,14 @@ echo "[${COMPONENT}] Installing ${AGENT} plugin..."
 if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — skipping plugin installation."
     echo "[${COMPONENT}] Install OpenClaw first, then run this script again."
+    if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+        # A dry run has to produce preview output on every host, this one
+        # included: the real install stops at the gate above, so the preview
+        # names that gate rather than printing no DRY-RUN line at all.
+        # ws-ckpt's OpenClaw script states the rule outright — "Dry-run should
+        # not require the CLI".
+        echo "DRY-RUN: ${OPENCLAW_BIN} is not on PATH — a real install would stop here and install nothing."
+    fi
     exit 0
 fi
 

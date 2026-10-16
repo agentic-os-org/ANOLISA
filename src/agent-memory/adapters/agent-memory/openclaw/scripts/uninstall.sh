@@ -34,7 +34,15 @@ if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
         echo "DRY-RUN: rm -rf ${OPENCLAW_STATE_DIR}/extensions/memory-anolisa (no ${OPENCLAW_BIN} on PATH)"
     fi
     if [ -f "$OPENCLAW_CFG" ]; then
-        echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (jq, or python3 when jq is absent)"
+        # Mirror the real path's three branches (jq, python3, neither): the
+        # preview may not promise an edit this host cannot make.
+        if command -v jq &>/dev/null; then
+            echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (jq)"
+        elif command -v python3 &>/dev/null; then
+            echo "DRY-RUN: drop ${PLUGIN_ID} from plugins.allow, plugins.entries and plugins.slots in ${OPENCLAW_CFG} (python3)"
+        else
+            echo "DRY-RUN: WARN: neither jq nor python3 is on PATH — a real uninstall would leave ${PLUGIN_ID} referenced in ${OPENCLAW_CFG}; edit it manually"
+        fi
     fi
     exit 0
 fi

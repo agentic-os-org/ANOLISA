@@ -595,6 +595,16 @@ done
 # The adapter family contract (tokenless's nine adapters, ws-ckpt's openclaw and
 # hermes scripts) is that ANOLISA_DRY_RUN=1 previews and changes nothing. A dry
 # run must name the negotiated install argv and the config-set that follows it.
+#
+# One deliberate divergence from the family's stricter no-CLI-touch rule:
+# install.sh's preview names the *negotiated* argv, so the read-only
+# `plugins install --help` probe still runs under a dry run — that probe is
+# what decides the flags the preview prints, and naming the resolved flags
+# beats a conditional wording. (ws-ckpt's OpenClaw script takes the other route
+# and names the probe it would run: "DRY-RUN: probe '$OPENCLAW_BIN --version'
+# before config cleanup".) The argv assertions below therefore carve the
+# `--help` probe out of the "the CLI was not invoked" count rather than
+# requiring an empty argv log.
 : > "$TEST_ARGV_LOG"
 rm -f "$TEST_INSTALLED"
 dry_install_out="$(env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
@@ -612,6 +622,20 @@ esac
     || fail 'dry-run install invoked the installer'
 [ ! -f "$TEST_INSTALLED" ] || fail 'dry-run install marked the plugin installed'
 echo "PASS: dry-run install previews the install and the settings write"
+
+# A host without the CLI still gets a preview: the real install stops at the
+# CLI gate, and a dry run that printed nothing at all would leave the operator
+# unable to tell "nothing to do on this host" from "the preview is broken".
+: > "$TEST_ARGV_LOG"
+dry_nocli_install_out="$(env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    ANOLISA_DRY_RUN=1 OPENCLAW_BIN="$SANDBOX/absent-openclaw" TEST_HELP=modern TEST_GATE=new \
+    bash "$INSTALL_SH" 2>&1)" || fail 'no-CLI dry-run install exited non-zero'
+case "$dry_nocli_install_out" in
+    *"DRY-RUN: $SANDBOX/absent-openclaw is not on PATH"*) : ;;
+    *) fail 'no-CLI dry-run install produced no preview' ;;
+esac
+[ ! -s "$TEST_ARGV_LOG" ] || fail 'no-CLI dry-run install invoked a CLI'
+echo 'PASS: a no-CLI dry-run install names the gate it stops at'
 
 # A dry-run uninstall names the CLI deregistration and touches nothing.
 mkdir -p -- "$OPENCLAW_STATE_DIR/plugins/memory-anolisa"
@@ -641,3 +665,46 @@ case "$dry_manual_out" in
 esac
 [ -d "$OPENCLAW_STATE_DIR/plugins/memory-anolisa" ] || fail 'the no-CLI dry run removed the plugin tree'
 echo "PASS: a no-CLI dry-run uninstall names both direct removals"
+
+# The openclaw.json rewrite preview is the only conditional in the uninstall
+# preview, so both of its branches are pinned here: deleting the -f guard, or
+# the block, must fail this suite. The tool named is the one the real path
+# would use on this host — jq, else python3, else neither, where the real path
+# WARNs and leaves the file referencing the plugin, so the preview says that
+# instead of promising an edit this host cannot make.
+mkdir -p -- "$OPENCLAW_STATE_DIR"
+cfg="$OPENCLAW_STATE_DIR/openclaw.json"
+printf '{"plugins":{"allow":["memory-anolisa"],"entries":{"memory-anolisa":{"enabled":true}},"slots":{"memory":"memory-anolisa"}}}\n' > "$cfg"
+cfg_before="$(cat "$cfg")"
+dry_cfg_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
+    || fail 'dry-run uninstall with a config file exited non-zero'
+case "$dry_cfg_out" in
+    *"drop memory-anolisa from plugins.allow, plugins.entries and plugins.slots in $cfg"*) : ;;
+    *) fail 'dry-run uninstall did not preview the openclaw.json rewrite' ;;
+esac
+if command -v jq &>/dev/null; then cfg_tool='(jq)'
+elif command -v python3 &>/dev/null; then cfg_tool='(python3)'
+else cfg_tool=''; fi
+if [ -n "$cfg_tool" ]; then
+    case "$dry_cfg_out" in
+        *"$cfg_tool"*) : ;;
+        *) fail "dry-run uninstall did not name the tool the real path would use ($cfg_tool)" ;;
+    esac
+else
+    case "$dry_cfg_out" in
+        *'neither jq nor python3 is on PATH'*) : ;;
+        *) fail 'dry-run uninstall promised a config edit with no tool to make it' ;;
+    esac
+fi
+[ "$(cat "$cfg")" = "$cfg_before" ] || fail 'dry-run uninstall rewrote openclaw.json'
+echo "PASS: dry-run uninstall previews the openclaw.json rewrite and names the tool"
+
+# Without the file there is no rewrite to announce.
+rm -f "$cfg"
+dry_nocfg_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
+    || fail 'dry-run uninstall without a config file exited non-zero'
+case "$dry_nocfg_out" in
+    *"plugins.allow, plugins.entries and plugins.slots"*|*'neither jq nor python3'*)
+        fail 'dry-run uninstall previewed a rewrite for a missing openclaw.json' ;;
+esac
+echo 'PASS: a dry run without openclaw.json previews no rewrite'
