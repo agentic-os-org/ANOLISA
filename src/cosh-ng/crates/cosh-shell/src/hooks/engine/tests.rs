@@ -68,6 +68,57 @@ fn write_executable_hook(dir_name: &str, file_name: &str, body: &str) -> (PathBu
     (dir, path)
 }
 
+fn write_output_file(dir_name: &str, file_name: &str, body: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{dir_name}-{}-{unique}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(file_name);
+    fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn hook_input_preview_is_byte_bounded_for_huge_single_line() {
+    // A single huge output line must not defeat the 50-line preview cap: the
+    // whole spilled file used to be read into memory and shipped to hooks.
+    let path = write_output_file(
+        "cosh_hook_preview_bound",
+        "huge.txt",
+        &"x".repeat(256 * 1024),
+    );
+    let mut block = make_block("cat huge.txt");
+    block.output.terminal_output_ref = Some(path.to_string_lossy().to_string());
+
+    let input = runtime::hook_input_from_block(&block);
+
+    assert!(
+        input.output_preview.len() <= 64 * 1024,
+        "preview held {} bytes",
+        input.output_preview.len()
+    );
+    assert!(!input.output_preview.is_empty());
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn hook_input_preview_keeps_first_lines_for_normal_output() {
+    let body: String = (0..60).map(|i| format!("line-{i}\n")).collect();
+    let path = write_output_file("cosh_hook_preview_lines", "lines.txt", &body);
+    let mut block = make_block("seq 60");
+    block.output.terminal_output_ref = Some(path.to_string_lossy().to_string());
+
+    let input = runtime::hook_input_from_block(&block);
+
+    assert!(input.output_preview.contains("line-0\n"));
+    assert!(input.output_preview.contains("line-49"));
+    assert!(!input.output_preview.contains("line-50"));
+    let _ = fs::remove_file(&path);
+}
+
 #[path = "tests/evaluation.rs"]
 mod evaluation;
 #[path = "tests/external.rs"]
