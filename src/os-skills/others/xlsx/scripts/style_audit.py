@@ -115,7 +115,13 @@ def _parse_styles(styles_xml: bytes) -> dict:
         fills_declared = int(fills_elem.get("count", "0"))
         for fill in fills_elem:
             pf = fill.find(f"{NSP}patternFill")
-            pattern_type = pf.get("patternType", "") if pf is not None else ""
+            if pf is None:
+                # Not a pattern fill at all (e.g. gradientFill): no default applies.
+                pattern_type = ""
+            else:
+                # patternType is optional in CT_PatternFill and defaults to "none";
+                # openpyxl serialises that default as a bare <patternFill/>.
+                pattern_type = pf.get("patternType") or "none"
             fills.append({"patternType": pattern_type})
 
     # cellXfs
