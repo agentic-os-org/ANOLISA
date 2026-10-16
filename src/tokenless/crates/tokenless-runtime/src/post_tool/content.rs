@@ -19,6 +19,7 @@ mod source_code;
 mod stack_trace;
 mod tabular;
 
+use tokenless_compressors::SearchResultsCompressor;
 use tokenless_protocol::ContentType;
 
 /// Detection inspects at most this many leading bytes.
@@ -76,6 +77,11 @@ pub fn detect(content: &str) -> ContentType {
     }
     if tabular::is_tabular(content) {
         return ContentType::Tabular;
+    }
+    // Retain established source/table routes when slash-bearing rows
+    // could also be interpreted as paths.
+    if SearchResultsCompressor.is_path_list(scan) {
+        return ContentType::SearchResults;
     }
     ContentType::PlainText
 }

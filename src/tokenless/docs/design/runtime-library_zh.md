@@ -67,14 +67,33 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 
 ## 搜索路径共享
 
-PostTool 仅在搜索路径共享已开启、来源为 `api_response` 且支持文本替换时，将识别为
-`search_results` 的内容交给 `SearchResultsCompressor`。这是按内容派发的 Core 能力，不限定 Agent ID；
-文件内容和命令输出均不进入该域，包括未由 RTK 处理的 Bash 输出。
+PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
+`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
+带行号的搜索记录仍要求来源为 `api_response`。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
 实际采用时操作为 `search_path_sharing`，Python SDK 对应 `AppliedOperation.SEARCH_PATH_SHARING`；
 恢复等级为 `lossless`，不写入 Stash。
+
+纯路径列表也可共享公共目录前缀，允许 `command_output` 和 `api_response` 来源。
+至少包含三条 POSIX 路径，使用统一的 LF 或 CRLF；收到的全部路径、顺序、重复项及末尾换行均保留。
+压缩器验证完整输入，包括超出检测器采样窗口的部分。空行、控制字符、含冒号的路径
+（包括 URL 和 Windows 路径）、混合行尾、双前导斜杠或有歧义的相对根目录均拒绝压缩。
+不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
+可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
+`file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
+既有源码和表格检测优先于纯路径列表检测。
+
+路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
+开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。
+将 `base` 与每个解码后的 `paths` 项拼接，以 `line_ending` 连接，仅当 `trailing_newline`
+为 true 时补充末尾行尾，即可逐字节还原。公共前缀始终以 `/` 结束。完整视图（包括声明和元数据）
+的字节数和估算 Token 都减少后，才进入收益仲裁。
+
+PreTool 保留原生 `find` 调用，以便 PostTool 接收原生结果。包含 `find` 的整条复合命令也保留原样；
+混合输出不属于路径列表，不进入该压缩策略。后置路由本身不要求命令为 `find`，其他未优化工具结果
+只要内容符合格式也可复用。RTK 源码及其他命令的改写规则不变。
 
 Claude Code Adapter 仅提取无上下文选项的原生 Grep `mode=content` 响应，将其文本槽声明为
 API 响应，再只替换原输出对象的 `content` 字段。包括宿主限额在内的其他元数据保持不变；
@@ -87,6 +106,7 @@ API 响应，再只替换原输出对象的 `content` 字段。包括宿主限�
 Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 `TokenlessConfig(search_path_sharing_enabled=False)` 或 `TokenlessRuntime` 的同名参数。
 关闭该域时搜索列表原样返回且不计算搜索候选。其他工具名仍可使用 JSON、表格和日志压缩。
+关闭路径共享时，原生 `find` 仍跳过 RTK 改写。
 精确名称 `Grep` 始终排除这些域，以保留全部已收到命中；关闭路径共享不会恢复此功能引入前
 自定义 `Grep` 工具的 JSON、表格和日志派发。全局压缩开关仍控制已开启域的 dry-run。
 整任务节省取决于工作负载；保留全部收到的字节并不保证后续工具调用更少或总 Token 用量更低。

@@ -35,7 +35,7 @@ mod rtk;
 pub struct EntryOptions {
     /// Whether accepted candidates replace the original content.
     pub compression_enabled: bool,
-    /// Whether API search listings may share paths; independent of other domains.
+    /// Whether API search records and non-file path lists may share paths.
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
     pub diff_compression_enabled: bool,
@@ -345,9 +345,8 @@ fn pre_tool_with_optional_rtk(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // RTK ownership would bypass the PostTool domain selected for native
-    // build/test output, so the two optimizers remain mutually exclusive.
-    if is_build_log_owned_command(command) {
+    // Preserve native execution for build logs and path lists owned by PostTool.
+    if is_post_tool_owned_command(command) {
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
@@ -402,7 +401,7 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-fn is_build_log_owned_command(command: &str) -> bool {
+fn is_post_tool_owned_command(command: &str) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
@@ -432,7 +431,7 @@ fn is_build_log_owned_command(command: &str) -> bool {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
-            if character == '\n' && segment_is_build_log_owned(&words) {
+            if character == '\n' && segment_is_post_tool_owned(&words) {
                 return true;
             }
             if character == '\n' {
@@ -442,7 +441,7 @@ fn is_build_log_owned_command(command: &str) -> bool {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
-            if segment_is_build_log_owned(&words) {
+            if segment_is_post_tool_owned(&words) {
                 return true;
             }
             words.clear();
@@ -453,10 +452,10 @@ fn is_build_log_owned_command(command: &str) -> bool {
     if !word.is_empty() {
         words.push(word);
     }
-    segment_is_build_log_owned(&words)
+    segment_is_post_tool_owned(&words)
 }
 
-fn segment_is_build_log_owned(words: &[String]) -> bool {
+fn segment_is_post_tool_owned(words: &[String]) -> bool {
     let mut index = words
         .iter()
         .position(|word| !is_environment_assignment(word))
@@ -493,6 +492,7 @@ fn segment_is_build_log_owned(words: &[String]) -> bool {
         .unwrap_or_default();
     let arguments = &words[index.saturating_add(1).min(words.len())..];
     match executable {
+        "find" => true,
         "cargo" => {
             // A leading +toolchain argument selects the toolchain and
             // precedes the subcommand.
@@ -1323,6 +1323,51 @@ mod tests {
     }
 
     #[test]
+    fn pre_tool_keeps_native_find_commands_without_calling_rtk() {
+        for command in [
+            "find /workspace -name '*.json' 2>/dev/null",
+            "find /workspace -path '*records*document*' 2>/dev/null",
+            "find /workspace -name 'document*'; echo '---'; ls -la /workspace | head",
+            "git status && /usr/bin/find ./data -type f",
+            "env -i find ./data -print0 | xargs -0 cat",
+            "LANG=C command find './project with spaces' -type f",
+            "env -u TEMP /usr/bin/find . -type f",
+        ] {
+            let request = PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": command, "timeout": 30}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            };
+            // No RTK path or data directory: invoking RTK would fail this call.
+            let response = pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT,
+            )
+            .unwrap();
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for command in [
+            "echo 'find . -name *.json'",
+            "printf '%s' find",
+            "rg find README.md",
+            "fd document",
+            "rg --files",
+            "rtk find . -name '*.json'",
+        ] {
+            assert!(!is_post_tool_owned_command(command), "{command}");
+        }
+    }
+
+    #[test]
     fn pre_tool_reserves_supported_build_and_test_commands_for_post_tool() {
         let commands = [
             "cargo test --workspace",
@@ -1339,7 +1384,7 @@ mod tests {
         ];
         for command in commands {
             assert!(
-                is_build_log_owned_command(command),
+                is_post_tool_owned_command(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1354,7 +1399,7 @@ mod tests {
             "rg pytest README.md",
         ] {
             assert!(
-                !is_build_log_owned_command(command),
+                !is_post_tool_owned_command(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
@@ -1382,7 +1427,7 @@ mod tests {
             "make -j8",
         ] {
             assert!(
-                is_build_log_owned_command(command),
+                is_post_tool_owned_command(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1393,7 +1438,7 @@ mod tests {
             "env -u RUSTC grep error log",
         ] {
             assert!(
-                !is_build_log_owned_command(command),
+                !is_post_tool_owned_command(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
@@ -2222,6 +2267,48 @@ mod tests {
         request.capabilities.recovery = RecoveryMethod::tool("tokenless_retrieve").unwrap();
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, request.tools);
+    }
+
+    #[test]
+    fn path_list_routing_keeps_file_and_rtk_guards_and_records_stats() {
+        let input: String = (0..60)
+            .map(|i| {
+                format!("/workspace/project with spaces/long_directory/records/file {i}.json\n")
+            })
+            .collect();
+        let mut request = post_tool_request(&input);
+        request.tool_name = "Bash".into();
+        request.content_origin = ContentOrigin::CommandOutput;
+        let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(
+            outcome.stats.content_type.as_deref(),
+            Some("search_results")
+        );
+        assert_eq!(
+            outcome.stats.applied_operations,
+            [AppliedOperation::SearchPathSharing]
+        );
+        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+        assert!(outcome.response.stash_keys.is_empty());
+
+        for (command, origin, optimization) in [
+            (None, ContentOrigin::FileContent, OutputOptimization::None),
+            (None, ContentOrigin::FileRead, OutputOptimization::None),
+            (
+                Some("cat paths.txt"),
+                ContentOrigin::CommandOutput,
+                OutputOptimization::None,
+            ),
+            (None, ContentOrigin::CommandOutput, OutputOptimization::Rtk),
+        ] {
+            request.command = command.map(str::to_owned);
+            request.content_origin = origin;
+            request.output_optimization = optimization;
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(outcome.response.output, input);
+            assert!(outcome.response.applied_operations.is_empty());
+        }
     }
 
     #[test]
