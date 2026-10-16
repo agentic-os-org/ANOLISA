@@ -132,6 +132,7 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 - Writes Alibaba Cloud Model Studio config with `api = anthropic-messages`.
 - Sets `gateway.mode = local`, `gateway.bind = loopback`, and `gateway.auth.mode = none` for local single-machine setup.
 - Starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart` unless `--skip-gateway` is passed.
+- Runs every `openclaw` child command it launches (plugin installs, `doctor --fix`, `gateway stop`/`install`/`restart`/`status --deep`, and the `agent` write-scope smoke test) with `OPENCLAW_CONFIG_PATH` set to the resolved `--config` path, so those commands act on the configuration the script just wrote instead of the default config or an override inherited from the environment.
 - After the Gateway port is listening, runs a bounded local message smoke test to verify the local operator device has `operator.write`. If stale read-only local operator device state exists, the script clears it and retries the message smoke test.
 - If the gateway port is occupied by OpenClaw, it clears that stale listener. If the port is occupied by another process, it stops and prints the process details for the user to decide.
 - **Auto-installs the tokenless OpenClaw plugin** after OpenClaw is installed, for token usage tracking and response compression. Pass `--skip-tokenless` to opt out.
@@ -147,6 +148,8 @@ openclaw agent --message "hello" --agent main
 openclaw gateway health
 openclaw status
 ```
+
+When a non-default `--config` path was passed, run these checks with the same override, for example `OPENCLAW_CONFIG_PATH=<config-path> openclaw models list`; without it they read the default config instead of the one the script wrote.
 
 The script already runs the message smoke test unless `--skip-gateway-write-check` is passed. Do not treat `EMBEDDED FALLBACK` as success; if it mentions `pairing required`, `scope upgrade pending approval`, or `missing scope: operator.write`, read `references/troubleshooting.md`.
 

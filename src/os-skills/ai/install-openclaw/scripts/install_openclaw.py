@@ -21,6 +21,10 @@ from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path("~/.openclaw/openclaw.json").expanduser()
 
+# OpenClaw reads its configuration override from this variable; the installer
+# stamps it into every child command so the children use the selected config.
+CONFIG_ENV_VAR = "OPENCLAW_CONFIG_PATH"
+
 BILLING_ALIASES = {
     "payg": "payg",
     "standard": "payg",
@@ -556,6 +560,27 @@ def apply_config(config, config_path, *, dry_run=False):
     print(f"\nConfig written: {config_path}")
 
 
+def resolved_config_path(args):
+    """Return the config path selected by --config.
+
+    ``~`` is expanded but the spelling is otherwise kept as given, so a symlinked
+    config path stays the path the user selected and matches what apply_config writes.
+    """
+    return Path(args.config).expanduser()
+
+
+def openclaw_env(args, *, base=None):
+    """Return the environment for an OpenClaw child command.
+
+    The resolved ``--config`` path is stamped into ``OPENCLAW_CONFIG_PATH`` so every
+    gateway/plugin/agent command this installer launches reads the configuration it
+    just wrote, instead of the default config or an unrelated inherited override.
+    """
+    env = dict(os.environ if base is None else base)
+    env[CONFIG_ENV_VAR] = str(resolved_config_path(args))
+    return env
+
+
 def run_command(cmd, *, env=None, dry_run=False, check=True, timeout=None, capture_output=False):
     print("  $ " + " ".join(cmd), flush=True)
     if dry_run:
@@ -962,6 +987,7 @@ def wait_gateway_ready(args):
     try:
         result = run_command(
             ["openclaw", "gateway", "status", "--deep"],
+            env=openclaw_env(args),
             check=False,
             timeout=args.gateway_status_timeout,
             capture_output=True,
@@ -1005,11 +1031,11 @@ def gateway_scope_blocked(result):
 
 
 def device_auth_path(args):
-    return Path(args.config).expanduser().parent / "identity" / "device-auth.json"
+    return resolved_config_path(args).parent / "identity" / "device-auth.json"
 
 
 def paired_devices_path(args):
-    return Path(args.config).expanduser().parent / "devices" / "paired.json"
+    return resolved_config_path(args).parent / "devices" / "paired.json"
 
 
 def has_write_scope(scopes):
@@ -1115,6 +1141,7 @@ def run_gateway_write_smoke(args, timeout):
     try:
         return run_command(
             cmd,
+            env=openclaw_env(args),
             check=False,
             timeout=timeout,
             capture_output=True,
@@ -1224,7 +1251,7 @@ def install_tokenless_plugin(args):
         return
 
     print(f"  tokenless adapter: {adapter_dir}")
-    env = os.environ.copy()
+    env = openclaw_env(args)
     env["ANOLISA_ADAPTER_DIR"] = str(adapter_dir)
     env["ANOLISA_COMPONENT"] = "tokenless"
     env["ANOLISA_TARGET"] = "openclaw"
@@ -1241,7 +1268,7 @@ def install_tokenless_plugin(args):
 
 
 def install_dingtalk_plugin(args):
-    env = os.environ.copy()
+    env = openclaw_env(args)
     if args.npm_registry:
         env["NPM_CONFIG_REGISTRY"] = args.npm_registry
     run_command(
@@ -1252,15 +1279,18 @@ def install_dingtalk_plugin(args):
 
 
 def start_gateway(args):
+    env = openclaw_env(args)
     if args.doctor_fix:
         run_command(
             ["openclaw", "doctor", "--fix"],
+            env=env,
             dry_run=args.dry_run,
             check=False,
             timeout=args.gateway_command_timeout,
         )
     run_command(
         ["openclaw", "gateway", "stop"],
+        env=env,
         dry_run=args.dry_run,
         check=False,
         timeout=args.gateway_command_timeout,
@@ -1268,12 +1298,14 @@ def start_gateway(args):
     clear_openclaw_gateway_port(args)
     run_command(
         ["openclaw", "gateway", "install", "--port", str(args.gateway_port)],
+        env=env,
         dry_run=args.dry_run,
         check=False,
         timeout=args.gateway_command_timeout,
     )
     run_command(
         ["openclaw", "gateway", "restart"],
+        env=env,
         dry_run=args.dry_run,
         check=False,
         timeout=args.gateway_command_timeout,
@@ -1436,7 +1468,7 @@ def main():
         install_openclaw(args)
         install_tokenless_plugin(args)
 
-    apply_config(config, Path(args.config).expanduser(), dry_run=args.dry_run)
+    apply_config(config, resolved_config_path(args), dry_run=args.dry_run)
 
     if args.install_dingtalk_plugin:
         install_dingtalk_plugin(args)
