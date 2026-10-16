@@ -2401,9 +2401,10 @@ fn eval_overcommit_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 /// so the switch read is assertable against synthetic files.
 ///
 /// The rule fires on a zero — the kernel guesses, which is the mode the
-/// fork-based persistence of Redis and Valkey can fail under — and
-/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
-/// Only a zero the reader could produce is evidence of the guessing mode, so a
+/// fork-based persistence of Redis and Valkey can fail under — and on strict
+/// accounting (2) when no database needs it, and [`read_sysctl_u64`] maps an
+/// unreadable or unparseable file to that same 0. Only a zero the reader
+/// could produce is evidence of the guessing mode, so a
 /// masked or garbled proc entry (a container's, typically) neither reports a
 /// `current_value` the host does not have nor asks for a write it may not
 /// need.
@@ -2416,27 +2417,36 @@ fn eval_overcommit_memory_at(
         return 1;
     }
     // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
-    // `valkey-server` binary that carries the same startup warning
-    // ("WARNING overcommit_memory is set to 0! Background save may fail
-    // under low memory condition"), because fork-based RDB/AOF persistence
-    // is unchanged.
+    // `valkey-server` binary that carries the same startup check ("Memory
+    // overcommit must be enabled! Without it, a background save or
+    // replication may fail under low memory condition"), because fork-based
+    // RDB/AOF persistence is unchanged.
     let needs_overcommit = info.has_process("redis-server") || info.has_process("valkey-server");
     if !needs_overcommit {
         return 1;
     }
-    if read_switch(path) == Some(0) {
-        recs.push(Recommendation {
-            param: "vm.overcommit_memory".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason:
-                "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory=0 可能导致 fork 失败"
-                    .to_string(),
-            confidence: Confidence::High,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    // Redis 7 and Valkey check for exactly 1 ("Memory overcommit must be
+    // enabled!", src/syscheck.c `checkOvercommit`), and strict accounting (2)
+    // charges the fork for a full copy of the dataset, so it fails sooner than
+    // the guessing mode. A database on the same host keeps its strict mode:
+    // `overcommit_ratio_recommendation` sizes that mode for it, and a switch
+    // to 1 would make that advice a no-op.
+    let current = match read_switch(path) {
+        Some(0) => 0,
+        Some(2) if !is_database_present(info) => 2,
+        _ => return 1,
+    };
+    recs.push(Recommendation {
+        param: "vm.overcommit_memory".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "1".to_string(),
+        reason: format!(
+            "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory={current} 可能导致 fork 失败"
+        ),
+        confidence: Confidence::High,
+        category: Category::Performance,
+        writable: true,
+    });
     1
 }
 
@@ -22454,6 +22464,46 @@ mod tests {
             advice(&other, &off).is_empty(),
             "the Redis/Valkey precondition is untouched"
         );
+    }
+
+    /// Redis 7 and Valkey refuse every mode but 1 ("Memory overcommit must be
+    /// enabled!", src/syscheck.c `checkOvercommit`): strict accounting (2)
+    /// charges the fork for a full copy of the dataset, the failure the rule
+    /// exists for, yet the rule only fired on 0. A database next to the cache
+    /// keeps its strict mode: the overcommit_ratio rule sizes that mode for
+    /// it, and switching to 1 would turn that advice into a no-op.
+    #[test]
+    fn overcommit_memory_advice_covers_strict_accounting() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_overcommit_strict_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let strict = dir.join("strict");
+        std::fs::write(&strict, b"2\n").unwrap();
+        let advice = |procs: &[&str]| {
+            let mut recs = Vec::new();
+            eval_overcommit_memory_at(
+                &info_with_processes(procs),
+                &mut recs,
+                strict.to_str().unwrap(),
+            );
+            recs
+        };
+
+        for cache in ["redis-server", "valkey-server"] {
+            let recs = advice(&[cache]);
+            assert_eq!(recs.len(), 1, "{cache}: strict accounting fails the fork");
+            assert_eq!(recs[0].current_value, "2");
+            assert_eq!(recs[0].recommended_value, "1");
+        }
+        assert!(
+            advice(&["redis-server", "postgres"]).is_empty(),
+            "a database's strict mode is left to the overcommit_ratio rule"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
