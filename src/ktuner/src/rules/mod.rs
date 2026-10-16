@@ -476,7 +476,16 @@ fn eval_swappiness(
         // cache workload, so the redis-server gates must count it too.
         || info.has_process("valkey-server");
 
-    let (target, reason) = if is_db
+    // TiKV checks the knob at startup and accepts exactly 0 ("vm.swappiness
+    // shoud be 0", TiKV 8.1 components/tikv_util/src/config.rs
+    // `check_kernel`), so the database floor of 1 left a TiKV node with the
+    // warning this rule exists to clear.
+    let (target, reason) = if info.has_process("tikv-server") {
+        (
+            0,
+            "TiKV 启动检查要求 vm.swappiness=0，swap 会导致严重的延迟抖动",
+        )
+    } else if is_db
         || *workload == WorkloadType::IoLatency
         || *workload == WorkloadType::MemoryIntensive
     {
@@ -11542,6 +11551,28 @@ mod tests {
             })
             .collect();
         info
+    }
+
+    /// TiKV refuses any swappiness but 0 at startup (`check_kernel`), while the
+    /// rule's database floor is 1: a TiKV node at 1 got no advice and at 60
+    /// was told to go to 1, which TiKV still warns about.
+    #[test]
+    fn swappiness_meets_tikvs_own_check() {
+        let advice = |procs: &[&str], current: u64| {
+            let mut info = info_with_processes(procs);
+            info.sysctl.swappiness = current;
+            let mut recs = Vec::new();
+            eval_swappiness(&info, &WorkloadType::IoLatency, &mut recs);
+            recs.into_iter()
+                .map(|r| r.recommended_value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(advice(&["tikv-server"], 60), ["0"]);
+        assert_eq!(advice(&["tikv-server"], 1), ["0"]);
+        assert!(advice(&["tikv-server"], 0).is_empty());
+        // The other latency workloads keep the floor of 1.
+        assert_eq!(advice(&["tidb-server"], 60), ["1"]);
+        assert!(advice(&["tidb-server"], 1).is_empty());
     }
 
     #[test]
