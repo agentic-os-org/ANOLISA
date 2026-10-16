@@ -398,7 +398,7 @@ tokenless env-check --checklist --json
 tokenless env-check --tool Shell --fix
 ```
 
-> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。如果未来重新设计并启用，保留的旧版实现只会尝试修复缺失的必需依赖。
+> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。如果未来重新设计并启用，保留的旧版实现会尝试修复缺失或版本过低的必需依赖。
 
 ## `stats`
 
