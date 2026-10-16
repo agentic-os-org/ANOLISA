@@ -2,7 +2,7 @@ pub mod journald;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -105,11 +105,19 @@ impl AuditLogger {
         // `→ /tmp/evil` cannot redirect our audit stream off-mount. The
         // audit log is the trust anchor for tamper-evidence (see CLAUDE.md
         // "信任链传导") so this open path matters as much as safe_fs does.
+        //
+        // The same co-tenant threat model applies to *reading*: the log
+        // records every tool call's paths and error text, so it is created
+        // owner-only (0600, mirroring the tokenless stash database) and a
+        // pre-existing group/other-readable file is tightened on open —
+        // files created by older builds are repaired on first run.
         let f = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         if journald_enabled {
             journald::probe();
         }
@@ -164,5 +172,49 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"], "nope");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("audit.log");
+        let log = AuditLogger::new(p.clone()).unwrap();
+        log.log(AuditEntry::new("mem_write").path("notes/a.md"))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the audit log must not be readable by group/other"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_tightens_pre_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("audit.log");
+        // A log created by an older build (or a permissive umask at creation
+        // time) may already exist group/other-readable.
+        std::fs::write(&p, b"{\"legacy\":true}\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let log = AuditLogger::new(p.clone()).unwrap();
+        log.log(AuditEntry::new("mem_read").path("notes/a.md"))
+            .unwrap();
+        drop(log);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "opening an existing audit log must repair its permissions"
+        );
+        // The pre-existing line and the new append both survive the reopen.
+        let contents = std::fs::read_to_string(&p).unwrap();
+        assert!(contents.contains("\"legacy\":true"));
+        assert!(contents.contains("mem_read"));
     }
 }
