@@ -224,6 +224,22 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             dv.set("sqref", new)
             changes += 1
 
+    # 6. Sheet-level filter/sort ranges: <autoFilter ref>, <sortState ref>,
+    #    <sortCondition ref>. Without this the ranges keep addressing the
+    #    pre-edit rows: inserted rows fall outside the sheet's filter and sort
+    #    ranges, and deletions leave them pointing at rows that no longer
+    #    exist. Ranges owned by xl/tables/*.xml are a separate part handled by
+    #    process_table().
+    for local in ("autoFilter", "sortState", "sortCondition"):
+        for el in root.iter(_tag(local)):
+            old = el.get("ref", "")
+            if not old:
+                continue
+            new = shift_sqref(old, at, delta)
+            if new != old:
+                el.set("ref", new)
+                changes += 1
+
     if changes > 0:
         _write_tree(tree, path)
     return changes
