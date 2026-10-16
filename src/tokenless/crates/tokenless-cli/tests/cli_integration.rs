@@ -3019,3 +3019,147 @@ fn operation_failure_keeps_its_exit_code_with_an_unwritable_stderr() {
         "an unwritable stderr must not replace the exit code with 101"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Success-path stdout writes must not panic when the write fails
+// ─────────────────────────────────────────────────────────────────────
+// `println!`/`print!` panic on a write error, so a command whose work was
+// already done answered 101 with a panic message on stderr instead of the
+// status it had earned - a full filesystem behind a redirect, or a consumer
+// that stopped reading (`tokenless stats list | head -1`). The policy is the
+// one ktuner settled for the same shape: a broken pipe means the consumer
+// left while the work was finished, so the command ends gracefully and keeps
+// its exit code; any other write error is an operation failure (code 1)
+// reported through the CLI's normal error channel.
+
+/// A child's stdout whose read end is already closed: every write answers
+/// EPIPE, the deterministic shape of a consumer that stopped reading.
+#[cfg(target_os = "linux")]
+fn closed_pipe_stdout() -> std::process::Stdio {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    assert_eq!(unsafe { libc::close(fds[0]) }, 0, "close the read end");
+    unsafe { std::process::Stdio::from_raw_fd(fds[1]) }
+}
+
+/// The listing command: a success path whose whole job is one stdout write.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_list_ends_gracefully_when_the_consumer_stopped_reading() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "list"])
+        .stdout(closed_pipe_stdout())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a broken pipe is a pipeline condition, not a failure: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A full filesystem behind a redirect is not a pipeline condition: the
+/// command reports an operation failure through the normal error channel.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "list"])
+        .stdout(std::process::Stdio::from(dev_full()))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// The payload path: a healthy run keeps the bytes `println!` wrote (the
+/// compressed output plus one LF), and an unwritable stdout becomes an
+/// operation error instead of a panic.
+#[test]
+#[cfg(target_os = "linux")]
+fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let run = |stdout: std::process::Stdio| {
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .arg("compress-response")
+            .stdin(std::process::Stdio::piped())
+            .stdout(stdout)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(COMPRESSIBLE_RESPONSE.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap()
+    };
+
+    let healthy = run(std::process::Stdio::piped());
+    assert!(healthy.status.success(), "{healthy:?}");
+    assert!(
+        healthy.stdout.ends_with(b"\n"),
+        "the payload still carries the single trailing LF println! added"
+    );
+
+    let full = run(std::process::Stdio::from(dev_full()));
+    let stderr = String::from_utf8_lossy(&full.stderr);
+    assert_eq!(full.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A prompt is a stdout write too: it must reach the terminal ahead of the
+/// stdin read that follows it, and its failure must not leave the command
+/// blocked on input nobody will answer.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_clear_prompt_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "clear"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(dev_full()))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
