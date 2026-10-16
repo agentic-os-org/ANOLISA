@@ -3954,10 +3954,11 @@ fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// /proc/meminfo, so injecting both is the only way to assert either branch on
 /// any host.
 ///
-/// The gate is the shared boundary-aware database predicate, not the
-/// hand-rolled `postgres || mysqld` list: MariaDB 10.4+ runs as `mariadbd`
-/// (the daemon comm Debian and Ubuntu ship), so a MariaDB-only host missed
-/// the rule while the sibling SysV IPC sizing rules already counted it.
+/// The gate is [`hugetlb_database_present`], the databases that can map the
+/// pool, not every database: reserved huge pages "cannot be used for other
+/// purposes" (v6.6 Documentation/admin-guide/mm/hugetlbpage.rst), so a quarter
+/// of memory reserved for a server that never maps it is a quarter of memory
+/// taken away from it.
 ///
 /// The count is also read as a switch here: the rule fires on a zero, and
 /// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0,
@@ -3972,7 +3973,7 @@ fn eval_nr_hugepages_at(
     if !info.param_exists(path) {
         return 1;
     }
-    if !is_database_present(info) {
+    if !hugetlb_database_present(info) {
         return 1;
     }
     let recommended = quarter_memory_hugepages(info.memory_total_gb, hugepage_kb);
@@ -3990,6 +3991,19 @@ fn eval_nr_hugepages_at(
         });
     }
     1
+}
+
+/// Whether a database that maps the hugetlb pool runs: PostgreSQL
+/// (`huge_pages`, on by default as `try`), MySQL and MariaDB (`large_pages`)
+/// and Oracle (SGA huge pages). [`is_database_present`] also counts mongod,
+/// ClickHouse, TiDB and TiKV, which offer no option to map the pool; a
+/// reservation sized for them only takes memory from them. Boundary-aware like that predicate, so
+/// `postgres: writer` counts and `mysqldump` does not.
+fn hugetlb_database_present(info: &SystemInfo) -> bool {
+    info.has_process("postgres")
+        || info.has_process("mysqld")
+        || info.has_process("mariadbd")
+        || info.has_process("oracle")
 }
 
 fn eval_shmmax(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -17363,6 +17377,37 @@ mod tests {
         );
     }
 
+    /// Reserved huge pages cannot be used for anything but hugetlb mappings
+    /// (v6.6 hugetlbpage.rst), and mongod, ClickHouse, TiDB and TiKV never map
+    /// them, so the quarter of memory the rule reserves was taken from those
+    /// servers instead of serving them.
+    #[test]
+    fn nr_hugepages_advice_is_for_databases_that_map_the_pool() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_hugetlb_dbs_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("nr_hugepages");
+        std::fs::write(&knob, "0\n").unwrap();
+        let advised = |name: &str| {
+            let mut info = info_with_processes(&[name]);
+            info.memory_total_gb = 64;
+            let mut recs = Vec::new();
+            eval_nr_hugepages_at(&info, &mut recs, knob.to_str().unwrap(), 2048);
+            !recs.is_empty()
+        };
+
+        for name in ["postgres", "mysqld", "mariadbd", "oracle"] {
+            assert!(advised(name), "{name} maps the hugetlb pool");
+        }
+        for name in ["mongod", "clickhouse", "tidb-server", "tikv-server"] {
+            assert!(!advised(name), "{name} cannot use reserved huge pages");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn test_arp_ignore_multi_nic() {
         let mut info = make_test_info();
