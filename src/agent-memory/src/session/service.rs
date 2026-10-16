@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -251,20 +251,47 @@ impl SessionLogService {
     pub fn read_log(&self) -> Result<String> {
         // Hold the write-side lock while reading so we get a consistent
         // snapshot (no half-written lines) — not to prevent concurrent
-        // corruption, which O_APPEND already guarantees.
+        // corruption, which O_APPEND already guarantees. The held log_file
+        // handle is opened append/write-only, so the actual reads go through
+        // a fresh read-only view of the same anchored path.
         let _g = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
-        let raw = std::fs::read(&self.log_path)?;
-        if raw.len() <= Self::MAX_SESSION_LOG_BYTES as usize {
+        let cap = Self::MAX_SESSION_LOG_BYTES;
+        let mut f = std::fs::File::open(&self.log_path)?;
+        let len = f.metadata()?.len();
+
+        if len <= cap {
+            // Whole log: already bounded by the cap, nothing to truncate.
+            let mut raw = Vec::new();
+            f.read_to_end(&mut raw)?;
             return String::from_utf8(raw).map_err(|e| MemoryError::Other(e.to_string()));
         }
-        // Return the tail: find a line boundary near the end of the cap.
-        let cap = Self::MAX_SESSION_LOG_BYTES as usize;
-        let start = raw[raw.len() - cap..]
+
+        // Read only the last `cap` bytes instead of the whole file first:
+        // the cap exists to bound memory for long-running sessions, and a
+        // full `fs::read` would transiently allocate the entire log before
+        // the tail is cut out of it.
+        f.seek(SeekFrom::End(-(cap as i64)))?;
+        let mut window = vec![0u8; cap as usize];
+        f.read_exact(&mut window)?;
+
+        // Return whole entries: skip to the first line boundary inside the
+        // window. When the most recent entry alone is larger than the cap
+        // there is no boundary to align to — keep the windowed bytes, but
+        // skip the leading bytes of any UTF-8 sequence the window start may
+        // have split mid-character, which would otherwise make the tail
+        // fail `from_utf8` instead of degrading to a shorter string.
+        let start = window
             .iter()
             .position(|&b| b == b'\n')
-            .map(|p| raw.len() - cap + p + 1)
-            .unwrap_or(raw.len() - cap);
-        String::from_utf8(raw[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+            .map(|p| p + 1)
+            .unwrap_or_else(|| {
+                let mut s = 0;
+                while s < window.len() && (window[s] & 0xC0) == 0x80 {
+                    s += 1;
+                }
+                s
+            });
+        String::from_utf8(window[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
     }
 
     /// Copy a file from `<scratch>/<src_in_scratch>` to `<mount.root>/<dst_in_store>`.
@@ -333,5 +360,88 @@ impl SessionLogService {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionId;
+    use tempfile::tempdir;
+
+    fn setup() -> (tempfile::TempDir, SessionLogService) {
+        let tmp = tempdir().unwrap();
+        let svc = SessionLogService::start(
+            tmp.path(),
+            SessionId::from_string("ses_test").unwrap(),
+            "alice",
+            Some("test"),
+            "user-alice",
+            None,
+        )
+        .unwrap();
+        (tmp, svc)
+    }
+
+    #[test]
+    fn read_log_returns_whole_small_log() {
+        let (_t, svc) = setup();
+        svc.append_log(crate::audit::AuditEntry::new("mem_read").path("a.md"))
+            .unwrap();
+        svc.append_log(crate::audit::AuditEntry::new("mem_write").path("b.md"))
+            .unwrap();
+
+        let text = svc.read_log().unwrap();
+        // The ≤-cap path must return the entire log — including the oldest
+        // entry — not just a tail window.
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("mem_read"));
+        assert!(text.contains("mem_write"));
+    }
+
+    #[test]
+    fn read_log_tail_keeps_whole_recent_lines() {
+        let (_t, svc) = setup();
+        let cap = SessionLogService::MAX_SESSION_LOG_BYTES as usize;
+        // ~1093-byte lines; 1100 of them exceed the cap. The returned tail
+        // must start at a line boundary and contain the newest entries.
+        let mut body = String::new();
+        for i in 0..1100 {
+            body.push_str(&format!("entry-{i:05} {}\n", "x".repeat(1080)));
+        }
+        assert!(body.len() > cap);
+        std::fs::write(svc.log_path(), body.as_bytes()).unwrap();
+
+        let tail = svc.read_log().unwrap();
+        assert!(tail.len() <= cap);
+        assert!(
+            tail.starts_with("entry-"),
+            "tail must start at a whole line, got: {}",
+            &tail[..tail.len().min(40)]
+        );
+        // Most recent entry survived truncation.
+        assert!(tail.contains("entry-01099"));
+    }
+
+    #[test]
+    fn read_log_tail_never_splits_a_utf8_sequence() {
+        let (_t, svc) = setup();
+        // Regression: the tail window used to be returned verbatim from
+        // byte `len - cap` even when no line boundary existed inside it.
+        // With one giant entry built from 2-byte UTF-8 chars the window
+        // provably opens mid-sequence (any odd offset into an `é` run is a
+        // continuation byte), so `read_log` failed with an invalid-UTF-8
+        // error instead of degrading to a shorter string.
+        let cap = SessionLogService::MAX_SESSION_LOG_BYTES as usize;
+        let giant = format!("x\n{}z", "é".repeat((cap - 2) / 2 + 8));
+        std::fs::write(svc.log_path(), giant.as_bytes()).unwrap();
+
+        let tail = svc
+            .read_log()
+            .expect("oversized single entry must degrade to a shorter tail, not error");
+        assert!(tail.len() <= cap);
+        assert!(tail.ends_with('z'), "tail must keep the newest bytes");
+        // The split `é` was skipped; every remaining char is whole.
+        assert!(tail.chars().all(|c| c == 'é' || c == 'z'));
     }
 }
