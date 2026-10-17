@@ -84,6 +84,32 @@ confirm_destructive = true
 
 ---
 
+## OpenAI 兼容的 OpenClaw 预检
+
+OpenClaw 安装器会在写入配置或启动 Gateway 之前，验证 `anthropic-messages`
+（默认值）和 `openai-completions` 两种协议：
+
+```bash
+python3 SKILL_DIR/scripts/install_openclaw.py --billing payg \
+  --api-key-env BAILIAN_API_KEY --provider-api openai-completions \
+  --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --model-id "$OPENAI_MODEL"
+```
+
+将 `SKILL_DIR` 替换为已安装的 `ai/install-openclaw` 目录，并将 `OPENAI_MODEL`
+设为配置端点支持的模型。通过 `--base-url` 提供完整的兼容 API Base URL；
+选择该协议不会替换计费计划的默认 Base URL。预检在基础路径后追加
+`/chat/completions`，保留查询参数；如果已提供完整端点，则不会重复追加路径。
+请求使用 Bearer API Key、用户消息 `ping` 和 `max_tokens: 1`，超时由
+`--preflight-timeout` 控制（默认 20 秒）。HTTP、认证或网络失败会在写入配置前停止，
+并复用现有的提供商诊断。
+
+`--skip-preflight` 可显式延后端点验证；未支持的提供商协议保留原有跳过提示。
+`--dry-run` 仍会执行预检，除非显式跳过；`--precheck-only` 仅检查本地依赖，
+不会发送模型请求。端点需要接受标准 Chat 请求；需要额外提供商参数的模型，
+应通过其支持的配置进行验证。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
