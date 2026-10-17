@@ -41,6 +41,29 @@ fn fabricated_line_present(stdout: &str) -> bool {
 }
 
 #[test]
+fn list_and_validate_render_c1_name_as_visible_text() {
+    let holder = tempfile::tempdir().expect("holder tempdir");
+    let source = holder.path().join("skills");
+    let skill = source.join("sample\u{85}name");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\ndescription: example\n---\nBody\n",
+    )
+    .unwrap();
+    for command in ["list", "validate"] {
+        let out = Command::new(bin_path())
+            .arg(command)
+            .arg(&source)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(!stdout.contains('\u{85}'), "{command}: {stdout:?}");
+        assert!(stdout.contains("sample\\x85name"), "{command}: {stdout:?}");
+    }
+}
+
+#[test]
 fn list_text_output_escapes_control_characters_in_skill_names() {
     let holder = tempfile::tempdir().expect("holder tempdir");
     let source = hostile_tree(holder.path());
