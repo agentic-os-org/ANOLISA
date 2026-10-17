@@ -525,6 +525,11 @@ python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/xlsx_fmt/unpacked/ /tmp/output.xlsx
 python3 SKILL_DIR/scripts/formula_check.py /tmp/output.xlsx
 ```
 
+The style audit checks every cellXfs entry's fillId and borderId against the
+actual fills and borders collections, including unused entries. It also reports
+borders count mismatches. Use `--json` for findings with the style-table index,
+invalid resource ID and collection size; structural violations produce exit 1.
+
 Manual style reference integrity check:
 ```bash
 # Find the maximum s attribute value in the sheet XML

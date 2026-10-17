@@ -84,6 +84,24 @@ confirm_destructive = true
 
 ---
 
+## Spreadsheet Style Validation
+
+Use the XLSX skill's style audit on a workbook or its unpacked directory:
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/style_audit.py report.xlsx
+python3 src/os-skills/others/xlsx/scripts/style_audit.py report.xlsx --json
+```
+
+The audit checks the borders collection's declared count and validates every
+cellXfs entry's `fillId` and `borderId` against the actual collection sizes,
+including unused entries. Invalid references produce `fill_index_out_of_range`
+or `border_index_out_of_range` findings with the `cellXfs_index`, offending ID,
+and collection count. Collection count mismatches use `count_mismatch`.
+These structural findings have no sheet/cell location because they describe
+the workbook's shared style table. JSON and text output report the same findings;
+exit code 1 indicates violations and exit code 0 indicates none.
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

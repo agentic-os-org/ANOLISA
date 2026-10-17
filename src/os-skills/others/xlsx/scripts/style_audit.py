@@ -4,7 +4,7 @@
 style_audit.py — Financial formatting compliance checker for xlsx files.
 
 Audits an xlsx file (or an unpacked xlsx directory) and reports:
-1. Style system integrity: count attributes match actual element counts
+1. Style system integrity: collection counts and fill/border references are valid
 2. Color-role violations: formula cells with blue font, input cells with black font
 3. Year-format violations: cells containing 4-digit years using comma-format
 4. Percentage value violations: percentage-formatted cells with values > 1 (likely meant 0.08 not 8)
@@ -22,14 +22,14 @@ Exit code:
     1 — violations detected (or file cannot be opened)
 """
 
-import sys
-import os
-import zipfile
-import xml.etree.ElementTree as ET
 import json
+import os
 import re
-import tempfile
 import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NSP = f"{{{NS}}}"
@@ -118,6 +118,11 @@ def _parse_styles(styles_xml: bytes) -> dict:
             pattern_type = pf.get("patternType", "") if pf is not None else ""
             fills.append({"patternType": pattern_type})
 
+    # borders
+    borders_elem = find("borders")
+    borders_declared = int(borders_elem.get("count", "0")) if borders_elem is not None else 0
+    borders_actual = len(borders_elem) if borders_elem is not None else 0
+
     # cellXfs
     xfs = []
     xfs_elem = find("cellXfs")
@@ -142,6 +147,8 @@ def _parse_styles(styles_xml: bytes) -> dict:
         "fills": fills,
         "fills_declared": fills_declared,
         "fills_actual": len(fills),
+        "borders_declared": borders_declared,
+        "borders_actual": borders_actual,
         "xfs": xfs,
         "xfs_declared": xfs_declared,
         "xfs_actual": len(xfs),
@@ -233,6 +240,34 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             "actual": styles["xfs_actual"],
             "fix": f"Update <cellXfs count=\"{styles['xfs_actual']}\">",
         })
+
+    if styles["borders_declared"] != styles["borders_actual"]:
+        v.append(
+            {
+                "type": "count_mismatch",
+                "element": "borders",
+                "declared": styles["borders_declared"],
+                "actual": styles["borders_actual"],
+                "fix": f"Update <borders count=\"{styles['borders_actual']}\">",
+            }
+        )
+
+    # Audit the complete style collection, including styles not used by a cell.
+    for xf_index, xf in enumerate(xfs):
+        for resource, field in (("fills", "fillId"), ("borders", "borderId")):
+            resource_id = xf[field]
+            actual_count = styles[f"{resource}_actual"]
+            if not 0 <= resource_id < actual_count:
+                v.append(
+                    {
+                        "type": f"{field[:-2]}_index_out_of_range",
+                        "cellXfs_index": xf_index,
+                        field: resource_id,
+                        f"{resource}_count": actual_count,
+                        "fix": f"Set {field} on cellXfs[{xf_index}] to an existing {resource} index "
+                        f"in [0, {actual_count}) or add the missing resource",
+                    }
+                )
 
     # ── Check B: fills[0] and fills[1] presence ──────────────────────────────
     fills = styles["fills"]
@@ -544,6 +579,14 @@ def main() -> None:
                 elif t == "font_index_out_of_range":
                     print(f"  [FAIL] [{item['sheet']}!{item['cell']}] fontId={item['fontId']} but "
                           f"fonts count={item['fonts_count']}")
+                    print(f"         Fix: {item['fix']}")
+                elif t in ("fill_index_out_of_range", "border_index_out_of_range"):
+                    field = "fillId" if t == "fill_index_out_of_range" else "borderId"
+                    resource = "fills" if field == "fillId" else "borders"
+                    print(
+                        f"  [FAIL] cellXfs[{item['cellXfs_index']}] {field}={item[field]} but "
+                        f"{resource} count={item[f'{resource}_count']}"
+                    )
                     print(f"         Fix: {item['fix']}")
                 elif t == "year_with_comma_format":
                     print(f"  [FAIL] [{item['sheet']}!{item['cell']}] year value {item['value']} "

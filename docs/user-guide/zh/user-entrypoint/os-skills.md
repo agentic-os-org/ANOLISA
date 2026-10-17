@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## 电子表格样式验证
+
+可对工作簿或其解包目录运行 XLSX 技能的样式审计：
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/style_audit.py report.xlsx
+python3 src/os-skills/others/xlsx/scripts/style_audit.py report.xlsx --json
+```
+
+审计检查 borders 集合声明的计数，并根据实际集合大小验证每个 cellXfs 条目的
+`fillId` 和 `borderId`，包括尚未使用的条目。无效引用生成 `fill_index_out_of_range`
+或 `border_index_out_of_range` 结果，包含 `cellXfs_index`、错误 ID 和集合计数。
+集合计数不一致使用 `count_mismatch`。这些结构性结果描述工作簿共享样式表，
+因此不包含工作表或单元格位置。JSON 和文本输出报告相同结果；退出码 1 表示存在违规，
+退出码 0 表示没有违规。
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
