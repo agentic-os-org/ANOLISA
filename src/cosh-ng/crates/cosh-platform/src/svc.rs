@@ -9,6 +9,8 @@ use crate::{run_command, SVC_TIMEOUT};
 
 /// Get structured status of a systemd service.
 pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
+    reject_option_like_unit_name(name)?;
+
     let props = load_service_properties(name)?;
 
     let active_state = props
@@ -52,6 +54,8 @@ pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
 
 /// Perform a service action (start/stop/restart).
 pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionResult, CoshError> {
+    reject_option_like_unit_name(name)?;
+
     let valid_actions = ["start", "stop", "restart", "enable", "disable"];
     if !valid_actions.contains(&action) {
         return Err(CoshError::new(
@@ -209,6 +213,27 @@ fn validate_state_filter(state: &str) -> Result<(), CoshError> {
 
 // --- Internal helpers ---
 
+/// Reject unit names that a child process would parse as an option.
+///
+/// A name starting with `-` (`--no-pager`, `-x`) reaches systemctl/journalctl
+/// as a flag instead of a unit name: `systemctl show --no-pager` exits 0 with
+/// manager-level properties and no `LoadState`, which fabricates an
+/// `Ok(SvcStatus)` for a unit that does not exist. Such a name is invalid
+/// input, not a unit worth querying — reject it before spawning anything.
+fn reject_option_like_unit_name(name: &str) -> Result<(), CoshError> {
+    if name.starts_with('-') {
+        return Err(CoshError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "Unit name '{}' looks like an option (leading '-'); unit names must not start with '-'",
+                name
+            ),
+            "svc",
+        ));
+    }
+    Ok(())
+}
+
 fn svc_state(name: &str) -> Result<SvcState, CoshError> {
     Ok(state_from_properties(&load_service_properties(name)?))
 }
@@ -298,6 +323,10 @@ fn read_system_uptime_secs() -> Option<u64> {
 }
 
 fn fetch_journal_lines(unit: &str, count: usize) -> Vec<String> {
+    if reject_option_like_unit_name(unit).is_err() {
+        return vec![];
+    }
+
     let result = run_command(
         Command::new("journalctl").args(["-u", unit, "-n", &count.to_string(), "--no-pager", "-q"]),
         SVC_TIMEOUT,
@@ -623,5 +652,52 @@ mod tests {
     fn test_validate_state_filter_shell_metachar() {
         assert!(validate_state_filter("running;evil").is_err());
         assert!(validate_state_filter("").is_err());
+    }
+
+    // --- option-like unit names are rejected before systemctl (issue #4477) ---
+
+    #[test]
+    fn test_svc_status_option_like_unit_name_is_rejected() {
+        let err = svc_status("--no-pager").unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidInput,
+            "option-like unit names must be rejected, not fabricated: {err:?}"
+        );
+        assert!(err.message.contains("--no-pager"));
+    }
+
+    #[test]
+    fn test_svc_action_option_like_unit_name_is_rejected() {
+        let err = svc_action("--no-pager", "start", false).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidInput,
+            "option-like unit names must be rejected before systemctl: {err:?}"
+        );
+        assert!(err.message.contains("--no-pager"));
+    }
+
+    #[test]
+    fn test_svc_action_dry_run_rejects_option_like_unit_name() {
+        let err = svc_action("-weird-unit", "start", true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        assert!(err.message.contains("-weird-unit"));
+    }
+
+    #[test]
+    fn test_fetch_journal_lines_option_like_unit_name_yields_no_lines() {
+        assert!(
+            fetch_journal_lines("--no-pager", 5).is_empty(),
+            "an option-like unit name must not reach journalctl's flag parsing"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_svc_status_missing_unit_control_still_reports_not_found() {
+        // Control: a plain missing unit keeps the existing SvcNotFound path.
+        let err = svc_status("cosh-cn9-missing-unit").unwrap_err();
+        assert_eq!(err.code, ErrorCode::SvcNotFound);
     }
 }
