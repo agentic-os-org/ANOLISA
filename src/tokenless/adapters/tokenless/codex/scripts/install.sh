@@ -35,8 +35,6 @@ set -euo pipefail
 PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
-MARKETPLACE_NAME="anolisa-tokenless"
-PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 
 # Resolve codex binary via shared helper (see _common.sh).
 
@@ -44,6 +42,8 @@ PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./_common.sh
 source "$SCRIPT_DIR/_common.sh"
+PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
+PLUGIN_NAME="${PLUGIN_ID%%@*}"
 PLUGIN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"   # codex/ directory
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ mkdir -p "$AGENTS_DIR"
 
 # Symlink plugin at marketplace root (codex resolves plugin paths relative to
 # the marketplace root, not the manifest file).
-PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+PLUGIN_LINK="$MARKETPLACE_DIR/$PLUGIN_NAME"
 if [[ ! -L "$PLUGIN_LINK" ]] || [[ "$(readlink "$PLUGIN_LINK")" != "$PLUGIN_SRC" ]]; then
     rm -f "$PLUGIN_LINK"
     ln -sfn "$PLUGIN_SRC" "$PLUGIN_LINK"
@@ -119,14 +119,14 @@ cat > "$AGENTS_DIR/marketplace.json" <<JSON
 {
     "name": "${MARKETPLACE_NAME}",
     "interface": {
-        "displayName": "ANOLISA Tokenless"
+        "displayName": "${MARKETPLACE_DISPLAY_NAME}"
     },
     "plugins": [
         {
-            "name": "tokenless",
+            "name": "${PLUGIN_NAME}",
             "source": {
                 "source": "local",
-                "path": "./tokenless"
+                "path": "./${PLUGIN_NAME}"
             },
             "policy": {
                 "installation": "AVAILABLE"
