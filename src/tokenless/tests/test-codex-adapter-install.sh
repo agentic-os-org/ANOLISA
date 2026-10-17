@@ -163,18 +163,27 @@ else
         fail "the dry run built or installed the component binary"
     fi
 
-    # …and without a source tree it says the real run would refuse, instead of
-    # promising a build.
+    # …and without a source tree the real run refuses at Phase 1, so the dry run
+    # must refuse at the same point, with the same message and the same exit
+    # code — not preview Phase 2 writes a real run never reaches.
     mv "$TOKENLESS_BIN" "$SANDBOX/tokenless.saved"
     empty_source="$SANDBOX/empty-source"
     mkdir -p "$empty_source"
-    no_source_out="$(env_for env ANOLISA_DRY_RUN=1 TOKENLESS_SOURCE_DIR="$empty_source" \
-        bash "$INSTALL_SH" 2>&1)"
+    no_source_rc=0
+    no_source_out="$(env_for env ANOLISA_DRY_RUN=1 TOKENLESS_SOURCE_DIR="$empty_source" bash "$INSTALL_SH" 2>&1)" || no_source_rc=$?
     mv "$SANDBOX/tokenless.saved" "$TOKENLESS_BIN"
-    expect_line "a dry run without a source tree reports the refusal" \
-        "DRY-RUN: no tokenless binary and no source tree at $empty_source: the real run exits 1" "$no_source_out"
-    expect_no_line "a dry run without a source tree does not promise a build" \
-        "DRY-RUN: cargo build --release" "$no_source_out"
+    if [ "$no_source_rc" = 1 ]; then
+        pass "a dry run without a source tree exits like the real run"
+    else
+        fail "a dry run without a source tree: expected exit 1, got $no_source_rc"
+    fi
+    expect_line "a dry run without a source tree reports the refusal" "ERROR: tokenless binary not found and no source tree at $empty_source" "$no_source_out"
+    expect_no_line "a dry run without a source tree emits no preview" "DRY-RUN:" "$no_source_out"
+    if [ ! -e "$MARKETPLACE_DIR" ]; then
+        pass "a refused dry run creates no marketplace tree"
+    else
+        fail "a refused dry run created the marketplace tree"
+    fi
 fi
 
 # ── A dry run without the codex CLI names no work it cannot reach ───────────
