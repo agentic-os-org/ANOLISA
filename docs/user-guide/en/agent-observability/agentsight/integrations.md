@@ -143,3 +143,39 @@ report, or import the session into another AgentSight instance through the Traje
 - [Configuration](configuration.md) — add rules for your own Agent
 - [Dashboard guide](dashboard.md#navigation-and-page-availability) — which pages appear when
 - [Data and storage](data-and-storage.md#http-api) — API details
+
+### Record statistics through the API
+
+With `tokenless_api` configured, authenticated `POST /api/tokenless/refresh` accepts
+`{"session_id":"source-session"}`, `{"tool_use_id":"captured-tool-id"}`, or `{}` to record one source page (100 records). Unfiltered replies include an optional
+string `next_before_id`; pass `{"before_id":"42"}` to record the next page. This is an ordinary
+query parameter, without a persisted checkpoint or restart-recovery guarantee. It records a
+bounded query (at most 1,000 records / 8 MiB) atomically. An oversized query fails without
+saving a partial result; narrow the filter. Refresh requires an AgentSight credential,
+even from loopback. `GET /api/tokenless/records` lists saved metadata with optional
+`start_ns`, `end_ns`, `session_id`, `tool_use_id`, and `limit` (1–100); the default window
+is the last 24 hours. Network/query failures are explicit, and saved records remain readable.
+Original fields are preserved. `agentsight_session_id` is populated only when a captured
+tool-call ID uniquely matches a local session; missing or ambiguous associations remain null.
+
+Saved lists also accept `before_cache_id` for descending local-ID pagination and return
+`next_before_cache_id`. `GET /api/tokenless/records/{cache_id}?include_content=true` requests
+full content; omitting the flag returns metadata. Configured API copies supply the existing
+savings endpoints, excluding DryRun/unknown modes and avoiding duplicate local-database accounting.
+
+The existing `GET /api/token-savings` and `GET /api/token-savings/session/{id}` refresh metadata
+for their captured tool-call IDs before calculating results. No separate refresh request is needed
+for these views. They require the existing AgentSight credential when an API is configured,
+including loopback requests. The query deduplicates IDs and shares a 5-second, 1000-record/request,
+8-MiB budget across source requests. A failed or oversized refresh returns an error without saving
+a partial batch or presenting cached rows as current. Source records absent from this response are
+excluded from current totals; saved records remain available through the records API. Without
+`tokenless_api`, the existing local-database behavior is unchanged.
+
+Historical call IDs remain available for compounding calculations. Source lookup batches at most
+128 IDs per request, so a long session with few matching records can complete without discarding
+earlier savings. All batches and their pages share the same recording budget. Saved metadata
+lists also require the existing AgentSight credential, including on loopback.
+
+The API-backed savings path requires the batch POST endpoint; upgrade AgentSight and the
+Tokenless query service together. Existing single-filter GET queries remain available.

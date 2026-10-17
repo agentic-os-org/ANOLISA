@@ -255,6 +255,41 @@ else
     fail "hook wrapper accepted a traversal path: ${traversal_out:-<no output>}"
 fi
 
+# ANOLISA_DRY_RUN previews the two lifecycle actions and touches nothing.
+if ! HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null; then
+    fail "failed to reinstall plugin for dry-run coverage"
+fi
+installs_before=$(grep -Fxc "plugins install $ADAPTER_DIR/qoder --scope user"     "$FAKE_HOME/.qoder/stub.log")
+uninstalls_before=$(grep -Fxc "plugins uninstall tokenless --scope user"     "$FAKE_HOME/.qoder/stub.log")
+
+dry_uninstall_out="$(HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR"     ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)"
+case "$dry_uninstall_out" in
+    *DRY-RUN:*) pass "dry-run uninstall previews the removal" ;;
+    *) fail "dry-run uninstall did not print a DRY-RUN preview" ;;
+esac
+if [ -f "$FAKE_HOME/.qoder/native-tokenless-installed" ] &&         [ "$(grep -Fxc "plugins uninstall tokenless --scope user"             "$FAKE_HOME/.qoder/stub.log")" = "$uninstalls_before" ]; then
+    pass "dry-run uninstall leaves the registration in place"
+else
+    fail "dry-run uninstall unregistered the plugin"
+fi
+
+dry_install_out="$(HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR"     ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" 2>&1)"
+case "$dry_install_out" in
+    *DRY-RUN:*) pass "dry-run install previews the registration" ;;
+    *) fail "dry-run install did not print a DRY-RUN preview" ;;
+esac
+if [ "$(grep -Fxc "plugins install $ADAPTER_DIR/qoder --scope user"         "$FAKE_HOME/.qoder/stub.log")" = "$installs_before" ]; then
+    pass "dry-run install leaves qodercli untouched"
+else
+    fail "dry-run install still called qodercli"
+fi
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$UNINSTALL_SH" >/dev/null; then
+    pass "real uninstall still removes the registration after the previews"
+else
+    fail "real uninstall stopped working after the dry-run coverage"
+fi
+
 echo ""
 echo "Qoder adapter tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

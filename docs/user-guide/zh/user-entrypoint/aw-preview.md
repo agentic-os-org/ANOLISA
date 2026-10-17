@@ -26,7 +26,7 @@ export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-默认构建只生成 core；`--component all` 生成四个包。`aw-core` 包含 `aw` 和 `aw-package`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接和 Tokenless CLI；`aw-all-in-one` 包含完全相同的三个组件。分包安装时，分别解压 core 和 Provider，依次用包内 `aw-package install` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
+默认构建只生成 core；`--component all` 生成四个包。`aw-core` 包含 `aw` 和 `aw-package`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。分包安装时，分别解压 core 和 Provider，依次用包内 `aw-package install` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
 
 安装器校验哈希、权限、架构、版本及源码提交，拒绝覆盖，并在 `.aw-packages` 记录文件归属。安装过程中收到 Ctrl-C（SIGINT）或 SIGTERM 会回滚本次写入，随后可重试；强制终止（SIGKILL）不在自动回滚范围内。校验和用于发现损坏，不是发布者签名。安装父目录须归安装用户所有，且不可被其他用户写入。系统后端的安装由 root 管理；若连接已有后端，也支持普通用户安装到自己的目录。
 
@@ -201,6 +201,11 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
   --socket /run/aw-preview-sec/daemon.sock --skillsec-config /etc/aw-preview/skillsec.json
 ```
 
+包内还包含认证探测 `agent-sec-daemon-health` 和由回执校验的官方服务/配置
+参考资产。持久后台应复用已有 root 系统服务或独立安装 sec-core 系统包。
+AW 安装/卸载不会修改该服务或 `/etc`，不得让 root 服务执行用户可写前缀中的程序。
+参见[后台归属和健康诊断](aw-sec-core.md#包内后台与显式健康诊断)。
+
 ## 3. 生成一份 AW 配置
 
 另外准备 Qoder CLI >=1.1.64、OpenClaw **2026.9.6** 及兼容的 Node.js。Qoder 须保留
@@ -300,12 +305,12 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
 
 Rust 构建器编译锁定依赖的 release 二进制，检查原生 ELF 架构，只生成所选压缩包及 `SHA256SUMS`。默认 `--component core` 不编译或读取 sec-core；`--component sec-core` 生成扩展包，`--component all` 生成四种包。扩展安装仍要求同一源码提交和版本的 core。发布失败或取消时，只清理本次创建的链接，以便重试；清理失败会报告具体残留路径。安装包 CI 使用真实 sec-core 扫描器，通过模拟事件验证两种工具映射及审计恢复，不将其作为原生 Agent 验收。真实模型会话按上文另行验证。AW 通用开发门禁仍保留交付链路之外的 Python 测试工具。
 
-包 CI 自动覆盖 package crate、AW manifests、本指南和工作流变更；其他 AW/sec-core 变更在分发前需要针对确切源码提交手动运行。成功的 PR 产物保留 3 天，手动产物保留 14 天；失败时保留诊断证据，不上传安装包。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
+包 CI 自动覆盖 package/Provider crate、sec-core V2 和 systemd 资产、AW manifests、本指南和工作流变更；其他 AW 变更在分发前需要针对确切源码提交手动运行。成功的 PR 产物保留 3 天，手动产物保留 14 天；失败时保留诊断证据，不上传安装包。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
 
 ## 可选 Tokenless PostTool 包
 
 `--component tokenless` 构建 `aw-provider-tokenless`；`--component all` 也将它纳入
-`aw-all-in-one`。扩展包含桥接和 Tokenless CLI，要求匹配的 core，沿用 sec-core 的
+`aw-all-in-one`。扩展包含桥接、Tokenless CLI 和固定版本带补丁的 RTK，要求匹配的 core，沿用 sec-core 的
 收据与完整性规则。通过 `configure --provider tokenless` 或
 `--provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
 结果槽和故障行为见 [Tokenless 指南](aw-tokenless.md)。

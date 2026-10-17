@@ -610,6 +610,24 @@ fn latest_round_messages(messages: &[InputMessage]) -> &[InputMessage] {
     }
 }
 
+/// The tail of a replayed history from its last tool call on — the round whose
+/// responses that history carries. Unlike [`latest_round_messages`] there is no
+/// user-message fallback: a column that carries only the responses themselves
+/// (the measured live shape, where the result rides on the user turn) holds no
+/// assistant turn and must be scanned whole.
+fn messages_after_the_last_tool_call(messages: &[InputMessage]) -> &[InputMessage] {
+    let last_tool_call = messages.iter().rposition(|m| {
+        m.role == "assistant"
+            && m.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::ToolCall { .. }))
+    });
+    match last_tool_call {
+        Some(idx) => &messages[idx + 1..],
+        None => messages,
+    }
+}
+
 /// Build observation by looking for ToolCallResponse in the next event's input.
 fn build_observation(
     tool_calls: &[ToolCall],
@@ -638,11 +656,16 @@ fn build_observation(
         }
     }
 
-    // Strategy 3: from input_messages column (already incremental — latest round)
+    // Strategy 3: from input_messages column. Narrowed to the round it
+    // carries: a completed row keeps only the current round there, but a row
+    // that never completed keeps the whole replayed history, and a multi-round
+    // turn keeps every round of the turn — an earlier round's id-less response
+    // would otherwise take this step's call through the positional fallback.
     if results.is_empty() {
         if let Some(ref json) = next_event.input_messages {
             if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-                collect_tool_responses(&msgs, &tc_ids, &mut results, &mut matched_by_id);
+                let latest = messages_after_the_last_tool_call(&msgs);
+                collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
             }
         }
     }
@@ -1754,6 +1777,63 @@ pub(crate) mod tests {
         assert_eq!(
             by_id("tc-b").content.as_ref().and_then(|c| c.as_str()),
             Some("output of b"),
+        );
+    }
+
+    /// A next event replays the conversation, not only the latest round: a row
+    /// that never completed keeps the whole history — `build_pending_from_request`
+    /// copies every non-system message until the call completes — so an
+    /// *earlier* round's id-less tool result is in `input_messages` too. Pass 2
+    /// matches an id-less response to the next unmatched call in order, so
+    /// without narrowing the scan to the latest round that earlier result
+    /// answers this step's call and the current one is dropped.
+    #[test]
+    fn an_earlier_round_result_does_not_answer_the_current_step() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: None,
+                name: "list_dir".into(),
+                arguments: Some(serde_json::json!({})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let mut replayed = call_event(2, 3_000_000_000, None, None, None);
+        replayed.input_messages = Some(
+            serde_json::json!([
+                {"role": "user", "content": "list it"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "old-call", "type": "function",
+                     "function": {"name": "list_dir", "arguments": "{}"}}]},
+                {"role": "tool", "content": "old result"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "cur-call", "type": "function",
+                     "function": {"name": "list_dir", "arguments": "{}"}}]},
+                {"role": "tool", "content": "current result"}
+            ])
+            .to_string(),
+        );
+
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("list it")),
+            replayed,
+        ];
+
+        let doc = convert_trace_to_atif("trace-earlier-round", events).unwrap();
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("the latest round's tool result must become an observation")
+            .results;
+        assert_eq!(
+            results.len(),
+            1,
+            "only the current round's result belongs here: {results:?}"
+        );
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("current result"),
         );
     }
 

@@ -19,9 +19,10 @@ pub(super) fn run(
     command: &CommandSpec,
     signal: &AtomicI32,
     ready: Option<Readiness>,
+    started: impl FnOnce(u32),
 ) -> Result<ExitStatus> {
     let Some(ready) = ready else {
-        return aw_exec::run_foreground(command, signal).map_err(Into::into);
+        return aw_exec::run_foreground_observed(command, signal, started).map_err(Into::into);
     };
     if ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120) {
         return Err("native startup deadline must be within 1..120000 ms".into());
@@ -30,6 +31,7 @@ pub(super) fn run(
     thread::scope(|scope| {
         let mut watcher = None;
         let execution = aw_exec::run_foreground_observed(command, signal, |pid| {
+            started(pid);
             let ready = &ready;
             watcher = Some(scope.spawn(move || {
                 let result = wait(ready, receiver, pid);

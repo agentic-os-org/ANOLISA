@@ -151,9 +151,25 @@ $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json: $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json.i
 	@echo "==> Generating qwenpaw/plugin.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
+# The requirements file is the one stamped artifact whose content needs more
+# than the raw workspace version: it pins release-asset wheel URLs, where the
+# filename carries the PEP 440 normalized spelling (the pinned maturin names a
+# Cargo 0.9.0-rc.1 wheel anolisa_tokenless-0.9.0rc1-..., and pip refuses the
+# unnormalized form) while the release-tag path keeps the raw Cargo spelling
+# the release workflow tags verbatim. packaging/raw/verify-release.py owns that
+# contract and the normalization behind it, so the stamping asks its normalizer
+# through packaging/raw/wheel-version.py instead of carrying a second
+# implementation that could drift from the gate it has to satisfy. python3 is
+# already a hard requirement of this component (runtime Requires, the hooks,
+# and packaging/raw/package.sh, which runs the same gate).
 $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt: $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt.in Cargo.toml
-	@echo "==> Generating qwenpaw/requirements.txt (version=$(VERSION))..."
-	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+	@wheel_version=$$(python3 packaging/raw/wheel-version.py '$(VERSION)') || { \
+	    echo "ERROR: cannot normalize $(VERSION) into a wheel filename version" >&2; \
+	    exit 1; }; \
+	test -n "$$wheel_version" || { \
+	    echo "ERROR: no wheel filename version for $(VERSION)" >&2; exit 1; }; \
+	echo "==> Generating qwenpaw/requirements.txt (version=$(VERSION), wheel version=$$wheel_version)..."; \
+	sed -e 's/@WHEEL_VERSION@/'"$$wheel_version"'/g' -e 's/@VERSION@/$(VERSION)/g' $< > $@
 
 $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml: \
     $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml.in Cargo.toml
@@ -324,7 +340,11 @@ test-claude-code-detect:
 # tests. It is unittest-shaped now and rides on this target beside the other
 # plain-python3 suites the Test tokenless job already runs, which is what
 # gives the raw packaging gate regression coverage in CI.
-test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts test-qwenwork-hooks
+# Keep the worker protocol suite as a prerequisite so test-integration and
+# its aggregate callers cannot omit it. It is stdlib-only: the subprocess
+# fixture supplies Headroom stubs on PYTHONPATH, without a Headroom venv.
+test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts \
+                  test-qwenwork-hooks test-headroom-pipeline-worker
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_hermes_lifecycle.py
@@ -338,6 +358,11 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_verify_release_versions.py
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
+	python3 tests/test_stats_http.py
+
+.PHONY: test-headroom-pipeline-worker
+test-headroom-pipeline-worker:
+	python3 tests/test_headroom_pipeline_worker_protocol.py
 
 # Keep this standalone entry free of Rust/plugin builds. CI runs the shared
 # suites through test-integration and only the installer through test-adapters.
@@ -485,8 +510,15 @@ stage-raw:
 	@$(MAKE) build-openclaw-plugin build-dsh-plugin
 	@./packaging/raw/package.sh stage
 
+# The second pass publishes a prerelease: that is the only version shape whose
+# release-tag path (raw Cargo 0.9.0-rc.1) and wheel filenames (PEP 440
+# normalized 0.9.0rc1, what the pinned maturin builds and what pip accepts)
+# differ, so it is the pass that would catch a stamping rule writing one
+# spelling into both positions. Both passes run packaging/raw/package.sh, whose
+# verify-release.py gate rejects the mix.
 test-raw-package:
 	@bash tests/test-package-raw.sh
+	@TOKENLESS_RAW_TEST_VERSION=0.9.0-rc.1 bash tests/test-package-raw.sh
 
 # tests/test-package-npm-prebuilt.sh drives npm/scripts/package-npm.js, whose
 # buildAdapters() recursively runs `make build-openclaw-plugin build-dsh-plugin`.

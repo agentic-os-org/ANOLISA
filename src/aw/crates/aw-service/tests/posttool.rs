@@ -181,10 +181,10 @@ fn qoder_callback_delivers_one_replacement_and_keeps_audit_metadata_only() {
 }
 
 #[test]
-fn four_adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
+fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use aw_service::{Binding, Capabilities, Operation};
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Instant};
-    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes"] {
+    for adapter in ["qoder", "openclaw", "qwenpaw", "agentscope", "hermes"] {
         let fixture = Fixture::new();
         let mut document = fixture.document();
         document["spec"]["agents"] =
@@ -240,13 +240,16 @@ fn four_adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
             "openclaw" => {
                 json!({"hook":"after_tool_call","event":{"toolName":"Custom/Tool","params":input,"toolCallId":"call","runId":"run","result":{"content":[{"type":"text","text":"original"}]}},"context":{"sessionId":"session","runId":"run","toolCallId":"call"}})
             }
-            "qwenpaw" => {
-                json!({"event":"tool.after","session_id":"session","tool_call":{"name":"exec","id":"call","input":input.to_string()},"tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"}})
+            "qwenpaw" | "agentscope" => {
+                json!({"event":"tool.after","invocation_id":"call","session_id":"session","tool_call":{"name":"exec","id":"call","input":input.to_string()},"tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"}})
             }
             _ => {
                 json!({"hook_event_name":"post_tool_call","cwd":fixture.root,"session_id":"session","tool_name":"terminal","tool_input":input,"extra":{"api_request_id":"api","tool_call_id":"call","status":"ok","duration_ms":3,"error_type":null,"error_message":null,"middleware_trace":[{"kept":true}],"result":"{\"output\":\"original\",\"exit_code\":0}"}})
             }
         };
+        if adapter == "agentscope" {
+            native["effective_input"] = input;
+        }
         native["run_id"] = json!("coexist");
         let mut original = serde_json::to_vec(&native).unwrap();
         let snapshot = String::from_utf8(original.clone()).unwrap();

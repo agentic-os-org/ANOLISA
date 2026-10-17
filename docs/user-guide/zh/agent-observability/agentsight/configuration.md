@@ -325,3 +325,16 @@ sudo agentsight summary --last 1
 python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
+
+## Tokenless 统计 API
+
+连接远程 Tokenless 时，在传给 `agentsight serve --config /etc/agentsight/config.json`
+的配置中加入以下可选的顶层设置：
+
+```json
+{"tokenless_api":{"url":"http://127.0.0.1:7397","credential_file":"/etc/agentsight/tokenless-api-token"}}
+```
+
+凭据文件保存与 `tokenless stats serve` 相同的 Bearer token。使用私有网络或 HTTPS
+代理。服务在启动时读取文件；修改后需重启 AgentSight。凭据仅保存在后端，非法配置
+会阻止启动。不配置此项时，保留现有的本地数据库集成方式。

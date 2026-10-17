@@ -141,6 +141,10 @@ async fn privileged_mutations_fail_closed_without_credentials() {
         App::new()
             .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
             .route(
+                "/api/tokenless/refresh",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
                 "/api/optimize/config",
                 web::post().to(|| async { HttpResponse::Ok().finish() }),
             )
@@ -156,7 +160,11 @@ async fn privileged_mutations_fail_closed_without_credentials() {
     .await;
     let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
 
-    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+    for uri in [
+        "/api/optimize/config",
+        "/api/agent-health/4242/restart",
+        "/api/tokenless/refresh",
+    ] {
         let response = awtest::call_service(
             &app,
             awtest::TestRequest::post()
@@ -198,6 +206,10 @@ async fn privileged_mutations_accept_a_valid_credential() {
         App::new()
             .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
             .route(
+                "/api/tokenless/refresh",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
                 "/api/optimize/config",
                 web::post().to(|| async { HttpResponse::Ok().finish() }),
             )
@@ -209,7 +221,11 @@ async fn privileged_mutations_accept_a_valid_credential() {
     .await;
     let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
 
-    for uri in ["/api/optimize/config", "/api/agent-health/4242/restart"] {
+    for uri in [
+        "/api/optimize/config",
+        "/api/agent-health/4242/restart",
+        "/api/tokenless/refresh",
+    ] {
         let response = awtest::call_service(
             &app,
             awtest::TestRequest::post()
@@ -267,5 +283,104 @@ impl AuthFixture {
 impl Drop for AuthFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[actix_web::test]
+async fn tokenless_record_routes_require_a_dashboard_credential() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/tokenless/records",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/tokenless/records/{id}",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+    let token = fixture.auth.read_token_from_file().unwrap();
+    for uri in [
+        "/api/tokenless/records",
+        "/%61pi/tokenless/records",
+        "/api/tokenless/%72ecords",
+        "/api/tokenless/records/1",
+        "/%61pi/tokenless/records/1",
+    ] {
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::OK
+        );
+    }
+}
+
+#[actix_web::test]
+async fn configured_tokenless_savings_queries_require_credentials() {
+    let fixture = AuthFixture::new();
+    let credential = fixture.directory.join("service-token");
+    std::fs::write(&credential, "service-fixture").unwrap();
+    let config = fixture.directory.join("query.json");
+    std::fs::write(
+        &config,
+        serde_json::json!({"tokenless_api":{
+            "url":"http://127.0.0.1:7397", "credential_file":credential
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let client = super::super::tokenless::QueryClient::from_config_path(Some(&config))
+        .unwrap()
+        .unwrap();
+    let app = awtest::init_service(
+        App::new()
+            .app_data(web::Data::new(client))
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+    )
+    .await;
+    let token = fixture.auth.read_token_from_file().unwrap();
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+    for uri in [
+        "/api/token-savings",
+        "/api/token-savings/session/fixture",
+        "/%61pi/token-savings",
+        "/api/token-savings/%73ession/fixture",
+    ] {
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
+        );
+        let request = awtest::TestRequest::get()
+            .uri(uri)
+            .peer_addr(loopback)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        assert_eq!(
+            awtest::call_service(&app, request).await.status(),
+            StatusCode::OK,
+            "{uri}"
+        );
     }
 }

@@ -230,6 +230,14 @@ impl SkillMetricsCommand {
             None => GenAISqliteStore::default_path(),
         };
 
+        // Check the path before opening it, like the sibling query commands:
+        // without this, a directory answers "SQLite database does not exist"
+        // for a path that exists.
+        if let Err(error) = agentsight::check_data_file(&db_path) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+
         // Open store
         let store = DatabaseManager::open_query(
             DatabaseId::GenAi,

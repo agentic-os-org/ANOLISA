@@ -26,6 +26,9 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
+            if args.flags.contains_key("--close-event") {
+                return Exit::Code(1);
+            }
             let blocked = args
                 .flags
                 .get("--event")
@@ -44,9 +47,21 @@ pub(super) fn callback(args: &Arguments) -> Exit {
 
 fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     args.check(
-        &["--adapter", "--binding", "--event", "--step", "--on-error"],
+        &[
+            "--adapter",
+            "--binding",
+            "--event",
+            "--step",
+            "--on-error",
+            "--close-event",
+        ],
         false,
     )?;
+    let close = match args.flags.get("--close-event").map(String::as_str) {
+        None => false,
+        Some("true") if args.required("--adapter")? == "agentscope" => true,
+        _ => return Err("event cleanup requires the AgentScope bridge".into()),
+    };
     let event = args.required("--event")?;
     let step = args.required("--step")?;
     let on_error = args.required("--on-error")?;
@@ -83,7 +98,8 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     {
         return Err("step or budget does not match binding".into());
     }
-    let deadline = Instant::now() + Duration::from_millis(route.budget_ms + 2000);
+    let deadline =
+        Instant::now() + Duration::from_millis(if close { 2000 } else { route.budget_ms + 2000 });
     let mut input = read_input(deadline)?;
     let mut value: Value = serde_json::from_slice(&input)?;
     let completion = if binding.adapter == "openclaw" {
@@ -125,6 +141,35 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     if client.identity() != &binding.binding.identity {
         return Err("stale hook binding".into());
     }
+    if close {
+        client.call(
+            Operation::CloseHookEvent {
+                instance_id: binding.binding.instance_id,
+                event: event.into(),
+                session_id: normalized["session_id"]
+                    .as_str()
+                    .ok_or("missing session")?
+                    .into(),
+                call_id: normalized["tool"]["call_id"]
+                    .as_str()
+                    .ok_or("missing call")?
+                    .into(),
+            },
+            deadline,
+        )?;
+        return Ok(Exit::Code(0));
+    }
+    if step == adapter::OBSERVE_STEP {
+        client.call(
+            Operation::ObserveHookEvent {
+                instance_id: binding.binding.instance_id,
+                event: normalized,
+                native_input: input,
+            },
+            deadline,
+        )?;
+        return emit(adapter.reply(false));
+    }
     let handle: EventHandle = serde_json::from_value(client.call(
         Operation::OpenHookEvent {
             instance_id: binding.binding.instance_id.clone(),
@@ -145,12 +190,11 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         )
         .map_err(Into::into)
         .and_then(|output| response(adapter, event, on_error, output, &binding.adapter, &value));
-    // Pi stops its SDK callback loop on JSON denial (exit 0), including a
-    // fail-closed callback error. Unvisited steps must not keep the lease live.
-    if binding.adapter == "pi"
+    // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
+    if matches!(binding.adapter.as_str(), "pi" | "claude-sdk" | "agentscope")
         && event == "tool.before"
         && handle.steps.last().map(String::as_str) != Some(step)
-        && pi_stops_before(&result, on_error)
+        && stops_before(&binding.adapter, &result, on_error)
     {
         if let Err(error) = client.call(
             Operation::CloseEvent {
@@ -166,11 +210,16 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     emit(result?)
 }
 
-fn pi_stops_before(result: &Result<HookOutput>, on_error: &str) -> bool {
-    match result {
-        Ok(output) => serde_json::from_slice::<Value>(&output.stdout)
+fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> bool {
+    match (adapter, result) {
+        ("pi", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
             .is_ok_and(|value| value["block"] == true),
-        Err(_) => on_error == "block",
+        ("claude-sdk" | "agentscope", Ok(output)) => {
+            matches!(output.exit, Exit::Code(2))
+                || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
+        }
+        ("pi" | "claude-sdk" | "agentscope", Err(_)) => on_error == "block",
+        _ => false,
     }
 }
 
@@ -209,13 +258,51 @@ fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
+        let claude_before = adapter_id == "claude-sdk" && event == "tool.before";
+        // Validate before success so fail-closed vetoes use the existing event closure.
+        if claude_before {
+            std::io::stderr().write_all(&stderr)?;
+            std::io::stderr().flush()?;
+            if code == Some(2) {
+                // Native exit 2 explicitly designates stderr as the blocking reason.
+                let mut reply = adapter.reply(true);
+                let reason = String::from_utf8_lossy(&stderr);
+                if !reason.trim().is_empty() {
+                    adapter::block_reason(adapter_id, &mut reply, reason.trim())?;
+                }
+                return Ok(reply);
+            }
+        }
+        if claude_before && code == Some(0) {
+            let value: Value =
+                serde_json::from_slice(if stdout.iter().all(u8::is_ascii_whitespace) {
+                    b"{}"
+                } else {
+                    &stdout
+                })?;
+            let specific = &value["hookSpecificOutput"];
+            if specific["hookEventName"] == "PreToolUse" && specific["permissionDecision"] == "deny"
+            {
+                let mut reply = adapter.reply(true);
+                if let Some(reason) = specific["permissionDecisionReason"]
+                    .as_str()
+                    .filter(|reason| !reason.is_empty())
+                {
+                    adapter::block_reason(adapter_id, &mut reply, reason)?;
+                }
+                return Ok(reply);
+            }
+            if value != serde_json::json!({}) {
+                return Err("invalid_native_response".into());
+            }
+        }
         if adapter_id == "pi" {
             validate_pi_native(event, &exit, &stdout)?;
         }
         return Ok(HookOutput {
             exit,
             stdout,
-            stderr,
+            stderr: if claude_before { Vec::new() } else { stderr },
         });
     }
     if output["kind"] != "provider" {
@@ -348,10 +435,10 @@ mod tests {
     #[test]
     fn pi_early_close_uses_json_denial_even_with_report_errors() {
         let adapter = adapter::select("pi").unwrap();
-        assert!(pi_stops_before(&Ok(adapter.reply(true)), "report"));
-        assert!(!pi_stops_before(&Ok(adapter.reply(false)), "block"));
-        assert!(pi_stops_before(&Err("failure".into()), "block"));
-        assert!(!pi_stops_before(&Err("failure".into()), "report"));
+        assert!(stops_before("pi", &Ok(adapter.reply(true)), "report"));
+        assert!(!stops_before("pi", &Ok(adapter.reply(false)), "block"));
+        assert!(stops_before("pi", &Err("failure".into()), "block"));
+        assert!(!stops_before("pi", &Err("failure".into()), "report"));
     }
 
     #[test]
@@ -388,5 +475,54 @@ mod tests {
             &json!({})
         )
         .is_err());
+    }
+
+    #[test]
+    fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
+        for adapter in ["agentscope", "claude-sdk"] {
+            for (exit, on_error, expected) in [
+                (Exit::Code(0), "block", false),
+                (Exit::Code(0), "report", false),
+                (Exit::Code(2), "block", true),
+                (Exit::Code(2), "report", true),
+                (Exit::Code(1), "block", true),
+                (Exit::Code(1), "report", false),
+                (Exit::Signal(15), "block", true),
+                (Exit::Signal(15), "report", false),
+            ] {
+                let result = Ok(HookOutput {
+                    exit,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+                assert_eq!(stops_before(adapter, &result, on_error), expected);
+            }
+            assert!(stops_before(adapter, &Err("failed".into()), "block"));
+            assert!(!stops_before(adapter, &Err("failed".into()), "report"));
+        }
+    }
+
+    #[test]
+    fn agentscope_native_output_reaches_the_bridge_without_decoding() {
+        let adapter = adapter::select("agentscope").unwrap();
+        for stdout in [
+            b"{\"action\":\"ask\"}".to_vec(),
+            b"\xef\xbb\xbf{\"action\":\"approve\"}".to_vec(),
+            b"\xff\xfe{\x00}\x00".to_vec(),
+        ] {
+            let output = json!({"status": "ok", "kind": "native", "native": {
+                "stdout": stdout, "stderr": [], "exit_code": 0, "signal": null}});
+            let reply = response(
+                adapter,
+                "tool.before",
+                "block",
+                output,
+                "agentscope",
+                &Value::Null,
+            )
+            .unwrap();
+            assert_eq!(reply.stdout, stdout);
+            assert!(matches!(reply.exit, Exit::Code(0)));
+        }
     }
 }
