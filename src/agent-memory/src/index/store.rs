@@ -403,6 +403,7 @@ impl BM25Store {
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
+        let match_query = literal_fts_query(&tokens, " ");
         // Agent scope filter: when set, only return results from the specified agent.
         // Use parameterised binding (`?3`) rather than `format!()` so an
         // attacker-controlled `MCP_CLIENT_NAME` cannot escape the literal.
@@ -430,7 +431,7 @@ impl BM25Store {
             LIMIT ?2
         "#
         );
-        let bind = match_bind(&fts_q, top_k, &agent_param, &category_param);
+        let bind = match_bind(&match_query, top_k, &agent_param, &category_param);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows: Vec<(String, String, f64, String, i64)> = stmt
             .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
@@ -454,11 +455,7 @@ impl BM25Store {
         // retry with OR-joined quoted tokens so partial matches still
         // surface.
         let rows: Vec<(String, String, f64, String, i64)> = if rows.is_empty() && tokens.len() > 1 {
-            let or_q = tokens
-                .iter()
-                .map(|t| format!("\"{}\"", t))
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            let or_q = literal_fts_query(&tokens, " OR ");
             let or_sql = format!(
                 r#"
                 SELECT f.path,
@@ -757,6 +754,7 @@ impl BM25Store {
         if tokens.iter().any(|t| t.chars().count() < 3) {
             return self.detect_conflicts_like(&tokens, threshold);
         }
+        let match_query = literal_fts_query(&tokens, " ");
 
         // Search excluding cold and superseded files.
         let sql = r#"
@@ -768,7 +766,7 @@ impl BM25Store {
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
+        let rows = stmt.query_map(params![match_query], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
 
@@ -1371,8 +1369,8 @@ fn make_snippet(body: &str, needle: &str, radius: usize) -> String {
     s
 }
 
-/// Convert a raw query into something safe for FTS5: drop quotes /
-/// punctuation that confuse the parser, AND-join surviving tokens.
+/// Normalize raw query terms, retaining dots in filenames and version numbers.
+/// The returned terms must be quoted before use in an FTS5 MATCH expression.
 /// `-` is dropped because FTS5 interprets a leading `-` as the NOT
 /// operator, so naïvely keeping it would silently invert match intent
 /// (`hello-world` → match docs containing "hello" but NOT "world").
@@ -1386,6 +1384,17 @@ fn sanitize_fts_query(q: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Encode sanitized terms as FTS5 literals; SQL binding does not quote MATCH syntax.
+/// A space separator requires all terms; ` OR ` allows any term to match.
+/// Quote escaping is defensive: the current sanitizer already removes quotes.
+fn literal_fts_query(tokens: &[&str], separator: &str) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 pub(crate) fn mtime_ms_of(meta: &std::fs::Metadata) -> i64 {
@@ -1478,6 +1487,126 @@ mod tests {
         assert!(store.remove_file("vector.md").unwrap());
         assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
         assert!(!store.remove_file("vector.md").unwrap());
+    }
+
+    #[test]
+    fn literal_search_recalls_dotted_terms() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert(
+                "notes/deployment.md",
+                100,
+                80,
+                "Configure config.toml for example.com using release v1.2.3",
+                None,
+            )
+            .unwrap();
+        for query in ["config.toml", "example.com", "v1.2.3"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(hits.len(), 1, "existing memory must match {query:?}");
+            assert_eq!(hits[0].path, "notes/deployment.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_keeps_all_terms_before_or_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, body) in [
+            ("both.md", "deployment config.toml"),
+            ("word-only.md", "deployment unrelated"),
+            ("file-only.md", "config.toml unrelated"),
+        ] {
+            store
+                .upsert(path, 100, body.len() as u64, body, None)
+                .unwrap();
+        }
+        let hits = store.search("deployment config.toml", 10, true).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+            vec!["both.md"],
+            "a dotted term must not turn an AND search into OR fallback"
+        );
+
+        // With no exact conjunction, the existing OR fallback still applies.
+        let hits = store.search("absent config.toml", 10, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.path != "word-only.md"));
+    }
+
+    #[test]
+    fn literal_search_treats_boolean_words_as_text() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("null.md", 100, 30, "constraint NOT NULL", None)
+            .unwrap();
+        store
+            .upsert("other.md", 100, 20, "constraint required", None)
+            .unwrap();
+
+        for query in ["NOT", "constraint NOT NULL"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(
+                hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(),
+                vec!["null.md"],
+                "natural-language query must retain {query:?} literally"
+            );
+        }
+
+        store.upsert("gate.md", 100, 10, "AND gate", None).unwrap();
+        let hits = store.search("AND", 10, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "gate.md");
+    }
+
+    #[test]
+    fn literal_search_preserves_scope_and_short_term_fallback() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [("alpha.md", "alpha"), ("beta.md", "beta")] {
+            store
+                .upsert(path, 100, 30, "花名 config.toml", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "花名 config.toml"] {
+            let hits = store
+                .search_scoped(query, 10, true, Some("isolated:alpha"), None)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "scoped query {query:?}");
+            assert_eq!(hits[0].path, "alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_combines_category_and_agent_filters_before_limit() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        for (path, agent) in [
+            ("facts/config/alpha.md", "alpha"),
+            ("facts/config/beta.md", "beta"),
+            ("facts/other/alpha.md", "alpha"),
+        ] {
+            store
+                .upsert(path, 100, 30, "config.toml NOT NULL", Some(agent))
+                .unwrap();
+        }
+        for query in ["config.toml", "NOT", "absent config.toml"] {
+            let hits = store
+                .search_scoped(query, 1, true, Some("isolated:alpha"), Some("config"))
+                .unwrap();
+            assert_eq!(hits.len(), 1, "combined filters for {query:?}");
+            assert_eq!(hits[0].path, "facts/config/alpha.md");
+        }
+    }
+
+    #[test]
+    fn literal_search_conflicts_accept_dots_and_boolean_words() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert("fact.md", 100, 40, "config.toml requires NOT NULL", None)
+            .unwrap();
+        for query in ["config.toml", "NOT", "config.toml requires NOT NULL"] {
+            let conflicts = store.detect_conflicts(query, -2.0).unwrap();
+            assert_eq!(conflicts.len(), 1, "conflict query {query:?}");
+            assert_eq!(conflicts[0].0, "fact.md");
+        }
     }
 
     #[test]

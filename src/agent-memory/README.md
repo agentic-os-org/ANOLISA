@@ -14,6 +14,10 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 - **Safety** — prompt-injection detection and secret/PII redaction for injected content
 - **Cross-session tasks** — save/resume/close tasks across sessions with full context
 
+Keyword search accepts terms such as `config.toml`, `example.com`, and `v1.2.3`.
+Words such as `AND`, `NOT`, and `OR` are searched as text. Separate search terms
+with spaces; partial matches are returned when no result matches every term.
+
 ## Quick Start
 
 ### Install
