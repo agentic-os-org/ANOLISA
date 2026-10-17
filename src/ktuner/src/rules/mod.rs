@@ -6268,22 +6268,49 @@ fn eval_sched_nr_migrate_at(
 }
 
 fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_notsent_lowat";
+    eval_tcp_notsent_lowat_at(info, recs, "/proc/sys/net/ipv4/tcp_notsent_lowat")
+}
+
+/// Path-injectable form of [`eval_tcp_notsent_lowat`] (the `eval_*_at` idiom)
+/// so the read is assertable against a synthetic file.
+///
+/// The old reason claimed the default "caches a large amount of unsent data
+/// and wastes memory" and that 128KB "lowers memory use". Neither is what the
+/// knob does: it is a wake-up threshold, not a cap. Its only reader is
+/// `tcp_stream_memory_free()` (v6.6 net/ipv4/tcp_ipv4.c:3096-3104), which
+/// `sk_stream_is_writeable()` consults (include/net/sock.h:1388-1395) to
+/// answer one question — whether `poll()`/`epoll()` should report `POLLOUT`
+/// — and it never queues or drops a byte:
+///
+/// ```text
+///   return (notsent_bytes << wake) < tcp_notsent_lowat(tp);
+/// ```
+///
+/// `sendmsg()` is bounded by `sk_sndbuf` (the same predicate returns false as
+/// soon as `sk_wmem_queued >= sk_sndbuf`), which the write does not change,
+/// and the socket value always wins over this global
+/// (`val ?: READ_ONCE(net->ipv4.sysctl_tcp_notsent_lowat)`,
+/// include/net/tcp.h:2087-2095). So the memory a connection may hold back is
+/// untouched, while a lower threshold makes a busy sender report itself
+/// unwritable sooner — the opposite of the advice's stated benefit for
+/// throughput-sensitive hosts.
+///
+/// The recommendation is therefore withdrawn: there is no memory to reclaim
+/// by lowering it, and what the write does change (when `POLLOUT` fires) is a
+/// latency/throughput trade the engine has no evidence to make.
+fn eval_tcp_notsent_lowat_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 131072 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_notsent_lowat".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "131072".to_string(),
-            reason: "默认值过大导致每个 TCP 连接可能缓存大量未发送数据浪费内存，设为 128KB 可降低内存占用并减少延迟".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    // Read so a masked or garbled entry still counts as checked, then judge
+    // the value inert for the reason above: no value of this knob is a
+    // finding.
+    let _current = read_sysctl_u64(path);
+    let _ = recs;
     1
 }
 
@@ -19663,17 +19690,43 @@ mod tests {
         );
     }
 
+    /// `tcp_notsent_lowat` is a wake-up threshold, not a memory cap: its only
+    /// reader, `tcp_stream_memory_free()` (v6.6 net/ipv4/tcp_ipv4.c:3096-3104),
+    /// decides whether `poll()` reports `POLLOUT`, and `sk_stream_is_writeable()`
+    /// separately rejects a full `sk_sndbuf` (include/net/sock.h:1388-1395) —
+    /// the limit the old reason said 128KB would lower. Nothing is queued or
+    /// dropped by the value, so there is no memory to reclaim and no finding.
     #[test]
-    fn test_tcp_notsent_lowat() {
+    fn tcp_notsent_lowat_is_a_wakeup_threshold_not_a_cap() {
         let info = make_test_info();
-        let mut recs = Vec::new();
-        eval_tcp_notsent_lowat(&info, &mut recs);
-        if let Some(rec) = recs
-            .iter()
-            .find(|r| r.param == "net.ipv4.tcp_notsent_lowat")
-        {
-            assert_eq!(rec.recommended_value, "131072");
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_notsent_lowat_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("tcp_notsent_lowat");
+
+        // The kernel default is UINT_MAX (ip-sysctl.rst "Default: UINT_MAX"),
+        // and the old rule fired on it; so did every other large value.
+        for value in ["4294967295", "1048576", "131073", "131072", "0"] {
+            std::fs::write(&knob, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_notsent_lowat_at(&info, &mut recs, knob.to_str().unwrap());
+            assert_eq!(checked, 1);
+            assert!(
+                recs.is_empty(),
+                "{value}: the knob caps no memory, so it is never a finding"
+            );
         }
+
+        // A file the process cannot read is not a reason to advise either.
+        let mut recs = Vec::new();
+        eval_tcp_notsent_lowat_at(&info, &mut recs, dir.join("absent").to_str().unwrap());
+        assert!(recs.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
