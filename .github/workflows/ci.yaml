@@ -242,6 +242,15 @@ jobs:
       - name: Test aggregated runtime dependency preflight
         run: bash tests/test-build-all-runtime-deps.sh
 
+  check-rpm-build-usage:
+    name: Check rpm-build usage contract
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test rpm-build.sh usage and sandbox-repo contract
+        run: bash tests/test-rpm-build-usage.sh
+
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
   # =========================================================================
