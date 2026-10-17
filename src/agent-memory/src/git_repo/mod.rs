@@ -4,9 +4,9 @@
 //! - On startup, `<mount.root>` is initialized as a git repo if it isn't
 //!   already, with `.anolisa/` (audit / index / snapshots) excluded via
 //!   the repo's own `.gitignore`.
-//! - When `auto_commit = true`, every successful audit-emitting tool call
-//!   performs a best-effort inline `commit -am "<tool> <path>"`. Failures are
-//!   logged at debug level and never block the foreground tool.
+//! - When `auto_commit = true`, a successful call to any tool classified as
+//!   mutating (`WRITE_TOOLS` below) performs a best-effort inline commit of
+//!   the whole mount. Failures surface at `warn!` and never block the tool.
 //! - `mem_log` returns recent commits; `mem_revert` checks out a path
 //!   from the previous commit.
 
@@ -356,6 +356,16 @@ impl GitHandle {
         }
         // Only commit for write-side tools; reads shouldn't bump HEAD.
         if !is_write_tool(entry.tool) {
+            // A name in neither list is a tool nobody classified. Skipping it
+            // silently is how writes end up invisible to `mem_log` until an
+            // unrelated commit sweeps them up, so surface it instead.
+            if !NON_COMMITTING_TOOLS.contains(&entry.tool) {
+                tracing::warn!(
+                    tool = entry.tool,
+                    "unclassified tool: add it to WRITE_TOOLS if a successful call changes \
+                     tracked content, otherwise to NON_COMMITTING_TOOLS"
+                );
+            }
             return;
         }
         let msg = if entry.path.is_empty() {
@@ -392,18 +402,78 @@ impl GitHandle {
     }
 }
 
+/// Audited tool names whose successful calls can change git-tracked content
+/// under the mount root, and therefore have to bump HEAD.
+///
+/// `auto_commit_for` gates on this allowlist rather than committing on every
+/// audit entry because `commit_all` pays a full `add_all(["*"])` workdir scan
+/// even when its empty-tree guard then skips the commit, and the read path is
+/// hot: the OpenClaw adapter's auto-recall hook calls `memory_search` on every
+/// prompt.
+///
+/// Membership rule: a name belongs here iff a successful call can create,
+/// modify or delete a path git tracks — anything under the mount root except
+/// the `.anolisa/` meta dir that [`init`] gitignores. Everything else the crate
+/// audits is listed in [`NON_COMMITTING_TOOLS`], and the test
+/// `classified_tool_names_cover_every_audited_tool` fails on a name that
+/// appears in neither list, so a new tool has to be classified deliberately.
+/// An unclassified mutating tool is not a cosmetic miss: its writes reach disk
+/// without a commit, `mem_log` never shows them, `mem_revert` still answers
+/// from the pre-write HEAD, and the next allowlisted tool's `commit_all`
+/// sweeps them into a commit whose message names an unrelated path.
+pub(crate) const WRITE_TOOLS: &[&str] = &[
+    // Tier A file tools.
+    "mem_write",
+    "mem_append",
+    "mem_edit",
+    "mem_mkdir",
+    "mem_remove",
+    "mem_promote",
+    // Tier B and structured writers.
+    "memory_observe",
+    "mem_import",
+    "memory_task_save",
+    "memory_task_close",
+    "mem_index_refresh",
+    "mem_snapshot_restore",
+    // Internal: `FactWriter` output under `facts/` is tracked content.
+    "consolidate",
+];
+
+/// Audited tool names that must not bump HEAD: reads, writers whose only
+/// output lands under the gitignored `.anolisa/` meta dir (`mem_snapshot`,
+/// `mem_dream`), and mutations another entry already commits — `memory_forget`
+/// deletes through `mem_remove`, `mem_revert` commits inside [`revert`].
+///
+/// Spelled out instead of inferred as "everything not in [`WRITE_TOOLS`]" so
+/// that adding a tool forces an explicit classification.
+pub(crate) const NON_COMMITTING_TOOLS: &[&str] = &[
+    "mem_read",
+    "mem_list",
+    "mem_grep",
+    "mem_diff",
+    "mem_export",
+    "mem_log",
+    "mem_revert",
+    "mem_snapshot",
+    "mem_snapshot_list",
+    "mem_session_log",
+    "mem_dream",
+    "memory_search",
+    "memory_get_context",
+    "memory_session_context",
+    "memory_sessions",
+    "memory_timeline",
+    "memory_summary",
+    "memory_about",
+    "memory_auto_created",
+    "memory_forget",
+    "memory_task_list",
+    "memory_task_resume",
+];
+
 fn is_write_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "mem_write"
-            | "mem_append"
-            | "mem_edit"
-            | "mem_mkdir"
-            | "mem_remove"
-            | "mem_promote"
-            | "memory_observe"
-            | "mem_snapshot_restore"
-    )
+    WRITE_TOOLS.contains(&name)
 }
 
 #[cfg(test)]
@@ -475,5 +545,163 @@ mod tests {
             std::fs::read_to_string(tmp.path().join("a.md")).unwrap(),
             "v2"
         );
+    }
+
+    fn auto_commit_handle(root: &Path) -> Arc<GitHandle> {
+        GitHandle::open(
+            GitConfig {
+                enabled: true,
+                auto_commit: true,
+            },
+            root,
+        )
+        .unwrap()
+        .expect("enabled config yields a handle")
+    }
+
+    /// Seed a repo whose tree is clean, so the next `auto_commit_for` call has
+    /// something to commit only if the caller dirties it first.
+    fn seeded_repo() -> tempfile::TempDir {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("seed.md"), "seed").unwrap();
+        init(tmp.path()).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn auto_commit_for_bumps_head_for_every_write_tool() {
+        let tmp = seeded_repo();
+        let handle = auto_commit_handle(tmp.path());
+
+        for (i, tool) in WRITE_TOOLS.iter().enumerate() {
+            // One fresh file per tool: `commit_all` skips an unchanged tree, so
+            // a repeat of the previous iteration's content would prove nothing.
+            std::fs::write(tmp.path().join(format!("w{i}.md")), tool).unwrap();
+            let before = log(tmp.path(), 100, None).unwrap().len();
+
+            handle.auto_commit_for(&AuditEntry::new(tool));
+
+            let after = log(tmp.path(), 100, None).unwrap();
+            assert_eq!(
+                after.len(),
+                before + 1,
+                "{tool} mutates tracked content but did not bump HEAD"
+            );
+            assert_eq!(after[0].summary, *tool);
+        }
+    }
+
+    #[test]
+    fn auto_commit_for_leaves_non_committing_tools_alone() {
+        let tmp = seeded_repo();
+        let handle = auto_commit_handle(tmp.path());
+        let baseline = log(tmp.path(), 100, None).unwrap().len();
+
+        for (i, tool) in NON_COMMITTING_TOOLS.iter().enumerate() {
+            std::fs::write(tmp.path().join(format!("r{i}.md")), tool).unwrap();
+            handle.auto_commit_for(&AuditEntry::new(tool));
+        }
+
+        let after = log(tmp.path(), 100, None).unwrap();
+        assert_eq!(
+            after.len(),
+            baseline,
+            "reads and metadata-only tools must not bump HEAD: {:?}",
+            after.iter().map(|e| &e.summary).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn failed_write_tool_does_not_commit() {
+        let tmp = seeded_repo();
+        let handle = auto_commit_handle(tmp.path());
+        std::fs::write(tmp.path().join("w.md"), "partial").unwrap();
+        let baseline = log(tmp.path(), 100, None).unwrap().len();
+
+        handle.auto_commit_for(&AuditEntry::new("mem_write").error("boom".to_string()));
+
+        assert_eq!(log(tmp.path(), 100, None).unwrap().len(), baseline);
+    }
+
+    /// Tool names the crate audits, collected from source: every `const TOOL`
+    /// literal plus every `AuditEntry::new` name literal under `src/`.
+    fn audited_tool_names() -> std::collections::BTreeSet<String> {
+        let patterns = [
+            r#"AuditEntry::new\("([a-z0-9_]+)"\)"#,
+            r#"const TOOL: &str = "([a-z0-9_]+)";"#,
+        ];
+        let mut names = std::collections::BTreeSet::new();
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in walkdir::WalkDir::new(&src_dir)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if entry.path().extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for pattern in patterns {
+                let re = regex::Regex::new(pattern).unwrap();
+                for caps in re.captures_iter(&text) {
+                    names.insert(caps[1].to_string());
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn classified_tool_names_cover_every_audited_tool() {
+        let audited = audited_tool_names();
+        assert!(
+            audited.len() >= 30,
+            "source scan found only {} names — the regexes or CARGO_MANIFEST_DIR are broken: {:?}",
+            audited.len(),
+            audited
+        );
+
+        let unclassified: Vec<&str> = audited
+            .iter()
+            .map(String::as_str)
+            .filter(|n| !WRITE_TOOLS.contains(n) && !NON_COMMITTING_TOOLS.contains(n))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "unclassified audited tool(s) {unclassified:?}: decide whether a successful call \
+             changes tracked content and add each to WRITE_TOOLS or NON_COMMITTING_TOOLS"
+        );
+
+        let stale: Vec<&str> = WRITE_TOOLS
+            .iter()
+            .chain(NON_COMMITTING_TOOLS.iter())
+            .copied()
+            .filter(|n| !audited.contains(*n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "classified tool(s) {stale:?} are audited nowhere under src/ — rename or drop them"
+        );
+
+        let in_both: Vec<&str> = WRITE_TOOLS
+            .iter()
+            .copied()
+            .filter(|n| NON_COMMITTING_TOOLS.contains(n))
+            .collect();
+        assert!(
+            in_both.is_empty(),
+            "tool(s) {in_both:?} are classified as both committing and non-committing"
+        );
+
+        for (label, list) in [
+            ("WRITE_TOOLS", WRITE_TOOLS),
+            ("NON_COMMITTING_TOOLS", NON_COMMITTING_TOOLS),
+        ] {
+            let mut deduped = list.to_vec();
+            deduped.sort_unstable();
+            deduped.dedup();
+            assert_eq!(deduped.len(), list.len(), "{label} contains a duplicate");
+        }
     }
 }
