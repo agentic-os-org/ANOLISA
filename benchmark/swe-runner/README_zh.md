@@ -353,6 +353,15 @@ OpenClaw profile、session 和 sandbox agent。
 `evaluate` 封装 SWE-bench 官方 evaluation 流程。它读取 `preds.json` 中
 非空的 `model_patch`，并只评估这些实例。
 
+使用 `--instance-id/-i` 可从同一预测文件中重新评估逗号分隔的指定实例。
+实例 ID 会去除首尾空格，并按请求顺序去重。每个指定 ID 都必须有非空补丁；
+缺失 ID、空补丁或逗号分隔中的空项会在 evaluator/Docker 初始化之前报错。
+省略该选项时仍评估全部非空预测，预测文件保持不变。
+
+```bash
+swe-runner evaluate --instance-id django__django-12345,sympy__sympy-54321
+```
+
 默认评估：
 
 ```bash
@@ -383,6 +392,7 @@ swe-runner evaluate --namespace none
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
 | `--predictions, -p` | `./output/run/preds.json` | 预测文件 |
+| `--instance-id, -i` | 无 | 有非空预测的指定实例 ID，以逗号分隔 |
 | `--subset, -s` | `lite` | 评估数据集：`lite` / `verified` / `full` / `multilingual` |
 | `--split` | `test` | 数据集 split |
 | `--output, -o` | `./output` | 输出根目录，评估结果写入其 `evaluate/` 子目录 |
