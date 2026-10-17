@@ -294,6 +294,12 @@ async fn edit_and_diff_workflow() {
     assert!(text.contains("--- v1.md"));
     assert!(text.contains("+++ v2.md"));
     assert!(text.contains("body: b"));
+    let patch =
+        diffy::Patch::from_str(&text).expect("MCP mem_diff must return a valid unified patch");
+    assert_eq!(
+        diffy::apply("title: hello\nbody: a", &patch).unwrap(),
+        "title: hello\nbody: b"
+    );
 
     drop(stdin);
     let _ = child.kill().await;
