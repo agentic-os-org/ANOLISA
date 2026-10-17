@@ -568,3 +568,104 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
     );
     assert_eq!(hits[0].path, "notes/a.md");
 }
+
+// ---------- consolidation × audit-format contract ----------
+
+/// `memory_search` logs `<mode>:len=<N>` — the query text deliberately never
+/// reaches the audit log, which is also fanned out to systemd-journald. Rule 2
+/// of the consolidation heuristics used to read everything after the first `:`
+/// as the query, so every consolidated session wrote a `搜索: len=NN` fact into
+/// `facts/interest/`. Those files are indexed like any other memory, so the
+/// marker came back out of `memory_search`, `memory_session_context` and
+/// `memory_auto_created` as a topic the agent had supposedly searched for.
+/// Episodic extraction quoted the same field into `facts/episodic/`, and
+/// `rule_lesson` quotes it into `facts/lesson/` for a failed embedding.
+///
+/// This drives the real pipeline — search → session log → consolidate → store
+/// — instead of a hand-written entry, so the two sides of that coupling cannot
+/// drift apart silently again.
+#[test]
+fn consolidation_does_not_turn_the_search_length_marker_into_a_fact() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "rust ownership system", false)
+        .unwrap();
+    // README is auto-created by MountPoint::ensure → 2 files
+    assert!(wait_for_index(&svc, 2), "BM25 index did not reach 2 rows");
+
+    // The write above plus these two searches clear min_tool_calls (3). The
+    // second search takes the no-embedding fallback, whose marker nests a
+    // second mode name: "bm25(fallback from hybrid):len=<N>".
+    svc.memory_search("rust ownership", 5, None, None, None)
+        .unwrap();
+    svc.memory_search("python gc", 5, Some("hybrid"), None, None)
+        .unwrap();
+
+    // Premise: the session log consolidation reads really carries the
+    // sanitized markers. If this trips, the audit format moved again and
+    // rule_interest has to be re-checked — which is the point of the test.
+    let log = svc.session.as_ref().unwrap().read_log().unwrap();
+    assert!(
+        log.contains("bm25:len=") && log.contains("bm25(fallback from hybrid):len="),
+        "search audit format changed; re-check rule_interest:\n{log}"
+    );
+
+    let written = svc.consolidate();
+    assert!(written > 0, "consolidation wrote nothing at all");
+
+    let interest_dir = svc.mount.root.join("facts").join("interest");
+    let fabricated: Vec<String> = walkdir::WalkDir::new(&interest_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    assert!(
+        fabricated.is_empty(),
+        "consolidation fabricated {} interest fact(s) out of the length marker:\n{}",
+        fabricated.len(),
+        fabricated.join("\n---\n")
+    );
+
+    // Rule 2 is not the only path into the store. These three calls are also a
+    // task chain, so episodic extraction runs on them, and Episode::to_fact
+    // used to quote each step's audit `path` verbatim into a fact written under
+    // facts/episodic/ — at confidence 0.9, above the 0.8 that
+    // memory_session_context injects, so the marker would have been pushed into
+    // every later prompt as the agent's own history. Scan the whole tree rather
+    // than one category, so any rule that starts quoting the marker trips here.
+    let quoted: Vec<String> = walkdir::WalkDir::new(svc.mount.root.join("facts"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+            content.contains("len=").then(|| {
+                format!(
+                    "--- {}\n{}",
+                    e.path()
+                        .strip_prefix(&svc.mount.root)
+                        .unwrap_or(e.path())
+                        .display(),
+                    content
+                )
+            })
+        })
+        .collect();
+    assert!(
+        quoted.is_empty(),
+        "{} persisted fact file(s) quote the search length marker:\n{}",
+        quoted.len(),
+        quoted.join("\n")
+    );
+
+    // Same thing from the reader's side: the marker must not have entered the
+    // searchable corpus, where it costs context tokens on every recall.
+    let hits = svc.memory_search("len", 10, None, None, None).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.path.starts_with("facts/")),
+        "length marker is searchable as a memory: {:?}",
+        hits.iter()
+            .map(|h| (&h.path, &h.snippet))
+            .collect::<Vec<_>>()
+    );
+}

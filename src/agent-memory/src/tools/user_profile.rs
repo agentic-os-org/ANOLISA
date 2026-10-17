@@ -142,15 +142,13 @@ fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
             // Track tool frequency
             *tool_frequency.entry(tool.to_string()).or_insert(0) += 1;
 
-            // Track search topics
-            if tool == "memory_search" || tool == "mem_grep" {
-                // Extract query from path field (format: "mode:query")
-                if let Some(query) = path_str.split(':').nth(1) {
-                    let query = query.trim().to_lowercase();
-                    if query.len() > 3 {
-                        *search_topics.entry(query).or_insert(0) += 1;
-                    }
-                }
+            // Track search topics. `memory_search` logs the query *length*,
+            // not the query (see audit::search_query), and `mem_grep` logs the
+            // directory it walked — counting either as a topic used to report
+            // "interested in: len=14", whose evidence_count ≥ 2 then outranked
+            // the single-evidence entries the fact and note phases contribute.
+            if let Some(query) = crate::audit::search_query(tool, path_str) {
+                *search_topics.entry(query.to_lowercase()).or_insert(0) += 1;
             }
 
             // Track edited files
@@ -393,6 +391,62 @@ mod tests {
         let content = "Just plain text.";
         let body = extract_body(content);
         assert_eq!(body, "Just plain text.");
+    }
+
+    /// Write a session-log JSONL file the way the session mirror does and
+    /// return the profile `analyze_session_logs` builds from it.
+    fn profile_from_session_log(lines: &[&str]) -> UserProfile {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ses_1.jsonl"), lines.join("\n") + "\n").unwrap();
+        let mut profile = UserProfile::default();
+        analyze_session_logs(dir.path(), &mut profile).unwrap();
+        profile
+    }
+
+    fn entry(tool: &str, path: &str) -> String {
+        format!(
+            "{{\"ts\":\"2026-09-25T00:00:00Z\",\"tool\":\"{tool}\",\"path\":\"{path}\",\"ok\":true}}"
+        )
+    }
+
+    #[test]
+    fn search_topics_ignore_the_sanitized_length_marker() {
+        // memory_search logs "<mode>:len=<N>". Two searches whose queries
+        // happen to be the same length used to add up to a
+        // "interested in: len=9" context entry.
+        let profile = profile_from_session_log(&[
+            &entry("memory_search", "bm25:len=9"),
+            &entry("memory_search", "bm25(fallback from hybrid):len=9"),
+            &entry("mem_grep", "notes/kconfig"),
+        ]);
+
+        assert_eq!(profile.tool_calls_analyzed, 3);
+        assert!(
+            profile.context.is_empty(),
+            "audit marker read as a search topic: {:?}",
+            profile
+                .context
+                .iter()
+                .map(|e| &e.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn search_topics_still_count_a_query_that_was_logged() {
+        // The shape that does carry a query keeps feeding the dimension, so
+        // only the marker is refused.
+        let profile = profile_from_session_log(&[
+            &entry("memory_search", "bm25:Rust Ownership"),
+            &entry("memory_search", "bm25:rust ownership"),
+        ]);
+
+        let topics: Vec<(&str, usize)> = profile
+            .context
+            .iter()
+            .map(|e| (e.description.as_str(), e.evidence_count))
+            .collect();
+        assert_eq!(topics, vec![("interested in: rust ownership", 2)]);
     }
 
     #[test]
