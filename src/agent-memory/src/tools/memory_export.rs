@@ -59,12 +59,15 @@ pub struct AmaArchive {
 }
 
 /// Export filter options.
+///
+/// `category` and `source` select facts; `include_tasks` alone governs the
+/// task inventory, which carries neither field.
 pub struct ExportFilter {
-    /// Filter by category (e.g. "lesson", "interest"). None = all.
+    /// Filter facts by category (e.g. "lesson", "interest"). None = all.
     pub category: Option<String>,
-    /// Filter by source ("auto-consolidation", "manual-observe"). None = all.
+    /// Filter facts by source ("auto-consolidation", "manual-observe"). None = all.
     pub source: Option<String>,
-    /// Include tasks in export. Default: true.
+    /// Include the task inventory. Default: true.
     pub include_tasks: bool,
 }
 
@@ -164,6 +167,21 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
 
         let (frontmatter, body) = parse_frontmatter(&content);
 
+        // Split the task inventory out before filtering. Tasks live in their
+        // own archive section and carry no category/source frontmatter, so
+        // running the fact filters first silently dropped every task from a
+        // filtered export — and re-importing that archive lost them.
+        if rel_path.starts_with("tasks/") {
+            if filter.include_tasks {
+                tasks.push(ExportedMemory {
+                    path: rel_path,
+                    frontmatter,
+                    content: body,
+                });
+            }
+            continue;
+        }
+
         // Apply category filter
         if let Some(ref cat) = filter.category {
             let entry_cat = frontmatter.get("category").cloned().unwrap_or_default();
@@ -182,28 +200,20 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             }
         }
 
-        let exported = ExportedMemory {
-            path: rel_path.clone(),
-            frontmatter: frontmatter.clone(),
-            content: body,
-        };
-
-        // Separate tasks from regular memories
-        if rel_path.starts_with("tasks/") {
-            if filter.include_tasks {
-                tasks.push(exported);
-            }
-        } else {
-            // Update stats
-            if let Some(cat) = frontmatter.get("category") {
-                *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
-            }
-            if let Some(src) = frontmatter.get("source") {
-                *stats.by_source.entry(src.clone()).or_insert(0) += 1;
-            }
-            stats.total_bytes += content.len() as u64;
-            memories.push(exported);
+        // Stats and `total_memories` describe the fact set only; the task
+        // inventory is reported in its own section.
+        if let Some(cat) = frontmatter.get("category") {
+            *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
         }
+        if let Some(src) = frontmatter.get("source") {
+            *stats.by_source.entry(src.clone()).or_insert(0) += 1;
+        }
+        stats.total_bytes += content.len() as u64;
+        memories.push(ExportedMemory {
+            path: rel_path,
+            frontmatter,
+            content: body,
+        });
     }
 
     let agent_id = std::env::var("MCP_CLIENT_NAME").unwrap_or_else(|_| "unknown".into());
