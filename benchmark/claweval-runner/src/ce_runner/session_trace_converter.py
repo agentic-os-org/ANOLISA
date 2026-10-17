@@ -308,7 +308,10 @@ def convert_session_to_trace(
             "tool_name": tool_name,
             "endpoint_url": endpoint_url,
             "request_body": input_params,
-            "response_status": derive_response_status(result_body, is_error),
+            "response_status": (
+                422 if tc_info.get("response_status") == 422
+                else derive_response_status(result_body, is_error)
+            ),
             "response_body": result_body,
             "latency_ms": 0.0,
             "timestamp": tc_info.get("timestamp", now_iso()),
@@ -338,9 +341,9 @@ def convert_session_to_trace(
             "tool_name": tool_name,
             "endpoint_url": endpoint_url,
             "request_body": tc_info.get("input", {}),
-            "response_status": derive_response_status(
+            "response_status": tc_info.get("response_status", derive_response_status(
                 tc_info.get("result", ""), tc_info.get("is_error", False)
-            ),
+            )),
             "response_body": tc_info.get("result", ""),
             "latency_ms": 0.0,
             "timestamp": tc_info.get("timestamp", now_iso()),
@@ -461,17 +464,20 @@ def convert_session_to_trace(
             tool_call_id = msg.get("toolCallId", "")
             is_error = msg.get("isError", False)
 
-            # Extract text content
-            result_text = ""
-            for block in content:
-                if block.get("type") == "text":
-                    result_text = block.get("text", "")
-                    break
+            result_content = [
+                {"type": "text", "text": block.get("text", "")}
+                for block in content if block.get("type") == "text"
+            ] or [{"type": "text", "text": ""}]
+            result_text = "\n".join(block["text"] for block in result_content)
+            response_status = (
+                422 if any(derive_response_status(block["text"], is_error) == 422 for block in result_content)
+                else derive_response_status(result_text, is_error)
+            )
 
             ce_content = [{
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
-                "content": [{"type": "text", "text": result_text}],
+                "content": result_content,
                 "is_error": is_error,
             }]
 
@@ -480,6 +486,7 @@ def convert_session_to_trace(
                 tc = tool_call_map[tool_call_id]
                 tc["result"] = result_text
                 tc["is_error"] = is_error
+                tc["response_status"] = response_status
 
             body_events.append({
                 "type": "message",
