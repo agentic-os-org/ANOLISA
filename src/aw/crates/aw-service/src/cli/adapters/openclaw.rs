@@ -208,11 +208,11 @@ impl PreparedLaunch for Prepared {
         let mut hooks = json!({"before":[],"after":[]});
         let mut events = BTreeMap::new();
         for name in ["tool.before", "tool.after"] {
-            let selected: Vec<_> = context
-                .steps
-                .iter()
-                .filter(|step| step.event == name)
-                .collect();
+            let selected = adapter::native_steps(
+                context.steps,
+                name,
+                adapter::observation_enabled(&self.input.document, &self.input.target),
+            );
             if selected.is_empty() {
                 continue;
             }
@@ -223,7 +223,7 @@ impl PreparedLaunch for Prepared {
                 "after"
             }] = json!(selected
                 .iter()
-                .map(|step| json!({"step":step.step_id,"onError":step.on_error,"budgetMs":budget,"replaceResult":step.execution.replaces_result()}))
+                .map(|step| json!({"step":step.step_id,"onError":step.on_error,"budgetMs":budget,"replaceResult":step.replaces_result}))
                 .collect::<Vec<_>>());
             events.insert(
                 name.into(),
@@ -231,7 +231,7 @@ impl PreparedLaunch for Prepared {
                     budget_ms: budget,
                     replacement_step: selected
                         .iter()
-                        .find(|step| step.execution.replaces_result())
+                        .find(|step| step.replaces_result)
                         .map(|step| step.step_id.clone()),
                     steps: selected
                         .into_iter()
@@ -293,6 +293,7 @@ impl PreparedLaunch for Prepared {
             .environment
             .insert("NODE_DISABLE_COMPILE_CACHE".into(), "1".into());
         let provider_environment = command.environment.clone();
+        let hook_count = events.values().map(|event| event.steps.len()).sum();
         Ok(LaunchPlan {
             command,
             provider_environment,
@@ -301,7 +302,7 @@ impl PreparedLaunch for Prepared {
                 path: ready,
                 token,
                 adapter: "openclaw".into(),
-                hooks: context.steps.len(),
+                hooks: hook_count,
                 timeout: Duration::from_secs(30),
             }),
         })

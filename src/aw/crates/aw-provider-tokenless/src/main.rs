@@ -25,7 +25,7 @@ fn main() -> ExitCode {
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     const USAGE: &str =
-        "usage: aw-provider-tokenless [--view] --cli ABSOLUTE_PATH --data-dir ABSOLUTE_DIR";
+        "usage: aw-provider-tokenless [--view] --cli ABSOLUTE_PATH --data-dir ABSOLUTE_DIR [--rtk ABSOLUTE_PATH --rtk-sha256 HEX]";
     if args.len() == 1 && args[0] == "--help" {
         println!("{USAGE}");
         return Ok(());
@@ -34,7 +34,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     if view {
         args.remove(0);
     }
-    if args.len() != 4 || args[0] != "--cli" || args[2] != "--data-dir" {
+    if !matches!(args.len(), 4 | 8) || args[0] != "--cli" || args[2] != "--data-dir" {
         return Err(USAGE.into());
     }
     let cli = PathBuf::from(&args[1]);
@@ -42,6 +42,25 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     if !cli.is_absolute() || !data.is_absolute() {
         return Err("--cli and --data-dir must be absolute paths".into());
     }
+    let rtk = if args.len() == 8 {
+        if view || args[4] != "--rtk" || args[6] != "--rtk-sha256" {
+            return Err(USAGE.into());
+        }
+        let path = PathBuf::from(&args[5]);
+        let checksum = args[7].to_str().ok_or(USAGE)?.to_owned();
+        if !path.is_absolute()
+            || path.file_name().is_none_or(|name| name != "rtk")
+            || checksum.len() != 64
+            || !checksum
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err("managed RTK requires absolute rtk path and lowercase SHA-256".into());
+        }
+        Some((path, checksum))
+    } else {
+        None
+    };
     if view {
         // SAFETY: the handler only stores an atomic flag; no child reaping or
         // allocation occurs in signal context. The bounded executor owns cleanup.
@@ -64,12 +83,14 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
-    aw_provider_tokenless::run(
+    aw_provider_tokenless::run_with_rtk(
         &mut std::io::stdin().lock(),
         &mut std::io::stdout().lock(),
         &cli,
         &data,
         Duration::from_secs(60),
+        rtk.as_ref()
+            .map(|(path, checksum)| (path.as_path(), checksum.as_str())),
     )?;
     Ok(())
 }

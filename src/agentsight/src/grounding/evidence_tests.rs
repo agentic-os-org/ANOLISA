@@ -300,6 +300,35 @@ fn scenario_value_inside_a_failed_results_error_text_is_not_evidence() {
 }
 
 #[test]
+fn scenario_value_inside_an_unflagged_lowercase_failure_is_not_evidence() {
+    // The provider marked no error flag here, so the payload's own first line
+    // is the only failure signal — the shape R5 exists for. Its lowercase
+    // spelling was not recognised, the failed result stayed in the evidence
+    // pool, and the error text then grounded the very number it was supposed
+    // to keep out.
+    let doc = traj(vec![
+        user(1, "查 star 数"),
+        acting_agent(
+            2,
+            "查询",
+            vec![call("c1", "Bash", serde_json::json!({"command": "gh api"}))],
+            vec![ok_result(
+                "c1",
+                "error: request failed for repo 242391: quota exceeded",
+            )],
+        ),
+        agent(3, "该仓库有 242391 个 star。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert_eq!(
+        grounding_for(&index, "242391"),
+        Grounding::Unresolved,
+        "a number quoted inside a failed call's error text did not come back as data"
+    );
+}
+
+#[test]
 fn scenario_echoed_command_line_is_not_evidence() {
     let doc = traj(vec![
         user(1, "抓一下"),

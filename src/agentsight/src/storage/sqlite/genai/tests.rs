@@ -3945,7 +3945,7 @@ fn maintenance_connection_does_not_block_capture_delivery_or_loop_detection() {
             .map(|_| {
                 writer
                     .get_recent_calls_for_conversation("live-conversation", 5)
-                    .len()
+                    .map(|calls| calls.len())
             })
             .map_err(|error| error.to_string());
         done_tx.send(result).unwrap();
@@ -3956,7 +3956,7 @@ fn maintenance_connection_does_not_block_capture_delivery_or_loop_detection() {
     capture.join().unwrap();
     assert_eq!(
         completed.unwrap().unwrap(),
-        1,
+        Some(1),
         "delivery and its follow-up query must not wait for maintenance"
     );
     drop(live);
@@ -4724,6 +4724,126 @@ fn call_turn_indices_survive_a_null_call_id_row() {
         .expect("a NULL call_id row must not fail the whole map");
     assert_eq!(indices.get("call-a"), Some(&1));
     assert_eq!(indices.get("call-b"), Some(&3));
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A failed recent-calls lookup must not be reported as an empty window.
+///
+/// The DeadLoop detector reads a short window as "too few repetitions to be a
+/// loop", so folding a storage error into an empty list silently disabled the
+/// interruption — and the auto-kill behind it — for that conversation, with no
+/// log line to say so.
+#[test]
+fn a_failed_recent_calls_lookup_is_not_an_empty_window() {
+    let dir = std::env::temp_dir().join(format!(
+        "test_recent_calls_lookup_failure_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("foreign.db");
+    // The shape a foreign or legacy file has: the table the lookup selects
+    // from exists, without any of the columns it selects.
+    rusqlite::Connection::open(&db)
+        .expect("fixture connection")
+        .execute_batch("CREATE TABLE genai_events (id INTEGER PRIMARY KEY);")
+        .expect("fixture schema");
+    let store = GenAISqliteStore::open_read_only_existing(&db).expect("foreign store");
+
+    assert!(
+        store
+            .get_recent_calls_for_conversation("conv-1", 10)
+            .is_none(),
+        "an unreadable window must be reported as unknown, not as an empty one"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The answer the detector does consume: this conversation's calls, oldest
+/// first, each with the tokens and the parsed output summary it counts
+/// repetitions over.
+#[test]
+fn a_successful_recent_calls_lookup_returns_the_calls_oldest_first() {
+    let path = std::env::temp_dir().join(format!(
+        "test_recent_calls_lookup_success_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns,\
+                   conversation_id, agent_name, pid, status, input_tokens,\
+                   output_tokens, output_messages, event_json\
+                   ) VALUES (?1,'llm_call',?2,?3,'conv-success','agent-s',7,'complete',?4,?5,?6,'{}')";
+        // Inserted newest-first on purpose: the ascending order the detector
+        // replays has to come from the query, not from the insertion order.
+        conn.execute(
+            sql,
+            params![
+                "call-b",
+                BASE_NS + STEP_NS,
+                BASE_NS + 2 * STEP_NS,
+                20_i64,
+                5_i64,
+                r#"[{"parts":[{"type":"tool_call","name":"read_file","arguments":{"path":"b"}}]}]"#,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-a",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                10_i64,
+                2_i64,
+                r#"[{"parts":[{"type":"tool_call","name":"read_file","arguments":{"path":"a"}}]}]"#,
+            ],
+        )
+        .unwrap();
+    }
+
+    let calls = store
+        .get_recent_calls_for_conversation("conv-success", 10)
+        .expect("a readable window is not a failure");
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-a", "call-b"],
+        "the window is replayed oldest-first"
+    );
+    assert_eq!((calls[0].input_tokens, calls[0].output_tokens), (10, 2));
+    assert_eq!(
+        calls[0]
+            .tool_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_file"]
+    );
+    // An empty conversation is an empty window, not the failure `None` means,
+    // and another conversation's calls stay out of this window.
+    assert_eq!(
+        store
+            .get_recent_calls_for_conversation("conv-other", 10)
+            .map(|calls| calls.len()),
+        Some(0)
+    );
+
     drop(store);
     let _ = std::fs::remove_file(&path);
 }

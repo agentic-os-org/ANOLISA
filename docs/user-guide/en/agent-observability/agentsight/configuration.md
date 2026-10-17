@@ -347,3 +347,17 @@ If the service refuses to come back, the file is usually invalid JSON:
 python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
 journalctl -u agentsight.service -n 30 --no-pager
 ```
+
+## Tokenless statistics API
+
+For a remote Tokenless instance, add this optional top-level setting to the configuration
+passed to `agentsight serve --config /etc/agentsight/config.json`:
+
+```json
+{"tokenless_api":{"url":"http://127.0.0.1:7397","credential_file":"/etc/agentsight/tokenless-api-token"}}
+```
+
+The credential file holds the same Bearer token configured for `tokenless stats serve`.
+Use a private connection or HTTPS proxy. The server reads the file at startup; restart
+AgentSight after changing it. Credentials stay on the backend. Invalid configuration
+fails startup. Omitting this setting preserves the existing local database integration.

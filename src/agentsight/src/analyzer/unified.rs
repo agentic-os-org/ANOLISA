@@ -155,19 +155,6 @@ pub fn count_request_tokens(
         .unwrap_or(0);
     let mut fold_into_tool_message = tool_definition_tokens;
 
-    // Use apply_chat_template_with_tools to format all messages WITH tools
-    // This ensures the tools instruction text is included in the total count
-    let tools_slice = tools_json.as_deref();
-    let total_tokens =
-        match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
-            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
-            Err(e) => {
-                log::warn!("Failed to apply chat template with tools: {e}");
-                // Fallback: count raw content + tools separately
-                0
-            }
-        };
-
     // Count per-message tokens: first calculate raw token counts, then distribute total_tokens by percentage
     // Step 1: Calculate raw token count for each message
     let mut raw_per_message: Vec<(String, usize)> = Vec::new();
@@ -191,6 +178,27 @@ pub fn count_request_tokens(
 
     // Step 2: Calculate total raw tokens and distribute total_tokens by percentage
     let raw_total: usize = raw_per_message.iter().map(|(_, t)| *t).sum();
+
+    // Use apply_chat_template_with_tools to format all messages WITH tools
+    // This ensures the tools instruction text is included in the total count
+    let tools_slice = tools_json.as_deref();
+    let total_tokens =
+        match chat_template.apply_chat_template_with_tools(&template_messages, tools_slice, true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(e) => {
+                log::warn!("Failed to apply chat template with tools: {e}");
+                // Fallback: count raw content + tools separately. The manual
+                // counter's own fallback sums the serialized messages, and the
+                // drain fallback answers the same way; this arm used to return
+                // a plain 0, so a body the template cannot render (a content
+                // block array, a role-less Responses replay item) recorded a
+                // zero-input breakdown next to a counted output side. Tool
+                // definitions that found no tool-role message to fold into are
+                // added on top, so the fallback also covers the tools the
+                // template never got to render.
+                raw_total + fold_into_tool_message
+            }
+        };
 
     if raw_total > 0 {
         // Distribute total_tokens proportionally based on raw token percentages

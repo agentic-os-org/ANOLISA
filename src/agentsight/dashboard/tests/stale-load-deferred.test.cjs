@@ -2073,3 +2073,141 @@ test('agent sessions: changed filters cancel the superseded ranking', async () =
   assert.deepEqual(result.matches, [], 'a late old result must not repopulate matches');
   assert.deepEqual(result.displayed_session_ids, ['session-0']);
 });
+
+// ─── SystemAuditPage: a server-side filter must re-issue the query ───────────
+//
+// The case list is filtered by the server (`agent_id`, `status`, `blocked` are
+// query params), so a filter change has to change the loader's identity - and it
+// has to start from the first page, or the narrowed list is asked for a page it
+// no longer has.
+
+test('system audit: a case filter change re-queries the list from the first page', async () => {
+  const driver = createHooksDriver();
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchAuditSummary',
+    'fetchSecurityCases',
+    'fetchAuditSessions',
+    'fetchAuditEvents',
+    'fetchEnforcementBindings',
+  ]);
+  const t = (key, args) => (args ? `${key}:${JSON.stringify(args)}` : key);
+  const page = loadPageModule('src/pages/SystemAuditPage.tsx', {
+    'react-router-dom': {
+      useNavigate: () => () => {},
+      useSearchParams: () => [new URLSearchParams(), () => {}],
+    },
+    '../i18n': { useI18n: () => ({ t, locale: 'en-US' }), useLocaleTag: () => 'en-US' },
+    '../components/ContainmentDialog': componentStub('ContainmentDialog'),
+    '../components/ContainmentLifecycleCard': componentStub('ContainmentLifecycleCard'),
+    '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
+    '../utils/enforcementMode': {
+      effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+    },
+    '../utils/ruleReason': { translateRuleReason: (summary) => summary },
+    '../utils/apiClient': {
+      ...stubs,
+      fetchSecurityCase: async () => ({ data: null }),
+      reviewSecurityCase: async () => ({}),
+    },
+  }, driver).SystemAuditPage;
+  assert.equal(typeof page, 'function', 'SystemAuditPage must be a component');
+
+  const mounted = [];
+  const render = () => {
+    const rendered = driver.render(page);
+    rendered.effects.forEach((fn, index) => {
+      const deps = fn.__deps;
+      const prev = mounted[index];
+      if (prev && sameDeps(prev.deps, deps)) return;
+      if (prev && typeof prev.cleanup === 'function') prev.cleanup();
+      mounted[index] = { deps, cleanup: fn() };
+    });
+    return rendered;
+  };
+  const fixture = (count, first = 0) => Array.from({ length: count }, (_, i) => ({
+    case_id: `case-${first + i}`,
+    agent_id: 'claude',
+    session_id: `session-${first + i}`,
+    summary: `rule ${first + i}`,
+    severity: 'high',
+    risk_score: 40 + i,
+    status: 'open',
+    blocked: false,
+    updated_at_ns: (first + i + 1) * 1_000_000_000,
+  }));
+  // load() awaits its five callers in one allSettled, so each reload is answered
+  // as a batch.
+  const answer = async (payload = {}) => {
+    calls.fetchAuditSummary.at(-1).resolve({ data: {} });
+    calls.fetchSecurityCases.at(-1).resolve({
+      data: { items: payload.items ?? [], total: payload.total ?? 0 },
+    });
+    calls.fetchAuditSessions.at(-1).resolve({ data: { items: [], total: 0 } });
+    calls.fetchAuditEvents.at(-1).resolve({ data: { items: [], total: 0, next_offset: null } });
+    calls.fetchEnforcementBindings.at(-1).resolve({ bindings: [] });
+    await settle();
+    await settle();
+  };
+  const lastQuery = () => calls.fetchSecurityCases.at(-1).args[0];
+  const text = (rendered) => elementText(rendered.element).join('|');
+
+  let rendered = render();
+  await answer({ items: fixture(60), total: 60 });
+  rendered = render();
+  assert.equal(calls.fetchSecurityCases.length, 1, 'sanity: an answered load must not re-issue itself');
+  assert.equal(lastQuery().status, undefined, 'sanity: the default filter sends no status');
+
+  // Move to page 2 first, so the offset reset is observable.
+  const pager = findElement(rendered.element, (el) => el.props
+    && el.props.limit === 20 && typeof el.props.onPageChange === 'function');
+  assert.ok(pager, 'sanity: 60 cases must render the pager');
+  const pagerButtons = collectElements(pager.type(pager.props)).filter(
+    (el) => el.type === 'button' && el.props && el.props.disabled !== true,
+  );
+  assert.ok(pagerButtons.length, 'sanity: the pager must offer an enabled control');
+  pagerButtons[pagerButtons.length - 1].props.onClick();
+  rendered = render();
+  assert.equal(calls.fetchSecurityCases.length, 2, 'sanity: the next page reloads the list');
+  assert.equal(lastQuery().offset, 20, 'sanity: page 2 is offset 20');
+  await answer({ items: fixture(20, 20), total: 60 });
+  rendered = render();
+
+  // The status filter is server-side: changing it must re-issue the query, and
+  // from the first page - keeping offset 20 would ask the narrowed list for a
+  // page it does not have.
+  const statusSelect = findElement(rendered.element, (el) => el.type === 'select'
+    && el.props && el.props.value === 'all');
+  assert.ok(statusSelect, 'sanity: the status filter must be rendered');
+  statusSelect.props.onChange({ target: { value: 'open' } });
+  rendered = render();
+  assert.equal(calls.fetchSecurityCases.length, 3, 'a filter change must re-issue the query');
+  assert.equal(lastQuery().status, 'open', 'the filter must reach the server');
+  assert.equal(lastQuery().offset, 0, 'the re-issued query must start from the first page');
+  await answer({ items: fixture(5), total: 5 });
+  rendered = render();
+  assert.ok(!text(rendered).includes('audit.cases.empty'), 'the filtered page must not be empty');
+  assert.ok(text(rendered).includes('rule 0'), 'the filtered page must show its rows');
+
+  // The same rule for the "only blocked" checkbox.
+  const blockedBox = findElement(rendered.element, (el) => el.type === 'input'
+    && el.props && el.props.type === 'checkbox');
+  assert.ok(blockedBox, 'sanity: the blocked checkbox must be rendered');
+  blockedBox.props.onChange({ target: { checked: true } });
+  rendered = render();
+  assert.equal(calls.fetchSecurityCases.length, 4, 'the checkbox must re-issue the query');
+  assert.equal(lastQuery().blocked, true, 'the checkbox must reach the server');
+  assert.equal(lastQuery().offset, 0, 'the checkbox query must start from the first page');
+  await answer({ items: fixture(5), total: 5 });
+  rendered = render();
+
+  // And clearing the filters goes back to the unfiltered first page.
+  const clearChip = findElement(rendered.element, (el) => el.type === 'button'
+    && elementText(el).join('') === '清除筛选');
+  assert.ok(clearChip, 'sanity: an active filter must offer the clear control');
+  clearChip.props.onClick();
+  rendered = render();
+  assert.equal(calls.fetchSecurityCases.length, 5, 'clearing the filters must re-issue the query');
+  assert.equal(lastQuery().status, undefined, 'cleared: no status is sent');
+  assert.equal(lastQuery().blocked, undefined, 'cleared: no blocked flag is sent');
+  assert.equal(lastQuery().offset, 0, 'the cleared query must start from the first page');
+});

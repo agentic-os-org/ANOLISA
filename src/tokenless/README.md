@@ -428,6 +428,12 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 
 ### Inspect token savings
 
+`tokenless stats serve --data-dir /var/lib/tokenless --credential-file /run/secrets/tokenless-query`
+runs an independent read-only HTTP service with Bearer validation, listening on
+`127.0.0.1:7397` by default. The paths are deployment placeholders; the database
+must already exist. See the [CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#read-only-http-queries)
+for endpoints, pagination, and content access.
+
 Use `stats summary` for totals, `show` for the stored before/after payload, or
 `diff` to explain the estimated token saving and highlight only changed lines:
 

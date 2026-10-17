@@ -75,14 +75,15 @@ Third-Party Software
 =========================================================================
 
 rtk (src/tokenless/third_party/rtk/)
-  Git submodule from https://github.com/rtk-ai/rtk.git
+  Pinned source from https://github.com/rtk-ai/rtk.git
+  Built using src/tokenless/scripts/setup-rtk.sh and Tokenless patches
   Copyright RTK Contributors
   Licensed under the Apache License, Version 2.0
 
   RTK (Rust Token Killer) is a high-performance CLI proxy for LLM
   token optimization, providing command rewriting and output filtering
   to achieve 60-90% token savings on common development commands.
-  Included in the tokenless component.
+  Included in the tokenless component and AW Tokenless Provider package.
 
 ripgrep (deprecated/copilot-shell/dist/)
   Vendored binary
