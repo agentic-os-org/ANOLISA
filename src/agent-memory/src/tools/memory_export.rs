@@ -32,7 +32,8 @@ pub struct ExportedMemory {
     pub path: String,
     /// Parsed frontmatter key-value pairs.
     pub frontmatter: HashMap<String, String>,
-    /// Markdown body (after frontmatter).
+    /// Markdown body (after frontmatter, excluding the blank separator line
+    /// that follows the closing fence).
     pub content: String,
 }
 
@@ -87,7 +88,17 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     if let Some(rest) = content.strip_prefix("---\n") {
         if let Some(end) = rest.find("\n---\n") {
             let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
+            // The blank line a writer puts between the closing fence and the
+            // body belongs to the delimiter, not to the body: `mem_import`
+            // re-inserts it (`reconstruct_markdown` writes "---\n\n"), so
+            // exporting it as content grows every memory by one blank line per
+            // export->import hop. Files written without the separator keep
+            // their body byte for byte.
+            let after_fence = &rest[end + 5..];
+            body = after_fence
+                .strip_prefix('\n')
+                .unwrap_or(after_fence)
+                .to_string();
             let mut current_list_key: Option<String> = None;
             let mut current_list_items: Vec<String> = Vec::new();
             for line in fm_str.lines() {
@@ -261,5 +272,83 @@ mod tests {
         assert_eq!(fm.get("title").unwrap(), "Test");
         assert!(fm.contains_key("next_steps"));
         assert!(body.contains("Body"));
+    }
+
+    #[test]
+    fn parse_frontmatter_excludes_separator_blank_line() {
+        // The blank line between the closing fence and the body is part of the
+        // delimiter; keeping it made every export->import hop grow the body.
+        let content = "---\nid: abc123\n---\n\nThe body.\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        assert_eq!(body, "The body.\n");
+    }
+
+    #[test]
+    fn parse_frontmatter_keeps_body_without_separator() {
+        // Hand-written files may omit the blank separator entirely.
+        let content = "---\nid: abc123\n---\nThe body.\n";
+        let (_fm, body) = parse_frontmatter(content);
+        assert_eq!(body, "The body.\n");
+    }
+
+    #[test]
+    fn parse_frontmatter_strips_only_one_separator_line() {
+        // Author blank lines after the separator are content, not delimiter.
+        let content = "---\nid: abc123\n---\n\n\nThe body.\n";
+        let (_fm, body) = parse_frontmatter(content);
+        assert_eq!(body, "\nThe body.\n");
+    }
+
+    fn service_at(base: &std::path::Path) -> MemoryService {
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = base.to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        config.memory.session.base_dir = base.join("sessions").to_string_lossy().to_string();
+        MemoryService::new(config).unwrap()
+    }
+
+    #[test]
+    fn export_import_roundtrip_keeps_body_verbatim() {
+        use crate::tools::memory_import::{ImportStrategy, memory_import};
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = service_at(source_dir.path());
+        let rel = "facts/preference.md";
+        std::fs::create_dir_all(source.mount.root.join("facts")).unwrap();
+        let written = "---\nid: fact-1\ncategory: preference\n---\n\nThe user prefers tabs.\n";
+        std::fs::write(source.mount.root.join(rel), written).unwrap();
+
+        let archive = memory_export(&source, &ExportFilter::default()).unwrap();
+        assert!(
+            archive.contains("\"content\": \"The user prefers tabs.\\n\""),
+            "exported body must not carry the separator blank line: {archive}"
+        );
+
+        // Import into a fresh store: the file must come back byte-identical
+        // apart from the frontmatter key order `reconstruct_markdown` sorts.
+        let imported_dir = tempfile::tempdir().unwrap();
+        let imported = service_at(imported_dir.path());
+        memory_import(&imported, &archive, ImportStrategy::SkipExisting, false).unwrap();
+        let first = std::fs::read_to_string(imported.mount.root.join(rel)).unwrap();
+        assert_eq!(
+            first, "---\ncategory: preference\nid: fact-1\n---\n\nThe user prefers tabs.\n",
+            "round trip changed the memory body"
+        );
+
+        // A second hop must not grow it again.
+        let reimported_dir = tempfile::tempdir().unwrap();
+        let reimported = service_at(reimported_dir.path());
+        let archive2 = memory_export(&imported, &ExportFilter::default()).unwrap();
+        memory_import(&reimported, &archive2, ImportStrategy::SkipExisting, false).unwrap();
+        let second = std::fs::read_to_string(reimported.mount.root.join(rel)).unwrap();
+        assert_eq!(second, first, "repeated round trips must be stable");
+        assert_eq!(
+            second.len(),
+            written.len(),
+            "imported file must not be larger than the source"
+        );
     }
 }
