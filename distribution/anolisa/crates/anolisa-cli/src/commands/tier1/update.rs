@@ -1772,6 +1772,171 @@ pub(crate) mod tests {
         assert_eq!(record["details"]["endpoint"], "https://mirror.invalid");
     }
 
+    /// A password containing an unencoded '/', '?', or '#' truncates the
+    /// authority at the separator, and the truncated `user:password` prefix
+    /// lands exactly where `SelfUpdateFailureContext::new` expects a
+    /// host[:port] — the shape that once failed closed under the path-wide
+    /// `@` guard. The full-credential assertions in
+    /// [`failed_self_update_does_not_persist_endpoint_credentials`] cannot
+    /// catch it: only a prefix of the password survives, so this test asserts
+    /// the prefix is gone too, and that `details.endpoint` is absent rather
+    /// than carrying the severed credential as a bogus port.
+    #[test]
+    fn failed_self_update_fails_closed_on_separator_passwords() {
+        for endpoint in [
+            "https://ci:secret-token/@mirror.invalid/release.toml",
+            "https://ci:secret-token?@mirror.invalid/release.toml",
+            "https://ci:secret-token#@mirror.invalid/release.toml",
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = self_ctx(tmp.path().to_path_buf(), false);
+            let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+            let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+            let txn = FakeSelfTxn::new("anolisa");
+
+            let failure =
+                run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                    .expect_err("an unreachable manifest endpoint must not report success");
+
+            append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+            let record = only_self_update_record(&ctx);
+            // Decode first: serialisation escaping could hide a leak from a
+            // raw-bytes scan.
+            let decoded = serde_json::to_string(&record).expect("re-encode");
+            let message = record["message"].as_str().expect("message");
+            for forbidden in ["secret-token", "secret", "token", "ci:secret"] {
+                assert!(
+                    !message.contains(forbidden),
+                    "password `{forbidden}` leaked into the message for {endpoint}: {message}"
+                );
+                assert!(
+                    !record["details"].to_string().contains(forbidden),
+                    "password `{forbidden}` leaked into details for {endpoint}"
+                );
+                assert!(
+                    !decoded.contains(forbidden),
+                    "password `{forbidden}` leaked into the record for {endpoint}"
+                );
+            }
+            // Fail closed means no endpoint at all, not a bogus host:port.
+            assert!(
+                record["details"].get("endpoint").is_none(),
+                "an unparseable authority must not be recorded as an endpoint for {endpoint}: {}",
+                record["details"]["endpoint"]
+            );
+        }
+    }
+
+    /// The numeric shape of the same truncation (review of this PR):
+    /// `https://ci:1234/@mirror.invalid/…` cuts the authority to `ci:1234`,
+    /// which parses as a legal `host:port`, so the shape check cannot clear
+    /// the ambiguity the trailing `@` introduces. The severed credential
+    /// must not reach the audit record at all — neither as `message`/
+    /// `details` text nor recorded as a bogus `host:port` endpoint.
+    #[test]
+    fn failed_self_update_fails_closed_on_numeric_separator_passwords() {
+        for endpoint in [
+            "https://ci:1234/@mirror.invalid/release.toml",
+            "https://ci:1234?@mirror.invalid/release.toml",
+            "https://ci:1234#@mirror.invalid/release.toml",
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = self_ctx(tmp.path().to_path_buf(), false);
+            let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+            let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+            let txn = FakeSelfTxn::new("anolisa");
+
+            let failure =
+                run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                    .expect_err("an unreachable manifest endpoint must not report success");
+
+            append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+            let record = only_self_update_record(&ctx);
+            // Decode first: serialisation escaping could hide a leak from a
+            // raw-bytes scan.
+            let decoded = serde_json::to_string(&record).expect("re-encode");
+            let message = record["message"].as_str().expect("message");
+            for forbidden in ["1234", "ci:1234"] {
+                assert!(
+                    !message.contains(forbidden),
+                    "password `{forbidden}` leaked into the message for {endpoint}: {message}"
+                );
+                assert!(
+                    !record["details"].to_string().contains(forbidden),
+                    "password `{forbidden}` leaked into details for {endpoint}"
+                );
+                assert!(
+                    !decoded.contains(forbidden),
+                    "password `{forbidden}` leaked into the record for {endpoint}"
+                );
+            }
+            // Fail closed means no endpoint at all: a severed numeric
+            // credential is not a `host:port`.
+            assert!(
+                record["details"].get("endpoint").is_none(),
+                "a numeric severed credential must not be recorded as an endpoint for {endpoint}: {}",
+                record["details"]["endpoint"]
+            );
+        }
+    }
+
+    /// The username-only shape of the same truncation (review of this PR):
+    /// `https://secret-token/@mirror.invalid/…` cuts the authority to a
+    /// colon-free `secret-token` that parses as a bare host, so neither the
+    /// host test nor a colon requirement can flag it. The severed token
+    /// must not reach the audit record at all — neither as `message`/
+    /// `details` text nor recorded as a bogus endpoint.
+    #[test]
+    fn failed_self_update_fails_closed_on_username_only_tokens() {
+        for endpoint in [
+            "https://secret-token/@mirror.invalid/release.toml",
+            "https://secret-token?@mirror.invalid/release.toml",
+            "https://secret-token#@mirror.invalid/release.toml",
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = self_ctx(tmp.path().to_path_buf(), false);
+            let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+            let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+            let txn = FakeSelfTxn::new("anolisa");
+
+            let failure =
+                run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                    .expect_err("an unreachable manifest endpoint must not report success");
+
+            append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+            let record = only_self_update_record(&ctx);
+            // Decode first: serialisation escaping could hide a leak from a
+            // raw-bytes scan.
+            let decoded = serde_json::to_string(&record).expect("re-encode");
+            let message = record["message"].as_str().expect("message");
+            for forbidden in ["secret-token", "secret", "token"] {
+                assert!(
+                    !message.contains(forbidden),
+                    "token `{forbidden}` leaked into the message for {endpoint}: {message}"
+                );
+                assert!(
+                    !record["details"].to_string().contains(forbidden),
+                    "token `{forbidden}` leaked into details for {endpoint}"
+                );
+                assert!(
+                    !decoded.contains(forbidden),
+                    "token `{forbidden}` leaked into the record for {endpoint}"
+                );
+            }
+            // Fail closed means no endpoint at all: a severed username is
+            // not a host.
+            assert!(
+                record["details"].get("endpoint").is_none(),
+                "a username-only severed credential must not be recorded as an endpoint for \
+                 {endpoint}: {}",
+                record["details"]["endpoint"]
+            );
+        }
+    }
+
     /// A transport error is free to quote the URL in a form this run never
     /// handled — percent-encoded, normalised, or a redirect target — which a
     /// literal replacement cannot catch. Such a message must be withheld.
