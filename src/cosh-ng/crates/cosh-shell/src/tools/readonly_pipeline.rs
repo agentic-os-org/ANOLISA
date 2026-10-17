@@ -1,6 +1,7 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::readonly_rules::is_readonly_ps;
 use super::temp_output::TempOutput;
 use super::{is_sensitive_target, strip_ansi};
 
@@ -214,7 +215,15 @@ fn validate_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPipelineE
         return Err(error("sensitive-path", argv.join(" ")));
     }
     match program {
-        "df" | "ps" => Ok(()),
+        "df" => Ok(()),
+        // The ps stage admits exactly the argument shapes the compound/
+        // broker paths allow (`is_readonly_ps`): procps' BSD `e` modifier
+        // appends the target process's environment to the command column,
+        // so an unrestricted `ps auxe` stage would dump the shell's own
+        // environment — credentials included — into the auto-approved
+        // pipeline output via /proc/<pid>/environ.
+        "ps" if is_readonly_ps(argv) => Ok(()),
+        "ps" => Err(error("unsafe-ps-args", argv.join(" "))),
         "git" if argv.get(1).is_some_and(|subcommand| subcommand == "status") => Ok(()),
         "git" => Err(error("unsupported-git-subcommand", argv.join(" "))),
         "grep" | "rg" => validate_search_stage(argv, index),
@@ -372,6 +381,45 @@ mod tests {
             assert!(
                 validate_readonly_pipeline(command).is_err(),
                 "{command} should be rejected"
+            );
+        }
+    }
+
+    // procps' BSD `e` modifier appends the target process's environment
+    // to the command column: an auto-approved `ps auxe | head` stage reads
+    // /proc/<pid>/environ of the shell's own process and prints every
+    // exported secret into the captured output. The compound/broker paths
+    // already reject these forms via `is_readonly_ps`; the pipeline stage
+    // now shares that predicate instead of accepting any ps argument.
+    // Verified on procps-ng 4.0.2: `ps auxe` shows the environment,
+    // `ps aux` does not.
+    #[test]
+    fn readonly_pipeline_rejects_ps_environment_flags() {
+        for command in [
+            "ps auxe | head -5",
+            "ps auxeww | head -5",
+            "ps e | head -1",
+            "ps eww | head -1",
+            "ps eaux | head -1",
+        ] {
+            assert!(
+                validate_readonly_pipeline(command).is_err(),
+                "{command} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_pipeline_keeps_broker_safe_ps_diagnostics() {
+        for command in [
+            "ps aux | head -5",
+            "ps -ef | head -1",
+            "ps -e -o pid,command | head -3",
+            "ps -Ao pid,pcpu,comm -r | head -5",
+        ] {
+            assert!(
+                validate_readonly_pipeline(command).is_ok(),
+                "{command} should stay allowed"
             );
         }
     }
