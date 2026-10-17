@@ -32,6 +32,11 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+/// Paths bound per access-bookkeeping `UPDATE` (see `record_search_access`).
+/// Keeps the statement well under SQLite's host-parameter limit however large
+/// the caller's `top_k` is.
+const ACCESS_UPDATE_BATCH: usize = 500;
+
 impl BM25Store {
     pub fn open(
         path: &Path,
@@ -310,6 +315,24 @@ impl BM25Store {
     /// otherwise a misconfigured `MCP_CLIENT_NAME` would silently widen the
     /// visibility domain.
     pub fn search_scoped(
+        &self,
+        query: &str,
+        top_k: usize,
+        exclude_cold: bool,
+        agent_scope: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        let hits = self.search_scoped_inner(query, top_k, exclude_cold, agent_scope)?;
+        // Everything handed back was just surfaced to the caller, which is the
+        // warmth signal `compact()` protects. Recording it here — in the
+        // wrapper rather than in each SQL branch — keeps the MATCH, OR-retry
+        // and LIKE-fallback paths covered by construction.
+        self.record_search_access(hits.iter().map(|h| h.path.as_str()));
+        Ok(hits)
+    }
+
+    /// Query paths behind [`Self::search_scoped`]; access bookkeeping lives in
+    /// the wrapper so no branch can forget it.
+    fn search_scoped_inner(
         &self,
         query: &str,
         top_k: usize,
@@ -651,11 +674,63 @@ impl BM25Store {
         self.search(query, top_k, false)
     }
 
-    /// Compact the index: mark old, never-accessed files as cold and
-    /// remove them from the FTS index. Returns the number of files compacted.
+    /// Record that these files were just surfaced by a search: bump
+    /// `access_count` and stamp `last_accessed_ms`.
     ///
-    /// Cold criteria: `access_count == 0 AND age > cold_after_days`.
-    /// Files with `access_count > 0` are never compacted (warm protection).
+    /// This is the write that makes `compact()`'s warm protection real — no
+    /// code path used to touch either column, so the columns stayed at their
+    /// `DEFAULT 0` forever and a memory the agent searched daily was archived
+    /// as soon as its mtime aged past `cold_after_days`.
+    ///
+    /// Best-effort: the search itself already succeeded, so a failed
+    /// bookkeeping write is logged rather than propagated. A hybrid search
+    /// bumps a file returned by both legs twice; `access_count` is a warmth
+    /// signal, not an exact query statistic.
+    fn record_search_access<'a>(&self, paths: impl IntoIterator<Item = &'a str>) {
+        let paths: Vec<&str> = paths.into_iter().collect();
+        if paths.is_empty() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        // One statement per batch of paths: SQLite bounds the number of host
+        // parameters per statement, and a caller-chosen `top_k` is unbounded.
+        for chunk in paths.chunks(ACCESS_UPDATE_BATCH) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "UPDATE files SET access_count = access_count + 1, \
+                 last_accessed_ms = ? WHERE path IN ({placeholders})"
+            );
+            let mut bind: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+            bind.push(rusqlite::types::Value::Integer(now_ms));
+            bind.extend(
+                chunk
+                    .iter()
+                    .map(|p| rusqlite::types::Value::Text((*p).to_string())),
+            );
+            if let Err(e) = self
+                .conn
+                .execute(&sql, rusqlite::params_from_iter(bind.iter()))
+            {
+                tracing::warn!(
+                    "search access bookkeeping failed for {} path(s): {e}",
+                    chunk.len()
+                );
+            }
+        }
+    }
+
+    /// Compact the index: mark inactive files as cold, which hides them from
+    /// normal search while deep search keeps reaching them. Returns the number
+    /// of files compacted.
+    ///
+    /// Cold criteria: no recent activity — the content (`mtime_ms`) *and* the
+    /// last search that returned the file (`last_accessed_ms`, stamped by
+    /// `record_search_access`) are both older than `cold_after_days`. A file
+    /// the agent keeps finding therefore stays warm however old its mtime is,
+    /// while a file searched once long ago is still archivable.
     pub fn compact(&mut self, cold_after_days: u64) -> Result<usize> {
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -668,8 +743,8 @@ impl BM25Store {
         // Find files eligible for cold marking.
         let cold_paths: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT path FROM files WHERE access_count = 0 \
-                 AND mtime_ms < ?1 AND is_cold = 0",
+                "SELECT path FROM files WHERE mtime_ms < ?1 \
+                 AND last_accessed_ms < ?1 AND is_cold = 0",
             )?;
             let rows = stmt.query_map(params![cutoff_ms], |r| r.get::<_, String>(0))?;
             rows.flatten().collect()
@@ -850,6 +925,14 @@ impl BM25Store {
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        let hits = self.search_vec_inner(query_vec, top_k)?;
+        // Vector-only searches count as access too, otherwise a store queried
+        // through `mode=vector` would never keep anything warm.
+        self.record_search_access(hits.iter().map(|(path, _)| path.as_str()));
+        Ok(hits)
+    }
+
+    fn search_vec_inner(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
@@ -1730,6 +1813,127 @@ mod tests {
         assert_eq!(hits2[0].path, "new.md");
     }
 
+    /// `(access_count, last_accessed_ms)` as stored for `path`.
+    fn access_row(s: &BM25Store, path: &str) -> (i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT access_count, last_accessed_ms FROM files WHERE path = ?1",
+                params![path],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn current_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    #[test]
+    fn search_records_access_bookkeeping() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("hit.md", 100, 10, "walrus knowledge", None)
+            .unwrap();
+        s.upsert("miss.md", 100, 10, "unrelated text", None)
+            .unwrap();
+        assert_eq!(access_row(&s, "hit.md"), (0, 0));
+
+        // FTS5 MATCH path.
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        let (count, last) = access_row(&s, "hit.md");
+        assert_eq!(count, 1, "a returned file must have its access recorded");
+        assert!(last > 0, "last_accessed_ms must be stamped");
+        assert_eq!(
+            access_row(&s, "miss.md"),
+            (0, 0),
+            "rows the search did not return stay untouched"
+        );
+
+        // LIKE fallback path (a term shorter than the trigram window).
+        s.upsert("cjk.md", 100, 10, "花名是小云", None).unwrap();
+        let hits = s.search("花名", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(access_row(&s, "cjk.md").0, 1);
+
+        // Vector path.
+        s.upsert_vec("hit.md", &[1.0, 0.0]).unwrap();
+        s.upsert_vec("miss.md", &[0.0, 1.0]).unwrap();
+        let hits = s.search_vec(&[1.0, 0.0], 1).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "hit.md");
+        assert_eq!(
+            access_row(&s, "hit.md").0,
+            2,
+            "a vector hit counts as an access too"
+        );
+        assert_eq!(access_row(&s, "miss.md").0, 0);
+    }
+
+    #[test]
+    fn compact_keeps_recently_searched_files_warm() {
+        // Regression: no query path recorded an access, so `access_count` and
+        // `last_accessed_ms` stayed at their `DEFAULT 0` and compaction went
+        // purely by mtime. A memory the agent searched every day was archived
+        // as soon as its mtime aged past `cold_after_days`, silently dropping
+        // it out of normal search and auto-recall.
+        let old = current_ms() - 100 * 86_400_000;
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("searched.md", old, 24, "walrus unique knowledge", None)
+            .unwrap();
+        s.upsert("untouched.md", old, 24, "other unique knowledge", None)
+            .unwrap();
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+
+        let compacted = s.compact(30).unwrap();
+        assert_eq!(compacted, 1, "only the never-searched file may go cold");
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a searched memory must stay searchable after compact"
+        );
+        assert!(
+            s.search("other", 5, true).unwrap().is_empty(),
+            "the untouched file is cold"
+        );
+        // Archived does not mean gone: deep search still reaches it.
+        let hits = s.search("other", 5, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "untouched.md");
+    }
+
+    #[test]
+    fn compact_archives_a_file_whose_searches_aged_out() {
+        // Warmth tracks *recent* searches, not "was ever searched": once the
+        // last access is itself older than `cold_after_days` the file is
+        // archivable again, so the warm set cannot only ever grow.
+        let old = current_ms() - 100 * 86_400_000;
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("stale.md", old, 12, "walrus trivia", None)
+            .unwrap();
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(s.compact(30).unwrap(), 0, "a just-searched file stays warm");
+
+        // Age the recorded access out: nothing has searched the file since.
+        s.conn
+            .execute(
+                "UPDATE files SET last_accessed_ms = ?1 WHERE path = 'stale.md'",
+                params![old],
+            )
+            .unwrap();
+        assert_eq!(s.compact(30).unwrap(), 1);
+        assert!(s.search("walrus", 5, true).unwrap().is_empty());
+    }
+
     #[test]
     fn compact_marks_old_files_cold() {
         let now_ms = std::time::SystemTime::now()
@@ -1824,6 +2028,16 @@ mod tests {
         // Before compact: visible in search.
         let hits = s.search("unique", 5, true).unwrap();
         assert_eq!(hits.len(), 1);
+
+        // That search just stamped `last_accessed_ms`, which is exactly the
+        // warmth signal `compact` protects. Age it back out so this test keeps
+        // covering the cold side; the warm side has its own test below.
+        s.conn
+            .execute(
+                "UPDATE files SET last_accessed_ms = 0 WHERE path = 'old.md'",
+                [],
+            )
+            .unwrap();
 
         // Compact.
         s.compact(30).unwrap();
