@@ -37,6 +37,27 @@ Shell。Shell 进程、工作目录、变量、函数和后台任务都会保留
 Enhanced 内部的路由子状态，不等同于没有 hook 的 Native 集成。OSC marker
 仍然存在，用来证明提示符所有权并保证能够安全切回。
 
+## Bash Login 启动 PATH 交接
+
+Enhanced Bash login 由受管 Shell 自身读取 login profile，不再运行独立的 login
+PATH 探针。首轮用户 `PROMPT_COMMAND` hook 执行后、首个 Cosh prompt 边界前，
+marker 会发送一次内部 OSC 事件：
+
+```json
+{"event":"startup_environment","token":"...","session_id":"...","path":"..."}
+```
+
+Host 只接受第一条 marker token 与 session ID 都匹配的有效报告。PATH 上限为
+8 KiB，不允许控制字符，并会规范化为不重复的绝对路径项。有效值只保存一次，
+仅注入 Provider/Core 子进程，不修改 Shell 进程的全局 PATH。启动 auth 会等待
+该决议，以使用相同的子进程 PATH。
+
+首个 prompt 会关闭该门。报告缺失、格式错误、超长、身份伪造或到达过晚时，
+Provider 继续使用继承 PATH，且不会重放 profile。`shell.login_identity = false`
+保留 marker 驱动的 login profile fallback，并按相同契约上报最终 PATH。设置
+`COSH_SHELL_BOOTSTRAP_PATH=0` 会同时关闭旧 PATH 探针和这条交接。Native
+集成保持不变；Bash non-login 与 zsh 保留原有探针行为。
+
 ## 输入所有权与可见状态
 
 符号首先描述按下 Enter 前的输入所有者，不描述已经产生的输出。输入类型保存在

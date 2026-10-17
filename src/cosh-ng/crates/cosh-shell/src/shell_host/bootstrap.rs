@@ -280,6 +280,9 @@ fn start_shell_session(
     if let Some(observer) = config.shell_history_file_observer.clone() {
         parser = parser.with_history_file_observer(observer);
     }
+    if let Some(observer) = config.shell_startup_path_observer.clone() {
+        parser = parser.with_startup_path_observer(observer);
+    }
 
     // Build all fallible session-owned storage before spawning the shell so
     // an unwritable spool cannot leave an unmanaged child process behind.
