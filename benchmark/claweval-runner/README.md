@@ -71,6 +71,10 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 All commands below assume `uv run` (project venv is auto-resolved).
 
+Declared task services start even when `health_check` is omitted or empty.
+Without a health URL, readiness is not probed; include one when the evaluation
+must wait for service readiness. Services with a health URL retain health-based reuse.
+
 > **`--config` is required unless the model/judge env vars are exported.** `run`/`batch` do **not** auto-load `claw-eval/config.yaml`; pass `--config claw-eval/config.yaml` (written by `scripts/configure_model.py`), or export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` and `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`.
 
 ```bash
