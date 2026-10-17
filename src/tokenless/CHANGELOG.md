@@ -9,6 +9,10 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+### Changed
+
+- JSON compression now carries every number as the literal it was written with, so a response containing `18446744073709551617`, `-9223372036854775809`, `1.234567890123456789`, or `1e-400` is compacted instead of passed through unchanged. Omitted arrays, complete record collections, and depth-truncated subtrees stash the same exact literals, and TOON replaces compact JSON only when decoding restores the exact value and numeric type; otherwise the compacted JSON candidate is kept ([#7416](https://github.com/agentic-os-org/ANOLISA/issues/7416)).
+
 ## [0.8.7] - 2026-10-15
 
 ### Fixed
