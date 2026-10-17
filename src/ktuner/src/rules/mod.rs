@@ -9939,7 +9939,12 @@ fn eval_numa_stat(info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
 // incoherent; keep only the precision-oriented one.
 
 fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_base_mss_at(info, recs, "/proc/sys/net/ipv4/tcp_base_mss")
+    eval_tcp_base_mss_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_base_mss",
+        "/proc/sys/net/ipv4/tcp_mtu_probing",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_base_mss`] (the `eval_*_at` idiom) so the read is
@@ -9950,11 +9955,33 @@ fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// could produce is evidence that the limit is low, so a masked or garbled
 /// proc entry (a container's, typically) neither reports a `current_value`
 /// the host does not have nor asks for a write it may not need.
-fn eval_tcp_base_mss_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+///
+/// The floor only matters while MTU probing is enabled: `tcp_mtup_init()`
+/// arms `icsk_mtup.enabled` from `net.ipv4.tcp_mtu_probing > 1` (v6.6
+/// net/ipv4/tcp_output.c:1766) and takes `tcp_base_mss` as the initial
+/// `search_low` (:1769), `tcp_sync_mss()` consults that floor only when
+/// enabled (:1812-1813), `tcp_mtu_probe()` returns -1 without it (:2403),
+/// and the black-hole path in `tcp_mtu_probing()` returns immediately for a
+/// zero `tcp_mtu_probing` (net/ipv4/tcp_timer.c:168-176). The documentation
+/// says the same: "If MTU probing is enabled, this is the initial MSS used
+/// by the connection" (Documentation/networking/ip-sysctl.rst:364-367),
+/// with mode 0 meaning "Disabled" (:587-593). With a readable 0 no MSS
+/// decision reads the value, so the advice waits for probing to be on — the
+/// way the TFO blackhole rule waits for its client bit. A switch that cannot
+/// be read keeps the advice: it is not evidence that probing is off.
+fn eval_tcp_base_mss_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    mtu_probing_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
+        return 1;
+    }
+    if read_switch_i64(mtu_probing_path) == Some(0) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -22357,6 +22384,7 @@ mod tests {
         // entry (a container's, typically) was reported as `current_value: "0"`
         // and answered with a raise on a host whose value was never read.
         let (_, high, others) = zero_switch_paths("base_mss_read", b"1024\n");
+        let (_, probing_on, _) = zero_switch_paths("base_mss_read_probing", b"1\n");
         let low = high.with_file_name("low");
         std::fs::write(&low, b"512\n").unwrap();
         let info = make_test_info();
@@ -22364,7 +22392,12 @@ mod tests {
         let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_base_mss_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_base_mss_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                probing_on.to_str().unwrap(),
+            );
             recs
         };
 
@@ -22379,6 +22412,64 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_base_mss_advice_needs_mtu_probing() {
+        // tcp_base_mss only sizes the search_low the packetization-layer PMTU
+        // probe starts from: tcp_mtup_init() arms icsk_mtup from
+        // tcp_mtu_probing (v6.6 net/ipv4/tcp_output.c:1766) and tcp_sync_mss()
+        // consults the floor only when enabled (:1812-1813), while
+        // tcp_mtu_probe() and the black-hole path return without it
+        // (:2403, net/ipv4/tcp_timer.c:168-176). With a readable 0 here no
+        // write to the floor changes any MSS decision.
+        let (_, base_high, _) = zero_switch_paths("base_mss_probing_base", b"1024\n");
+        let (probing_off, probing_on, probing_others) =
+            zero_switch_paths("base_mss_probing_switch", b"1\n");
+        let low = base_high.with_file_name("low");
+        std::fs::write(&low, b"512\n").unwrap();
+        let always = probing_on.with_file_name("always");
+        std::fs::write(&always, b"2\n").unwrap();
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let advice = |base: &std::path::Path, probing: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_base_mss_at(
+                &info,
+                &mut recs,
+                base.to_str().unwrap(),
+                probing.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&low, &probing_on).len(),
+            1,
+            "probing on: the floor decides"
+        );
+        assert_eq!(
+            advice(&low, &always).len(),
+            1,
+            "mode 2 starts probing from tcp_base_mss"
+        );
+        assert!(
+            advice(&low, &probing_off).is_empty(),
+            "probing off: nothing reads tcp_base_mss"
+        );
+        for path in &probing_others {
+            assert_eq!(
+                advice(&low, path).len(),
+                1,
+                "{}: an unreadable probing switch is not 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&base_high, &probing_on).is_empty(),
+            "a readable 1024 is not below the floor"
+        );
     }
 
     #[test]
