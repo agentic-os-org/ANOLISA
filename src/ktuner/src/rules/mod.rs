@@ -7283,21 +7283,47 @@ fn eval_sched_tunable_scaling_at(
     if info.cpu_cores <= 16 {
         return 1;
     }
-    if read_switch(path) == Some(0) {
-        recs.push(Recommendation {
-            param: "kernel.sched_tunable_scaling".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: format!(
-                "{}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = sched_tunable_scaling_recommendation(
+        read_switch(path),
+        info.cpu_cores,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_tunable_scaling` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the scaling selector this
+/// reason sizes has had no `/proc/sys` node since: it is exported as
+/// `/sys/kernel/debug/sched/tunable_scaling` (v6.6 kernel/sched/debug.c), which
+/// the rule's own path can never reach. A node under the old name exists only
+/// where a tree re-registered the name for another class, and nothing in such a
+/// tree reads that variable, so a write of 1 lands nowhere while the report
+/// claims the kernel scales its tunables again. Silence the rule from 5.13 on,
+/// the way the other knobs whose reader moved are silenced.
+fn sched_tunable_scaling_recommendation(
+    current: Option<u64>,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current != Some(0) {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_tunable_scaling".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_panic_on_oops(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -15523,6 +15549,19 @@ mod tests {
         assert!(sched_nr_migrate_recommendation(8, 64, "6.6.87.2").is_none());
         assert!(sched_nr_migrate_recommendation(8, 64, "").is_some());
         assert!(sched_nr_migrate_recommendation(128, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_tunable_scaling_advice_stops_where_its_reader_moved() {
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.4.0-150").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.13.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "6.6.87.2").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "").is_some());
+        // The switch gate is unchanged: an enabled selector or an unreadable
+        // file is not the disabled state.
+        assert!(sched_tunable_scaling_recommendation(Some(1), 64, "5.10.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(None, 64, "5.10.0").is_none());
     }
 
     #[test]
