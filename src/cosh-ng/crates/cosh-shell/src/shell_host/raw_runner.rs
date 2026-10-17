@@ -389,6 +389,13 @@ where
         prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
     }
     if config.integration.uses_markers() {
+        // #7768: release the input relay only once the path-routing gate is
+        // up. The shell writes the `precmd` marker (or paints the prompt)
+        // before the separate `prompt_ready` marker, and `main_prompt_gate`
+        // is raised by the latter. Starting the relay in between let startup
+        // type-ahead be processed while `is_path_prompt_ready()` was still
+        // false, so path-bearing prompts were refused routing and executed
+        // by the shell ("No such file or directory" / "command not found").
         read_until_streaming_with_presentation(
             &mut session.master,
             &mut session.child,
@@ -397,11 +404,12 @@ where
             &mut prompt_presentation,
             Duration::from_secs(5),
             |parser| {
-                if config.native_mode {
+                let shell_ready = if config.native_mode {
                     parser.precmd_count() >= 1
                 } else {
                     parser.prompt_count(config.prompt.as_bytes()) >= 1
-                }
+                };
+                shell_ready && main_prompt_gate.is_path_prompt_ready()
             },
         )?;
     }

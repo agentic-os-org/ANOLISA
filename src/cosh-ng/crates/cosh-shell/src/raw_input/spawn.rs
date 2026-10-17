@@ -149,7 +149,20 @@ where
                             .iter()
                             .position(|byte| matches!(byte, b'\n' | b'\r'))
                             .expect("split predicate requires a submission");
-                        let remainder = bytes.split_off(submit + 1);
+                        let mut split_at = submit + 1;
+                        // #7768: startup type-ahead coalesces separately typed
+                        // reads, so a Tab typed right after the Enter would
+                        // otherwise lead the deferred batch and reach ZLE as a
+                        // lone keystroke. Keep it with the submitted line so
+                        // the zsh Tab handoff sees submit+Tab in one read —
+                        // exactly what it receives when the reads do not
+                        // coalesce.
+                        if bytes.get(split_at) == Some(&b'\t')
+                            && state.zsh_path_prompt_buffering.is_some()
+                        {
+                            split_at += 1;
+                        }
+                        let remainder = bytes.split_off(split_at);
                         let shell_owned = is_pending_shell_submission(
                             &bytes[..submit],
                             &state,
