@@ -110,9 +110,10 @@ def extract_sheet_refs(formula: str) -> list[str]:
     sheet is referenced multiple times in one formula).
     """
     refs = []
-    # Quoted sheet names: 'Sheet Name'!
-    for m in re.finditer(r"'([^']+)'!", formula):
-        refs.append(m.group(1))
+    # Quoted sheet names: 'Sheet Name'! — an apostrophe inside the name is
+    # escaped by doubling it, so the sheet It's is referenced as 'It''s'!A1.
+    for m in re.finditer(r"'((?:[^']|'')*)'!", formula):
+        refs.append(m.group(1).replace("''", "'"))
     # Unquoted sheet names: SheetName! (not preceded by a single quote)
     for m in re.finditer(r"(?<!')([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.·\u4e00-\u9fff]*)!", formula):
         refs.append(m.group(1))
