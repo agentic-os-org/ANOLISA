@@ -413,6 +413,79 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+#[test]
+fn search_category_filter_survives_the_bm25_fallback() {
+    let (_tmp, svc) = setup();
+
+    // Two facts that both match "rust", one per category. No embedding
+    // provider is configured, so `mode=vector|hybrid` degrades to BM25 —
+    // and the `category` filter must survive that degradation instead of
+    // silently widening back to every category.
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    svc.write(
+        "facts/interest/01J1A2B3C4D5E6F7G8H9ABCDEF.md",
+        "---\ncategory: interest\ntitle: search rust\n---\n\nAgent searched for rust ownership",
+        false,
+    )
+    .unwrap();
+    svc.write(
+        "facts/lesson/01J1A2B3C4D5E6F7G8H9UVWXYZ.md",
+        "---\ncategory: lesson\ntitle: rust error\n---\n\nAgent hit a rust borrow-check error",
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_index(&svc, 3));
+
+    // Fixture guard: unfiltered, the fallback sees both categories.
+    let unfiltered = svc
+        .memory_search("rust", 10, Some("hybrid"), None, None)
+        .unwrap();
+    assert!(
+        unfiltered
+            .iter()
+            .any(|h| h.path.starts_with("facts/interest/"))
+            && unfiltered
+                .iter()
+                .any(|h| h.path.starts_with("facts/lesson/")),
+        "fixture broken: expected both facts unfiltered: {unfiltered:?}"
+    );
+
+    for mode in ["hybrid", "vector"] {
+        let hits = svc
+            .memory_search("rust", 10, Some(mode), Some("lesson"), None)
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "{mode}: expected the lesson fact on the BM25 fallback"
+        );
+        assert!(
+            hits.iter().all(|h| h.path.starts_with("facts/lesson/")),
+            "{mode}: category filter dropped on the BM25 fallback: {hits:?}"
+        );
+    }
+
+    // An explicit agent_scope forces the same BM25 fallback even when a
+    // provider is configured, so it must filter identically.
+    let hits = svc
+        .memory_search(
+            "rust",
+            10,
+            Some("hybrid"),
+            Some("lesson"),
+            Some("filter:tester"),
+        )
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "scoped fallback lost the lesson fact: {hits:?}"
+    );
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/lesson/")),
+        "scoped fallback dropped the category filter: {hits:?}"
+    );
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic
