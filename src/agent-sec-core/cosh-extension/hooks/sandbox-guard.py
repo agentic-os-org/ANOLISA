@@ -107,8 +107,12 @@ BLOCK_PATTERNS = [
 # 替换为沙箱执行的命令（文件系统/权限/服务类）- 网络隔离
 # 注意：sudo 不在此列表，由 strip_sudo() 预处理后对底层命令评估
 DANGEROUS_PATTERNS = [
-    # rm 危险操作：-rf、-fr、-r -f、--recursive、--force 各种写法
-    (r"\brm\b.*(-[a-zA-Z]*[rf]|-[a-zA-Z]*[fr]|--recursive|--force)", "递归/强制删除"),
+    # rm 危险操作：-rf、-fr、-r -f、--recursive、--force 各种写法。
+    # 选项必须是独立 token（前面为空白/行首/;|&，后面为空白/=/行尾）：
+    # 原式 [a-zA-Z]* 允许零字母，会把文件名里的字母读成选项
+    # （rm foo-bar.txt 误报递归删除）
+    (r"\brm\b.*(?:^|[\s;|&])-(?:[a-zA-Z]*[rf]|[a-zA-Z]*[fr])(?=[\s=]|$)"
+     r"|\brm\b.*(?:^|[\s;|&])--(?:recursive|force)(?=[\s=]|$)", "递归/强制删除"),
     (r"\bchmod\s+[0-7]{3,4}\s+/", "修改系统路径权限"),
     (r"\bchown\b", "修改文件所有者"),
     (r"\b(cp|mv)\s+.*\s+/etc/", "cp/mv 操作 /etc"),
