@@ -686,10 +686,15 @@ Examples:
         sum(1 for tr in t.get("trials", []) if tr.get("passed"))
         for t in data
     )
+    # 空/零试次批次（batch_results.json 为 [] 或 trials 全空）不得在报表
+    # 生成后以 ZeroDivisionError 毁掉输出——守卫与 build_structured_data
+    # 及 batch_runner 的既有写法一致
+    task_pct = passed_tasks / total_tasks * 100 if total_tasks else 0.0
+    trial_pct = passed_trials / total_trials * 100 if total_trials else 0.0
     summary_text = (
         table_txt
-        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/total_tasks*100:.1f}%)\n"
-        + f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
+        + f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({task_pct:.1f}%)\n"
+        + f"Trials: {total_trials} total, {passed_trials} passed ({trial_pct:.1f}%)\n"
     )
     summary_csv = render_csv(rows)
 
