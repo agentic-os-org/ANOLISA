@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## CSV 与 TSV 分隔符
+
+当导出文件使用逗号（`.csv` 默认值）或制表符（`.tsv` 默认值）之外的分隔符时，
+可以通过 `xlsx` 技能读取：
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py regional.csv --delimiter ';' --json
+```
+
+将 `SKILL_DIR` 替换为已安装的 `others/xlsx` 目录。`--delimiter` 接受一个字面字符，
+包括制表符或 `|`，并覆盖文件扩展名的默认分隔符。CSV 引号规则仍会保留被引号包围的
+单元格内的分隔符。空值、多个字符、换行、回车和 NUL 会被拒绝。该选项仅适用于
+CSV/TSV；Excel 输入会拒绝它。编码回退、报告、数据质量检查和统计继续使用解析后的列。
+读取器不会修改源文件。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
