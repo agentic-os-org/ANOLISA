@@ -2,11 +2,16 @@
 //! memory store. Supports merge/overwrite/skip-existing strategies.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::Path;
 
+use chrono::Utc;
+
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 use super::memory_export::{AmaArchive, ExportedMemory};
@@ -42,6 +47,110 @@ pub struct ImportReport {
     pub skipped: usize,
     pub overwritten: usize,
     pub errors: Vec<String>,
+}
+
+/// Sub-directory of `<mount>/.anolisa/` holding pre-overwrite import backups.
+/// Inside the meta dir so every walk of the store — `mem_export`, `mem_list`,
+/// snapshot creation — skips it, and so no tool can write to it (`.anolisa` is
+/// a reserved first segment).
+const BACKUPS_DIR: &str = "backups";
+
+/// Suffix every backup carries, so pruning only ever touches files written
+/// here and never a stray file an operator dropped into the same directory.
+const BACKUP_SUFFIX: &str = "-pre-import.ama.json";
+
+/// Backups retained per mount. Each overwrite import copies the whole store,
+/// so an unbounded directory would let a client calling `mem_import` in a loop
+/// fill the disk. The oldest — lowest timestamp-prefixed name — go first.
+const MAX_BACKUPS: usize = 8;
+
+/// Errors carried into the audit line. The full list already goes back to the
+/// caller in the tool result; the audit log has to stay one short line.
+const MAX_AUDITED_ERRORS: usize = 3;
+
+/// Persist `archive_json` (a full AMA export of the store as it stands) and
+/// return its mount-relative path.
+///
+/// Durable-or-fatal, and "durable" carries two requirements here. The bytes
+/// go through tmp file → fsync → rename → fsync of the directory, the same
+/// sequence `snapshot::tar::create_tarball` uses; a backup sitting only in
+/// the page cache can be lost to the very power failure that interrupted the
+/// import, which is the one moment it would be needed. And the directory the
+/// bytes land in is created through rooted, no-follow descriptors that fsync
+/// the parent holding its dirent — `std::fs::create_dir_all` does neither, so
+/// the first overwrite could create `.anolisa/backups` and lose both it and
+/// the archive to a crash right after the delete.
+///
+/// Every step is anchored to a descriptor rather than a path for the same
+/// reason: `.anolisa/backups` is inside a mount a co-tenant may be able to
+/// write to, and `File::create` follows a symlink planted there. That writes
+/// the whole archive outside the mount while the import below deletes every
+/// note and hands the caller an in-mount recovery path that does not exist.
+fn write_pre_overwrite_backup(svc: &MemoryService, archive_json: &str) -> Result<String> {
+    let root = svc.mount.root_fd.as_fd();
+    let dir_rel = Path::new(svc.mount.meta_dir_name()).join(BACKUPS_DIR);
+
+    safe_fs::create_dir_durable(root, &dir_rel)?;
+    let dir = safe_fs::open_dir(root, &dir_rel)?;
+
+    // The timestamp prefix keeps names unique across calls and sorts
+    // lexically in chronological order, which is what `prune_backups` relies on.
+    let name = format!("{}{BACKUP_SUFFIX}", Utc::now().format("%Y%m%dT%H%M%S%.6fZ"));
+    let tmp_name = format!("{name}.partial");
+
+    {
+        let mut f = safe_fs::create_new_in_dir(dir.as_fd(), Path::new(&tmp_name))?;
+        f.write_all(archive_json.as_bytes())?;
+        f.sync_all()?;
+    }
+    safe_fs::rename_in_dir(dir.as_fd(), Path::new(&tmp_name), Path::new(&name))?;
+    dir.sync_all()?;
+
+    prune_backups(&dir);
+
+    Ok(format!(
+        "{}/{BACKUPS_DIR}/{name}",
+        svc.mount.meta_dir_name()
+    ))
+}
+
+/// Drop the oldest backups once more than `MAX_BACKUPS` are present.
+///
+/// Best-effort by design: by the time this runs the backup that matters is
+/// already durable, and failing an import over a stale file that could not be
+/// unlinked would be the wrong trade. Enumeration and deletion both go
+/// through the descriptor the write above used, so retention neither counts
+/// nor removes anything it does not own — a planted symlink wearing a backup's
+/// name is invisible to it, where a path-based `read_dir` would have unlinked
+/// it and mis-counted the window.
+fn prune_backups(dir: &File) {
+    let mut names: Vec<String> = match safe_fs::regular_file_names(dir) {
+        Ok(names) => names
+            .into_iter()
+            .filter(|n| n.ends_with(BACKUP_SUFFIX))
+            .collect(),
+        Err(e) => {
+            tracing::warn!("could not list import backups to prune: {e}");
+            return;
+        }
+    };
+    if names.len() <= MAX_BACKUPS {
+        return;
+    }
+    names.sort();
+    for stale in &names[..names.len() - MAX_BACKUPS] {
+        if let Err(e) = safe_fs::unlink_in_dir(dir.as_fd(), stale) {
+            tracing::warn!("could not prune stale import backup {stale}: {e}");
+        }
+    }
+}
+
+fn summarize_errors(errors: &[String]) -> String {
+    let mut msg = errors[..errors.len().min(MAX_AUDITED_ERRORS)].join("; ");
+    if errors.len() > MAX_AUDITED_ERRORS {
+        msg.push_str(&format!("; +{} more", errors.len() - MAX_AUDITED_ERRORS));
+    }
+    msg
 }
 
 /// Reconstruct markdown from frontmatter map + body.
@@ -113,23 +222,33 @@ pub fn memory_import(
         errors: Vec::new(),
     };
 
-    // Handle overwrite strategy: export backup, then remove all existing .md files
+    // Handle overwrite strategy: persist a backup, then remove all existing
+    // .md files.
+    let mut backup_rel: Option<String> = None;
     if strategy == ImportStrategy::Overwrite && !dry_run {
-        // Best-effort backup: export current state before destructive overwrite.
-        match crate::tools::memory_export::memory_export(
+        // Fail closed. `remove_all_memories` below is irreversible and nothing
+        // else holds the prior store: git auto-commit only records the tool
+        // calls it is told about, and snapshots are opt-in. So a backup that
+        // cannot be persisted must abort the import — degrading to "proceed
+        // without one" is exactly how the store gets wiped with no way back.
+        // The previous code exported the store, logged its byte count as
+        // "saved", and dropped the buffer.
+        let current = crate::tools::memory_export::memory_export(
             svc,
             &crate::tools::memory_export::ExportFilter::default(),
-        ) {
-            Ok(backup) => {
-                tracing::info!(
-                    "overwrite backup: {} bytes of current memories saved",
-                    backup.len()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("overwrite backup failed: {e}; proceeding without backup");
-            }
-        }
+        )
+        .map_err(|e| {
+            MemoryError::Other(format!("refusing overwrite: pre-import export failed: {e}"))
+        })?;
+        let rel = write_pre_overwrite_backup(svc, &current).map_err(|e| {
+            MemoryError::Other(format!("refusing overwrite: pre-import backup failed: {e}"))
+        })?;
+        tracing::info!(
+            "overwrite backup: {} bytes of current memories saved to {rel}",
+            current.len()
+        );
+        backup_rel = Some(rel);
+
         let removed = remove_all_memories(svc)?;
         tracing::info!("overwrite strategy: removed {removed} existing memories");
     }
@@ -163,26 +282,48 @@ pub fn memory_import(
     }
 
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
-    let summary = format!(
+    let mut summary = format!(
         "{prefix}import complete: {} imported, {} overwritten, {} skipped, {} errors",
         report.imported,
         report.overwritten,
         report.skipped,
         report.errors.len()
     );
+    if let Some(rel) = &backup_rel {
+        summary.push_str(&format!("\npre-overwrite backup: {rel}"));
+    }
 
     if !report.errors.is_empty() {
         tracing::warn!("import errors: {:?}", report.errors);
     }
 
-    svc.audit_log(
-        AuditEntry::new("mem_import")
-            .path(format!(
-                "{} imported, {} skipped",
-                report.imported, report.skipped
-            ))
-            .bytes(json_data.len() as u64),
+    // Report every counter. An overwrite import lands as `overwritten`, so the
+    // old two-field line audited a whole-store rewrite as "0 imported,
+    // 0 skipped" — the durable record showed a no-op. The backup path rides
+    // along because it is the one thing an operator needs in order to undo.
+    //
+    // `ok` flips to false only when the call applied nothing at all. A partial
+    // success still mutated the store, and `git_repo::auto_commit_for` skips
+    // entries with `ok == false`, so marking one as failed would leave its
+    // writes uncommitted — the hole auto-commit exists to close.
+    let mut audit_detail = format!(
+        "{} imported, {} overwritten, {} skipped, {} errors",
+        report.imported,
+        report.overwritten,
+        report.skipped,
+        report.errors.len()
     );
+    if let Some(rel) = &backup_rel {
+        audit_detail.push_str(&format!(", backup {rel}"));
+    }
+    let mut entry = AuditEntry::new("mem_import")
+        .path(audit_detail)
+        .bytes(json_data.len() as u64);
+    let applied = report.imported + report.overwritten + report.skipped;
+    if applied == 0 && !report.errors.is_empty() {
+        entry = entry.error(summarize_errors(&report.errors));
+    }
+    svc.audit_log(entry);
 
     // Append error details if any
     if report.errors.is_empty() {

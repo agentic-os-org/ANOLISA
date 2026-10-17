@@ -17,10 +17,11 @@
 //! Linux-only (the parent crate already is). Requires kernel ≥ 5.6 for
 //! openat2 + ResolveFlag; AOS ships 6.x.
 
+use std::ffi::{CString, OsStr};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::path::Path;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
 use nix::sys::stat::Mode;
@@ -148,6 +149,177 @@ pub fn metadata(root: BorrowedFd<'_>, rel: &Path) -> Result<Metadata> {
 
 pub fn exists(root: BorrowedFd<'_>, rel: &Path) -> bool {
     metadata(root, rel).is_ok()
+}
+
+// ---- Directory-scoped IO -------------------------------------------------
+//
+// The helpers below anchor every operation to a descriptor the kernel has
+// already resolved beneath the mount root with RESOLVE_NO_SYMLINKS, and the
+// mutating ones (`mkdirat` / `renameat` / `unlinkat` / `fstatat`) never
+// re-walk a path at all — so a component swapped between two calls cannot
+// redirect them. `mem_import`'s pre-overwrite backup is the caller that
+// needs this: it deletes the whole store on the strength of that backup
+// being durable and in-mount, so both the escape (a symlinked
+// `.anolisa/backups`) and the lost dirent (a parent never fsynced) failure
+// modes end in data loss.
+
+/// Open a directory beneath `root` as an `O_RDONLY` descriptor: usable as
+/// the `dirfd` of the `*at` calls below and as an `fsync` target, which the
+/// `O_PATH` descriptor `open_root` hands back is not — `fsync` on `O_PATH`
+/// is `EBADF`. Pass `"."` for a syncable descriptor on `root` itself.
+///
+/// Fails with `PathOutsideMount` when any component is a symlink.
+pub fn open_dir(root: BorrowedFd<'_>, rel: &Path) -> Result<File> {
+    open_in_root(
+        root,
+        rel,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY,
+        Mode::empty(),
+    )
+}
+
+/// `create_dir_all` for a rooted path, with the two properties the `std::fs`
+/// version cannot give: no component is traversed without the kernel
+/// refusing symlinks, and the parent of every directory this call creates is
+/// fsynced.
+///
+/// That fsync is not decoration. The dirent naming a new directory lives in
+/// its *parent*, so a crash right after `create_dir_all` returns can drop
+/// the directory and the file just written into it, however carefully that
+/// file was synced itself — which for a pre-overwrite backup means the store
+/// is deleted against a recovery path that no longer exists.
+///
+/// Idempotent: an existing directory is not an error. Everything else is — a
+/// symlinked or non-directory component comes back as `PathOutsideMount` /
+/// `Other` rather than a quiet success, because a caller that destroys data
+/// on `Ok` has to be able to trust it.
+pub fn create_dir_durable(root: BorrowedFd<'_>, rel: &Path) -> Result<()> {
+    use std::path::Component;
+
+    // Opened up front so even a first-level mkdir has an fsync-able parent;
+    // `root` itself is O_PATH.
+    let mut parent = open_dir(root, Path::new("."))?;
+    let mut probe = PathBuf::new();
+
+    for comp in rel.components() {
+        let seg = match comp {
+            Component::Normal(s) => s,
+            _ => return Err(MemoryError::PathOutsideMount(rel.display().to_string())),
+        };
+        probe.push(seg);
+
+        match mkdirat(parent.as_fd(), seg) {
+            Ok(()) => parent.sync_all()?,
+            // Already present. The `open_dir` below is what proves it is a
+            // real directory and not a symlink or a regular file.
+            Err(nix::errno::Errno::EEXIST) => {}
+            Err(e) => {
+                return Err(MemoryError::Other(format!(
+                    "mkdirat {}: {e}",
+                    probe.display()
+                )));
+            }
+        }
+
+        // Re-resolve from `root` instead of keeping the descriptor the mkdir
+        // was issued against: this one was validated with
+        // RESOLVE_NO_SYMLINKS *after* the mkdir, so a swap in between cannot
+        // hand the next level a redirected parent.
+        parent = open_dir(root, &probe)?;
+    }
+    Ok(())
+}
+
+/// `mkdirat(2)` against a descriptor. nix 0.29 wraps `mkdir` but not
+/// `mkdirat`, and the path-based form is exactly what this module exists to
+/// avoid.
+fn mkdirat(dir: BorrowedFd<'_>, seg: &OsStr) -> std::result::Result<(), nix::errno::Errno> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = match CString::new(seg.as_bytes()) {
+        Ok(c) => c,
+        // An interior NUL can never name a file; EINVAL is what the kernel
+        // itself reports for a malformed name.
+        Err(_) => return Err(nix::errno::Errno::EINVAL),
+    };
+    let rc = unsafe {
+        nix::libc::mkdirat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            Mode::from_bits_truncate(0o755).bits(),
+        )
+    };
+    nix::errno::Errno::result(rc).map(drop)
+}
+
+/// Create a new regular file inside an already-rooted directory. `O_EXCL` so
+/// a name that is taken fails instead of being written through — a planted
+/// symlink answers `EEXIST` here even before RESOLVE_NO_SYMLINKS does.
+pub fn create_new_in_dir(dir: BorrowedFd<'_>, name: &Path) -> Result<File> {
+    open_in_root(
+        dir,
+        name,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
+        Mode::from_bits_truncate(0o644),
+    )
+}
+
+/// `renameat(2)` within one rooted directory: both names resolve against the
+/// same descriptor, so the rename can neither escape it nor be redirected by
+/// a parent swapped between the write and the rename.
+pub fn rename_in_dir(dir: BorrowedFd<'_>, from: &Path, to: &Path) -> Result<()> {
+    nix::fcntl::renameat(Some(dir.as_raw_fd()), from, Some(dir.as_raw_fd()), to).map_err(|e| {
+        MemoryError::Other(format!(
+            "renameat {} -> {}: {e}",
+            from.display(),
+            to.display()
+        ))
+    })
+}
+
+/// Names of the regular files directly inside `dir`, enumerated through the
+/// descriptor (`fdopendir`) and classified with `fstatat` +
+/// `AT_SYMLINK_NOFOLLOW`. Anything that is not a regular file — a
+/// subdirectory, a planted symlink — is left out, so a caller that prunes by
+/// name can neither count nor delete something it does not own.
+pub fn regular_file_names(dir: &File) -> Result<Vec<String>> {
+    // fdopendir takes ownership of the descriptor it is handed, so give it a
+    // dup and keep the original for the fstatat calls below.
+    let dup = dir.try_clone()?;
+    let mut handle =
+        nix::dir::Dir::from(dup).map_err(|e| MemoryError::Other(format!("fdopendir: {e}")))?;
+
+    let mut names = Vec::new();
+    for entry_res in handle.iter() {
+        let entry = entry_res.map_err(|e| MemoryError::Other(format!("readdir: {e}")))?;
+        let name = entry.file_name();
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let stat = nix::sys::stat::fstatat(
+            Some(dir.as_raw_fd()),
+            name,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(|e| MemoryError::Other(format!("fstatat {}: {e}", name.to_string_lossy())))?;
+        if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG {
+            names.push(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// `unlinkat(2)` for a regular file inside an already-rooted directory. The
+/// name is looked up against `dir`, so a parent swapped for a symlink after
+/// `dir` was opened cannot send the delete somewhere else.
+pub fn unlink_in_dir(dir: BorrowedFd<'_>, name: &str) -> Result<()> {
+    nix::unistd::unlinkat(
+        Some(dir.as_raw_fd()),
+        name,
+        nix::unistd::UnlinkatFlags::NoRemoveDir,
+    )
+    .map_err(|e| MemoryError::Other(format!("unlinkat {name}: {e}")))
 }
 
 /// Reject paths under a `.git/` directory at the mount root. Git internal
