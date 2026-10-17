@@ -22,14 +22,14 @@ Exit code:
     1 — violations detected (or file cannot be opened)
 """
 
-import sys
-import os
-import zipfile
-import xml.etree.ElementTree as ET
 import json
+import os
 import re
-import tempfile
 import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NSP = f"{{{NS}}}"
@@ -101,11 +101,14 @@ def _parse_styles(styles_xml: bytes) -> dict:
             else:
                 rgb = ""
                 theme = None
-            fonts.append({
-                "rgb": rgb,
-                "theme": theme,
-                "bold": bold_elem is not None,
-            })
+            fonts.append(
+                {
+                    "rgb": rgb,
+                    "theme": theme,
+                    "bold": bold_elem is not None
+                    and bold_elem.get("val", "1").strip() not in ("0", "false"),
+                }
+            )
 
     # fills
     fills = []
