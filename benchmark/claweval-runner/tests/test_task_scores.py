@@ -92,11 +92,11 @@ def find_trace_files(base_dir: Path, keyword: str) -> dict[str, tuple[Path | Non
 def _dir_timestamp(dir_name: str) -> str:
     """Extract timestamp part from directory name.
 
-    E.g. 'openclaw_26-04-28-10-41' -> '26-04-28-10-41'
+    E.g. 'openclaw_26-04-28-10-41-abcd1234' -> '26-04-28-10-41'
          'qwen3.6-plus_26-04-27-12-38' -> '26-04-27-12-38'
     """
     import re
-    m = re.search(r"_(\d{2}-\d{2}-\d{2}-\d{2}-\d{2})$", dir_name)
+    m = re.search(r"_(\d{2}-\d{2}-\d{2}-\d{2}-\d{2})(?:-[A-Za-z0-9_]+)?$", dir_name)
     return m.group(1) if m else dir_name
 
 

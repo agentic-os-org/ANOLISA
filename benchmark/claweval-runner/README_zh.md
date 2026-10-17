@@ -116,7 +116,7 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 ## 输出
 
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # 转换后的 trace
 ├── batch_results.json     # 每次试验结果
 └── batch_summary.json     # 聚合汇总
