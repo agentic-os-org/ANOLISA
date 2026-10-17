@@ -167,3 +167,20 @@ test('index schema accepts component roots without allowing arbitrary paths', as
     assert.equal(pattern.test(source), false, source);
   }
 });
+
+
+for (const [name, cargo, expected] of [
+  ['dependency version is not a workspace version', '[workspace.package]\nedition = "2021"\n[workspace.dependencies]\nversion = "9.9.9"\n', '1.2.3'],
+  ['package dependency version is ignored', '[package]\nname = "fixture"\n[dependencies.tool]\nversion = "9.9.9"\n', '1.2.3'],
+  ['explicit package version wins over workspace default', '[workspace.package]\nversion = "9.9.9"\n[package]\nversion = "4.5.6"\n', '4.5.6'],
+  ['package can inherit its workspace version', '[workspace.package]\nversion = "4.5.6"\n[package]\nversion.workspace = true\n', '4.5.6'],
+]) {
+  test(name, async (t) => {
+    const {root, paths} = await createFixture(t, true);
+    await writeFile(path.join(root, paths.anolisa, 'Cargo.toml'), cargo);
+    const result = generate(root);
+    assert.equal(result.status, 0, result.stderr);
+    const index = JSON.parse(await readFile(path.join(root, 'website/.generated/static/agents/repo-index.json'), 'utf8'));
+    assert.equal(index.components.find((component) => component.id === 'anolisa').version, expected);
+  });
+}
