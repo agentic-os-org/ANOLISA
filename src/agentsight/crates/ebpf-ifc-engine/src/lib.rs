@@ -2251,6 +2251,15 @@ fn config_has_file_write(cfg: &CConfig) -> bool {
             .any(|r| r.op == OP_WRITE)
 }
 
+fn supported_policy_features(features: u32, lsm_active: bool) -> u32 {
+    if lsm_active {
+        features
+    } else {
+        // Reserving hooks cannot provide pre-operation blocking without BPF LSM.
+        features & !(FEAT_BLOCK_EXEC | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT)
+    }
+}
+
 fn validate_supported_features(cfg: &CConfig, supported: u32, context: &str) -> io::Result<()> {
     let needed = config_features(cfg);
     let missing = needed & !supported;
@@ -2546,8 +2555,9 @@ impl PinnedEngine {
         let _install_lock = acquire_install_lock()?;
         let paths = PinnedEnginePaths::from_env();
         let reserve = HookReserve::pinned_profile()?;
-        validate_pinned_runtime(reserve, bpf_lsm_active())?;
-        let policy_features = reserve.policy_features;
+        let lsm_active = bpf_lsm_active();
+        validate_pinned_runtime(reserve, lsm_active)?;
+        let policy_features = supported_policy_features(reserve.policy_features, lsm_active);
         let present = match pinned_engine_present(&paths, reserve) {
             Ok(present) => present,
             // Stale layout from an incompatible ActPlane revision: fall
@@ -3080,7 +3090,8 @@ impl Loader {
         let enforce = bpf_lsm_active();
         let enforce_mode: u32 = if enforce { 1 } else { 0 };
         let hook_budget = HookBudget::from_config(&cfg, hook_reserve);
-        let policy_features = hook_budget.features;
+        let policy_features = supported_policy_features(hook_budget.features, enforce);
+        validate_supported_features(&cfg, policy_features, "initial policy")?;
         if let Some(paths) = pin_paths.as_ref() {
             ensure_pinned_engine_dirs(paths)?;
             if pinned_engine_present(paths, hook_reserve)? {
@@ -4723,6 +4734,146 @@ mod tests {
     }
 
     #[test]
+    fn force_tracepoint_loader_rejects_initial_block_policy() {
+        // Run in a child so forcing the backend cannot race other tests' env reads.
+        if std::env::var_os("ACTPLANE_FORCE_TRACEPOINT").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "tests::force_tracepoint_loader_rejects_initial_block_policy",
+                    "--nocapture",
+                ])
+                .env("ACTPLANE_FORCE_TRACEPOINT", "1")
+                .output()
+                .expect("run forced-tracepoint child");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_CONNECT;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        let blob = unsafe {
+            std::slice::from_raw_parts(
+                &cfg as *const CConfig as *const u8,
+                std::mem::size_of::<CConfig>(),
+            )
+        };
+        let error = match Loader::load_with_hook_reserve(blob, HookReserve::full_profile()) {
+            Err(error) => error,
+            Ok(_) => panic!("tracepoint backend must reject initial block connect policy"),
+        };
+        let text = error.to_string();
+        assert!(text.contains("initial policy"), "{text}");
+        assert!(text.contains("connect block hooks"), "{text}");
+        assert!(text.contains("active bpf LSM"), "{text}");
+    }
+
+    #[test]
+    fn tracepoint_budget_rejects_block_but_preserves_notify_and_kill() {
+        let budget = HookBudget {
+            features: ALL_POLICY_FEATURES,
+            ..HookBudget::default()
+        };
+        let tracepoint_features = supported_policy_features(budget.features, false);
+        for (op, hook) in [
+            (OP_EXEC, "exec block hooks"),
+            (OP_OPEN, "file block hooks"),
+            (OP_WRITE, "file block hooks"),
+            (OP_CONNECT, "connect block hooks"),
+        ] {
+            let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+            cfg.n_rules = 1;
+            cfg.rules[0].op = op;
+            cfg.rules[0].effect = EFFECT_BLOCK;
+            let error =
+                validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+                    .expect_err("tracepoint-only backend cannot block this operation");
+            assert!(error.to_string().contains(hook), "{error}");
+            validate_supported_features(
+                &cfg,
+                supported_policy_features(budget.features, true),
+                "runtime policy delta",
+            )
+            .expect("active LSM with reserved hooks admits block policy");
+
+            for effect in [0, 2] {
+                cfg.rules[0].effect = effect;
+                validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+                    .expect("notify and kill retain tracepoint support");
+            }
+        }
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_updates = 3;
+        for (update, op) in cfg.updates.iter_mut().zip([OP_OPEN, OP_CONNECT, OP_RECV]) {
+            update.op = op;
+            update.add = 1;
+        }
+        validate_supported_features(&cfg, tracepoint_features, "runtime policy delta")
+            .expect("file and network taint sources retain tracepoint support");
+    }
+
+    #[test]
+    fn tracepoint_reload_rejects_block_before_accessing_maps() {
+        let file = std::fs::File::open("/dev/null").expect("dummy non-BPF fd");
+        let duplicate = || file.try_clone().expect("duplicate dummy fd").into();
+        let handle = ReloadHandle {
+            cap_req_fd: duplicate(),
+            cap_pending_fd: duplicate(),
+            cap_task_fd: duplicate(),
+            cap_state_fd: duplicate(),
+            cap_policy_fd: duplicate(),
+            ts_counts_fd: duplicate(),
+            append_lock: Arc::new(Mutex::new(())),
+            append_lock_file: None,
+            policy_features: supported_policy_features(
+                HookReserve::full_profile().policy_features,
+                false,
+            ),
+        };
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_CONNECT;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        let blob = unsafe {
+            std::slice::from_raw_parts(
+                &cfg as *const CConfig as *const u8,
+                std::mem::size_of::<CConfig>(),
+            )
+        };
+        let error = handle
+            .append_policy_delta(42, 7, blob)
+            .expect_err("reject unsupported block before reading or writing BPF maps");
+        let text = error.to_string();
+        assert!(text.contains("connect block hooks"), "{text}");
+        assert!(text.contains("active bpf LSM"), "{text}");
+    }
+
+    #[test]
+    fn credential_profile_does_not_admit_unloaded_recv_hooks() {
+        let reserve = HookReserve::credential_exfiltration();
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_updates = 1;
+        cfg.updates[0].op = OP_RECV;
+        cfg.updates[0].add = 1;
+        for lsm_active in [false, true] {
+            let features = supported_policy_features(reserve.policy_features, lsm_active);
+            let error = validate_supported_features(&cfg, features, "runtime policy delta")
+                .expect_err("credential profile does not load recv hooks");
+            assert!(
+                error.to_string().contains("recv rules or sources"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn path_matcher_delta_error_explains_loaded_policy_requirement() {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
@@ -5016,12 +5167,12 @@ mod tests {
         config_blob(&cfg)
     }
 
-    fn block_connect_endpoint_config_blob(ipv4: u32) -> Vec<u8> {
+    fn notify_connect_endpoint_config_blob(ipv4: u32) -> Vec<u8> {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
         cfg.rules[0].op = OP_CONNECT;
         cfg.rules[0].m = 3; // TAINT_MATCH_ANY
-        cfg.rules[0].effect = EFFECT_BLOCK;
+        cfg.rules[0].effect = EFFECT_NOTIFY;
         cfg.rules[0].rule_id = 0;
         cfg.rules[0].ipv4 = ipv4;
         cfg.rules[0].ipv4_mask = u32::MAX;
@@ -9225,13 +9376,13 @@ finally:
 
     #[test]
     #[ignore = "requires root/CAP_BPF and loads live eBPF tracepoints"]
-    fn tracepoint_block_connect_degrades_to_unblocked_violation_smoke() {
+    fn tracepoint_notify_connect_reports_violation_smoke() {
         let _guard = live_bpf_test_guard();
         let caller_pid = std::process::id() as i32;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
         let port = listener.local_addr().expect("listener addr").port();
         let loopback = 127u32 | (1u32 << 24);
-        let policy = block_connect_endpoint_config_blob(loopback);
+        let policy = notify_connect_endpoint_config_blob(loopback);
         let old_force = std::env::var_os("ACTPLANE_FORCE_TRACEPOINT");
         std::env::set_var("ACTPLANE_FORCE_TRACEPOINT", "1");
         let loaded = Loader::load(&policy);
@@ -9278,15 +9429,15 @@ finally:
         );
 
         // The matching connect must succeed (tracepoints cannot deny) but be
-        // reported as a degraded block violation: effect=block, blocked=false.
+        // reported as a notification: blocking requests require BPF LSM.
         let hit = std::net::TcpStream::connect(("127.0.0.1", port))
             .expect("tracepoint backend must not deny the connect");
         drop(hit);
         let v = rx
             .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("degraded connect block violation");
+            .expect("connect notification");
         assert_eq!(v.op, OP_CONNECT as u32, "unexpected op: {v:?}");
-        assert_eq!(v.effect, EFFECT_BLOCK as u32, "unexpected effect: {v:?}");
+        assert_eq!(v.effect, EFFECT_NOTIFY as u32, "unexpected effect: {v:?}");
         assert!(
             !v.blocked,
             "tracepoint backend cannot block; expected degraded report: {v:?}"
