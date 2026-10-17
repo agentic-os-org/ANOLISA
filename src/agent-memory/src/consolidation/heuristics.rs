@@ -12,6 +12,16 @@ use crate::config::ConsolidationConfig;
 
 use super::fact::{ConsolidatedFact, FactCategory};
 
+/// Values interpolated into the backtick-quoted spans these templates
+/// build. A raw backtick in a value would break the span structure —
+/// `normalize_relative_dates` pairs runs of equal length, so a stray
+/// backtick either mis-pairs delimiters or disables normalization for
+/// the rest of the fact. Swap it for an apostrophe; the value stays one
+/// span and stays readable.
+fn span_safe(value: &str) -> String {
+    value.replace('`', "'")
+}
+
 /// Owned version of AuditEntry for deserialization from session logs.
 /// The real AuditEntry uses `&'static str` for `tool` which can't be
 /// deserialized from JSON.
@@ -157,10 +167,11 @@ fn rule_working_context(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Co
             let count = unique_paths.len();
             let title = format!("在 {dir} 下工作了 {count} 个文件");
             let content = format!(
-                "Agent 在 `{dir}` 目录下创建/修改了 {count} 个文件：{}。",
+                "Agent 在 `{}` 目录下创建/修改了 {count} 个文件：{}。",
+                span_safe(&dir),
                 unique_paths
                     .iter()
-                    .map(|p| format!("`{p}`"))
+                    .map(|p| format!("`{}`", span_safe(p)))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -191,7 +202,11 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
             let query = extract_search_query(&e.path);
             if query.len() > 3 {
                 let title = format!("搜索: {query}");
-                let content = format!("Agent 通过 `{}` 搜索了 `{}`。", e.tool, query);
+                let content = format!(
+                    "Agent 通过 `{}` 搜索了 `{}`。",
+                    span_safe(&e.tool),
+                    span_safe(&query)
+                );
                 // Shorter, more specific queries are more interesting.
                 let confidence = 0.5 + (0.3 / (query.len() as f64)).min(0.3);
                 facts.push(ConsolidatedFact::new(
@@ -251,7 +266,10 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
     for path in &verified_paths {
         let count = edit_counts.get(path).copied().unwrap_or(1);
         let title = format!("修改并验证: {path}");
-        let content = format!("Agent 对 `{path}` 进行了 {count} 次编辑，并回读验证了修改结果。");
+        let content = format!(
+            "Agent 对 `{}` 进行了 {count} 次编辑，并回读验证了修改结果。",
+            span_safe(path)
+        );
         facts.push(ConsolidatedFact::new(
             session_id,
             FactCategory::Change,
@@ -269,8 +287,10 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
         .filter(|(path, count)| *count >= 2 && !verified_paths.contains(path))
         .for_each(|(path, count)| {
             let title = format!("对 {path} 进行了 {count} 次编辑");
-            let content =
-                format!("Agent 对 `{path}` 进行了 {count} 次编辑，表明该文件是重点关注对象。");
+            let content = format!(
+                "Agent 对 `{}` 进行了 {count} 次编辑，表明该文件是重点关注对象。",
+                span_safe(&path)
+            );
             let confidence = 0.6 + (count as f64 * 0.1).min(0.3);
             facts.push(ConsolidatedFact::new(
                 session_id,
@@ -352,7 +372,10 @@ fn rule_promoted(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
         .map(|e| {
             // Path format: "scratch/<file> -> <store_path>"
             let title = format!("提升为持久记忆: {}", e.path);
-            let content = format!("Agent 将 `{}` 从临时 session 提升为持久记忆。", e.path);
+            let content = format!(
+                "Agent 将 `{}` 从临时 session 提升为持久记忆。",
+                span_safe(&e.path)
+            );
             // Promoting is a strong signal — the agent explicitly marked this as important.
             ConsolidatedFact::new(
                 session_id,
@@ -408,7 +431,7 @@ fn rule_session_summary(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Co
         error_count,
         tools
             .iter()
-            .map(|t| format!("`{t}`"))
+            .map(|t| format!("`{}`", span_safe(t)))
             .collect::<Vec<_>>()
             .join(", "),
         total_bytes
@@ -442,6 +465,7 @@ fn parse_duration_secs(first: &str, last: &str) -> u64 {
 mod tests {
     use super::*;
     use crate::config::ConsolidationConfig;
+    use crate::consolidation::quality::normalize_relative_dates;
 
     fn default_config() -> ConsolidationConfig {
         ConsolidationConfig::default()
@@ -492,6 +516,34 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Interest);
         assert!(facts[0].title.contains("rust ownership"));
+    }
+
+    #[test]
+    fn interpolated_values_cannot_break_the_span_structure() {
+        // A query pasted from markdown can carry backticks; the emitted
+        // fact must keep the value inside its single quoted span
+        // (backticks swapped for apostrophes) so the date normalizer's
+        // run pairing stays intact.
+        let entries = vec![make_entry(
+            "memory_search",
+            "bm25:``today`` and `yesterday` notes",
+            true,
+            None,
+        )];
+        let facts = rule_interest(&entries, "sid");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            !facts[0].content.contains("``"),
+            "no backtick run may survive interpolation, got: {}",
+            facts[0].content
+        );
+        // The sanitized value stays one span and survives the date
+        // normalizer verbatim, keywords included.
+        let normalized = normalize_relative_dates(&facts[0].content);
+        assert!(
+            normalized.contains("'today'") && normalized.contains("'yesterday'"),
+            "the sanitized span must survive normalization verbatim, got: {normalized}"
+        );
     }
 
     #[test]
