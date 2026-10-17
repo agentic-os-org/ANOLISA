@@ -46,6 +46,8 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+读取 PDF 保存的表单值和 widget 元数据，详见[表单字段参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#pdf-表单字段分析)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## PDF form field analysis
+
+Extract stored values from a filled PDF form with `--form-fields --format json`. The optional per-page `form_fields` list contains each selected page's AcroForm widget appearances:
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f application.pdf --format json --form-fields
+python3 SKILL_DIR/scripts/read_pdf.py -f application.pdf --format json --form-fields -p "1-2" --metadata
+```
+
+Each record includes `name`, `label`, `type`, `type_id`, stored `value`, `flags`, `rect` and `xref`. Rectangles are four-number JSON arrays. Choice fields also include `choices`; checkbox/radio fields include `button_states` when available. Values such as `Yes` and `Off` remain their stored states rather than being guessed from page text. Signature fields include the SDK's `signed` status, which does not verify signature validity or trust.
+
+Logical fields can appear in several places or pages, so appearances remain separate records with their page placement. Dotted hierarchical names, Unicode values, blank fields and multiple-choice metadata are retained. Pages without widgets use `form_fields: []`. Page selection and document metadata work as usual; default text/JSON output is unchanged when this flag is omitted.
+
+The reader copies values before closing the document and leaves the PDF bytes unchanged. It does not fill/reset fields, execute embedded JavaScript or infer form values from appearance text. Normal annotation extraction is a separate view because widgets represent form fields rather than ordinary annotations. This mode requires JSON and a PyMuPDF backend with widget/button-state support.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
