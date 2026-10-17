@@ -7,6 +7,7 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::bench::BenchResult;
 use crate::category;
@@ -1923,16 +1924,59 @@ fn persist_rollback_data_at(
     Ok(true)
 }
 
-/// Run `program` (systemctl) with its output discarded. Returns whether it
-/// ran and exited 0; a host without systemd fails to spawn it.
-fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
+/// The longest a `systemctl` call may take before the manager is presumed
+/// wedged. These calls run under the ledger lock and on the command's critical
+/// path (persist and finalize), so a request the manager never answers must not
+/// hold the transaction open: `tune`/`fix`/`rollback` would never print their
+/// documented body, and every other ktuner command would block on the lock.
+const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `program` (systemctl) with its output discarded, waiting at most
+/// `timeout`. Returns whether it ran and exited 0; a host without systemd
+/// fails to spawn it, and a manager that does not answer within `timeout` is
+/// killed and reaped, then answers false — the "boot replay is not armed"
+/// verdict the callers already give a refused `systemctl enable`, never a
+/// transaction blocked forever. The status of the advisory calls (`disable`,
+/// `daemon-reload`) is ignored by their callers, so only the wait bound
+/// changes for them.
+fn systemctl_quiet_with(program: &str, args: &[&str], timeout: Duration) -> bool {
     use std::process::Stdio;
-    std::process::Command::new(program)
+    let mut child = match std::process::Command::new(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Stop the process before reporting the verdict: a
+                    // lingering systemctl would keep acting on a manager the
+                    // caller has already answered for.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// [`systemctl_quiet_with`] with the production bound.
+fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
+    systemctl_quiet_with(program, args, SYSTEMCTL_TIMEOUT)
 }
 
 /// One ledger row as `rollback --list` publishes it: the recorded
@@ -11794,5 +11838,41 @@ mod tests {
             !stderr.contains("panicked"),
             "the engine panicked on a failed stdout write:\n{stderr}"
         );
+    }
+    /// The service-manager calls run under the ledger lock and on the
+    /// command's critical path (persist/finalize). A manager that never
+    /// answers must therefore not hold the transaction open: the call is
+    /// bounded, the process is stopped and reaped, and the answer is the
+    /// conservative "boot replay not armed" verdict — never an unbounded wait,
+    /// which would keep `tune`/`fix`/`rollback` from printing their documented
+    /// body and block every other ktuner command on the ledger lock.
+    #[test]
+    fn systemctl_quiet_stops_a_manager_that_never_answers() {
+        let started = Instant::now();
+        let armed = systemctl_quiet_with("/bin/sleep", &["5"], Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        assert!(
+            !armed,
+            "a manager that never answers is not an armed replay"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the call must be bounded by its timeout, took {elapsed:?}"
+        );
+    }
+
+    /// The bounded wait keeps the verdict of a manager that does answer.
+    #[test]
+    fn systemctl_quiet_reports_the_exit_status() {
+        assert!(systemctl_quiet_with(
+            "/bin/true",
+            &[],
+            Duration::from_secs(5)
+        ));
+        assert!(!systemctl_quiet_with(
+            "/bin/false",
+            &[],
+            Duration::from_secs(5)
+        ));
     }
 }
