@@ -8200,7 +8200,12 @@ fn orphan_retries_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
 }
 
 fn eval_tcp_early_retrans(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_early_retrans_at(info, recs, "/proc/sys/net/ipv4/tcp_early_retrans")
+    eval_tcp_early_retrans_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_early_retrans",
+        "/proc/sys/net/ipv4/tcp_sack",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_early_retrans`] (the `eval_*_at`
@@ -8212,12 +8217,29 @@ fn eval_tcp_early_retrans(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 /// a masked or garbled proc entry (a container's, typically) neither reports a
 /// `current_value` the host does not have nor asks for a write it may not
 /// need.
+///
+/// The switch alone is not enough to make it matter. The only reader in v6.6
+/// is `tcp_schedule_loss_probe()` (net/ipv4/tcp_output.c:2812), which schedules
+/// the probe for 3 or 4 only when `tcp_is_sack(tp)` holds (:2816-2817). That
+/// flag is `tp->rx_opt.sack_ok` (include/net/tcp.h:1188-1191), set from the
+/// SACK-permitted option only while `net.ipv4.tcp_sack` is on
+/// (net/ipv4/tcp_input.c:4126-4129). With a readable `tcp_sack` 0 no
+/// connection uses SACK, so a read of 0 here cannot be answered by the write
+/// the advice asks for. A SACK switch that cannot be read keeps the advice: it
+/// is not evidence that SACK is off, and the engine's own `tcp_sack` rule
+/// raises a readable 0 to 1 in the same plan.
 fn eval_tcp_early_retrans_at(
     _info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    sack_path: &str,
 ) -> usize {
     if !std::path::Path::new(path).exists() {
+        return 1;
+    }
+    // tcp_sack was a plain proc_dointvec int through v5.10, where -1 means
+    // enabled; only a signed 0 turns every connection's SACK off.
+    if read_switch_i64(sack_path) == Some(0) {
         return 1;
     }
     // The reader maps a file it cannot interpret to 0 as well; only a
@@ -23083,10 +23105,16 @@ mod tests {
         // container's, typically) was reported as `current_value: "0"` and
         // answered with a write on a host whose switch was never read.
         let (off, on, others) = switch_fixture("tcp_early_retrans");
+        let (_, sack_on, _) = switch_fixture("tcp_early_retrans_sack");
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_early_retrans_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_early_retrans_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack_on.to_str().unwrap(),
+            );
             recs
         };
         let recs = advice(&off);
@@ -23100,6 +23128,53 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_early_retrans_advice_needs_sack_enabled() {
+        // v6.6 net/ipv4/tcp_output.c:2812 reads net.ipv4.tcp_early_retrans in
+        // tcp_schedule_loss_probe(), and the probe is scheduled for 3 or 4
+        // only when tcp_is_sack(tp) holds (:2816-2817). That flag is
+        // tp->rx_opt.sack_ok (include/net/tcp.h:1188-1191), set from the
+        // SACK-permitted option only while net.ipv4.tcp_sack is on
+        // (net/ipv4/tcp_input.c:4126-4129). With a readable tcp_sack 0 no
+        // connection uses SACK, so raising tcp_early_retrans to 3 changes
+        // nothing and the advice was a no-op.
+        let (sack_off, sack_on, sack_others) = switch_fixture("tcp_early_retrans_needs_sack");
+        let (early_off, early_on, _) = switch_fixture("tcp_early_retrans_switch");
+        let info = make_test_info();
+        let advice = |early: &std::path::Path, sack: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_early_retrans_at(
+                &info,
+                &mut recs,
+                early.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&early_off, &sack_on).len(),
+            1,
+            "SACK on: the early-retransmit switch decides"
+        );
+        assert!(
+            advice(&early_off, &sack_off).is_empty(),
+            "SACK off: nothing reads tcp_early_retrans"
+        );
+        for path in &sack_others {
+            assert_eq!(
+                advice(&early_off, path).len(),
+                1,
+                "{}: an unreadable SACK switch is not the value 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&early_on, &sack_off).is_empty(),
+            "an enabled early retransmit is not a finding either way"
+        );
     }
 
     #[test]
