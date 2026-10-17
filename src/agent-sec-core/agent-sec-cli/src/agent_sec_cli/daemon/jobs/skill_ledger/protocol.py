@@ -32,6 +32,16 @@ class WorkerProtocolError(ValueError):
     """Raised when a Skill Ledger worker frame violates the protocol."""
 
 
+class WorkerResultTooLargeError(WorkerProtocolError):
+    """A worker result serialized above the frame cap.
+
+    Distinct from a malformed frame: the payload is valid but too large to
+    deliver, so the worker must answer with a bounded error frame instead of
+    dying (a dead worker reads as a transport failure and gets restarted and
+    reprocessed).
+    """
+
+
 @dataclass
 class SkillFsChange:
     """Validated SkillFS change notification."""
@@ -240,7 +250,7 @@ def _serialize_frame(payload: dict[str, Any]) -> bytes:
     except (TypeError, ValueError) as exc:
         raise WorkerProtocolError("worker payload must be JSON serializable") from exc
     if len(frame) > MAX_WORKER_FRAME_BYTES:
-        raise WorkerProtocolError(
+        raise WorkerResultTooLargeError(
             f"worker frame exceeds {MAX_WORKER_FRAME_BYTES} bytes"
         )
     return frame

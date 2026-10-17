@@ -11,6 +11,7 @@ from agent_sec_cli.daemon.jobs.skill_ledger.processor import (
 from agent_sec_cli.daemon.jobs.skill_ledger.protocol import (
     MAX_WORKER_FRAME_BYTES,
     WorkerProtocolError,
+    WorkerResultTooLargeError,
     error_worker_response,
     parse_worker_request,
     serialize_worker_response,
@@ -47,6 +48,21 @@ def _run(protocol_stdout: BinaryIO) -> int:
 
         try:
             frame = serialize_worker_response(response)
+        except WorkerResultTooLargeError:
+            # The result (e.g. a change echoing ~150k accumulated paths)
+            # cannot be delivered within the frame cap. Dying here would read
+            # as a transport failure: the client kills + respawns the worker
+            # and reprocesses the same change (a full re-scan) before failing
+            # identically. Answer with a bounded error frame instead — a
+            # permanent payload error, no restart, no double processing.
+            traceback.print_exc(file=sys.stderr)
+            bounded = error_worker_response(
+                request.request_id,
+                WorkerResultTooLargeError(
+                    f"worker result exceeds {MAX_WORKER_FRAME_BYTES} bytes"
+                ),
+            )
+            frame = serialize_worker_response(bounded)
         except WorkerProtocolError as exc:
             print(f"invalid Skill Ledger worker response: {exc}", file=sys.stderr)
             return 2
