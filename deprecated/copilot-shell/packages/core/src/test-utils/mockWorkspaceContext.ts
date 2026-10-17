@@ -5,6 +5,7 @@
  */
 
 import { vi } from 'vitest';
+import path from 'node:path';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 
 /**
@@ -22,11 +23,20 @@ export function createMockWorkspaceContext(
   const mockWorkspaceContext = {
     addDirectory: vi.fn(),
     getDirectories: vi.fn().mockReturnValue(allDirs),
-    isPathWithinWorkspace: vi
-      .fn()
-      .mockImplementation((path: string) =>
-        allDirs.some((dir) => path.startsWith(dir)),
-      ),
+    isPathWithinWorkspace: vi.fn().mockImplementation((pathToCheck: string) =>
+      // Mirror the real WorkspaceContext containment semantics
+      // (path.relative-based, as in its isPathWithinRoot) instead of a
+      // raw startsWith, so sibling-prefix paths ('/ws-evil' vs workspace
+      // '/ws') are rejected the same way the real class rejects them.
+      allDirs.some((dir) => {
+        const relative = path.relative(dir, pathToCheck);
+        return (
+          !relative.startsWith(`..${path.sep}`) &&
+          relative !== '..' &&
+          !path.isAbsolute(relative)
+        );
+      }),
+    ),
   } as unknown as WorkspaceContext;
 
   return mockWorkspaceContext;
