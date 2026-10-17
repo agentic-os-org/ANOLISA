@@ -282,6 +282,51 @@ fn grep_respects_glob_filter() {
     assert_eq!(hits[0].path, "notes/a.md");
 }
 
+#[test]
+fn grep_max_zero_returns_no_hits() {
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello\nhello again\n", false).unwrap();
+    svc.write("b.md", "hello elsewhere", false).unwrap();
+
+    let hits = svc
+        .grep(
+            "hello",
+            GrepOptions {
+                max: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "max=0 is an explicit request for no hits, got {hits:?}"
+    );
+}
+
+#[test]
+fn grep_max_caps_hits_without_losing_the_last_one() {
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello one\nhello two\nhello three\n", false)
+        .unwrap();
+    svc.write("b.md", "hello four", false).unwrap();
+
+    for max in 1..=3 {
+        let hits = svc
+            .grep(
+                "hello",
+                GrepOptions {
+                    max: Some(max),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), max, "max={max} must return exactly {max} hits");
+    }
+
+    let all = svc.grep("hello", GrepOptions::default()).unwrap();
+    assert_eq!(all.len(), 4, "uncapped grep still sees every match");
+}
+
 // ---------- mem_diff ----------
 
 #[test]
