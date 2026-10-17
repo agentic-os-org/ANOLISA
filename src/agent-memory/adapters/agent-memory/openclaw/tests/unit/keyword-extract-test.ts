@@ -176,9 +176,41 @@ describe("extractCjkTrigrams", () => {
     assert.ok(trigrams.length > 0);
     assert.ok(trigrams.includes("\u79d8\u5bc6\u4ee3"));
   });
+
+  it("never forms trigrams across separators or non-CJK text", () => {
+    for (const separator of [" ", ",", "\n", "\uFF0C", " routing "]) {
+      assert.deepEqual(
+        extractCjkTrigrams(`\u8BB0\u5FC6\u5E93${separator}\u6570\u636E\u5E93`),
+        ["\u8BB0\u5FC6\u5E93", "\u6570\u636E\u5E93"],
+        `separator ${JSON.stringify(separator)} must break a CJK run`,
+      );
+    }
+  });
+
+  it("does not join separate short CJK runs to reach three characters", () => {
+    assert.deepEqual(extractCjkTrigrams("\u8BB0\u5FC6 \u6570\u636E"), []);
+    assert.deepEqual(extractCjkTrigrams("\u8BB0,\u5FC6,\u5E93"), []);
+  });
+
+  it("deduplicates separate runs while preserving their first occurrence", () => {
+    assert.deepEqual(
+      extractCjkTrigrams("\u8BB0\u5FC6\u5E93 \u6570\u636E\u5E93 \u8BB0\u5FC6\u5E93"),
+      ["\u8BB0\u5FC6\u5E93", "\u6570\u636E\u5E93"],
+    );
+  });
 });
 
 describe("buildRecallQueries", () => {
+  it("uses real CJK segments while preserving the raw mixed prompt fallback", () => {
+    const prompt = "\u8BB0\u5FC6\u5E93\uFF0C\u6570\u636E\u5E93";
+    const queries = buildRecallQueries(prompt);
+    assert.equal(queries[0], "\u8BB0\u5FC6\u5E93 \u6570\u636E\u5E93");
+    assert.equal(queries.at(-1), prompt);
+    for (const token of queries[0].split(" ")) {
+      assert.ok(prompt.includes(token), "each extracted token exists in the prompt");
+    }
+  });
+
   it("returns deduplicated candidates", () => {
     const queries = buildRecallQueries("codeword");
     const unique = new Set(queries);
