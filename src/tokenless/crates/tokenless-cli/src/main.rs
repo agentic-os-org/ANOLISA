@@ -718,7 +718,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            println!("{emit_text}");
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a candidate
+            // that already ends in LF is not doubled. `println!` appended one,
+            // desyncing stdout from the `after` text recorded below.
+            {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(emit_text.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
+            }
 
             record_compression_stats(
                 &config,
@@ -809,7 +821,20 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             let output_text = stats_after_text(&result, &input);
-            println!("{}", result.output);
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a compressed
+            // candidate that already ends in LF is not doubled. `println!`
+            // appended one, desyncing stdout from the `after_text` recorded
+            // below.
+            {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(result.output.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
+            }
 
             record_compression_stats(
                 &config,

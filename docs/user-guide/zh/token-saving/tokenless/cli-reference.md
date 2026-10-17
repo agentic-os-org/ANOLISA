@@ -41,6 +41,9 @@ cat response.json | tokenless compress-response
 - 单次输入上限为 64 MiB。
 - JSON 相关命令要求输入为合法 JSON。
 - 压缩后没有 Token 收益时，CLI 向 stderr 说明原因，并输出原文。
+- `compress-schema`、`compress-response`、`compress-toon` 和 `retrieve` 按字节原样写出 Payload：
+  不添加也不去除末尾换行符。因此透传和无收益场景会逐字节复现输入，比较 stdout 与输入负载
+  即可可靠判断是否发生了压缩或编码，写出的字节也正是统计记录的 `after` 文本。
 
 ### 最小有效 Payload
 

@@ -41,6 +41,10 @@ cat response.json | tokenless compress-response
 - The per-call input limit is 64 MiB.
 - JSON commands require valid JSON.
 - If compression does not reduce the estimated token count, the CLI explains this on stderr and returns the original.
+- `compress-schema`, `compress-response`, `compress-toon`, and `retrieve` write their payload to stdout
+  byte-for-byte: no trailing newline is added or stripped. Passthrough and no-savings runs therefore
+  reproduce the input exactly, so comparing stdout with the input payload is a reliable encoding check,
+  and the emitted bytes are exactly the `after` text the statistics recorder measures.
 
 ### Minimum useful payload
 
