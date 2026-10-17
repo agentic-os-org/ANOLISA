@@ -300,12 +300,24 @@ async fn fetch_imdsv2_token(host: &str) -> Option<String> {
     }
 }
 
+/// Upper bound for an accepted IMDSv2 session token.
+///
+/// Mirrors the auth-path IMDSv2 client (`provider::sysom::ecs_metadata`'s
+/// `MAX_TOKEN_BYTES`): platform session tokens are opaque and may exceed a
+/// few hundred bytes. Rejecting a longer token here would silently downgrade
+/// this probe back to a tokenless IMDSv1 request — reintroducing, on any
+/// instance whose token exceeds the bound, the exact hardened-instance
+/// failure the IMDSv2 support exists to fix.
+const MAX_IMDS_TOKEN_BYTES: usize = 4096;
+
 /// Returns true for tokens safe to place verbatim in a request header.
 ///
 /// Rejecting spaces, CR/LF and control characters prevents request-splitting
 /// through a malformed metadata response.
 fn is_valid_imds_token(token: &str) -> bool {
-    !token.is_empty() && token.len() <= 256 && token.bytes().all(|byte| byte.is_ascii_graphic())
+    !token.is_empty()
+        && token.len() <= MAX_IMDS_TOKEN_BYTES
+        && token.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 /// Perform one bounded raw-HTTP metadata request over plain TCP.
@@ -324,7 +336,11 @@ async fn metadata_request(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    const MAX_RESPONSE_BYTES: usize = 1024;
+    /// Response read bound. Sized to admit the largest accepted session token
+    /// (`MAX_IMDS_TOKEN_BYTES`) plus response headers; a smaller bound would
+    /// truncate a long token mid-body and make it fail validation even though
+    /// the metadata service issued it.
+    const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 
     let addr: std::net::SocketAddr = host.parse().ok()?;
     let mut stream = TcpStream::connect(addr).await.ok()?;
@@ -1311,6 +1327,22 @@ mod tests {
         assert!(!url.contains("-internal"));
     }
 
+    /// Reads one bodyless HTTP request head (up to the blank line). The
+    /// token-carrying GET is several kilobytes when the session token is
+    /// long, and TCP may deliver it in several reads, so the header must be
+    /// accumulated until the terminating blank line instead of read once.
+    fn read_http_request_head(stream: &mut impl Read) -> String {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") && head.len() < 16 * 1024 {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
     /// Serve a minimal loopback IMDS: `PUT /latest/api/token` returns a token,
     /// any `GET` returns metadata. When `require_token` is `Some`, the GET only
     /// succeeds if it carries that exact `x-aliyun-ecs-metadata-token` header,
@@ -1330,9 +1362,7 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0u8; 512];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]);
+                let request = read_http_request_head(&mut stream);
                 let response = if request.starts_with("PUT ") {
                     http_metadata_response(token_status, token_body)
                 } else if require_token
@@ -1386,6 +1416,68 @@ mod tests {
         assert_eq!(
             fetch_region_id_from_metadata().await,
             Some("cn-shanghai".to_string())
+        );
+    }
+
+    /// A session token longer than 256 bytes is what the auth-path IMDSv2
+    /// client already accepts (`MAX_TOKEN_BYTES`), so the region probe must
+    /// present it too instead of silently downgrading to tokenless IMDSv1
+    /// (which the hardened mock rejects).
+    #[tokio::test]
+    // Holding the std mutex across await is intentional: this test mutates
+    // env vars and must be serialized against other tests that read them.
+    #[allow(clippy::await_holding_lock)]
+    async fn fetch_region_id_accepts_long_session_token_on_hardened_instance() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
+
+        let long_token: &'static str = Box::leak("T".repeat(400).into_boxed_str());
+        spawn_imds_mock(
+            listener,
+            200,
+            long_token,
+            200,
+            "cn-shanghai",
+            Some(long_token),
+        );
+
+        assert_eq!(
+            fetch_region_id_from_metadata().await,
+            Some("cn-shanghai".to_string()),
+            "a 400-byte token must be presented, not downgraded to IMDSv1"
+        );
+    }
+
+    /// The response read bound must admit a maximum-size token response; a
+    /// 1024-byte buffer would truncate the body mid-token.
+    #[tokio::test]
+    // Holding the std mutex across await is intentional: this test mutates
+    // env vars and must be serialized against other tests that read them.
+    #[allow(clippy::await_holding_lock)]
+    async fn fetch_region_id_reads_max_sized_session_token_to_completion() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
+
+        let max_token: &'static str =
+            // 4096 = MAX_IMDS_TOKEN_BYTES; literal keeps the tests-only red run compilable.
+            Box::leak("T".repeat(4096).into_boxed_str());
+        spawn_imds_mock(
+            listener,
+            200,
+            max_token,
+            200,
+            "cn-shenzhen",
+            Some(max_token),
+        );
+
+        assert_eq!(
+            fetch_region_id_from_metadata().await,
+            Some("cn-shenzhen".to_string()),
+            "a max-size token response must not be truncated mid-body"
         );
     }
 
@@ -1484,12 +1576,12 @@ mod tests {
     #[test]
     fn is_valid_imds_token_rejects_unsafe_values() {
         assert!(is_valid_imds_token("abcDEF0123-_=+/"));
-        assert!(is_valid_imds_token(&"x".repeat(256)));
+        assert!(is_valid_imds_token(&"x".repeat(4096)));
         assert!(!is_valid_imds_token(""));
         assert!(!is_valid_imds_token("has space"));
         assert!(!is_valid_imds_token("crlf\r\ninjected"));
         assert!(!is_valid_imds_token("tab\there"));
-        assert!(!is_valid_imds_token(&"x".repeat(257)));
+        assert!(!is_valid_imds_token(&"x".repeat(4097)));
     }
 
     /// fetch_region_id_from_metadata reads headers and body even when they are
