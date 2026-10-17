@@ -303,6 +303,62 @@ fn diff_missing_file_errors() {
     assert!(matches!(err, MemoryError::NotFound(_)));
 }
 
+#[test]
+fn diff_rejects_first_input_exceeding_cap() {
+    let (_t, svc) = setup_with_read_cap(10);
+    svc.write("big.md", "this content is way more than ten bytes", false)
+        .unwrap();
+    svc.write("small.md", "ok", false).unwrap();
+
+    let err = svc.diff("big.md", "small.md").unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("exceeds read limit"),
+        "expected read limit error, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("big.md"),
+        "error must name the oversized input, got: {err}"
+    );
+}
+
+#[test]
+fn diff_rejects_second_input_exceeding_cap() {
+    let (_t, svc) = setup_with_read_cap(10);
+    svc.write("small.md", "ok", false).unwrap();
+    svc.write("big.md", "this content is way more than ten bytes", false)
+        .unwrap();
+
+    // The oversized file is the *second* argument: gating only the body about
+    // to be read would slurp small.md and then hand the giant one to diffy.
+    let err = svc.diff("small.md", "big.md").unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("exceeds read limit"),
+        "expected read limit error, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("big.md"),
+        "error must name the oversized input, got: {err}"
+    );
+}
+
+#[test]
+fn diff_allows_both_inputs_within_cap() {
+    let (_t, svc) = setup_with_read_cap(100);
+    svc.write("a.md", "line1\n", false).unwrap();
+    svc.write("b.md", "line1 changed\n", false).unwrap();
+
+    let patch = svc.diff("a.md", "b.md").unwrap();
+    assert!(patch.contains("line1 changed"));
+}
+
 // mem_promote happy / error paths are exercised in tests/session_test.rs
 // (promote_copies_scratch_to_store, promote_missing_scratch_file_returns_not_found,
 //  session_log_degrades_gracefully_when_session_dir_unavailable).
