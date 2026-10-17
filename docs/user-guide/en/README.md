@@ -44,6 +44,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI terminal assistant and command gateway |
 | [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-tuning engine with JSON recommendations and safe rollback |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
+| [Offline Benchmark Task Inventory](user-entrypoint/task-inventory.md) | ClawEval runner | Review task metadata as UTF-8 CSV without running evaluations |
 
 ### Agent Observability (`agent-observability/`)
 

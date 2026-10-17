@@ -189,7 +189,7 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/configure_openclaw.py` | Configure openclaw settings for ce-runner |
 | `scripts/run_integration_test.py` | End-to-end integration test with timestamp & score checks |
 | `scripts/run_task_compare.py` | Run a task in native + ce-runner modes for comparison |
-| `scripts/list_tasks.py` | List tasks grouped by prefix (T/M/C) and difficulty |
+| `scripts/list_tasks.py` | List tasks grouped by prefix/difficulty, or export UTF-8 CSV metadata with `--format csv` |
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |
@@ -197,6 +197,10 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/prompt_task.py` | Display the system prompt for a given task |
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
+
+Export an offline selection with `python scripts/list_tasks.py --prefix T --difficulty hard --format csv > tasks.csv`.
+CSV retains scanner ordering and includes its six-column header even for no matches.
+The default grouped display remains unchanged; see the [task inventory reference](../../docs/user-guide/en/user-entrypoint/task-inventory.md) for fields, encoding and quoting.
 
 ## Troubleshooting
 
