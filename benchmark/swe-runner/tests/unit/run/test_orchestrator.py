@@ -245,7 +245,7 @@ def test_run_single_openclaw_uses_case_agent_and_prepared_workspace(tmp_path: Pa
 
     with (
         patch("swe_runner.agents.openclaw.adapter.OpenClawSandboxManager") as mock_sandbox_manager_cls,
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=tmp_path / "openclaw-work"),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=tmp_path / "openclaw-work"),
         patch(
             "swe_runner.agents.openclaw.adapter.prepare_workspace_from_image",
             return_value=tmp_path / "openclaw-work/repo",
@@ -262,18 +262,20 @@ def test_run_single_openclaw_uses_case_agent_and_prepared_workspace(tmp_path: Pa
     assert agent.calls[0]["instance_id"] == "instance-openclaw"
     assert isinstance(agent.calls[0]["session_id"], str)
     assert str(agent.calls[0]["session_id"]).startswith("instance-openclaw-")
-    assert agent.calls[0]["agent_id"] == "instance-openclaw"
+    assert str(agent.calls[0]["agent_id"]).startswith("instance-openclaw-")
     assert agent.calls[0]["base_agent_id"] == "swebench"
     assert agent.calls[0]["prompt"] == "fix the bug"
     assert str(agent.calls[0]["openclaw_profile"]).startswith("swebench-instance-openclaw-")
     sandbox_manager = mock_sandbox_manager_cls.return_value
     sandbox_manager.configure.assert_called_once()
     spec = sandbox_manager.configure.call_args.args[0]
-    assert spec.agent_id == "instance-openclaw"
+    assert spec.agent_id == agent.calls[0]["agent_id"]
     assert spec.image_name == "swebench/sweb.eval.x86_64.instance-openclaw:latest"
     assert spec.workspace_root == tmp_path / "openclaw-work/openclaw-workspace"
     assert spec.testbed_dir == tmp_path / "openclaw-work/repo"
-    sandbox_manager.remove_agent_containers.assert_called_once_with("instance-openclaw")
+    sandbox_manager.remove_agent_containers.assert_called_once_with(
+        sandbox_manager.configure.call_args.args[0].agent_id
+    )
 
 
 def test_run_single_openclaw_extracts_patch_once_in_runner_tail(tmp_path: Path) -> None:
@@ -291,7 +293,7 @@ def test_run_single_openclaw_extracts_patch_once_in_runner_tail(tmp_path: Path) 
 
     with (
         patch("swe_runner.agents.openclaw.adapter.OpenClawSandboxManager"),
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=tmp_path / "openclaw-work"),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=tmp_path / "openclaw-work"),
         patch(
             "swe_runner.agents.openclaw.adapter.prepare_workspace_from_image",
             return_value=tmp_path / "openclaw-work/repo",
@@ -583,7 +585,7 @@ def test_run_batch_openclaw_cleans_local_sandbox_on_failure(tmp_path: Path) -> N
 
     with (
         patch("swe_runner.agents.openclaw.adapter.OpenClawSandboxManager") as mock_sandbox_manager_cls,
-        patch("swe_runner.agents.openclaw.adapter.default_workspace_root", return_value=tmp_path / "openclaw-work"),
+        patch("swe_runner.agents.openclaw.adapter.tempfile.mkdtemp", return_value=tmp_path / "openclaw-work"),
         patch(
             "swe_runner.agents.openclaw.adapter.prepare_workspace_from_image",
             return_value=tmp_path / "openclaw-work/repo",
@@ -599,4 +601,6 @@ def test_run_batch_openclaw_cleans_local_sandbox_on_failure(tmp_path: Path) -> N
     assert results[0].success is False
     sandbox_manager = mock_sandbox_manager_cls.return_value
     sandbox_manager.configure.assert_called_once()
-    sandbox_manager.remove_agent_containers.assert_called_once_with("instance-openclaw")
+    sandbox_manager.remove_agent_containers.assert_called_once_with(
+        sandbox_manager.configure.call_args.args[0].agent_id
+    )
