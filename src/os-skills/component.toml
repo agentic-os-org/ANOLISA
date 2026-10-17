@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.15"
 
 [component]
 name = "os-skills"
-version = "0.6.3"
+version = "0.7.0"
 layer = "runtime"
 domain = "tools"
 description = "Curated OS Skill library for agent runtimes"
@@ -53,6 +53,10 @@ source = "{datadir}/skills/setup-mcp/"
 [[adapters.openclaw.skills]]
 name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
+
+[[adapters.openclaw.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
 
 [[adapters.openclaw.skills]]
 name = "github"
@@ -173,6 +177,10 @@ source = "{datadir}/skills/setup-mcp/"
 [[adapters.hermes.skills]]
 name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
+
+[[adapters.hermes.skills]]
+name = "docker-admin"
+source = "{datadir}/skills/docker-admin/"
 
 [[adapters.hermes.skills]]
 name = "github"

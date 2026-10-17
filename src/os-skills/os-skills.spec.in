@@ -54,6 +54,9 @@ find %{buildroot}%{_datadir}/anolisa/skills -type f \
 %{_datadir}/anolisa/skills/*
 
 %changelog
+* Thu Oct 15 2026 zmiao <zzmiaovo@qq.com> - 0.7.0-1
+- Add the docker-admin skill for single-host container runtime administration.
+
 * Fri Aug 21 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.6.3-1
 - Let anolisa upgrade resolve existing OS Skills through RPM metadata.
 

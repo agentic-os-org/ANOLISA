@@ -35,6 +35,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 - **upgrade-alinux-kernel** — ALinux kernel upgrade
 
 ### DevOps
+- **docker-admin** — Single-host Docker/Podman runtime administration (diagnostics, logs, safe cleanup, compose lifecycle)
 - **github** — GitHub workflows and integration
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
 - **sysom-agentsight** — System diagnostics tool
