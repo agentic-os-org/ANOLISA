@@ -13,6 +13,7 @@ use std::time::Duration;
 use skillfs_core::SharedSkillStore;
 use skillfs_core::os_adapter::OsAdapterStage;
 use skillfs_core::transform::TransformPipeline;
+use skillfs_core::views::ViewsConfig;
 use tracing::{error, info, warn};
 
 use crate::path::SkillLayout;
@@ -107,6 +108,12 @@ pub fn mount_background_configured(
     in_place: bool,
     config: MountConfig,
 ) -> Result<MountHandle, FuseError> {
+    // Refuse a present-but-unloadable views config synchronously: the
+    // spawn below only logs `mount_inner` failures, and `SkillFs` would
+    // otherwise treat the corrupt file as "no views" and serve every
+    // store skill in the default view.
+    load_views_config(source)?;
+
     let mountpoint_path = mountpoint.to_path_buf();
     let source_path = source.to_path_buf();
 
@@ -149,6 +156,20 @@ pub fn mount_background_configured(
     })
 }
 
+/// A present-but-unloadable `skillfs-views.toml` must fail the mount
+/// closed — the same fail-closed semantics `skillfs classify` applies to
+/// the file — instead of silently widening the default view to every
+/// store skill the way a "no views" fallback would.
+fn load_views_config(source: &Path) -> Result<Option<ViewsConfig>, FuseError> {
+    ViewsConfig::load_checked(source).map_err(|error| {
+        FuseError::InvalidViewsConfig(format!(
+            "skillfs-views.toml in {} exists but could not be read or parsed ({error}); \
+             fix or remove it before mounting",
+            source.display()
+        ))
+    })
+}
+
 /// Internal mount that accepts optional Skill Security overrides. Public
 /// `mount` and `mount_background` keep their existing signatures and pass
 /// `None` for both; test/embedder callers reach the sink/policy injection
@@ -179,6 +200,11 @@ fn mount_inner(
     max_skill_size: Option<usize>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
+
+    // Every blocking entry point funnels through here, so the corrupt
+    // views-config refusal covers them all (the background variants
+    // check before spawning; see `mount_background_configured`).
+    let views = load_views_config(source)?;
 
     if let Some(root) = &skill_discover_root {
         if !root.is_absolute() {
@@ -240,6 +266,7 @@ fn mount_inner(
         store,
         in_place,
         TransformPipeline::empty(),
+        views,
     );
     if let Some(root) = skill_discover_root {
         fs = fs.with_skill_discover_root(root);
@@ -684,6 +711,13 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
     refresh_controller: Option<Arc<RefreshController>>,
     trusted_writer: Option<TrustedWriterConfig>,
 ) -> Result<MountHandle, FuseError> {
+    // Synchronous preflight, same as the configured entry points: the
+    // spawn below only logs `mount_inner` failures, so without this the
+    // caller would receive `Ok(MountHandle)` for a source whose views
+    // config is present but unloadable — neither the refusal nor a live
+    // mount.
+    load_views_config(source)?;
+
     let mountpoint_path = mountpoint.to_path_buf();
     let source_path = source.to_path_buf();
 
