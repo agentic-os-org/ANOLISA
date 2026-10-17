@@ -100,10 +100,11 @@ export class HookEventHandler {
       ...(toolUseId && { tool_use_id: toolUseId }),
     };
 
+    const context: HookEventContext = { toolName };
     const result = await this.executeHooks(
       HookEventName.PreToolUse,
       input,
-      undefined,
+      context,
       signal,
     );
     debugLogger.info(
@@ -149,7 +150,8 @@ export class HookEventHandler {
       error_type: errorType,
     };
 
-    return this.executeHooks(HookEventName.PostToolUseFailure, input);
+    const context: HookEventContext = { toolName };
+    return this.executeHooks(HookEventName.PostToolUseFailure, input, context);
   }
 
   /**
