@@ -475,6 +475,20 @@ def convert_session_to_trace(
                 "is_error": is_error,
             }]
 
+            # Media results (BrowserScreenshot, ReadMedia) arrive as image
+            # blocks on the tool-result message. The nested tool_result
+            # block keeps its text-only contract, so the images travel on
+            # the outer user message content -- the same shape the native
+            # ClawEval runner writes for visual evidence.
+            for block in content:
+                if block.get("type") == "image":
+                    ce_content.append({
+                        "type": "image",
+                        "data": block.get("data", ""),
+                        "mime_type": block.get("mime_type") or block.get("mimeType", "image/jpeg"),
+                        "source_path": block.get("source_path"),
+                    })
+
             # Update tool_call_map with result
             if tool_call_id in tool_call_map:
                 tc = tool_call_map[tool_call_id]
