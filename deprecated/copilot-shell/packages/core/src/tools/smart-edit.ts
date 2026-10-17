@@ -128,14 +128,18 @@ async function calculateFlexibleReplacement(
       const firstLineInMatch = window[0];
       const indentationMatch = firstLineInMatch.match(/^(\s*)/);
       const indentation = indentationMatch ? indentationMatch[1] : '';
+      // Splice each replacement line as its own sourceLines entry carrying
+      // a trailing newline, matching the invariant that every entry ends
+      // with '\n'. A single join('\n') element without a trailing newline
+      // fuses the last replacement line with the next original line in the
+      // final join('').
       const newBlockWithIndent = replaceLines.map(
-        (line: string) => `${indentation}${line}`,
+        (line: string) => `${indentation}${line}\n`,
       );
-      sourceLines.splice(
-        i,
-        searchLinesStripped.length,
-        newBlockWithIndent.join('\n'),
-      );
+      sourceLines.splice(i, searchLinesStripped.length, ...newBlockWithIndent);
+      // Advance exactly past the replaceLines.length entries just inserted
+      // so a consecutive match starting at the next original line is still
+      // examined.
       i += replaceLines.length;
     } else {
       i++;
@@ -203,11 +207,16 @@ async function calculateRegexReplacement(
     .map((line) => `${indentation}${line}`)
     .join('\n');
 
-  // Use replace with the regex to substitute the matched content.
-  // Since the regex doesn't have the 'g' flag, it will only replace the first occurrence.
+  // Substitute only the first matched span, literally. With a string
+  // pattern, String.replace substitutes the first occurrence only, which
+  // matches the no-`g` flexibleRegex above; the function form keeps the
+  // replacement literal so $-patterns ($&, $`, $', $$) occurring in it or
+  // in the matched file content are not expanded — the exact hazard
+  // safeLiteralReplace exists to avoid, but it would rewrite every
+  // identical match while we report occurrences: 1.
   const modifiedCode = currentContent.replace(
-    flexibleRegex,
-    newBlockWithIndent,
+    match[0],
+    () => newBlockWithIndent,
   );
 
   return {
