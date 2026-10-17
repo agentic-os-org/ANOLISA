@@ -281,15 +281,18 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             except ValueError:
                 continue
 
-            # Check C1: s index out of range
-            if s_idx >= len(xfs):
+            # Check C1: s index out of range. The lower bound matters as much
+            # as the upper one: a negative s would otherwise crash on far
+            # out-of-range values or silently wrap to xfs[-1] via Python
+            # negative indexing and audit the cell against the wrong style.
+            if s_idx < 0 or s_idx >= len(xfs):
                 v.append({
                     "type": "style_index_out_of_range",
                     "sheet": sheet_name,
                     "cell": cell_ref,
                     "s": s_idx,
                     "cellXfs_count": len(xfs),
-                    "fix": f"s={s_idx} exceeds cellXfs count={len(xfs)}; add missing <xf> entries or lower s value",
+                    "fix": f"s={s_idx} is outside cellXfs range 0..{len(xfs) - 1}; add missing <xf> entries or fix the s value",
                 })
                 continue
 
@@ -297,7 +300,7 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             font_id = xf["fontId"]
             num_fmt_id = xf["numFmtId"]
 
-            if font_id >= len(fonts):
+            if font_id < 0 or font_id >= len(fonts):
                 v.append({
                     "type": "font_index_out_of_range",
                     "sheet": sheet_name,
