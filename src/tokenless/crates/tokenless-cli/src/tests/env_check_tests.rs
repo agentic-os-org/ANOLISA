@@ -197,6 +197,44 @@ fn version_ge_patch_comparison() {
 }
 
 #[test]
+fn version_regex_matches_two_component_versions() {
+    // jq, GNU Make, gzip, and an rtk reporting "0.36" all print major.minor
+    // with no patch group; the extraction must not degrade them to "0.0.0".
+    assert_eq!(VERSION_RE.find("jq-1.6").map(|m| m.as_str()), Some("1.6"));
+    assert_eq!(
+        VERSION_RE.find("GNU Make 4.3\n").map(|m| m.as_str()),
+        Some("4.3")
+    );
+    assert_eq!(VERSION_RE.find("gzip 1.10").map(|m| m.as_str()), Some("1.10"));
+    assert_eq!(VERSION_RE.find("rtk 0.36").map(|m| m.as_str()), Some("0.36"));
+    // Three-component versions keep matching, with tool prefixes and
+    // trailing architecture noise intact.
+    assert_eq!(
+        VERSION_RE
+            .find("curl 8.1.2 (x86_64-linux-gnu)")
+            .map(|m| m.as_str()),
+        Some("8.1.2")
+    );
+    assert_eq!(
+        VERSION_RE
+            .find("GNU bash, version 5.2.21(1)-release")
+            .map(|m| m.as_str()),
+        Some("5.2.21")
+    );
+}
+
+#[test]
+fn installed_version_from_handles_two_component_and_missing_versions() {
+    assert_eq!(installed_version_from("jq-1.6"), "1.6");
+    assert_eq!(installed_version_from("GNU Make 4.3\n"), "4.3");
+    assert_eq!(
+        installed_version_from("curl 8.1.2 (x86_64-linux-gnu)\n"),
+        "8.1.2"
+    );
+    assert_eq!(installed_version_from("no version here"), "0.0.0");
+}
+
+#[test]
 fn binary_fallback_paths_cover_supported_installers() {
     let paths = binary_fallback_paths("rtk", "/home/alice");
     let expected = [
@@ -438,6 +476,23 @@ fn rtk_resolution_skips_incompatible_path_candidate() {
             directory.path().to_str().unwrap()
         ),
         Some(bundled.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_accepts_two_component_version() {
+    let directory = tempfile::tempdir().unwrap();
+    let rtk = directory.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\nprintf 'rtk 0.36'\n").unwrap();
+    chmod_file(&rtk, 0o700);
+
+    // An rtk reporting a two-component version ("0.36") satisfies the
+    // >= 0.35.0 floor and must be selected; a strict three-group pattern
+    // extracts nothing, rejects the candidate, and silently disables rtk.
+    assert_eq!(
+        select_rtk_path(Some(rtk.clone()), directory.path().to_str().unwrap()),
+        Some(rtk.to_string_lossy().into_owned())
     );
 }
 
