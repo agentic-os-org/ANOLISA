@@ -6288,7 +6288,12 @@ fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 }
 
 fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_dsack_at(info, recs, "/proc/sys/net/ipv4/tcp_dsack")
+    eval_tcp_dsack_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_dsack",
+        "/proc/sys/net/ipv4/tcp_sack",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_dsack`] (the `eval_*_at` idiom).
@@ -6303,8 +6308,27 @@ fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 /// (`proc_dou8vec_minmax`, no extra1/extra2; v6.6) rejects negatives at
 /// write time; the signed reader keeps the truthiness contract correct on
 /// both registrations.
-fn eval_tcp_dsack_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+///
+/// The switch alone is not enough to make it matter: both writers of a
+/// duplicate SACK test `tcp_is_sack(tp)` before the sysctl (v6.6
+/// net/ipv4/tcp_input.c:4473 in `tcp_dsack_set`, :4520 in `tcp_send_dupack`),
+/// and `tcp_is_sack()` is `tp->rx_opt.sack_ok` (include/net/tcp.h:1188-1191),
+/// which `tcp_parse_options()` sets from the SACK-permitted option only while
+/// `net.ipv4.tcp_sack` is on (net/ipv4/tcp_input.c:4127-4129). With a
+/// readable `tcp_sack` 0 no connection reaches the bookkeeping this knob
+/// turns on, so the advice waits for SACK to be on — the dependency gate the
+/// TIME_WAIT-reuse rule applies to `tcp_timestamps`. A switch that cannot be
+/// read keeps the advice: it is not evidence that SACK is off.
+fn eval_tcp_dsack_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    sack_path: &str,
+) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    if read_switch_i64(sack_path) == Some(0) {
         return 1;
     }
     // The reader maps a file it cannot interpret to 0 as well; only a
@@ -25964,6 +25988,12 @@ mod tests {
         // "-1" to Err and fell back to 0, the disabled value, so the
         // `== 0` gate invented a finding on a host whose D-SACK is on.
         let info = make_test_info();
+        let sack = std::env::temp_dir().join(format!(
+            "ktuner_dsack_sack_on_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&sack, b"1\n").unwrap();
         for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
             let path = std::env::temp_dir().join(format!(
                 "ktuner_dsack_{}_{:?}_{value}",
@@ -25972,7 +26002,12 @@ mod tests {
             ));
             std::fs::write(&path, format!("{value}\n")).unwrap();
             let mut recs = Vec::new();
-            let checked = eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            let checked = eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
             std::fs::remove_file(&path).ok();
             assert_eq!(checked, 1);
             assert_eq!(
@@ -25985,6 +26020,7 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+        std::fs::remove_file(&sack).ok();
     }
 
     #[test]
@@ -25994,10 +26030,16 @@ mod tests {
         // container's, typically) was reported as `current_value: "0"` and
         // answered with a write on a host whose switch was never read.
         let (off, on, others) = switch_fixture("tcp_dsack");
+        let (_, sack_on, _) = switch_fixture("tcp_dsack_sack");
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack_on.to_str().unwrap(),
+            );
             recs
         };
         let recs = advice(&off);
@@ -26011,6 +26053,51 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_dsack_advice_needs_sack_enabled() {
+        // Both writers of a duplicate SACK test tcp_is_sack() before the
+        // sysctl (v6.6 net/ipv4/tcp_input.c:4473, :4520), and that flag is set
+        // only for a connection whose SYN offered SACK while
+        // net.ipv4.tcp_sack was on (:4127-4129; include/net/tcp.h:1188-1191).
+        // With a readable 0 here no connection reaches the bookkeeping the
+        // tcp_dsack write turns on, so the advice was a no-op.
+        let (sack_off, sack_on, sack_others) = switch_fixture("tcp_dsack_needs_sack");
+        let (dsack_off, dsack_on, _) = switch_fixture("tcp_dsack_switch");
+        let info = make_test_info();
+        let advice = |dsack: &std::path::Path, sack: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                dsack.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&dsack_off, &sack_on).len(),
+            1,
+            "SACK on: the D-SACK switch decides"
+        );
+        assert!(
+            advice(&dsack_off, &sack_off).is_empty(),
+            "SACK off: nothing reads tcp_dsack"
+        );
+        for path in &sack_others {
+            assert_eq!(
+                advice(&dsack_off, path).len(),
+                1,
+                "{}: an unreadable SACK switch is not the value 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&dsack_on, &sack_on).is_empty(),
+            "a readable 1 needs no write"
+        );
     }
 
     #[test]
