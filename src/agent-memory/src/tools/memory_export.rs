@@ -64,7 +64,10 @@ pub struct ExportFilter {
     pub category: Option<String>,
     /// Filter by source ("auto-consolidation", "manual-observe"). None = all.
     pub source: Option<String>,
-    /// Include tasks in export. Default: true.
+    /// Include the task inventory in the export. Default: true.
+    ///
+    /// Independent of `category`/`source`: those filters select memories, and
+    /// the task list is governed by this flag alone.
     pub include_tasks: bool,
 }
 
@@ -164,6 +167,22 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
 
         let (frontmatter, body) = parse_frontmatter(&content);
 
+        // Split the task inventory out before the memory filters run. `category`
+        // and `source` describe memories; the task list is governed by
+        // `include_tasks` alone. Task frontmatter carries neither field, so
+        // filtering first dropped every task from a filtered export and
+        // re-importing that archive lost them (issue #5002).
+        if rel_path.starts_with("tasks/") {
+            if filter.include_tasks {
+                tasks.push(ExportedMemory {
+                    path: rel_path,
+                    frontmatter,
+                    content: body,
+                });
+            }
+            continue;
+        }
+
         // Apply category filter
         if let Some(ref cat) = filter.category {
             let entry_cat = frontmatter.get("category").cloned().unwrap_or_default();
@@ -182,28 +201,19 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             }
         }
 
-        let exported = ExportedMemory {
-            path: rel_path.clone(),
-            frontmatter: frontmatter.clone(),
-            content: body,
-        };
-
-        // Separate tasks from regular memories
-        if rel_path.starts_with("tasks/") {
-            if filter.include_tasks {
-                tasks.push(exported);
-            }
-        } else {
-            // Update stats
-            if let Some(cat) = frontmatter.get("category") {
-                *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
-            }
-            if let Some(src) = frontmatter.get("source") {
-                *stats.by_source.entry(src.clone()).or_insert(0) += 1;
-            }
-            stats.total_bytes += content.len() as u64;
-            memories.push(exported);
+        // Update stats
+        if let Some(cat) = frontmatter.get("category") {
+            *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
         }
+        if let Some(src) = frontmatter.get("source") {
+            *stats.by_source.entry(src.clone()).or_insert(0) += 1;
+        }
+        stats.total_bytes += content.len() as u64;
+        memories.push(ExportedMemory {
+            path: rel_path,
+            frontmatter,
+            content: body,
+        });
     }
 
     let agent_id = std::env::var("MCP_CLIENT_NAME").unwrap_or_else(|_| "unknown".into());
