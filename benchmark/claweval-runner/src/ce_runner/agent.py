@@ -510,83 +510,95 @@ def _find_session_file(session_id: str, agent_id: str | None = None) -> str:
     return ""
 
 
-def _get_last_assistant_has_tool_calls(session_file: str) -> bool:
-    """Check if the last assistant message in a session has tool calls.
-
-    Returns True if the last assistant message contains toolCall blocks,
-    meaning the agent is still working. Returns False if it ended with
-    only text (agent finished its turn).
-    """
-    last_assistant_has_tools = False
+def _read_user_agent_session(session_file: str) -> tuple[bool, list[dict[str, str]]]:
+    """Project conversation and last valid assistant tool state in one pass."""
+    messages: list[dict[str, str]] = []
+    last_has_tools = False
     try:
-        with open(session_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        with open(session_file, encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
                     continue
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
-                if event.get("type") != "message":
-                    continue
-                msg = event.get("message", {})
-                if msg.get("role") != "assistant":
-                    continue
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    has_tools = any(
-                        c.get("type") == "toolCall" for c in content
+                    log(
+                        f"  [WARNING] invalid session JSON: {session_file}:{line_number}"
                     )
-                    last_assistant_has_tools = has_tools
-    except Exception:
-        pass
-    return last_assistant_has_tools
-
-
-def _build_conversation_for_user_agent(session_file: str) -> list:
-    """Build a simplified conversation history from session file for UserAgent.
-
-    Returns a list of dicts with 'role' and 'text' keys, representing the
-    conversation from the user's perspective (suitable for UserAgent).
-    """
-    messages = []
-    try:
-        with open(session_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
                     continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
+                if not isinstance(event, dict):
+                    log(
+                        f"  [WARNING] invalid session record: {session_file}:{line_number}"
+                    )
                     continue
                 if event.get("type") != "message":
                     continue
-                msg = event.get("message", {})
-                role = msg.get("role", "")
+                message = event.get("message")
+                if not isinstance(message, dict):
+                    log(
+                        f"  [WARNING] invalid session message: {session_file}:{line_number}"
+                    )
+                    continue
+                role = message.get("role")
                 if role not in ("user", "assistant"):
                     continue
-                content = msg.get("content", [])
+                content = message.get("content", [])
                 if isinstance(content, str):
-                    text = content
+                    text, has_tools = content, False
                 elif isinstance(content, list):
-                    texts = [
-                        c.get("text", "") for c in content
-                        if c.get("type") == "text"
-                    ]
-                    text = "\n".join(t for t in texts if t)
+                    texts = []
+                    has_tools = False
+                    valid_blocks = 0
+                    invalid_blocks = False
+                    for block in content:
+                        if not isinstance(block, dict):
+                            invalid_blocks = True
+                            continue
+                        valid_blocks += 1
+                        if block.get("type") == "toolCall":
+                            has_tools = True
+                        elif block.get("type") == "text":
+                            value = block.get("text", "")
+                            if isinstance(value, str):
+                                if value:
+                                    texts.append(value)
+                            else:
+                                valid_blocks -= 1
+                                invalid_blocks = True
+                    if invalid_blocks:
+                        log(
+                            f"  [WARNING] invalid session blocks: {session_file}:{line_number}"
+                        )
+                    if content and not valid_blocks:
+                        continue
+                    text = "\n".join(texts)
                 else:
-                    text = ""
+                    log(
+                        f"  [WARNING] invalid session content: {session_file}:{line_number}"
+                    )
+                    continue
+                if role == "assistant":
+                    last_has_tools = has_tools
                 if text:
                     messages.append({"role": role, "text": text})
-    except Exception:
-        pass
-    return messages
+    except (OSError, UnicodeError) as error:
+        log(f"  [WARNING] cannot read session {session_file}: {error}")
+    return last_has_tools, messages
 
 
-def _call_user_agent_llm(ua_config: dict, persona: str,
-                          conversation: list) -> str | None:
+def _get_last_assistant_has_tool_calls(session_file: str) -> bool:
+    """Return whether the last valid assistant message contains toolCall blocks."""
+    return _read_user_agent_session(session_file)[0]
+
+
+def _build_conversation_for_user_agent(session_file: str) -> list[dict[str, str]]:
+    """Build user/assistant text history from valid recorded session messages."""
+    return _read_user_agent_session(session_file)[1]
+
+
+def _call_user_agent_llm(
+    ua_config: dict, persona: str, conversation: list
+) -> str | None:
     """Call the UserAgent LLM to generate a simulated user response.
 
     Uses the same prompt format as claw-eval's UserAgent class.
@@ -787,12 +799,12 @@ def run_agent_with_user_agent(session_id: str, task_yaml: str, timeout: int,
 
     for round_num in range(1, max_rounds + 1):
         # Check if agent's last message has tool calls (still working)
-        if _get_last_assistant_has_tool_calls(session_file):
+        has_tool_calls, conversation = _read_user_agent_session(session_file)
+        if has_tool_calls:
             log(f"  [user-agent] Agent still has tool calls, unexpected end")
             break
 
         # Build conversation and call UserAgent
-        conversation = _build_conversation_for_user_agent(session_file)
         log(f"  [user-agent] Round {round_num}/{max_rounds}: calling UserAgent LLM...")
 
         ua_reply = _call_user_agent_llm(ua_config, persona, conversation)

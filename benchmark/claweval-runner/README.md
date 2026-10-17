@@ -198,6 +198,13 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Each UserAgent dialogue round derives its conversation and latest assistant tool
+state from one UTF-8 session read. Malformed records or content blocks produce
+source-line warnings and do not discard later valid messages. Plain-string
+assistant text completes its turn like text-only blocks; tool work still prevents
+a simulated user reply. The reader retains the existing empty/partial history
+defaults for unreadable files, now with an explicit warning.
+
 ## Troubleshooting
 
 | Issue | Fix |
