@@ -30,6 +30,7 @@ fn consolidation_retires_the_conflicting_fact_but_preserves_journals_and_notes()
         "facts/extra.jsonl",
         "facts-other/decoy.md",
     ];
+    // The first write already created facts/facts.jsonl.
     for path in &retained[1..] {
         let full = tmp.path().join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -45,10 +46,14 @@ fn consolidation_retires_the_conflicting_fact_but_preserves_journals_and_notes()
             .unwrap();
     }
     let conflicts = store.detect_conflicts("walrus walrus", -100.0).unwrap();
+    let candidates: std::collections::BTreeSet<_> =
+        conflicts.iter().map(|(path, _)| path.as_str()).collect();
+    let expected: std::collections::BTreeSet<_> = std::iter::once(old_path.as_str())
+        .chain(retained.iter().copied())
+        .collect();
     assert_eq!(
-        conflicts.len(),
-        5,
-        "all five indexed records must be candidates"
+        candidates, expected,
+        "fixture must include every record type"
     );
     let index = Arc::new(Mutex::new(store));
     let new = fact();
@@ -77,6 +82,68 @@ fn consolidation_retires_the_conflicting_fact_but_preserves_journals_and_notes()
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(path)).unwrap(),
             "walrus"
+        );
+    }
+}
+
+#[test]
+fn non_facts_cannot_exhaust_fact_conflict_candidates() {
+    for (term, count) in [("walrus", 6), ("海狸", 55)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut old = fact();
+        old.category = FactCategory::Lesson;
+        old.title = term.into();
+        old.content = format!("{term} {}", "padding ".repeat(100));
+        FactWriter::new(tmp.path()).write(&old).unwrap();
+        let old_path = format!("facts/lesson/{}.md", old.id);
+        let dir = tmp.path().join(".anolisa/index");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = BM25Store::open(&dir.join("bm25.db"), 0.0, 0.0, true).unwrap();
+        // Insert more non-facts than either query path's candidate budget.
+        let mut retained = Vec::new();
+        for i in 0..count {
+            let path = format!("notes/journal{i}.jsonl");
+            store
+                .upsert(&path, 1, 10, &format!("{term} {term} {term}"), None)
+                .unwrap();
+            retained.push(path);
+        }
+        let body = std::fs::read_to_string(tmp.path().join(&old_path)).unwrap();
+        store
+            .upsert(&old_path, 1, body.len() as u64, &body, None)
+            .unwrap();
+        let query = format!("{term} {term}");
+        assert!(
+            store
+                .detect_conflicts(&query, -100.0)
+                .unwrap()
+                .iter()
+                .all(|(p, _)| p != &old_path),
+            "fixture must crowd the fact out of the general query"
+        );
+        let index = Arc::new(Mutex::new(store));
+        let mut new = fact();
+        new.title = term.into();
+        new.content = term.into();
+        FactWriter::new(tmp.path())
+            .with_index(index.clone(), -100.0)
+            .write(&new)
+            .unwrap();
+        let hits = index.lock().unwrap().search(term, 100, true).unwrap();
+        assert!(
+            !hits.iter().any(|h| h.path == old_path),
+            "fact in another category must still retire ({term})"
+        );
+        for path in retained {
+            assert!(
+                hits.iter().any(|h| h.path == path),
+                "non-fact must survive ({term}): {path}"
+            );
+        }
+        assert!(
+            std::fs::read_to_string(tmp.path().join(old_path))
+                .unwrap()
+                .contains(&format!("superseded_by: {}", new.id))
         );
     }
 }

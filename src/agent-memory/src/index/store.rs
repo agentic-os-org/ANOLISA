@@ -32,6 +32,14 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+const FACT_RECORD_GLOB: &str = "facts/*.md";
+
+/// Recognize mount-relative Markdown fact paths eligible for replacement.
+pub(crate) fn is_fact_record(path: &str) -> bool {
+    let path = Path::new(path);
+    path.starts_with("facts") && path.extension() == Some(std::ffi::OsStr::new("md"))
+}
+
 impl BM25Store {
     pub fn open(
         path: &Path,
@@ -704,7 +712,28 @@ impl BM25Store {
 
     /// Detect potential conflicts: search for files similar to the given
     /// text and return those with BM25 score above the threshold.
+    /// Results include journals and source notes; consolidation must use
+    /// `detect_fact_conflicts` to restrict replacement eligibility.
     pub fn detect_conflicts(&self, text: &str, threshold: f64) -> Result<Vec<(String, f64)>> {
+        self.detect_conflicts_inner(text, threshold, false)
+    }
+
+    /// Find replacement candidates only among Markdown facts, before candidate limits.
+    /// Both FTS ranking and the short-query fallback preserve this scope.
+    pub(crate) fn detect_fact_conflicts(
+        &self,
+        text: &str,
+        threshold: f64,
+    ) -> Result<Vec<(String, f64)>> {
+        self.detect_conflicts_inner(text, threshold, true)
+    }
+
+    fn detect_conflicts_inner(
+        &self,
+        text: &str,
+        threshold: f64,
+        facts_only: bool,
+    ) -> Result<Vec<(String, f64)>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -719,7 +748,7 @@ impl BM25Store {
         // past conflict detection. Fall back to a LIKE substring scan.
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         if tokens.iter().any(|t| t.chars().count() < 3) {
-            return self.detect_conflicts_like(&tokens, threshold);
+            return self.detect_conflicts_like(&tokens, threshold, facts_only);
         }
 
         // Search excluding cold and superseded files.
@@ -728,11 +757,12 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 AND f.is_cold = 0 AND f.is_superseded = 0
+              AND (?2 = 0 OR (f.path GLOB ?3 AND f.path NOT GLOB '*/.md'))
             ORDER BY rank
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q], |row| {
+        let rows = stmt.query_map(params![fts_q, facts_only, FACT_RECORD_GLOB], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
 
@@ -751,7 +781,12 @@ impl BM25Store {
     /// recall-oriented: when we can't rank, flag every substring match as a
     /// potential conflict rather than silently miss a duplicate/contradiction.
     /// The caller still reviews flagged conflicts before superseding.
-    fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
+    fn detect_conflicts_like(
+        &self,
+        tokens: &[&str],
+        threshold: f64,
+        facts_only: bool,
+    ) -> Result<Vec<(String, f64)>> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -770,14 +805,17 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
+              AND (? = 0 OR (f.path GLOB ? AND f.path NOT GLOB '*/.md'))
             LIMIT 50
             "#
         );
         let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
-        let bind: Vec<rusqlite::types::Value> = like_patterns
+        let mut bind: Vec<rusqlite::types::Value> = like_patterns
             .iter()
             .map(|s| rusqlite::types::Value::Text(s.clone()))
             .collect();
+        bind.push(rusqlite::types::Value::Integer(i64::from(facts_only)));
+        bind.push(rusqlite::types::Value::Text(FACT_RECORD_GLOB.to_owned()));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
             Ok((
@@ -1836,6 +1874,35 @@ mod tests {
         let hits = s.search("unique", 5, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "old.md");
+    }
+
+    #[test]
+    fn fact_query_and_writer_agree_on_record_paths() {
+        for (path, eligible) in [
+            ("facts/lesson/x.md", true),
+            ("facts/a/b/c.md", true),
+            ("facts/facts.jsonl", false),
+            ("facts/extra.jsonl", false),
+            ("facts-other/decoy.md", false),
+            ("myfacts/x.md", false),
+            ("notes/source.md", false),
+            ("facts", false),
+            ("facts/x.MD", false),
+            ("./facts/x.md", false),
+            ("facts/.md", false),
+        ] {
+            assert_eq!(is_fact_record(path), eligible, "writer eligibility: {path}");
+            for term in ["walrus", "海狸"] {
+                let mut store = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
+                store.upsert(path, 1, 10, term, None).unwrap();
+                let hits = store.detect_fact_conflicts(term, -100.0).unwrap();
+                assert_eq!(
+                    !hits.is_empty(),
+                    eligible,
+                    "query eligibility ({term}): {path}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -81,15 +81,13 @@ impl FactWriter {
                 fact.content.chars().take(100).collect::<String>()
             );
             let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-            match s.detect_conflicts(&search_text, self.conflict_threshold) {
+            match s.detect_fact_conflicts(&search_text, self.conflict_threshold) {
                 Ok(conflicts) => {
                     for (old_path, score) in &conflicts {
                         // Search also indexes journals and source notes; only fact
                         // records participate in the replacement lifecycle.
-                        let path = Path::new(old_path);
-                        if !path.starts_with("facts")
-                            || path.extension() != Some(std::ffi::OsStr::new("md"))
-                        {
+                        if !crate::index::store::is_fact_record(old_path) {
+                            tracing::debug!(path = %old_path, "skipping non-fact conflict candidate");
                             continue;
                         }
                         tracing::info!(
