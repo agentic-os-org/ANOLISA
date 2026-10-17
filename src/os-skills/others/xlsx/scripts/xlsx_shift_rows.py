@@ -37,7 +37,8 @@ import sys
 import os
 import re
 import xml.etree.ElementTree as ET
-import xml.dom.minidom
+
+from xml_writer import write_tree as _write_tree
 
 
 def col_letter(n: int) -> str:
@@ -285,22 +286,6 @@ def process_pivot_cache(path: str, at: int, delta: int) -> int:
     if changes:
         _write_tree(tree, path)
     return changes
-
-
-def _write_tree(tree: ET.ElementTree, path: str) -> None:
-    """Write ElementTree back to file with pretty-printing."""
-    tree.write(path, encoding="unicode", xml_declaration=False)
-    # Re-pretty-print for readability
-    with open(path, "r", encoding="utf-8") as fh:
-        raw = fh.read()
-    try:
-        dom = xml.dom.minidom.parseString(raw.encode("utf-8"))
-        pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        lines = [line for line in pretty.splitlines() if line.strip()]
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-    except Exception:
-        pass  # If pretty-print fails, leave the file as-is
 
 
 # ---------------------------------------------------------------------------
