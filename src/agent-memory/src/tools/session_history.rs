@@ -75,7 +75,7 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
         let created_at = fm.get("created_at").cloned().unwrap_or_default();
 
         // Parse tool_calls count from content
-        let tool_calls = parse_count_from_body(&body, "tool calls");
+        let tool_calls = parse_count_from_body(&body);
         let tools_used = parse_list_from_body(&body, "tools:");
         let files_modified = parse_list_from_body(&body, "files:");
 
@@ -209,24 +209,51 @@ fn extract_body(content: &str) -> String {
     content.trim().to_string()
 }
 
-fn parse_count_from_body(body: &str, keyword: &str) -> usize {
-    // Look for patterns like "42 tool calls" or "42 次工具调用"
+/// Ordered most-specific first; the first needle present in a line wins.
+const COUNT_NEEDLES: &[&str] = &["次工具调用", "tool calls", "工具调用", "tool call", "调用"];
+
+fn parse_count_from_body(body: &str) -> usize {
+    // The count is anchored to a call-count keyword, not "first number on
+    // the line": the summary generator writes the duration before the
+    // count ("Session 持续约 15 分钟，共 42 次工具调用（…）"), so a
+    // first-number scan reports the minutes as the count. The needles are
+    // ordered most-specific first, so the loose 调用 tail only fires when
+    // the tighter wordings are absent; the number before the keyword wins
+    // over one after it, and both word orders ("42 次工具调用" and
+    // "工具调用 42 次") report the count.
     for line in body.lines() {
-        if line.contains(keyword) || (keyword == "tool calls" && line.contains("次")) {
-            // Extract first number
-            let num: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num.parse::<usize>() {
-                return n;
+        for needle in COUNT_NEEDLES {
+            let Some(pos) = line.find(needle) else {
+                continue;
+            };
+            if let Some(count) = last_number(&line[..pos]) {
+                return count;
             }
-            // Try to find number in the line
-            for word in line.split_whitespace() {
-                if let Ok(n) = word.parse::<usize>() {
-                    return n;
-                }
+            if let Some(count) = first_number(&line[pos + needle.len()..]) {
+                return count;
             }
         }
     }
     0
+}
+
+/// ASCII digit runs in `text`, parsed, in order. Runs that overflow
+/// `usize` (hash- or ID-like tokens) are skipped rather than aborting the
+/// scan: an unparseable run must not discard an already-parsed neighbour.
+fn digit_runs(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .filter_map(|run| run.parse().ok())
+}
+
+/// Last parsed digit run, as `usize`.
+fn last_number(text: &str) -> Option<usize> {
+    digit_runs(text).last()
+}
+
+/// First parsed digit run, as `usize`.
+fn first_number(text: &str) -> Option<usize> {
+    digit_runs(text).next()
 }
 
 fn parse_list_from_body(body: &str, prefix: &str) -> Vec<String> {
@@ -266,18 +293,70 @@ mod tests {
     #[test]
     fn parse_count_from_body_finds_number() {
         let body = "Session had 42 tool calls across 5 tools.";
-        assert_eq!(parse_count_from_body(body, "tool calls"), 42);
+        assert_eq!(parse_count_from_body(body), 42);
     }
 
     #[test]
     fn parse_count_chinese() {
         let body = "共 15 次工具调用";
-        assert_eq!(parse_count_from_body(body, "次"), 15);
+        assert_eq!(parse_count_from_body(body), 15);
     }
 
     #[test]
     fn parse_count_returns_zero_when_not_found() {
         let body = "No tool calls mentioned here.";
-        assert_eq!(parse_count_from_body(body, "tool calls"), 0);
+        assert_eq!(parse_count_from_body(body), 0);
+    }
+
+    #[test]
+    fn parse_count_generator_format_reports_calls_not_minutes() {
+        // Regression: the summary generator writes the duration before the
+        // call count, so the old first-number scan reported the minutes.
+        let body = "Session 持续约 15 分钟，共 42 次工具调用（40 成功，2 失败），使用工具类型: `mem_write`，总数据量 1234 bytes。";
+        assert_eq!(parse_count_from_body(body), 42);
+    }
+
+    #[test]
+    fn parse_count_accepts_count_after_keyword_word_order() {
+        // Free-form and agent-authored summaries also put the count after
+        // the keyword; the exact-substring fallback used to return 0 for
+        // these. The needle table keeps the precision (a bare duration
+        // line still reports 0) while restoring the recall.
+        assert_eq!(parse_count_from_body("工具调用 42 次"), 42);
+        assert_eq!(parse_count_from_body("本次会话共 15 次调用工具"), 15);
+    }
+
+    #[test]
+    fn parse_count_skips_unparseable_runs_without_losing_the_count() {
+        // A hash- or ID-like token between the count and the keyword must
+        // not discard the count: last_number used to clobber a good value
+        // with None when a later, unparseable run appeared.
+        assert_eq!(
+            parse_count_from_body("42 99999999999999999999999999 次工具调用"),
+            42
+        );
+    }
+
+    #[test]
+    fn parse_count_duration_without_call_keyword_is_zero() {
+        // The old "any line containing 次" fallback reported the minutes of
+        // a plain duration line as the call count.
+        assert_eq!(parse_count_from_body("第一次尝试，耗时 15 分钟"), 0);
+    }
+
+    #[test]
+    fn parse_count_fact_title_and_other_english_forms() {
+        // Fact titles and non-canonical English phrasings carried the same
+        // duration-first trap as the generator line; the keyword anchoring
+        // fixes them all (pinned so the behaviour cannot silently regress).
+        assert_eq!(parse_count_from_body("活跃会话 15 分钟，42 次工具调用"), 42);
+        assert_eq!(
+            parse_count_from_body("Session 持续约 <1 分钟，共 7 次工具调用（…）"),
+            7
+        );
+        assert_eq!(
+            parse_count_from_body("Session lasted 15 minutes with 42 tool calls."),
+            42
+        );
     }
 }
