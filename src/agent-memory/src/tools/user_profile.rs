@@ -344,15 +344,13 @@ fn analyze_notes(dir: &Path, profile: &mut UserProfile) -> Result<()> {
 
 fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
     let mut fm = HashMap::new();
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            for line in rest[..end].lines() {
-                if let Some((key, value)) = line.split_once(": ") {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    if !key.starts_with(' ') && !key.starts_with('-') {
-                        fm.insert(key.to_string(), value.to_string());
-                    }
+    if let Some((fm_str, _)) = super::split_frontmatter(content) {
+        for line in fm_str.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                if !key.starts_with(' ') && !key.starts_with('-') {
+                    fm.insert(key.to_string(), value.to_string());
                 }
             }
         }
@@ -361,12 +359,13 @@ fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
 }
 
 fn extract_body(content: &str) -> String {
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
-        }
+    // Fence matching mirrors parse_frontmatter_flat above: the closing
+    // fence is a line that is exactly `---` (see `split_frontmatter`), it
+    // may end the file, and it may close an empty frontmatter block.
+    match super::split_frontmatter(content) {
+        Some((_, body)) => body.trim().to_string(),
+        None => content.trim().to_string(),
     }
-    content.trim().to_string()
 }
 
 #[cfg(test)]
@@ -393,6 +392,49 @@ mod tests {
         let content = "Just plain text.";
         let body = extract_body(content);
         assert_eq!(body, "Just plain text.");
+    }
+
+    #[test]
+    fn extract_body_accepts_fence_without_trailing_newline() {
+        // A closing fence that ends the file (no trailing newline) is a
+        // valid frontmatter terminator for the flat key parser; the body
+        // extractor must agree instead of returning the whole file.
+        let content = "---\nid: abc\n---";
+        let body = extract_body(content);
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn crlf_frontmatter_parses_in_both_fence_spellings() {
+        // `mem_write` stores agent content verbatim, so CRLF notes exist on
+        // disk. The opening fence accepts `---\r\n`, and the per-line `\r`
+        // inside the frontmatter is stripped by `str::lines()`.
+        let fm = parse_frontmatter_flat("---\r\nid: abc\r\ncategory: lesson\r\n---\r\nbody");
+        assert_eq!(fm.get("id").unwrap(), "abc");
+        assert_eq!(fm.get("category").unwrap(), "lesson");
+        assert_eq!(extract_body("---\r\nid: abc\r\n---\r\nbody"), "body");
+        // Mixed: CRLF opening fence, LF closing fence.
+        let fm = parse_frontmatter_flat("---\r\nid: abc\n---\nbody");
+        assert_eq!(fm.get("id").unwrap(), "abc");
+    }
+
+    #[test]
+    fn false_fences_do_not_close_frontmatter() {
+        // Only a line that is exactly `---` closes frontmatter. A thematic
+        // break, a unified-diff header and a fence followed by a trailing
+        // space are body content: the prefix-only match used to delete the
+        // `---` bytes and shift the rest of the body left.
+        let thematic = "---\ntitle: t\n----\nreal body";
+        assert_eq!(parse_frontmatter_flat(thematic).len(), 0);
+        assert_eq!(extract_body(thematic), thematic.trim());
+
+        let diff = "---\ntitle: patch\n\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1 +1 @@\n";
+        assert_eq!(parse_frontmatter_flat(diff).len(), 0);
+        assert_eq!(extract_body(diff), diff.trim());
+
+        let trailing_space = "---\nid: abc\n--- \n";
+        assert_eq!(parse_frontmatter_flat(trailing_space).len(), 0);
+        assert_eq!(extract_body(trailing_space), trailing_space.trim());
     }
 
     #[test]
