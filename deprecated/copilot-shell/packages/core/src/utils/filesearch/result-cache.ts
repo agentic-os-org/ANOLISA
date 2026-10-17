@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+const GLOB_SYNTAX = /[!*?[\]{}()+|\\]/;
+
 /**
  * Implements an in-memory cache for file search results.
  * This cache optimizes subsequent searches by leveraging previously computed results.
@@ -40,12 +42,18 @@ export class ResultCache {
     // If a user first searches for "foo", and then for "foobar",
     // we don't need to search through all files again. We can start
     // from the results of the "foo" search.
-    // This finds the most specific, already-cached query that is a prefix
-    // of the current query.
+    // Glob and escape syntax can broaden a pattern when text is appended.
+    // Only literal queries justify narrowing by a cached literal prefix.
     let bestBaseQuery = '';
-    for (const key of this.cache?.keys?.() ?? []) {
-      if (query.startsWith(key) && key.length > bestBaseQuery.length) {
-        bestBaseQuery = key;
+    if (!GLOB_SYNTAX.test(query)) {
+      for (const key of this.cache.keys()) {
+        if (
+          !GLOB_SYNTAX.test(key) &&
+          query.startsWith(key) &&
+          key.length > bestBaseQuery.length
+        ) {
+          bestBaseQuery = key;
+        }
       }
     }
 
