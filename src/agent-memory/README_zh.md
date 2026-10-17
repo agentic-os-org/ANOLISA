@@ -30,7 +30,9 @@ sudo yum install agent-memory
 
 随包附带的插件（`memory-anolisa`）由
 `/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh` 部署，默认授予插件声明的能力。设置
-`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。共用的
+`ANOLISA_ACCEPT_CAPABILITIES=0` 拒绝的是同一份同意，tokenless 的 OpenClaw 安装脚本也识别它；两者同时设置时以
+agent-memory 变量为准。设置
 `AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
 
 ```bash

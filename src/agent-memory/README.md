@@ -32,7 +32,10 @@ The bundled plugin (`memory-anolisa`) is deployed by
 `/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh`, which
 grants the plugin's declared capabilities by default. Set
 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold consent — on hosts that gate
-consent the install then fails until consent is granted interactively. Set
+consent the install then fails until consent is granted interactively. The
+shared `ANOLISA_ACCEPT_CAPABILITIES=0` withholds the same consent and is also
+honored by the tokenless OpenClaw installer; the agent-memory variable wins
+when both are set. Set
 `AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
 that would still receive one. Full reference:
 [user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
