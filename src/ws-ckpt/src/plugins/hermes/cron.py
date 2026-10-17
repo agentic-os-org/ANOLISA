@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import subprocess
 import tempfile
+import time
 from typing import List, Optional
 
 _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
+
+# Same acquisition window and poll interval as the OpenClaw plugin's
+# `withLock` (openclaw/src/cron.ts), so both plugins degrade identically.
+_LOCK_WAIT_S = 5.0
+_LOCK_POLL_S = 0.05
 
 # Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
 _CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
@@ -130,14 +135,45 @@ class CrontabManager:
 
     @staticmethod
     def _with_lock(fn):
-        """Execute fn while holding an exclusive flock to prevent TOCTOU races."""
-        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+        """Execute fn while holding the shared ws-ckpt cron lock directory.
+
+        Uses the same mkdir-based protocol as the OpenClaw plugin's cron.ts
+        (identical lock path, 5 s acquisition window, fail-open on timeout,
+        owner-only removal). The previous flock-on-a-file scheme collided
+        with that plugin at the same path but through an incompatible
+        primitive: an OpenClaw lock *directory* made ``os.open`` raise
+        ``IsADirectoryError`` here (crashing every cron sync, including
+        against a stale directory left by a crashed holder), while this
+        side's persistent lock *file* made OpenClaw's ``mkdirSync`` fail
+        forever — so it always waited out its window and proceeded
+        unlocked, voiding mutual exclusion for both plugins.
+        """
+        acquired = False
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while True:
+            try:
+                os.mkdir(_LOCK_PATH)
+                acquired = True
+                break
+            except FileExistsError:
+                pass
+            except OSError:
+                # Non-contention failures (e.g. EACCES) match the OpenClaw
+                # side: keep retrying, then proceed unlocked rather than fail.
+                pass
+            if time.monotonic() >= deadline:
+                break  # proceed unlocked rather than fail
+            time.sleep(_LOCK_POLL_S)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
             return fn()
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            # Only the owner removes the lock directory: a caller that timed
+            # out and proceeded unlocked must not evict another holder.
+            if acquired:
+                try:
+                    os.rmdir(_LOCK_PATH)
+                except OSError:
+                    pass
 
     @staticmethod
     def sync(workspace: str, schedules: List[str]) -> bool:
