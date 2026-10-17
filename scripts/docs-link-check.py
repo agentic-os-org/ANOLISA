@@ -83,4 +83,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Status symbols and Unicode paths must not change the check's exit status.
+    sys.stdout.reconfigure(errors="backslashreplace")
     sys.exit(main())
