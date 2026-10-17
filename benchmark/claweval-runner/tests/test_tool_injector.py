@@ -336,3 +336,110 @@ class TestMcpDirectWrite:
         assert set(sb_srv.keys()) == {"command", "args"}
         assert sb_srv["command"] == _PYTHON
         assert "http://localhost:20050" in sb_srv["args"]
+
+
+class TestHostToolDenyBaseline:
+    """The injected agent must deny gateway built-ins AND agent-memory tools.
+
+    The agent-memory OpenClaw plugin registers its tools on the gateway itself
+    rather than through an MCP server, so neither ``_DENY_BUILTIN_TOOLS`` nor
+    the ``<serverKey>__*`` wildcards from ``_build_deny_list`` match them, while
+    its store outlives the task, the run, and the gateway restart. Both
+    spellings stay denied: ``anolisa_memory_*`` (agent-memory >= 0.2.8) and
+    ``memory_get`` / ``memory_search`` (agent-memory <= 0.2.7, which are also
+    the host ``memory-core`` built-in names).
+    """
+
+    MEMORY_PLUGIN_TOOLS = [
+        "anolisa_memory_search", "anolisa_memory_get",
+        "memory_observe", "memory_get_context",
+    ]
+
+    @pytest.fixture
+    def openclaw_config(self, tmp_path):
+        """Create a minimal openclaw.json for testing."""
+        config = {
+            "agents": {"defaults": {"maxConcurrent": 4}, "list": []},
+            "mcp": {"servers": {}},
+            "gateway": {"port": 18789},
+        }
+        config_path = tmp_path / "openclaw.json"
+        config_path.write_text(json.dumps(config, indent=2))
+        return str(config_path)
+
+    @pytest.fixture
+    def task_yaml_file(self, tmp_path):
+        """Create a minimal task.yaml for testing."""
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text(
+            "task_id: T001_test_task\n"
+            "services:\n"
+            "  - name: calendar\n"
+            "    port: 5001\n"
+            "    health_check: http://localhost:5001/health\n"
+            "tools:\n"
+            "  - calendar_list_events\n"
+        )
+        return str(task_yaml)
+
+    def test_deny_baseline_merges_builtins_and_memory_tools(self):
+        """_DENY_HOST_TOOLS is the union the builder starts from."""
+        from ce_runner.tool_injector import (_DENY_BUILTIN_TOOLS,
+                                             _DENY_HOST_TOOLS,
+                                             _DENY_MEMORY_PLUGIN_TOOLS)
+
+        assert list(_DENY_MEMORY_PLUGIN_TOOLS) == self.MEMORY_PLUGIN_TOOLS
+        assert set(_DENY_BUILTIN_TOOLS).issubset(set(_DENY_HOST_TOOLS))
+        assert set(_DENY_MEMORY_PLUGIN_TOOLS).issubset(set(_DENY_HOST_TOOLS))
+
+    def test_build_agent_tools_denies_memory_plugin_tools(self):
+        """build_agent_tools denies every agent-memory tool, both spellings."""
+        from ce_runner.tool_injector import build_agent_tools
+
+        tools = build_agent_tools(
+            allowed=["claw-eval-mock-t001__calendar_list_events"],
+        )
+        deny = tools["deny"]
+
+        for name in self.MEMORY_PLUGIN_TOOLS:
+            assert name in deny, f"agent-memory tool '{name}' must be denied"
+        # agent-memory <= 0.2.7 registered its read/search tools under the
+        # host names, which the built-in list already blocks.
+        assert "memory_get" in deny and "memory_search" in deny
+        # Denying must not be undone by the allow list.
+        for name in self.MEMORY_PLUGIN_TOOLS:
+            assert name not in tools["allow"]
+
+    def test_extra_deny_appended_after_host_baseline(self):
+        """Cross-task MCP wildcards are added on top of the host baseline."""
+        from ce_runner.tool_injector import _DENY_HOST_TOOLS, build_agent_tools
+
+        tools = build_agent_tools(
+            allowed=["claw-eval-mock-t001__calendar_list_events"],
+            extra_deny=["claw-eval-mock-t002__*"],
+        )
+
+        assert set(_DENY_HOST_TOOLS).issubset(set(tools["deny"]))
+        assert tools["deny"][-1] == "claw-eval-mock-t002__*"
+
+    def test_configure_writes_memory_deny_into_agent(
+        self, openclaw_config, task_yaml_file,
+    ):
+        """configure() persists the memory denies into the agent entry."""
+        from ce_runner.tool_injector import ToolInjector
+
+        injector = ToolInjector(openclaw_config)
+        with patch("subprocess.run"):
+            ctx = injector.configure(
+                task_yaml_file, port_offset=0,
+                sandbox_url="http://localhost:20000",
+            )
+
+        with open(openclaw_config) as f:
+            config = json.load(f)
+
+        agent = next(a for a in config["agents"]["list"]
+                     if a["id"] == ctx.agent_id)
+        deny = agent["tools"]["deny"]
+        for name in self.MEMORY_PLUGIN_TOOLS:
+            assert name in deny, f"tools.deny missing '{name}': {deny}"
