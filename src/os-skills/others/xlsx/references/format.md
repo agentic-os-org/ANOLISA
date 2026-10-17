@@ -453,7 +453,7 @@ After appending, cross-sheet reference currency cells use `s="13"`.
 ### 6.2 Step 1 — Unpack
 
 ```bash
-python3 SKILL_DIR/scripts/xlsx_unpack.py input.xlsx /tmp/xlsx_fmt/
+python3 SKILL_DIR/scripts/xlsx_unpack.py input.xlsx /tmp/xlsx_fmt/unpacked/
 ```
 
 If the script is unavailable, unpack manually:
