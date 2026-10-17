@@ -603,7 +603,15 @@ impl SkillFs {
                                     physical = dir.join("SKILL.md");
                                 }
                                 PathType::NestedPassthrough { relative_path, .. } => {
-                                    physical = dir.join(relative_path);
+                                    // I4: grace bypass — whitelisted paths
+                                    // open from the live source, matching
+                                    // the flat open path.
+                                    if !self.is_post_publish_grace_allowed(
+                                        &nested_id,
+                                        Some(relative_path.as_path()),
+                                    ) {
+                                        physical = dir.join(relative_path);
+                                    }
                                 }
                                 _ => {}
                             }
