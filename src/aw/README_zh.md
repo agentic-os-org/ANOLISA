@@ -39,7 +39,7 @@ sec-core 指南；`aw inspect` 保持原合同，不探测后台。
 | Qoder CLI | 原生命令 Hook 合同，记录实际版本 | 交互或 print |
 | OpenClaw | 2026.9.6 | 新 Gateway |
 | AgentScope SDK | 2.0.6 | 单个前台 Python worker 中显式接线的公共工厂 |
-| QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
+| QwenPaw / AgentScope | 2.2.2b4 / 2.0.9 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | AW 管理的前台 Node worker 中的公共 SDK 工厂 |
 | Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | 使用公共 AW client 工厂的前台 Python worker |
