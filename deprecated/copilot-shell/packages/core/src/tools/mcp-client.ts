@@ -828,6 +828,11 @@ export async function connectToMcpServer(
     unlistenDirectories = undefined;
   };
 
+  // Whether a live client is being returned to the caller (which then owns
+  // the workspace listener). Every other exit must release the listener,
+  // otherwise failed connection attempts leak a listener (and its client
+  // closure) on the long-lived WorkspaceContext for every retry.
+  let connectionEstablished = false;
   try {
     const transport = await createTransport(
       mcpServerName,
@@ -840,6 +845,7 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      connectionEstablished = true;
       return mcpClient;
     } catch (error) {
       await transport.close();
@@ -968,6 +974,7 @@ export async function connectToMcpServer(
                       mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                   });
                   // Connection successful with OAuth
+                  connectionEstablished = true;
                   return mcpClient;
                 } catch (retryError) {
                   console.error(
@@ -1114,6 +1121,7 @@ export async function connectToMcpServer(
                           mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                       });
                       // Connection successful with OAuth
+                      connectionEstablished = true;
                       return mcpClient;
                     } catch (retryError) {
                       console.error(
@@ -1186,6 +1194,16 @@ export async function connectToMcpServer(
       }
 
       throw new Error(conciseError);
+    }
+  } finally {
+    // Release the workspace listener unless a live client was returned to
+    // the caller. connect() failures never fire onclose, so without this
+    // the listener would stay registered on the WorkspaceContext (which
+    // outlives the connection attempt) until a directory change happened
+    // to fail the notification.
+    if (!connectionEstablished) {
+      unlistenDirectories?.();
+      unlistenDirectories = undefined;
     }
   }
 }

@@ -15,6 +15,7 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
+  connectToMcpServer,
   createTransport,
   hasNetworkTransport,
   isEnabled,
@@ -184,6 +185,71 @@ describe('mcp-client', () => {
       consoleErrorSpy.mockRestore();
     });
   });
+  describe('connectToMcpServer', () => {
+    function makeWorkspaceContext(unlisten: () => void): WorkspaceContext {
+      return {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(unlisten),
+      } as unknown as WorkspaceContext;
+    }
+
+    it('should unsubscribe the workspace listener when the connection fails', async () => {
+      const mockedClient = {
+        connect: vi.fn().mockRejectedValue(new Error('spawn failed')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+      const unlisten = vi.fn();
+      const workspaceContext = makeWorkspaceContext(unlisten);
+
+      await expect(
+        connectToMcpServer(
+          'test-server',
+          { command: 'test-command' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow('Connection failed');
+
+      expect(workspaceContext.onDirectoriesChanged).toHaveBeenCalledOnce();
+      expect(unlisten).toHaveBeenCalledOnce();
+    });
+
+    it('should keep the workspace listener when the connection succeeds', async () => {
+      const mockedClient = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+      const unlisten = vi.fn();
+      const workspaceContext = makeWorkspaceContext(unlisten);
+
+      const client = await connectToMcpServer(
+        'test-server',
+        { command: 'test-command' },
+        false,
+        workspaceContext,
+      );
+
+      expect(client).toBeDefined();
+      expect(unlisten).not.toHaveBeenCalled();
+    });
+  });
+
   describe('appendMcpServerCommand', () => {
     it('should do nothing if no MCP servers or command are configured', () => {
       const out = populateMcpServerCommand({}, undefined);
