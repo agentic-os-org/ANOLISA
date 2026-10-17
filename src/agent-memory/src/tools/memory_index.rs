@@ -61,24 +61,57 @@ pub fn parse_index(content: &str) -> Vec<IndexEntry> {
         }
         // Format: - [title](path) — description
         let rest = &line[3..]; // skip "- ["
-        if let Some(bracket_end) = rest.find("](") {
-            let title = &rest[..bracket_end];
-            let after_bracket = &rest[bracket_end + 2..];
-            if let Some(paren_end) = after_bracket.find(')') {
-                let path = &after_bracket[..paren_end];
-                let description = after_bracket[paren_end + 1..]
-                    .trim_start_matches(" — ")
-                    .trim_start_matches(" - ")
-                    .to_string();
-                entries.push(IndexEntry {
-                    title: title.to_string(),
-                    path: path.to_string(),
-                    description,
-                });
-            }
+        if let Some(entry) = parse_entry_line(rest) {
+            entries.push(entry);
         }
     }
     entries
+}
+
+/// Split one index line, already stripped of its `- [` prefix, into an entry.
+///
+/// Titles come from frontmatter `title:` fields and from note bodies, both
+/// free-form, so a title may itself contain `"]("` — any note about markdown
+/// link syntax does. Cutting at the first occurrence would truncate such a
+/// title and read the remainder as a garbage path, and because
+/// [`update_index_entry`] upserts by path while [`remove_index_entry`]
+/// filters by it, that entry could then never be matched again: every write
+/// appended a duplicate line and removal silently missed.
+///
+/// Try each `"]("` as the link opener left to right and keep the first whose
+/// extracted path contains no `"]("` itself. A candidate cut at a stray
+/// in-title bracket necessarily swallows the real opener, so its path is
+/// rejected and the scan reaches the real link. Lines with an ordinary title
+/// take their first opener exactly as before, so the emitted format is
+/// unchanged and already-written indexes keep parsing.
+///
+/// A title that embeds `"]("` *and* a `")"` before the real opener stays
+/// ambiguous — resolving that would need escaping on the write side, which
+/// would break every index already on disk.
+fn parse_entry_line(rest: &str) -> Option<IndexEntry> {
+    let mut offset = 0;
+    while let Some(found) = rest[offset..].find("](") {
+        let bracket_end = offset + found;
+        let title = &rest[..bracket_end];
+        let after_bracket = &rest[bracket_end + 2..];
+        // No `)` after this candidate means none after any later one either,
+        // since each candidate's tail is a suffix of the previous one's.
+        let paren_end = after_bracket.find(')')?;
+        let path = &after_bracket[..paren_end];
+        if !path.contains("](") {
+            let description = after_bracket[paren_end + 1..]
+                .trim_start_matches(" — ")
+                .trim_start_matches(" - ")
+                .to_string();
+            return Some(IndexEntry {
+                title: title.to_string(),
+                path: path.to_string(),
+                description,
+            });
+        }
+        offset = bracket_end + 2;
+    }
+    None
 }
 
 /// Build a complete index by scanning all .md files in the mount.
@@ -285,6 +318,43 @@ mod tests {
         };
         let line = entry.to_line();
         assert!(line.len() <= MAX_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn index_entry_round_trips_through_parse_index() {
+        // A title may legitimately contain "](" — any note about markdown
+        // link syntax does. Pre-fix the parse cut at the first "](", so the
+        // path came back as garbage and the entry could never be matched
+        // again by the path-keyed upsert and removal.
+        let entry = IndexEntry {
+            title: "array literal ]( vs concat".into(),
+            path: "notes/x.md".into(),
+            description: "pick one".into(),
+        };
+        let parsed = parse_index(&entry.to_line());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, entry.path);
+        assert_eq!(parsed[0].title, entry.title);
+        assert_eq!(parsed[0].description, entry.description);
+    }
+
+    #[test]
+    fn parse_index_stops_the_link_at_the_first_clean_path() {
+        // The description follows the real link and may itself contain "](";
+        // it must not be mistaken for a second link opener.
+        let entries = parse_index("- [Title](notes/x.md) — see ](syntax\n");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Title");
+        assert_eq!(entries[0].path, "notes/x.md");
+        assert_eq!(entries[0].description, "see ](syntax");
+    }
+
+    #[test]
+    fn parse_index_skips_a_line_with_no_link_at_all() {
+        // "- [" with neither "](" nor ")" is not an entry, and must not
+        // become one with an empty path.
+        assert!(parse_index("- [dangling title\n").is_empty());
+        assert!(parse_index("- [dangling](unclosed.md\n").is_empty());
     }
 
     #[test]
