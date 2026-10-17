@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { StringDecoder } from 'node:string_decoder';
+
 export async function readStdin(): Promise<string> {
   const MAX_STDIN_SIZE = 8 * 1024 * 1024; // 8MB
   return new Promise((resolve, reject) => {
@@ -27,17 +29,23 @@ export async function readStdin(): Promise<string> {
           pipedInputTimerId = null;
         }
 
-        if (totalSize + chunk.length > MAX_STDIN_SIZE) {
+        const chunkSize = Buffer.byteLength(chunk, 'utf8');
+        if (totalSize + chunkSize > MAX_STDIN_SIZE) {
           const remainingSize = MAX_STDIN_SIZE - totalSize;
-          data += chunk.slice(0, remainingSize);
+          // A byte boundary can bisect a character; keep only its complete
+          // UTF-8 prefix instead of adding a replacement or lone surrogate.
+          data += new StringDecoder('utf8').write(
+            Buffer.from(chunk, 'utf8').subarray(0, remainingSize),
+          );
           console.warn(
             `Warning: stdin input truncated to ${MAX_STDIN_SIZE} bytes.`,
           );
-          process.stdin.destroy(); // Stop reading further
-          break;
+          onEnd();
+          process.stdin.destroy(); // A normal destroy emits close, not end.
+          return;
         }
         data += chunk;
-        totalSize += chunk.length;
+        totalSize += chunkSize;
       }
     };
 
@@ -58,11 +66,13 @@ export async function readStdin(): Promise<string> {
       }
       process.stdin.removeListener('readable', onReadable);
       process.stdin.removeListener('end', onEnd);
+      process.stdin.removeListener('close', onEnd);
       process.stdin.removeListener('error', onError);
     };
 
     process.stdin.on('readable', onReadable);
     process.stdin.on('end', onEnd);
+    process.stdin.on('close', onEnd);
     process.stdin.on('error', onError);
   });
 }
