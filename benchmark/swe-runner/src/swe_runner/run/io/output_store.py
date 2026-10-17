@@ -97,8 +97,8 @@ class RunOutputStore:
             result_file,
         )
 
-    def load_attempted_instance_ids(self) -> set[str]:
-        """Load instance IDs that already have per-instance result files."""
+    def load_attempted_instance_ids(self, *, successful_only: bool = False) -> set[str]:
+        """Load saved result IDs, optionally restricted to explicitly successful runs."""
         if not self.results_dir.exists():
             logger.info("OUTPUT_LOAD_ATTEMPTED_IDS instance=global count=0 output_dir=%s", self.output_dir)
             return set()
@@ -107,6 +107,8 @@ class RunOutputStore:
         for result_file in self.results_dir.glob("*.json"):
             try:
                 data = json.loads(result_file.read_text(encoding="utf-8"))
+                if successful_only and (not isinstance(data, dict) or data.get("success") is not True):
+                    continue
                 instance_id = data.get("instance_id") if isinstance(data, dict) else None
                 if isinstance(instance_id, str) and instance_id:
                     ids.add(instance_id)
