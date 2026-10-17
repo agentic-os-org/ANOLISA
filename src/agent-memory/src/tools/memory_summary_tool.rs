@@ -200,12 +200,12 @@ pub fn memory_summary(svc: &MemoryService, recent_limit: usize) -> Result<Memory
 
     // Top concepts (sorted by count descending)
     let mut concepts: Vec<(String, usize)> = concept_counts.into_iter().collect();
-    concepts.sort_by_key(|b| std::cmp::Reverse(b.1));
+    concepts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     summary.top_concepts = concepts.into_iter().take(10).collect();
 
     // Top files (sorted by count descending)
     let mut files: Vec<(String, usize)> = file_counts.into_iter().collect();
-    files.sort_by_key(|b| std::cmp::Reverse(b.1));
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     summary.top_files = files.into_iter().take(10).collect();
 
     svc.audit_log(
@@ -220,6 +220,44 @@ pub fn memory_summary(svc: &MemoryService, recent_limit: usize) -> Result<Memory
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tied_concepts_and_files_rank_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = temp.path().to_string_lossy().into_owned();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        config.memory.session.base_dir =
+            temp.path().join("sessions").to_string_lossy().into_owned();
+        let svc = MemoryService::new(config).unwrap();
+        for index in (1..=12).rev() {
+            std::fs::write(
+                svc.mount.root.join(format!("memory-{index}.md")),
+                format!("---\nconcepts: [c{index:02}]\nfiles: [src/f{index:02}.rs]\n---\nBody\n"),
+            )
+            .unwrap();
+        }
+        for index in 1..=2 {
+            std::fs::write(
+                svc.mount.root.join(format!("popular-{index}.md")),
+                "---\nconcepts: [z-popular]\nfiles: [src/z-popular.rs]\n---\nBody\n",
+            )
+            .unwrap();
+        }
+        let summary = memory_summary(&svc, 3).unwrap();
+        let expected_concepts: Vec<_> = std::iter::once(("z-popular".to_string(), 2))
+            .chain((1..=9).map(|index| (format!("c{index:02}"), 1)))
+            .collect();
+        let expected_files: Vec<_> = std::iter::once(("src/z-popular.rs".to_string(), 2))
+            .chain((1..=9).map(|index| (format!("src/f{index:02}.rs"), 1)))
+            .collect();
+        assert_eq!(summary.top_concepts, expected_concepts);
+        assert_eq!(summary.top_files, expected_files);
+        assert_eq!(summary.total_memories, 14);
+        assert_eq!(summary.recent_memories.len(), 3);
+    }
 
     #[test]
     fn parse_frontmatter_basic() {
