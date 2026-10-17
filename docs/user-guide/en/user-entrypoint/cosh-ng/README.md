@@ -330,12 +330,14 @@ as well. Neither form uninstalls cosh-ng nor deletes production Gateway state.
   after uncertain client I/O. Current deterministic tests cover launch
   selection and baseline policy; real Codex, SSH-disconnect, and packaged
   systemd execution remain installation-specific unaccepted gates.
-- The experimental Web continuation command is **Linux-only** and currently
-  **refuses the built-in Core/Codex catalog**. Continue Tasks through `/task` or
-  `cosh agent task`. macOS builds omit the Web command and its Linux credential
+- The experimental Web continuation command is **Linux-only** and **not yet
+  available in this build**: it is hidden from `--help` and exits with a
+  `web_failed` not-yet-available error before any workspace, token, or daemon
+  validation. Continue Tasks through `/task` or `cosh agent task`. macOS builds omit the Web command and its Linux credential
   tests; they do not attempt to resolve credentials through `/proc/self/fd`.
 
-  On Linux, `cosh agent web --help` describes these options:
+  On Linux, `cosh agent web --help` still describes the retained adapter's
+  options; they take effect once the build gate is lifted:
 
   | Option | Contract |
   |--------|----------|
@@ -345,8 +347,9 @@ as well. Neither form uninstalls cosh-ng nor deletes production Gateway state.
   | `--bind ADDRESS` | IPv4/IPv6 loopback only; default `127.0.0.1:8765`. |
   | `--output human\|jsonl` | Startup and error presentation. |
 
-  Admission queries the authenticated local daemon's capabilities **before**
-  binding HTTP. A missing daemon, unknown launch schema, workspace mismatch,
+  When a brokered-only Runtime boundary exists and the gate is lifted, the
+  retained startup attestation queries the authenticated local daemon's
+  capabilities **before** binding HTTP. A missing daemon, unknown launch schema, workspace mismatch,
   incomplete Runtime catalog, delegated local-user authority, or unbrokered
   effects causes a visible `web_failed` error. Unavailable Runtime entries are
   checked too: disabling new launches does not remove historical Task authority.
@@ -354,8 +357,8 @@ as well. Neither form uninstalls cosh-ng nor deletes production Gateway state.
   the daemon's authority.
 
   Both current Runtime entries attest local-user authority. A workspace-external
-  token does not isolate it from those Runtimes, so this release has no admitted
-  production Web configuration. A restricted Runtime boundary and corresponding
+  token does not isolate it from those Runtimes, so this release gates the
+  subcommand as not yet available instead of attempting startup. A restricted Runtime boundary and corresponding
   daemon attestation require separate implementation and validation before Web
   can be enabled. This restriction does not change terminal, Task CLI, or direct
   ACP operation.
