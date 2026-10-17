@@ -9177,12 +9177,68 @@ fn skb_defer_max_recommendation(current: u64, kernel_version: &str) -> Option<Re
     })
 }
 
-fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/neigh/default/proxy_delay";
+fn eval_neigh_proxy_delay(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_neigh_proxy_delay_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/neigh/default/proxy_delay",
+        Path::new("/proc/sys/net/ipv4/conf"),
+        Path::new("/proc/sys/net/ipv6/conf"),
+    )
+}
+
+/// Path-injectable form of [`eval_neigh_proxy_delay`] (the `eval_*_at` idiom)
+/// so the proxy precondition is assertable against synthetic conf trees.
+///
+/// `proxy_delay` is read in exactly one place, `neigh_proxy_delay()`
+/// (v6.6 net/core/neighbour.c:1652-1658), whose only caller is
+/// `pneigh_enqueue()` (:1661) — the queue that holds a proxied solicitation
+/// back for a random fraction of the delay. Both of that function's call
+/// sites sit behind a forwarding *and* a proxy test:
+///
+/// ```text
+///   } else if (IN_DEV_FORWARD(in_dev)) {                    // net/ipv4/arp.c:855
+///           if (addr_type == RTN_UNICAST &&
+///               (arp_fwd_proxy(in_dev, dev, rt) ||              // :858
+///                arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||    // :859
+///                (rt->dst.dev != dev &&
+///                 pneigh_lookup(&arp_tbl, net, &tip, dev, 0)))) // :861
+///                   ... pneigh_enqueue(&arp_tbl, in_dev->arp_parms, skb); // :877
+/// ```
+///
+/// and the IPv6 twin guards the same queue with
+/// `idev->cnf.forwarding && (net->ipv6.devconf_all->proxy_ndp ||
+/// idev->cnf.proxy_ndp)` (v6.6 net/ipv6/ndisc.c:906-908, queue at :922).
+/// `arp_fwd_proxy()` (arp.c:470-497) starts with `if (!IN_DEV_PROXY_ARP(in_dev))
+/// return 0;` and `arp_fwd_pvlan()` (:518-534) with `IN_DEV_PROXY_ARP_PVLAN`,
+/// both `IN_DEV_ORCONF` tests of the `all` template and the device slot
+/// (include/linux/inetdevice.h:109-110).
+///
+/// A host that forwards nowhere, or that leaves every proxy slot at zero,
+/// therefore never reads the value, and the old rule still advised writing the
+/// template to 0 on it — the default template is what every new device inherits
+/// (`neigh_parms_alloc()` kmemdups `tbl->parms`, neighbour.c:1709). The gate
+/// fails open: a conf tree that cannot be listed, or a slot that cannot be
+/// parsed, is not evidence that the proxy path is unreachable.
+fn eval_neigh_proxy_delay_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    ipv4_conf: &std::path::Path,
+    ipv6_conf: &std::path::Path,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    if !proxy_delay_is_ever_read(ipv4_conf, ipv6_conf) {
+        return 1;
+    }
+    // The knob's unit is USER_HZ (NEIGH_SYSCTL_USERHZ_JIFFIES_ENTRY,
+    // neighbour.c:3740), so the value the file shows is the one the reason
+    // speaks in.
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current > 80 {
         recs.push(Recommendation {
             param: "net.ipv4.neigh.default.proxy_delay".to_string(),
@@ -9195,6 +9251,56 @@ fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         });
     }
     1
+}
+
+/// Whether any device could reach `pneigh_enqueue()` for its family — a device
+/// whose own `forwarding` slot is on and whose proxy mode is on through the
+/// `all` template or its own slot (see [`eval_neigh_proxy_delay_at`]).
+///
+/// `forwarding` is the device's own slot only (`IN_DEV_FORWARD` is
+/// `IN_DEV_CONF_GET`, not an ORCONF, include/linux/inetdevice.h:98). A slot
+/// that cannot be read is not evidence of a zero, so an unparseable value keeps
+/// the advice instead of guessing the proxy path away.
+fn proxy_delay_is_ever_read(ipv4_conf: &std::path::Path, ipv6_conf: &std::path::Path) -> bool {
+    fn any_device_proxies(conf_root: &std::path::Path, proxy_slots: &[&str]) -> bool {
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i64>().ok())
+        };
+        // `all` is the ORCONF half of every device; an unreadable one is not
+        // evidence of a zero.
+        let all_on = proxy_slots
+            .iter()
+            .any(|slot| read(conf_root.join("all").join(slot)) != Some(0));
+        let Ok(entries) = std::fs::read_dir(conf_root) else {
+            // A tree that cannot be listed proves nothing, so the advice stays.
+            return true;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let name = entry.file_name();
+            // Both are templates: `all` is folded in above, and `default` only
+            // seeds devices created later.
+            if name == *"all" || name == *"default" {
+                continue;
+            }
+            if read(entry.path().join("forwarding")) == Some(0) {
+                continue;
+            }
+            if all_on
+                || proxy_slots
+                    .iter()
+                    .any(|slot| read(entry.path().join(slot)) != Some(0))
+            {
+                return true;
+            }
+        }
+        false
+    }
+    // `arp_fwd_proxy` needs IN_DEV_PROXY_ARP and `arp_fwd_pvlan`
+    // IN_DEV_PROXY_ARP_PVLAN; the IPv6 half needs proxy_ndp.
+    any_device_proxies(ipv4_conf, &["proxy_arp", "proxy_arp_pvlan"])
+        || any_device_proxies(ipv6_conf, &["proxy_ndp"])
 }
 
 fn eval_tcp_pacing_ca_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -26830,5 +26936,97 @@ mod tests {
             }
         }
         assert!(ip_no_pmtu_disc_recommendation(0).is_none());
+    }
+
+    /// `proxy_delay` is read only by `neigh_proxy_delay()` (v6.6
+    /// net/core/neighbour.c:1652-1658), whose single caller `pneigh_enqueue()`
+    /// sits behind a forwarding and a proxy test in both families (net/ipv4/
+    /// arp.c:855-877, net/ipv6/ndisc.c:906-922). On a host that neither
+    /// forwards nor proxies, the write this rule asked for cannot change how
+    /// any packet is delayed — and the `default` template is what every device
+    /// created later inherits (`neigh_parms_alloc()`, neighbour.c:1709).
+    #[test]
+    fn proxy_delay_advice_needs_a_proxying_forwarder() {
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_proxy_delay_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let v4 = dir.join("ipv4");
+        let v6 = dir.join("ipv6");
+        let write = |path: std::path::PathBuf, content: &str| {
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        let knob = dir.join("proxy_delay");
+        write(knob.clone(), "800\n");
+
+        let advice = |v4: &std::path::Path, v6: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_neigh_proxy_delay_at(&info, &mut recs, knob.to_str().unwrap(), v4, v6);
+            recs.len()
+        };
+
+        // Nothing forwards: no solicitation ever reaches the proxy queue, so
+        // the value is not read and the template is not worth writing.
+        for (name, forwarding) in [("all", "0"), ("default", "0"), ("eth0", "0")] {
+            write(v4.join(name).join("forwarding"), forwarding);
+            write(v4.join(name).join("proxy_arp"), "0");
+            write(v4.join(name).join("proxy_arp_pvlan"), "0");
+            write(v6.join(name).join("forwarding"), forwarding);
+            write(v6.join(name).join("proxy_ndp"), "0");
+        }
+        assert_eq!(advice(&v4, &v6), 0, "nothing forwards, so nothing proxies");
+
+        // A forwarding device whose own proxy_arp is on reaches
+        // arp_fwd_proxy()'s body, which is where the queue is.
+        write(v4.join("eth0").join("forwarding"), "1");
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "a proxying forwarder reads the knob");
+        write(v4.join("eth0").join("proxy_arp"), "0");
+
+        // The `all` template is the ORCONF half, so it alone arms every
+        // forwarding device.
+        write(v4.join("all").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "conf/all proxy_arp arms the queue");
+        write(v4.join("all").join("proxy_arp"), "0");
+
+        // Private-VLAN proxy ARP is the second consumer of the queue.
+        write(v4.join("eth0").join("proxy_arp_pvlan"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "pvlan proxy arp reaches it too");
+        write(v4.join("eth0").join("proxy_arp_pvlan"), "0");
+
+        // IPv6 proxy NDP queues through the same helper, but its guard reads
+        // the device's own `forwarding` slot too (ndisc.c:907).
+        write(v6.join("eth0").join("forwarding"), "1");
+        write(v6.join("eth0").join("proxy_ndp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "proxy_ndp reaches it as well");
+        write(v6.join("eth0").join("proxy_ndp"), "0");
+        write(v6.join("eth0").join("forwarding"), "0");
+        assert_eq!(advice(&v4, &v6), 0, "and only then is it quiet again");
+
+        // A slot that cannot be read is not evidence of a zero: the advice
+        // stays rather than guessing the proxy path away. An unreadable
+        // `forwarding` alone does not, because the device's proxy slots are
+        // still readable zeros and the queue stays out of reach.
+        write(v4.join("eth0").join("forwarding"), "masked\n");
+        assert_eq!(advice(&v4, &v6), 0, "a masked forwarding with no proxy");
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "a masked forwarding that may proxy");
+        write(v4.join("eth0").join("forwarding"), "1");
+        write(v4.join("eth0").join("proxy_arp"), "masked\n");
+        assert_eq!(advice(&v4, &v6), 1, "an unreadable proxy slot keeps it");
+
+        // The value gate is unchanged, and the default template's 80 is not a
+        // finding even on a proxying forwarder.
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        write(knob.clone(), "80\n");
+        assert_eq!(advice(&v4, &v6), 0, "80 is the documented default");
+        write(knob.clone(), "81\n");
+        assert_eq!(advice(&v4, &v6), 1, "above 80 the delay is excessive");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
