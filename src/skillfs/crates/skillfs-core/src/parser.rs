@@ -268,6 +268,26 @@ fn is_atx_heading(line: &str) -> bool {
     }
 }
 
+/// One `##` section heading: the same CommonMark shape [`is_atx_heading`]
+/// accepts (at most three spaces of indentation, then the hashes, then a
+/// space or tab), restricted to exactly two hashes. `## Parameters` and its
+/// tab-separated or up-to-three-spaces-indented spellings must all open the
+/// section, or the contract bullets under a heading the parser itself
+/// recognizes would silently vanish from structured extraction.
+fn section_heading(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let title = rest.strip_prefix("##")?;
+    let separator = title.chars().next()?;
+    if separator != ' ' && separator != '\t' {
+        return None;
+    }
+    Some(title[1..].trim())
+}
+
 fn extract_first_paragraph(body: &str) -> String {
     // Take the first non-empty paragraph. A paragraph ends at a blank
     // line; `lines()` strips the terminator of either convention, so a
@@ -326,11 +346,11 @@ fn split_sections(
             open_fence = Some(fence);
             continue;
         }
-        if let Some(heading) = line.strip_prefix("## ") {
+        if let Some(heading) = section_heading(line) {
             if let Some(name) = current_name.take() {
                 record_section(&mut sections, name, current_content, issues);
             }
-            current_name = Some(heading.trim().to_string());
+            current_name = Some(heading.to_string());
             current_content = String::new();
         } else if current_name.is_some() {
             current_content.push_str(line);
@@ -976,6 +996,46 @@ description: Test skill
 
         assert_eq!(entry.parameters.len(), 1);
         assert!(!entry.parameters[0].required); // default to optional
+    }
+
+    #[test]
+    fn test_parse_tab_and_indented_section_headings_open_sections() {
+        // `is_atx_heading` (used for the description fallback) accepts the
+        // CommonMark spellings of an ATX heading: up to three spaces of
+        // indentation and a tab after the hashes. The section splitter
+        // must agree, or the contract bullets under such a heading vanish
+        // from structured extraction with `ParseStatus::Ok`.
+        let content = "---\nname: test\ndescription: Test skill\n---\n\n##\tParameters\n\n- `query` (string, required): The search query\n\n  ## Returns\n\n- `result` (string, required): The result\n";
+
+        let entry = parse_skill_md(content, "test");
+
+        assert_eq!(
+            entry.parameters.len(),
+            1,
+            "tab-separated heading opens the section"
+        );
+        assert_eq!(
+            entry.parameters[0].name, "query",
+            "the bullet under a tab-separated heading is extracted"
+        );
+        assert_eq!(entry.returns.len(), 1, "indented heading opens the section");
+        assert_eq!(entry.returns[0].name, "result");
+        assert!(
+            entry.parse_status.is_ok(),
+            "a well-formed skill stays Ok, got {:?}",
+            entry.parse_status
+        );
+
+        // Deeper headings (h3+) and four-space indentation stay content.
+        let content = "---\nname: test\ndescription: Test skill\n---\n\n### Parameters\n\n- `query` (string, required): The search query\n\n    ## Returns\n\n- `result` (string, required): The result\n";
+
+        let entry = parse_skill_md(content, "test");
+
+        assert!(entry.parameters.is_empty(), "h3 is not a section heading");
+        assert!(
+            entry.returns.is_empty(),
+            "four spaces of indentation is content"
+        );
     }
 
     // -----------------------------------------------------------------------
