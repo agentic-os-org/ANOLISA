@@ -130,10 +130,22 @@ def run(
         raise typer.Exit(code=1) from None
 
     if report.total == 0:
-        console.print("[yellow]No instances to process.[/yellow]")
+        if report.skipped_existing > 0:
+            # Resume skipped every requested instance; distinguish this from an
+            # empty dataset selection, whose message would mislead the operator.
+            console.print(
+                f"[green]All {report.skipped_existing} instance(s) were already attempted in a previous run; nothing to do.[/green]"
+            )
+            console.print("Run again with --redo to re-run them.")
+        else:
+            console.print("[yellow]No instances to process.[/yellow]")
         raise typer.Exit(code=0)
 
     console.print(f"\n[green]Done:[/green] {report.succeeded}/{report.total} succeeded")
+    if report.skipped_existing:
+        console.print(
+            f"[green]Skipped:[/green] {report.skipped_existing} instance(s) already attempted in a previous run"
+        )
     console.print(f"[green]Run metadata:[/green] {report.metadata_path}")
 
 

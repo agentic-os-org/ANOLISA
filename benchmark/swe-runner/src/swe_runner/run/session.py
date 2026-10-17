@@ -66,13 +66,29 @@ class RunSession:
             return RunReport(succeeded=0, failed=0, total=0, instance_ids=[], metadata_path=None)
 
         orchestrator = Orchestrator(agent_instance, self._settings, redo=self._redo)
+        output_store = RunOutputStore(output_dir)
+        # Resume visibility: run_batch silently filters instances that already
+        # have per-instance result files, and that filtering is logged only to
+        # the file log. Count the skipped instances here so the report (and the
+        # CLI) can tell a fully-resumed batch apart from an empty dataset
+        # selection without changing the orchestrator contract.
+        skipped_existing = 0
+        if not self._redo:
+            attempted = output_store.load_attempted_instance_ids()
+            if attempted:
+                skipped_existing = sum(1 for i in instances if i.instance_id in attempted)
+                logger.info(
+                    "SESSION_RESUME_SKIPPED instance=global skipped=%s attempted=%s",
+                    skipped_existing,
+                    len(attempted),
+                )
         started_at_ns = time.time_ns()
         results = orchestrator.run_batch(instances, output_dir)
         ended_at_ns = time.time_ns()
 
         report = RunReport.from_results(results, started_at_ns=started_at_ns, ended_at_ns=ended_at_ns)
 
-        metadata_path = RunOutputStore(output_dir).write_run_metadata(
+        metadata_path = output_store.write_run_metadata(
             RunMetadataSnapshot(
                 started_at_ns=report.started_at_ns,
                 ended_at_ns=report.ended_at_ns,
@@ -83,7 +99,7 @@ class RunSession:
                 metadata_mappings=report.metadata_mappings,
             )
         )
-        report = report.model_copy(update={"metadata_path": metadata_path})
+        report = report.model_copy(update={"metadata_path": metadata_path, "skipped_existing": skipped_existing})
 
         logger.info(
             "SESSION_END agent=%s succeeded=%s failed=%s total=%s",
