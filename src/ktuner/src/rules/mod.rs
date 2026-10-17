@@ -6273,21 +6273,45 @@ fn eval_sched_nr_migrate_at(
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 128 {
-        recs.push(Recommendation {
-            param: "kernel.sched_nr_migrate".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "128".to_string(),
-            reason: format!(
-                "{}核 CPU 每次负载均衡仅迁移 {} 个任务，增大可加速核间负载均衡收敛",
-                info.cpu_cores, current
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_nr_migrate_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_nr_migrate` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the batch size this
+/// reason sizes has had no `/proc/sys` node since: the variable is exported as
+/// `/sys/kernel/debug/sched/nr_migrate` (v6.6 kernel/sched/debug.c), which the
+/// rule's own path can never reach. A node under the old name exists only where
+/// a tree re-registered the name for another class, and nothing in such a tree
+/// reads that variable, so the write lands nowhere while the report claims the
+/// idle balancer converges faster. Silence the rule from 5.13 on, the way the
+/// other knobs whose reader moved are silenced.
+fn sched_nr_migrate_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current >= 128 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_nr_migrate".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "128".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 每次负载均衡仅迁移 {current} 个任务，增大可加速核间负载均衡收敛"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -15489,6 +15513,16 @@ mod tests {
         assert!(sched_migration_cost_recommendation(500_000, 64, "").is_some());
         assert!(sched_migration_cost_recommendation(-1, 64, "5.10.0").is_none());
         assert!(sched_migration_cost_recommendation(5_000_000, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_nr_migrate_advice_stops_where_its_reader_moved() {
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.4.0-150").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.13.0").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "6.6.87.2").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "").is_some());
+        assert!(sched_nr_migrate_recommendation(128, 64, "5.10.0").is_none());
     }
 
     #[test]
