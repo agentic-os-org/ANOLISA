@@ -19,7 +19,9 @@ from typing import Any, Callable
 
 def arguments(component: Path) -> argparse.Namespace:
     """Expose common load controls and explicit Git/prebuilt-binary comparison sources."""
-    parser = argparse.ArgumentParser(prog="memory_run.sh", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="resource_run.sh", description="Measure AgentSight RSS and CPU with optional Git A/B."
+    )
     parser.add_argument("--ab", action="store_true", help="run before/after sequentially")
     parser.add_argument("--baseline", help="baseline commit, branch or tag; required with --ab")
     parser.add_argument(
@@ -35,6 +37,11 @@ def arguments(component: Path) -> argparse.Namespace:
         help="prebuilt candidate instead of a Git ref",
     )
     parser.add_argument("--config", type=Path, default=component / "agentsight.json")
+    parser.add_argument(
+        "--cpu-budget-percent",
+        type=int,
+        help="cooperative process CPU target; 0 disables, 100%% = one logical CPU (default: config or 25)",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--connection-capacity", type=int, help="HTTP connection slots (default: agent count)"
@@ -76,11 +83,17 @@ def arguments(component: Path) -> argparse.Namespace:
         parser.error("baseline options require --ab")
     for name, value in vars(args).items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            minimum = 0 if name in ("startup_delay", "validation_wait_seconds") else 1e-12
+            minimum = (
+                0
+                if name in ("startup_delay", "validation_wait_seconds", "cpu_budget_percent")
+                else 1e-12
+            )
             if not math.isfinite(value) or value < minimum:
                 parser.error(f"--{name.replace('_', '-')} must be finite and >= {minimum}")
     if args.rate_tolerance >= 1 or args.port > 65535:
         parser.error("rate-tolerance must be < 1 and port must be <= 65535")
+    if args.cpu_budget_percent is not None and args.cpu_budget_percent > 100:
+        parser.error("--cpu-budget-percent must be between 0 and 100")
     if args.ring_buffer_mb is not None and args.ring_buffer_mb & (args.ring_buffer_mb - 1):
         parser.error("--ring-buffer-mb must be a positive power of two")
     return args
@@ -109,7 +122,7 @@ def ensure_python(
     print("Preparing benchmark Python dependencies...", flush=True)
     cache.mkdir(parents=True, exist_ok=True)
     interpreter = cache / "venv/bin/python3"
-    command = [str(interpreter), "-B", str(harness / "memory_run.py"), *arguments]
+    command = [str(interpreter), "-B", str(harness / "resource_run.py"), *arguments]
     # Recheck a cached venv before installing; user-site packages disappear under sudo.
     if interpreter.exists() and Path(sys.prefix).resolve() != interpreter.parents[1].resolve():
         os.execv(str(interpreter), command)
@@ -139,7 +152,7 @@ class Inputs:
     def __init__(self, repo: Path, output: Path) -> None:
         self.repo = repo
         self.output = output
-        self.temporary = tempfile.TemporaryDirectory(prefix="agentsight-memory-inputs-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="agentsight-resource-inputs-")
         self.worktrees: list[Path] = []
 
     def git(self, *arguments: str, env: dict[str, str] | None = None) -> str:

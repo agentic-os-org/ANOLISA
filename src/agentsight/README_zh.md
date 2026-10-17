@@ -250,11 +250,14 @@ npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
 
 完成后，运行 `make build-frontend && cargo build --release` 将更新后的 UI 嵌入二进制。
 
-### 内存 benchmark（Linux）
+### 资源 benchmark（Linux）
 
-[`scripts/benchmark/single_run/memory_run.sh`](scripts/benchmark/single_run/memory_run.sh)
-可指定 Agent 数量和输出 tok/s 来测量 AgentSight RSS，默认 32 个 Agent、每路 100 tok/s、60 秒。
-脚本会打印平均/峰值 RSS、整机内存占比和负载/采集校验，并通过
+[`scripts/benchmark/single_run/resource_run.sh`](scripts/benchmark/single_run/resource_run.sh)
+可指定 Agent 数量和输出 tok/s 来测量 AgentSight RSS 和 CPU，默认 32 个 Agent、每路 100 tok/s、60 秒。
+脚本会打印平均/峰值 RSS、整机内存占比、平均/P95/峰值 CPU（100% = 一个逻辑核）和负载/采集校验，
+协作式 CPU 调度默认开启，目标为一个逻辑核的 25%，可能延迟投递；
+`--cpu-budget-percent N` 可覆盖配置中的目标（`0` 关闭）。
+正式负载窗口与尾部收流分别统计，并通过
 `--ab --baseline REF --candidate REF` 支持 Git A/B 对比。`--ring-buffer-mb N` 可指定 Ring Buffer 大小；探针计数发现丢事件时，对比结果判为无效。采集需要 root 或 eBPF capabilities，
 脚本默认请求 sudo。一键命令、工作区快照和报告说明见 [benchmark 使用指南](scripts/docs/BENCHMARK_USAGE_zh.md)。
 

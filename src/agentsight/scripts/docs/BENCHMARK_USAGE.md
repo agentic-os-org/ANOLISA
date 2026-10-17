@@ -7,8 +7,8 @@ specified number of output tokens per second. The entry point is
 [`single_run/run.sh`](../benchmark/single_run/run.sh), which starts a local
 HTTPS/SSE mock server, client processes, and report generation.
 
-For automatic collector startup, memory reporting and Git A/B comparison, use
-[`single_run/memory_run.sh`](../benchmark/single_run/memory_run.sh) as described in §7.
+For automatic collector startup, RSS/CPU reporting and Git A/B comparison, use
+[`single_run/resource_run.sh`](../benchmark/single_run/resource_run.sh) as described in §7.
 
 ## 1. Prepare the environment
 
@@ -153,16 +153,16 @@ may label it MB. For an FFI integration, supplying the host process PID measures
 the host's RSS. LoongCollector WSS requires a separate measurement with the
 same scope as the original experiment.
 
-## 7. One-command memory measurement and A/B comparison
+## 7. One-command resource measurement and A/B comparison
 
 From `src/agentsight`, run:
 
 ```bash
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --agents 32 \
   --tokens-per-second 100 \
   --duration 60 \
-  --output-dir /tmp/agentsight-memory-single
+  --output-dir /tmp/agentsight-resource-single
 ```
 
 The script prepares missing Python dependencies in an isolated cached venv,
@@ -205,14 +205,14 @@ Compare the last commit with the current working tree, including staged,
 unstaged and non-ignored untracked files:
 
 ```bash
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --ab \
   --baseline HEAD \
   --candidate working-tree \
   --agents 32 \
   --tokens-per-second 100 \
   --duration 60 \
-  --output-dir /tmp/agentsight-memory-ab
+  --output-dir /tmp/agentsight-resource-ab
 ```
 
 `--baseline` and `--candidate` also accept commit hashes, local branches and tags.
@@ -223,12 +223,17 @@ measurement. Runs execute sequentially with the same frozen harness, configurati
 and load parameters, fresh collector processes, and separate databases.
 For existing binaries, use `--ab --baseline-bin PATH --candidate-bin PATH`.
 
-The terminal and `memory-report.txt` show average/peak RSS, their percentages of
-host RAM, Load/Capture PASS or FAIL, and run status. A/B adds the reduction in MiB
-and `(before - after) / before × 100%`; negative values mean more memory. Host
-RAM share changes use percentage points (`pp`). `memory-summary.json` records
-the measurements, version/tree IDs and binary hashes. Per-run CSV, capture
-reports and logs are under `run/`, or `before/` and `after/` in A/B mode.
+The terminal and `resource-report.txt` show average/peak RSS, their percentages of
+host RAM, average/P95/peak CPU, Load/Capture PASS or FAIL, and run status.
+CPU includes all threads of the standalone AgentSight process: 100% means one
+logical CPU, and values can exceed 100%. The report records the host logical CPU
+count; mock-server and client processes are outside this scope.
+A/B shows RSS reductions in MiB and relative percent. CPU reductions use percentage
+points (`before - after`) and relative percent; negative values mean increased
+resource usage. A zero CPU baseline has no relative percentage. Host RAM share
+changes use percentage points. `resource-summary.json` records the measurements,
+version/tree IDs and binary hashes. Per-run CSV, capture reports and logs are under
+`run/`, or `before/` and `after/` in A/B mode.
 
 The result is VALID only if the load passes, capture completeness and token
 accuracy are each at least 99.9%, the collector survives with valid resource
@@ -237,16 +242,34 @@ userspace-channel drops are printed separately. These counters cover all probe
 types, so they do not identify which events were lost; any observed drops keep
 the result INVALID even if all requests have correct usage. Missing counters
 are shown as N/A; older binaries continue to use the request-level checks.
-An INVALID result suppresses improvement calculations.
+Missing or invalid CPU samples, or CPU coverage below 95% of the load window,
+also make the result INVALID. An INVALID result suppresses all improvement calculations.
 Success exits 0; invalid/failed runs exit nonzero; Ctrl+C exits 130 and preserves
 partial artifacts. Use a fresh output directory for each invocation. The default
-is `scripts/benchmark/results/memory-<UTC timestamp>-<PID>/`.
+is `scripts/benchmark/results/resource-<UTC timestamp>-<PID>/`.
 
 This wrapper defaults to 32 Agents, 100 tok/s each and 60 seconds; the load-only
 `run.sh` still defaults to 900 seconds. It accepts the load, discovery, port and
-safety controls listed above; run `memory_run.sh --help` for all supported flags.
-RSS is sampled once per second through response drain and reported in MiB, not
-decimal MB. This measures standalone AgentSight RSS; the original LoongCollector
-WSS target needs a separate measurement using the same original scope.
+safety controls listed above; run `resource_run.sh --help` for all supported flags.
+RSS and CPU are sampled about once per second through response drain. Main
+statistics use the monotonic start/end window in `agents/start.json`; response
+drain is summarized separately in each run's `tail` object and the text report.
+Average RSS is the arithmetic mean of in-window samples; peak RSS is the sampled
+maximum, not the process-lifetime `VmHWM`. RSS is reported in MiB, not decimal MB.
+The first sample establishes a CPU baseline and leaves CPU fields empty. Average
+CPU is weighted by the actual measured interval, with CPU seconds reported too.
+P95 uses nearest-rank interval samples; peak CPU is the maximum interval average.
+Intervals crossing a window boundary contribute proportionally to their overlap.
+`metrics.csv` retains wall-clock timestamps and adds `monotonic_timestamp` and
+`cpu_interval_seconds` for these calculations. The original LoongCollector WSS
+target needs a separate measurement using the same original scope.
 
 See the [benchmark plan](BENCHMARK_PLAN.md) for the complete before/after design.
+
+
+`--cpu-budget-percent 25` sets `runtime_limits.cpu_budget_percent` for the captured process.
+Omitting the flag uses the configured target or 25% when unset; `0` disables pacing. This cooperative target
+paces capture persistence and primary/GenAI cleanup, increasing delivery latency when needed.
+It leaves workload generation, CPU sampling and validity checks unchanged. Inspect
+`completion_queue_count` / `completion_queue_bytes` in `metrics.csv`, probe drops and response drain
+alongside CPU/RSS; sustained queue growth is not an acceptable CPU improvement.
