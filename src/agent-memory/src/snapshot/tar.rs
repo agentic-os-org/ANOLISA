@@ -284,11 +284,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
             if name == mount.meta_dir_name() {
                 continue;
             }
-            // Skip any leftover rollback / staging artefacts from a crashed
-            // prior restore (defense-in-depth — meta dir owner cleans these).
-            if name.to_string_lossy().starts_with(&rollback_prefix) {
-                continue;
-            }
+            // Recovery containers live under meta, never in the user namespace.
             let original = entry.path();
             let rolled = rollback_dir.join(&name);
             std::fs::rename(&original, &rolled)?;
