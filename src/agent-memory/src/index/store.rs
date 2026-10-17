@@ -871,10 +871,15 @@ impl BM25Store {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let stored = blob_to_f32(&blob);
+            let stored = l2_normalise(&blob_to_f32(&blob));
             if stored.len() != q_norm.len() {
                 continue;
             }
+            // Cosine similarity: both operands normalised. The embedding
+            // providers do not guarantee unit vectors (only the query side
+            // used to be normalised, so a stored embedding of magnitude m
+            // scored m·cos, letting magnitude — not direction — decide the
+            // ranking).
             let similarity = dot_product(&q_norm, &stored) as f64;
             // Filter non-finite scores (from zero-norm or degenerate embeddings).
             if !similarity.is_finite() {
@@ -1699,6 +1704,43 @@ mod tests {
             like_hits[0].score,
             like_hits[1].score
         );
+    }
+
+    #[test]
+    fn vector_search_ranks_by_cosine_not_embedding_magnitude() {
+        // `search_vec` documents `(path, cosine_similarity)` and
+        // `SearchHit::score` documents "search_vec scales a cosine in
+        // [-1, 1]" — but only the query was normalised, so a stored
+        // embedding of magnitude m scores m·cos. Ollama-style providers do
+        // not guarantee unit embeddings, so a doc with cosine 0.5 and
+        // magnitude 10 would outrank a doc with cosine 0.9. Scoring must
+        // be invariant to the magnitude of the stored vector.
+        let mut s = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
+        // cosine 0.9 with query [1, 0], unit magnitude
+        s.upsert_vec("high-cosine.md", &[0.9, 0.4358899]).unwrap();
+        // same direction, magnitude 10: cosine must be unchanged
+        s.upsert_vec("high-cosine-scaled.md", &[9.0, 4.358899])
+            .unwrap();
+        // cosine 0.5 with query [1, 0], magnitude 10: raw dot is 5.0
+        s.upsert_vec("low-cosine-big-magnitude.md", &[5.0, 8.660254])
+            .unwrap();
+
+        let hits = s.search_vec(&[1.0, 0.0], 3).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits[0].0, "high-cosine.md",
+            "ranking must follow cosine similarity, not raw dot product: {:?}",
+            hits
+        );
+        assert_eq!(
+            hits[1].0, "high-cosine-scaled.md",
+            "scaling an embedding must not change its rank: {:?}",
+            hits
+        );
+        assert_eq!(hits[2].0, "low-cosine-big-magnitude.md");
+        // the contract: the reported score is a cosine, not m·cos
+        assert!((hits[0].1 - 0.9).abs() < 1e-5, "got {}", hits[0].1);
+        assert!((hits[2].1 - 0.5).abs() < 1e-5, "got {}", hits[2].1);
     }
 
     #[test]
