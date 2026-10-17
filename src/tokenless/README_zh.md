@@ -99,6 +99,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
+- **Command Code Mod** — Tool Ready（已硬关闭）+ RTK 命令重写 + 响应/TOON 压缩 + Marker 命令恢复，通过 Command Code 的 ModApi 工具 Hook 接入；宿主没有工具 Schema 接缝，因此不提供 Schema 压缩
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
 `tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
@@ -220,7 +221,7 @@ PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测
 输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
 
 Claude Code 2.1.121 及以上版本、Qoder CLI、
-OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
+OpenCode、Command Code 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
 PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有 Shell Tool 执行精确的
 `tokenless retrieve` 命令。Hook 只识别成功执行、参数为
 有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
@@ -351,6 +352,42 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 两种方式都会拒绝冲突的文件或链接。在 ANOLISA disable 后若要恢复独立管理，重新运行
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
+
+### Command Code 安装
+
+Command Code（`cmd`）以松散文件的形式发现 `~/.commandcode/mods` 下的用户级 Mod，并用 jiti
+编译，因此该 Adapter 只提供一个自包含的 TypeScript Mod，并用软链接完成注册。Command Code
+从文件名推导出的 Mod 名称 `tokenless`，就是 `cmd mods list` 显示的名称，也是
+`cmd mods disable tokenless` 接受的名称。
+
+ModApi 只提供两个可变更的工具 Hook，没有工具 Schema 接缝，因此不支持 Schema 压缩；独立的
+`tokenless compress-schema` 命令不受影响。
+
+| 策略 | Hook | 行为 | 状态 |
+|---|---|---|---|
+| Tool Ready | `beforeToolCall` | 注册为静默透传；不检查、不修复、不注入、不阻断 | ⛔ 已硬关闭 |
+| 命令重写 | `beforeToolCall`（`shell_command`、`powershell`） | 通过 RTK 重写 Shell 命令，并原样保留其余输入字段 | ✅ 生效 |
+| 响应 + TOON 压缩 | `afterToolCall` | 替换结果中模型可见的文本，非文本块保持原位 | ✅ 生效 |
+| Schema 压缩 | — | ModApi 没有工具定义 Hook | ⛔ 宿主不支持 |
+
+当前尚未提供 `cmd` 的内置 ANOLISA Driver，因此 `anolisa adapter scan` 不会列出它，
+`anolisa adapter enable tokenless cmd` 会报告未知 Framework。请改用随包生命周期脚本注册：
+
+```bash
+make cmd-install
+```
+
+脚本依次从 `TOKENLESS_CMD_MODS_DIR`、`COMMANDCODE_HOME`、`~/.commandcode` 解析 Mod 目录，
+把 `mods/tokenless.ts` 建成指向随包 Mod 的软链接，并拒绝替换不属于它管理的文件或链接。
+`make cmd-uninstall` 只移除该链接。当 `PATH` 上没有 `cmd` 时，安装脚本只打印提示并以 0 退出，
+因此在没有安装 Command Code 的机器上 `make setup` 仍能正常完成。
+
+Mod 在每个进程中只加载一次，因此安装或移除后需要开启新会话或执行 `/reload`。完整生命周期
+参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#command-code-cmd)。
+
+每次 Hook 调用都失败即放行：运行器缺失、Hook 超时或返回内容无法解析时，工具调用都会保持
+Command Code 原本的行为。响应中含 Retrieve Marker 时，Command Code 可以通过自己的 Shell
+工具执行内嵌的 `tokenless retrieve` 命令，适配器会让该恢复结果走 Core 旁路，不再二次压缩。
 
 ### 千问办公插件（macOS 本地模式）
 
@@ -676,6 +713,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据
 - `adapters/tokenless/` — 面向具体 Agent/CLI 的 Plugin、Hook 与 Extension 适配器包
 - `adapters/tokenless/dsh/`。DeepSeek Harness 原生 Bundle
+- `adapters/tokenless/cmd/` — Command Code 适配器：jiti 加载的 TypeScript Mod 与生命周期脚本
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 - `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
 

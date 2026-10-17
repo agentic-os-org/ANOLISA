@@ -114,6 +114,10 @@ stage_payload() {
         opencode/scripts/detect.sh \
         opencode/scripts/install.sh \
         opencode/scripts/uninstall.sh \
+        cmd/tokenless.ts \
+        cmd/scripts/detect.sh \
+        cmd/scripts/install.sh \
+        cmd/scripts/uninstall.sh \
         qwencode/qwen-extension.json \
         qwencode/hooks/run-hook.sh \
         qwenpaw/plugin.json \

@@ -76,6 +76,9 @@ Register it with `qwen extensions link`, or run the install script: qwencode/scr
 OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
+Command Code mod (response/TOON compression, RTK command rewriting, and Tool Ready)
+is available under /usr/share/anolisa/adapters/tokenless/cmd/.
+Register it by running the install script: cmd/scripts/install.sh
 
 %prep
 %setup -q -n %{name}-%{version}
@@ -122,6 +125,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/cmd/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
@@ -237,6 +241,12 @@ install -m 0755 adapters/tokenless/opencode/scripts/detect.sh %{buildroot}%{_dat
 install -m 0755 adapters/tokenless/opencode/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
 install -m 0755 adapters/tokenless/opencode/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
 
+# Install Command Code mod (jiti-loaded TypeScript mod + lifecycle scripts).
+install -m 0644 adapters/tokenless/cmd/tokenless.ts %{buildroot}%{_datadir}/anolisa/adapters/tokenless/cmd/
+install -m 0755 adapters/tokenless/cmd/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/cmd/scripts/
+install -m 0755 adapters/tokenless/cmd/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/cmd/scripts/
+install -m 0755 adapters/tokenless/cmd/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/cmd/scripts/
+
 # Install Qwen Code plugin (extension manifest + hooks + scripts).
 # qwen-extension.json is stamped from .in by `make stamp-adapter-templates`
 # during %build (transitive dep of build-openclaw-plugin).
@@ -302,6 +312,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/codex/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/opencode
 %dir %{_datadir}/anolisa/adapters/tokenless/opencode/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/cmd
+%dir %{_datadir}/anolisa/adapters/tokenless/cmd/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
@@ -377,6 +389,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh
+# Command Code mod — jiti-loaded TypeScript mod + lifecycle scripts.
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/cmd/tokenless.ts
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/cmd/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/cmd/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/cmd/scripts/uninstall.sh
 # Qwen Code plugin — extension manifest + hooks + scripts.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/qwen-extension.json
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks/run-hook.sh
@@ -475,6 +492,12 @@ if [ $1 -eq 0 ]; then
     OPENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh"
     if [ -x "$OPENCODE_SCRIPT" ]; then
         bash "$OPENCODE_SCRIPT" || true
+    fi
+
+    # --- Command Code mod cleanup ---
+    CMD_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/cmd/scripts/uninstall.sh"
+    if [ -x "$CMD_SCRIPT" ]; then
+        bash "$CMD_SCRIPT" || true
     fi
 
     # --- Qwen Code plugin cleanup ---

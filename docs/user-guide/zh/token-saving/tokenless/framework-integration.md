@@ -22,10 +22,11 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
+| Command Code | `cmd` | 硬退出 | 替换 `shell_command` / `powershell` 的输入 | 通过 `afterToolCall` 替换工具结果 | 对可替换文本由流水线选择 | — |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
-Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook）；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。
+Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook）；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。Command Code 的 ModApi 只提供两个可变更的工具 Hook，没有工具 Schema 接缝，因此其 Adapter 完全不注册 Schema Hook；独立的 `tokenless compress-schema` 命令不受影响。
 
 这些 Adapter 仍会注册 Tool Ready，但会在检查、修复或阻断之前无条件硬退出，任何运行时设置都无法重新启用。工具执行后的失败归因不受影响。
 
@@ -35,8 +36,8 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 ## Adapter 处理规则
 
-共享 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
-发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
+共享 Cosh-NG、Qoder、千问办公、Claude Code、OpenCode 和 Command Code PostTool Hook 会向
+`tokenless compress` 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
 解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；否则 Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
 
@@ -312,7 +313,7 @@ npm 的 postinstall 脚本会尝试把 Adapter 资源复制到：
 
 应确认该目录确实存在。Adapter 复制属于补充步骤，失败时只输出警告，不会让二进制安装失败；因此可能出现命令可用但这里没有资源副本的情况。目录缺失时应检查 npm postinstall 警告，并优先改用 anolisa 管理的安装。
 
-npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
+npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code、QwenPaw 和 Command Code 可以运行各自的安装脚本：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -464,6 +465,38 @@ anolisa adapter enable tokenless opencode
 
 启用或禁用后请重启 OpenCode：已有进程会保留加载的插件及其工具输出替换行为，直到重启。
 启用并重启后，执行一次工具调用，再运行 `tokenless stats list` 检查统计记录。
+
+### Command Code (cmd)
+
+Command Code 以松散文件的形式发现 `~/.commandcode/mods` 下的用户级 Mod，并用 jiti 编译，
+因此注册方式是指向随包 Mod 文件的软链接，而不是安装一个包。Command Code 从该文件名推导出的
+Mod 名称 `tokenless`，就是 `cmd mods list` 显示的名称，也是 `cmd mods disable tokenless`
+接受的名称。
+
+当前尚未提供 `cmd` 的内置 ANOLISA Driver，因此 `anolisa adapter scan` 不会列出它，
+`anolisa adapter enable tokenless cmd` 会报告未知 Framework。请改用随包生命周期脚本注册；
+在源码检出目录中，`make cmd-install` 运行的是同一批脚本：
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/cmd/scripts/install.sh
+```
+
+安装脚本依次从 `TOKENLESS_CMD_MODS_DIR`、`COMMANDCODE_HOME`、`~/.commandcode` 解析 Mod 目录，
+把 `mods/tokenless.ts` 建成指向随包 Mod 的软链接，并拒绝替换不属于它管理的文件或链接。
+`scripts/detect.sh` 会对该链接报告 `ready`，`scripts/uninstall.sh` 只移除该链接。
+当 `PATH` 上没有 `cmd` 时，安装脚本只打印提示并以 0 退出，因此在没有安装 Command Code
+的机器上 `make setup` 仍能正常完成。
+
+该 Mod 把 `beforeToolCall` 与 `afterToolCall` 映射到共享 Tokenless Hook。`beforeToolCall`
+替换 `shell_command` 和 `powershell` 工具的 `command`，并原样保留其余输入字段——因为
+Command Code 会整体替换输入，再把它串联给下一个 Mod。`afterToolCall` 替换工具结果中
+模型可见的文本，并保持图片等非文本块在原位置。每次 Hook 调用都失败即放行：运行器缺失、
+Hook 超时或返回内容无法解析时，工具调用都会保持 Command Code 原本的行为。
+
+Mod 在每个进程中只加载一次，因此安装或移除后需要开启新会话或执行 `/reload`。随后执行一次
+工具调用并运行 `tokenless stats list`，统计记录会归属到 `agent=cmd`。两个 Hook 使用相同的
+会话与工具调用标识，因此共享 PostTool Hook 会把 RTK 归属传递给 Core，已经被 Tokenless
+改写为 `rtk` 的命令不会被二次压缩。
 
 ### Qwen Code
 

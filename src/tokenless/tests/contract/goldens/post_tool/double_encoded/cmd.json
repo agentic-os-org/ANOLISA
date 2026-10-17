@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": "{\"items\":[{\"id\":0,\"label\":\"item-0\"},{\"id\":1,\"label\":\"item-1\"},{\"id\":2,\"label\":\"item-2\"},{\"id\":3,\"label\":\"item-3\"},{\"id\":4,\"label\":\"item-4\"},{\"id\":5,\"label\":\"item-5\"},{\"id\":6,\"label\":\"item-6\"},{\"id\":7,\"label\":\"item-7\"},{\"id\":8,\"label\":\"item-8\"},{\"id\":9,\"label\":\"item-9\"}],\"has_more\":false}"
+    },
+    "suppressOutput": true
+  }
+}

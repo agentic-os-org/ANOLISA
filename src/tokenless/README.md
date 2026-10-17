@@ -29,6 +29,7 @@ Agent adapters are available for:
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
 - **DeepSeek Harness plugin** — native response compression, Marker-directed recovery, and environment-error attribution through DSH's `tools/post-execute` seam.
+- **Command Code mod** — RTK command rewriting, response/TOON compression, Marker-directed recovery, and registered but hard-disabled Tool Ready through Command Code's ModApi tool hooks.
 
 For framework developers, the Python SDK has a framework-neutral layer and an **AgentScope-specific
 layer**. Together they cover schema compression, RTK rewriting, response compression, TOON,
@@ -59,6 +60,7 @@ retrieval, and attribution.
 | Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
 | QwenPaw plugin | — | Schema compression ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Retrieve Tool recovery ✅ |
 | DeepSeek Harness plugin | — | Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
+| Command Code mod | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅, Schema unavailable in the host |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
@@ -144,6 +146,7 @@ Token-Less/
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
 │   ├── codex/                   # Codex plugin + scripts
 │   ├── opencode/                # OpenCode local plugin + scripts
+│   ├── cmd/                     # Command Code mod + scripts
 │   ├── qwenpaw/                 # QwenPaw plugin (AgentScope middleware) + scripts
 │   └── dsh/                     # Native DeepSeek Harness bundle
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
@@ -336,8 +339,8 @@ commands unchanged so their native output has a single PostTool owner. Other
 supported commands may be rewritten by RTK, and their results continue to
 bypass PostTool compression.
 
-Claude Code 2.1.121 or newer, Qoder CLI, OpenCode, and Cosh-NG can replace the
-live result. Their PostTool requests enable recovery when bare `tokenless`
+Claude Code 2.1.121 or newer, Qoder CLI, OpenCode, Command Code, and Cosh-NG can
+replace the live result. Their PostTool requests enable recovery when bare `tokenless`
 also resolves on the shell `PATH`. A compression Marker then tells the model to
 run the exact `tokenless retrieve` command through the existing shell tool. The
 hook recognizes only a successful, standalone command
@@ -806,6 +809,51 @@ If a response contains a Retrieve Marker, OpenCode can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter sends
 the successful recovery result through the Core bypass without recompressing it.
 
+## Command Code Mod
+
+Command Code (`cmd`) discovers user-scope mods as loose files under
+`~/.commandcode/mods` and compiles them with jiti, so the adapter ships a single
+self-contained TypeScript mod and registers it with a symlink. The mod name
+Command Code derives from that file, `tokenless`, is what `cmd mods list` prints
+and what `cmd mods disable tokenless` accepts.
+
+The ModApi exposes two mutating tool hooks and no tool-schema seam, so schema
+compression is unavailable; the standalone `tokenless compress-schema` command is
+unchanged.
+
+| Strategy | Hook | Action | Status |
+|---|---|---|---|
+| Tool Ready | `beforeToolCall` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
+| Command rewriting | `beforeToolCall` (`shell_command`, `powershell`) | Rewrites shell commands via RTK, carrying every other input field over | ✅ Active |
+| Response + TOON compression | `afterToolCall` | Replaces the model-visible text of the result, keeping non-text blocks in place | ✅ Active |
+| Schema compression | — | The ModApi has no tool-definition hook | ⛔ Unavailable |
+
+No built-in ANOLISA driver ships for `cmd` yet, so `anolisa adapter scan` does not
+list it and `anolisa adapter enable tokenless cmd` reports an unknown framework.
+Register the mod with the bundled lifecycle script instead:
+
+```bash
+make cmd-install
+```
+
+The script resolves the mods directory from `TOKENLESS_CMD_MODS_DIR`, then
+`COMMANDCODE_HOME`, and finally `~/.commandcode`; creates `mods/tokenless.ts` as a
+link to the bundled mod; and refuses to replace a file or link it does not own.
+`make cmd-uninstall` removes only that link. Without a `cmd` binary on `PATH` the
+installer prints a hint and exits 0, so `make setup` still completes on hosts
+without Command Code.
+
+Mods load once per process, so start a new session or run `/reload` after
+installing or removing the mod. See
+[framework integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#command-code-cmd)
+for the complete lifecycle.
+
+Every hook call fails open: a missing runner, a hook timeout, or an undecodable
+reply leaves the tool call exactly as Command Code would have run it. If a
+response contains a Retrieve Marker, Command Code can run the embedded
+`tokenless retrieve` command through its shell tool, and the adapter sends that
+recovery result through the Core bypass without recompressing it.
+
 ## QwenPaw Plugin
 
 The QwenPaw adapter is a native QwenPaw plugin. Its `plugin.py` registers an
@@ -1047,6 +1095,8 @@ and makes no cloud requests.
 | `make codex-uninstall` | Remove Codex plugin |
 | `make opencode-install` | Install OpenCode local plugin |
 | `make opencode-uninstall` | Remove OpenCode local plugin |
+| `make cmd-install` | Install the Command Code mod |
+| `make cmd-uninstall` | Remove the Command Code mod |
 | `make qwenpaw-install` | Install QwenPaw plugin via the qwenpaw CLI |
 | `make qwenpaw-uninstall` | Remove QwenPaw plugin |
 | `make setup` | Full setup: build + install + all adapters |
@@ -1107,6 +1157,7 @@ layout and single-target interface.
 | `adapters/tokenless/claude-code/` | Claude Code adapter — marketplace + plugin + hooks dispatcher |
 | `adapters/tokenless/codex/` | Codex adapter — plugin + Python hook scripts |
 | `adapters/tokenless/opencode/` | OpenCode adapter — local JavaScript plugin + lifecycle scripts |
+| `adapters/tokenless/cmd/` | Command Code adapter — jiti-loaded TypeScript mod + lifecycle scripts |
 | `adapters/tokenless/qwenpaw/` | QwenPaw adapter — plugin manifest, AgentScope middleware, wheel requirements + lifecycle scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
