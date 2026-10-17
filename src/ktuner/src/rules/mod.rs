@@ -3019,25 +3019,48 @@ fn eval_sched_migration_cost_at(
     let Some(current) = read_switch_i64(path) else {
         return 1;
     };
-    // Every negative value is the pinned side of the comparison (see above):
-    // there is no migration tendency left for the target to raise.
-    if current < 0 {
-        return 1;
-    }
-    if current < 5000000 {
-        recs.push(Recommendation {
-            param: "kernel.sched_migration_cost_ns".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "5000000".to_string(),
-            reason: format!(
-                "{}核机器线程迁移开销大，增大 migration_cost 让调度器倾向于保持线程在同一 CPU 上运行",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance, writable: true,
-        });
+    if let Some(rec) =
+        sched_migration_cost_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_migration_cost_ns` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the migration cost this
+/// reason sizes has had no `/proc/sys` node since: the variable is exported as
+/// `/sys/kernel/debug/sched/migration_cost_ns` (v6.6 kernel/sched/debug.c),
+/// which the rule's own path can never reach. A node under the old name exists
+/// only where a tree re-registered the name for another class, and nothing in
+/// such a tree reads that variable, so the write lands nowhere while the report
+/// claims the scheduler was made stickier. Silence the rule from 5.13 on, the
+/// way the other knobs whose reader moved are silenced.
+///
+/// Every negative value is the pinned side of the comparison above: there is no
+/// migration tendency left for the target to raise.
+fn sched_migration_cost_recommendation(
+    current: i64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || !(0..5_000_000).contains(&current) {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_migration_cost_ns".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "5000000".to_string(),
+        reason: format!(
+            "{cpu_cores}核机器线程迁移开销大，增大 migration_cost 让调度器倾向于保持线程在同一 CPU 上运行"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 // ─── Additional Security Rules ───────────────────────────────────────────────
@@ -6250,21 +6273,45 @@ fn eval_sched_nr_migrate_at(
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 128 {
-        recs.push(Recommendation {
-            param: "kernel.sched_nr_migrate".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "128".to_string(),
-            reason: format!(
-                "{}核 CPU 每次负载均衡仅迁移 {} 个任务，增大可加速核间负载均衡收敛",
-                info.cpu_cores, current
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_nr_migrate_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_nr_migrate` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the batch size this
+/// reason sizes has had no `/proc/sys` node since: the variable is exported as
+/// `/sys/kernel/debug/sched/nr_migrate` (v6.6 kernel/sched/debug.c), which the
+/// rule's own path can never reach. A node under the old name exists only where
+/// a tree re-registered the name for another class, and nothing in such a tree
+/// reads that variable, so the write lands nowhere while the report claims the
+/// idle balancer converges faster. Silence the rule from 5.13 on, the way the
+/// other knobs whose reader moved are silenced.
+fn sched_nr_migrate_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current >= 128 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_nr_migrate".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "128".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 每次负载均衡仅迁移 {current} 个任务，增大可加速核间负载均衡收敛"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -7236,21 +7283,47 @@ fn eval_sched_tunable_scaling_at(
     if info.cpu_cores <= 16 {
         return 1;
     }
-    if read_switch(path) == Some(0) {
-        recs.push(Recommendation {
-            param: "kernel.sched_tunable_scaling".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: format!(
-                "{}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = sched_tunable_scaling_recommendation(
+        read_switch(path),
+        info.cpu_cores,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_tunable_scaling` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the scaling selector this
+/// reason sizes has had no `/proc/sys` node since: it is exported as
+/// `/sys/kernel/debug/sched/tunable_scaling` (v6.6 kernel/sched/debug.c), which
+/// the rule's own path can never reach. A node under the old name exists only
+/// where a tree re-registered the name for another class, and nothing in such a
+/// tree reads that variable, so a write of 1 lands nowhere while the report
+/// claims the kernel scales its tunables again. Silence the rule from 5.13 on,
+/// the way the other knobs whose reader moved are silenced.
+fn sched_tunable_scaling_recommendation(
+    current: Option<u64>,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current != Some(0) {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_tunable_scaling".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_panic_on_oops(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -15450,6 +15523,45 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "5000000");
             }
         }
+    }
+
+    /// 5.13 moved every SCHED_DEBUG tunable into debugfs, so the three knobs
+    /// these rules size have had no /proc/sys node since; the siblings whose
+    /// reader moved were silenced the same way, these three were not.
+    #[test]
+    fn sched_migration_cost_advice_stops_where_its_reader_moved() {
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.4.0-150").is_some());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.13.0").is_none());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "6.6.87.2").is_none());
+        // Unparseable versions keep the legacy behaviour, and the value gates
+        // are unchanged: a pinned negative and a tuned host keep their silence.
+        assert!(sched_migration_cost_recommendation(500_000, 64, "").is_some());
+        assert!(sched_migration_cost_recommendation(-1, 64, "5.10.0").is_none());
+        assert!(sched_migration_cost_recommendation(5_000_000, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_nr_migrate_advice_stops_where_its_reader_moved() {
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.4.0-150").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.13.0").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "6.6.87.2").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "").is_some());
+        assert!(sched_nr_migrate_recommendation(128, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_tunable_scaling_advice_stops_where_its_reader_moved() {
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.4.0-150").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.13.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "6.6.87.2").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "").is_some());
+        // The switch gate is unchanged: an enabled selector or an unreadable
+        // file is not the disabled state.
+        assert!(sched_tunable_scaling_recommendation(Some(1), 64, "5.10.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(None, 64, "5.10.0").is_none());
     }
 
     #[test]
