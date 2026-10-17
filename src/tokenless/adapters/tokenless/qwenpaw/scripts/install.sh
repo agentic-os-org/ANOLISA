@@ -28,8 +28,11 @@ PLUGIN_DST="${QWENPAW_WORKING_DIR%/}/plugins/${PLUGIN_ID}"
 
 # QwenPaw installs requirements.txt with its own interpreter (the CLI's
 # shebang). On a platform without a matching wheel pip installs nothing and
-# still exits 0, and a released wheel may predate the SDK surface the plugin
-# imports, so prove the SDK imports there. QWENPAW_PYTHON overrides the
+# still exits 0, and a released wheel can export every class name the plugin
+# imports while still predating a field the plugin passes: the published 0.8.4
+# wheel had no PostToolRequest.command, so a name-level check passed and every
+# tool call died with a TypeError. Ask the bundle's own plugin.py what it needs
+# and prove the installed wheel provides it. QWENPAW_PYTHON overrides the
 # interpreter; a CLI without a Python shebang (frozen build) is left unverified.
 check_sdk() {
     local python="${QWENPAW_PYTHON:-}"
@@ -42,14 +45,66 @@ check_sdk() {
     if [ -z "$python" ] || [ ! -x "$python" ] || ! "$python" --version 2>&1 | grep -q '^Python '; then
         return 2
     fi
-    "$python" - <<'PY'
+    ANOLISA_PLUGIN_PY="$PLUGIN_SRC/plugin.py" "$python" - <<'PY'
+import importlib.util
+import os
 import sys
+import types
+
+plugin_py = os.environ["ANOLISA_PLUGIN_PY"]
+
+
+def fail(reason):
+    # Both callers capture stdout, so the reason lands in the script's own
+    # report instead of only in this process' stderr.
+    print(reason)
+    sys.exit(1)
+
+
 try:
     import anolisa_tokenless as sdk
 except ImportError as error:
-    sys.exit(f"anolisa_tokenless is not importable by {sys.executable}: {error}")
+    fail(f"anolisa_tokenless is not importable by {sys.executable}: {error}")
+
 if not hasattr(sdk, "RecoveryMethod"):
-    sys.exit(f"anolisa_tokenless {sdk.__version__} predates the SDK surface the plugin needs")
+    fail(f"anolisa_tokenless {sdk.__version__} predates the SDK surface the plugin needs")
+
+
+def declared_gaps():
+    """What the bundled plugin.py declares this wheel to be missing."""
+    # plugin.py owns the declaration, so the verdict cannot drift from what the
+    # plugin actually constructs. It imports AgentScope at module level, which
+    # is QwenPaw's dependency and not this interpreter's, so stub those modules.
+    for name, attributes in {
+        "agentscope": (),
+        "agentscope.message": ("TextBlock", "ToolResultState"),
+        "agentscope.middleware": ("MiddlewareBase",),
+        "agentscope.tool": ("ToolChunk", "ToolResponse"),
+    }.items():
+        module = types.ModuleType(name)
+        module.__path__ = []
+        for attribute in attributes:
+            setattr(module, attribute, type(attribute, (), {}))
+        sys.modules[name] = module
+    spec = importlib.util.spec_from_file_location("tokenless_qwenpaw_plugin", plugin_py)
+    bundle = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bundle)
+    return bundle._missing_sdk_surface(sdk)
+
+
+try:
+    gaps = declared_gaps()
+except Exception as error:
+    # A guard that cannot load is no verdict: report it on stderr, which the
+    # callers do not capture, and leave the decision to the plugin's own
+    # registration check.
+    gaps = []
+    print(f"could not check the SDK surface declared by {plugin_py}: {error}", file=sys.stderr)
+if gaps:
+    fail(
+        f"anolisa_tokenless {sdk.__version__} lacks {', '.join(gaps)}, which the "
+        f"tokenless plugin at {plugin_py} requires"
+    )
 print(sdk.__version__)
 PY
 }

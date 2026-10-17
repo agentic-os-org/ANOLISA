@@ -14,6 +14,7 @@ table are passed through untouched.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import AsyncGenerator, Callable
@@ -119,6 +120,72 @@ _REQUIRED_SDK_NAMES = (
     "TokenlessSdk",
     "ToolResultStatus",
 )
+
+# Keyword arguments this plugin passes to each SDK constructor it calls. A
+# released wheel that renames or drops one of them still imports and still
+# exposes the class, so the name check alone passes and the middleware dies
+# with a TypeError on the first model or tool call -- which is exactly how a
+# wheel built before ``PostToolRequest.command`` reached users as a runtime
+# crash instead of an install-time refusal.
+_REQUIRED_SDK_FIELDS = {
+    "BeforeModelCapabilities": ("recovery", "replace_tools"),
+    "BeforeModelRequest": (
+        "attribution",
+        "capabilities",
+        "tools",
+        "visible_context",
+    ),
+    "PostToolCapabilities": ("recovery", "replace_output", "replace_with_text"),
+    "PostToolRequest": (
+        "attribution",
+        "capabilities",
+        "command",
+        "content",
+        "content_origin",
+        "output_optimization",
+        "result_kind",
+        "status",
+        "tool_name",
+    ),
+    "PreToolCapabilities": ("block_and_suggest", "replace_arguments"),
+    "PreToolRequest": (
+        "arguments",
+        "attribution",
+        "capabilities",
+        "command_field",
+        "tool_name",
+    ),
+    "TokenlessConfig": ("data_dir", "retrieve_tool_name", "rtk_enabled"),
+}
+
+
+def _missing_sdk_surface(sdk: Any) -> list[str]:
+    """Members of ``sdk`` this plugin needs but the installed wheel lacks.
+
+    Reports missing module attributes as bare names and missing constructor
+    keyword arguments as ``Class.field``. A constructor that accepts
+    ``**kwargs``, or whose signature cannot be introspected, is left alone:
+    this guard must never be the reason a compatible wheel is refused.
+    """
+    missing = [name for name in _REQUIRED_SDK_NAMES if not hasattr(sdk, name)]
+    for class_name, fields in _REQUIRED_SDK_FIELDS.items():
+        constructor = getattr(sdk, class_name, None)
+        if constructor is None:
+            continue  # already reported as a missing name
+        try:
+            parameters = inspect.signature(constructor).parameters
+        except (TypeError, ValueError):
+            continue
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            continue
+        missing.extend(
+            f"{class_name}.{field}" for field in fields if field not in parameters
+        )
+    return missing
+
 
 _SDKS: dict[str, Any] = {}
 
@@ -386,9 +453,7 @@ class TokenlessPlugin:
         manifest = json.loads(
             (Path(__file__).parent / "plugin.json").read_text(encoding="utf-8")
         )
-        missing = [
-            name for name in _REQUIRED_SDK_NAMES if not hasattr(anolisa_tokenless, name)
-        ]
+        missing = _missing_sdk_surface(anolisa_tokenless)
         if missing:
             logger.error(
                 "tokenless: anolisa_tokenless %s lacks %s required by plugin %s; "

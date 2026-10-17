@@ -263,6 +263,44 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api.middlewares, [])
         self.assertEqual(api.tools, [])
 
+    def test_register_refuses_a_wheel_whose_constructor_lost_a_field(self) -> None:
+        """A wheel that only lost a keyword argument must not reach the model.
+
+        `anolisa_tokenless` 0.8.4 shipped a `PostToolRequest` without `command`
+        while the deployed plugin already passed `command=`; both name guards
+        passed and the middleware raised TypeError on the first tool call.
+        """
+
+        @dataclass(frozen=True)
+        class _StalePostToolRequest:
+            result_kind: object
+            tool_name: str
+            content: str
+            status: object
+            content_origin: object
+            output_optimization: object
+            capabilities: object
+            attribution: object
+
+        api = _FakeApi()
+        with mock.patch.object(core, "PostToolRequest", _StalePostToolRequest):
+            with self.assertLogs(plugin.logger, level="ERROR") as logs:
+                plugin.plugin.register(api)
+        self.assertIn("lacks PostToolRequest.command", logs.output[0])
+        self.assertEqual(api.middlewares, [])
+        self.assertEqual(api.tools, [])
+
+    def test_register_accepts_a_constructor_that_takes_arbitrary_keywords(self) -> None:
+        class _LooseConfig:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        api = _FakeApi()
+        with mock.patch.object(core, "TokenlessConfig", _LooseConfig):
+            with self.assertNoLogs(plugin.logger, level="WARNING"):
+                plugin.plugin.register(api)
+        self.assertEqual(api.middlewares, [(plugin._factory, 100)])
+
     async def test_model_call_compresses_schemas_and_records_markers(self) -> None:
         seen = {}
 
