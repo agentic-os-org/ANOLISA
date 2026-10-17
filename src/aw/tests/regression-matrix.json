@@ -1,0 +1,367 @@
+{
+  "version": 1,
+  "required_targets": [
+    "aw-config/test/configuration",
+    "aw-contracts/test/canonical",
+    "aw-contracts/test/contracts",
+    "aw-contracts/test/orchestration",
+    "aw-contracts/test/schemas",
+    "aw-core/test/execution",
+    "aw-core/test/journal",
+    "aw-exec/test/execution",
+    "aw-host/test/host",
+    "aw-package/test/installation",
+    "aw-provider-sec-core/test/provider",
+    "aw-provider-tokenless/test/managed_rtk",
+    "aw-provider-tokenless/test/pretool",
+    "aw-provider-tokenless/test/provider",
+    "aw-provider-tokenless/test/views",
+    "aw-provider/test/admission",
+    "aw-provider/test/protocol",
+    "aw-provider/test/views",
+    "aw-service/bin/aw",
+    "aw-service/lib/aw_service",
+    "aw-service/test/agentscope",
+    "aw-service/test/claude_sdk",
+    "aw-service/test/inspect",
+    "aw-service/test/launcher",
+    "aw-service/test/openclaw",
+    "aw-service/test/pi",
+    "aw-service/test/posttool",
+    "aw-service/test/pretool",
+    "aw-service/test/qwenpaw",
+    "aw-service/test/service"
+  ],
+  "cases": {
+    "catalog": {
+      "target": "aw-service/bin/aw",
+      "test": "cli::adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
+    },
+    "security-retry": {
+      "target": "aw-service/test/pretool",
+      "test": "retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors"
+    },
+    "final-replacement": {
+      "target": "aw-service/test/posttool",
+      "test": "adapters_keep_observers_and_user_hooks_before_one_final_replacement"
+    },
+    "qoder-lifecycle": {
+      "target": "aw-service/test/launcher",
+      "test": "two_agent_instances_release_independently_and_leave_the_daemon_running"
+    },
+    "openclaw-lifecycle": {
+      "target": "aw-service/test/openclaw",
+      "test": "plugin_callbacks_preserve_configuration_profile_raw_events_and_native_parallelism"
+    },
+    "hermes-lifecycle": {
+      "target": "aw-service/test/launcher",
+      "test": "hermes_probes_and_install_writers_cancel_and_reap_on_signals"
+    },
+    "qwenpaw-lifecycle": {
+      "target": "aw-service/test/qwenpaw",
+      "test": "app_exit_before_readiness_releases_instance_and_owned_files"
+    },
+    "pi-lifecycle": {
+      "target": "aw-service/test/pi",
+      "test": "foreground_factory_installs_both_hooks_and_releases_binding"
+    },
+    "claude-sdk-lifecycle": {
+      "target": "aw-service/test/claude_sdk",
+      "test": "claude_hook_cli_preserves_deny_success_failure_identity_and_audit"
+    },
+    "agentscope-lifecycle": {
+      "target": "aw-service/test/agentscope",
+      "test": "no_factory_attachment_never_reports_ready_and_releases_binding_files"
+    },
+    "security-block": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "risk_is_a_successful_block_only_with_explicit_mode_and_admission"
+    },
+    "security-error": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "failed_or_invalid_scans_never_become_policy_blocks"
+    },
+    "security-cancel": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "host_cancellation_stops_the_nested_scan_cli"
+    },
+    "security-observe": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "offline_methods_and_after_observation_do_not_need_the_daemon"
+    },
+    "security-budget": {
+      "target": "aw-provider-sec-core/test/provider",
+      "test": "stalled_cli_respects_invocation_budget_and_reports_failure"
+    },
+    "compression-bound": {
+      "target": "aw-provider-tokenless/test/provider",
+      "test": "applied_cli_result_is_a_bound_text_replacement"
+    },
+    "compression-failure": {
+      "target": "aw-provider-tokenless/test/provider",
+      "test": "cli_failures_and_wrong_identity_remain_visible_errors"
+    },
+    "compression-unsupported": {
+      "target": "aw-provider-tokenless/test/provider",
+      "test": "unsupported_slots_and_failed_tools_never_call_cli"
+    },
+    "compression-neutral": {
+      "target": "aw-provider-tokenless/test/provider",
+      "test": "dry_run_and_no_savings_keep_original_result"
+    },
+    "retry-ownership": {
+      "target": "aw-provider-tokenless/test/pretool",
+      "test": "adapters_block_original_and_carry_retry_ownership_into_after"
+    },
+    "retry-no-mutation": {
+      "target": "aw-provider-tokenless/test/pretool",
+      "test": "pretool_rejects_direct_mutations_and_keeps_execution_errors_visible"
+    },
+    "rtk-isolation": {
+      "target": "aw-provider-tokenless/test/managed_rtk",
+      "test": "managed_path_is_child_only_and_rejects_missing_corrupt_or_unusable_payloads"
+    },
+    "view-isolation": {
+      "target": "aw-provider-tokenless/test/views",
+      "test": "description_and_missing_store_never_invoke_or_initialize_component"
+    },
+    "cancel-initialization": {
+      "target": "aw-service/lib/aw_service",
+      "test": "audit::tests::cancellation_fences_hook_opens_blocked_in_initial_audit_claim"
+    }
+  },
+  "agents": {
+    "agentscope": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "agentscope-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "claude-sdk": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "claude-sdk-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "hermes": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "hermes-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "openclaw": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "openclaw-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "pi": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "pi-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "qoder": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "qoder-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "qwenpaw": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "qwenpaw-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement"
+      ]
+    }
+  },
+  "providers": {
+    "sec-core": [
+      "security-block",
+      "security-error",
+      "security-cancel",
+      "security-observe",
+      "security-budget"
+    ],
+    "tokenless": [
+      "compression-bound",
+      "compression-failure",
+      "compression-unsupported",
+      "compression-neutral",
+      "retry-ownership",
+      "retry-no-mutation",
+      "rtk-isolation",
+      "view-isolation"
+    ]
+  },
+  "opt_in_targets": {
+    "aw-package/test/installed": "Installed all-in-one Preview acceptance runs in package CI; requires installed binaries and a real sec-core socket or root."
+  }
+}

@@ -306,7 +306,9 @@ def main() -> None:
                     assert "native_arguments_invalid" in diagnostics, diagnostics
                     assert "native_integer_out_of_range" in diagnostics, diagnostics
                     (output / ("result-" + action + ".json")).write_text(
-                        json.dumps({"cases": len(CASES), "status": status}, indent=2)
+                        json.dumps(
+                            {"cases": len(records("permissions")), "status": status}, indent=2
+                        )
                     )
                 finally:
                     (output / ("records-" + action + ".json")).write_text(

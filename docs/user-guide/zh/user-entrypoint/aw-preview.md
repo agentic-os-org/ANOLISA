@@ -4,7 +4,13 @@
 
 只安装 AW core 即可运行已有的 Qoder 或 OpenClaw，无需 Provider。按需添加 sec-core 或自定义布尔判断脚本，使用同一份 AW 配置。AW 和 sec-core 的构建、安装及运行使用 Rust 二进制，不依赖 Python；用户脚本自行承担其运行依赖。OpenClaw 仍需 Node.js，各 Agent 的模型账户由其原生配置管理。
 
-此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请下载已评审提交上手动运行成功的 **CI / AW Packages** 产物。PR 自动产物带 `-validation` 后缀，仅用于合并候选验收，不作为发布包分发。
+此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请从运行成功的
+**CI / AW Integration** 下载 `aw-preview-linux-x86_64-<candidate_sha>`。
+该流程每天北京时间 03:23 在 `main` 上运行；验收已评审提交或发布候选时，
+手动运行并传入该提交完整的 40 位 `candidate_sha`。使用包前，须等待包括
+**AW / Integration result** 在内的整个流程通过。日常 PR 检查不生成 Preview 包。
+手动触发方式和原生验收边界见
+[集成验收说明](../../../../src/aw/CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
 
 从源码到组件接入的连续步骤及无需后端的策略示例见
 [组件教程](../../../developer-guide/zh/aw/integration.md)。需要 QwenPaw 或 Hermes 共用
@@ -305,7 +311,7 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
 
 Rust 构建器编译锁定依赖的 release 二进制，检查原生 ELF 架构，只生成所选压缩包及 `SHA256SUMS`。默认 `--component core` 不编译或读取 sec-core；`--component sec-core` 生成扩展包，`--component all` 生成四种包。扩展安装仍要求同一源码提交和版本的 core。发布失败或取消时，只清理本次创建的链接，以便重试；清理失败会报告具体残留路径。安装包 CI 使用真实 sec-core 扫描器，通过模拟事件验证两种工具映射及审计恢复，不将其作为原生 Agent 验收。真实模型会话按上文另行验证。AW 通用开发门禁仍保留交付链路之外的 Python 测试工具。
 
-包 CI 自动覆盖 package/Provider crate、sec-core V2 和 systemd 资产、AW manifests、本指南和工作流变更；其他 AW 变更在分发前需要针对确切源码提交手动运行。成功的 PR 产物保留 3 天，手动产物保留 14 天；失败时保留诊断证据，不上传安装包。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
+CI / AW Integration 每晚运行，也可针对确切源码提交手动触发；PR 不会自动运行包验收。两种触发方式的安装包产物均保留 3 天。完整集成结果通过后才能分发安装包；失败的任务保留诊断证据。支持重新构建，但不保证压缩包逐字节一致；统一发布入口后续交付。
 
 ## 可选 Tokenless PostTool 包
 

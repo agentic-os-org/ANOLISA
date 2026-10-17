@@ -97,6 +97,7 @@ async def worker() -> None:
         agent.model.round = 0
         return agent.reply(UserMsg("user", "run"))
 
+    cancelled = prespawn_cancelled = spawn_failures = deep_directives = 0
     for event in ["before", "after"]:
         for number in range(34):
             mode = f"cancel-{event}-{number}"
@@ -116,6 +117,7 @@ async def worker() -> None:
                 assert checked["events"] == 0, (mode, checked)
                 pid = int((root / mode).read_text())
                 assert not Path(f"/proc/{pid}").exists(), f"native hook child remains: {pid}"
+                cancelled += 1
             finally:
                 if not task.done():
                     task.cancel()
@@ -166,6 +168,7 @@ async def worker() -> None:
         ]
         assert observed == [label for label in labels if label != failed], (mode, observed)
         assert (mode in executed) == (failed != "before-last"), (mode, executed)
+        spawn_failures += 1
     await asyncio.wait_for(turn("normal-after-spawns"), 5)
     binding = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["binding"]
     proxy_socket = root / "fault.sock"
@@ -290,6 +293,8 @@ async def worker() -> None:
                     checked = await asyncio.to_thread(status)
                     assert checked["events"] == 0, (mode, checked)
                     assert (mode in executed) == (event == "after"), (mode, executed)
+                    cancelled += 1
+                    prespawn_cancelled += 1
                 finally:
                     if not task.done():
                         task.cancel()
@@ -395,17 +400,18 @@ async def worker() -> None:
         ]
         assert observed == labels, (mode, observed)
         assert status()["events"] == 0, mode
+        deep_directives += 1
     (root / "worker-result.json").write_text(
         json.dumps(
             {
-                "cancelled": 136,
-                "prespawn_cancelled": 68,
+                "cancelled": cancelled,
+                "prespawn_cancelled": prespawn_cancelled,
                 "finalizer_cancelled": len(finalizer_closes),
                 "finalizer_close_pids": finalizer_closes,
-                "spawn_failures": 36,
-                "rpc_failures": 36,
+                "spawn_failures": spawn_failures,
+                "rpc_failures": len(dropped),
                 "approval_failures": approvals,
-                "deep_directives": 3,
+                "deep_directives": deep_directives,
                 "executed": executed,
                 "status": status(),
             }
@@ -421,7 +427,7 @@ def owned(
         "command": command,
         "cwd": str(root),
         "ports": [],
-        "lifetime_seconds": 200,
+        "lifetime_seconds": 740,
         "logs": [str(output / (name + ".stdout")), str(output / (name + ".stderr"))],
     }
     path = output / (name + "-process.json")
@@ -529,7 +535,9 @@ def main() -> None:
                     "worker",
                     env,
                 ) as child:
-                    child.wait(timeout=180)
+                    # This sequential stress suite runs nearly 300 cancellation/error cases.
+                    # Keep the per-event budgets fixed while allowing hosted-runner overhead.
+                    child.wait(timeout=720)
                     assert child.returncode == 0, (output / "worker.stderr").read_text()
                 status = json.loads(
                     subprocess.check_output(

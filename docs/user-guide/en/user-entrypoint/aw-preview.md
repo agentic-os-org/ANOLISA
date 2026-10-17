@@ -4,7 +4,15 @@
 
 Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec-core or your own boolean policy command when needed, using one AW configuration. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
 
-This Preview is not yet published through `anolisa install` or RPM. Download artifacts from a successful manual **CI / AW Packages** run of the reviewed source commit. PR artifacts ending in `-validation` are merge-candidate checks, not distributable releases.
+This Preview is not yet published through `anolisa install` or RPM. Download
+`aw-preview-linux-x86_64-<candidate_sha>` from a successful **CI / AW Integration**
+run. The workflow runs nightly on `main` at 03:23 Asia/Shanghai; for a reviewed
+source commit or release candidate, run it manually with that commit's full
+40-character `candidate_sha`. Wait for the entire workflow, including
+**AW / Integration result**, to pass before using its packages. Daily PR checks
+do not produce Preview packages. See the
+[integration validation instructions](../../../../src/aw/CONTRIBUTING.md#daily-ci-and-nightly-integration)
+for manual dispatch and native acceptance boundaries.
 
 For source-to-integration steps, including a backend-free policy, see the
 [component walkthrough](../../../developer-guide/en/aw/integration.md). To use
@@ -335,7 +343,7 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
 
 The Rust builder compiles locked release binaries, checks native ELF architecture, and generates only the selected archives and `SHA256SUMS`. The default is `--component core`, which never builds or reads sec-core; use `--component sec-core` for the extension or `--component all` for all four packages. The extension still requires core from the same source commit and version at installation. Failed or cancelled publication removes only the links created by that run, allowing retry; cleanup failures report exact remaining paths. The installed-package CI test exercises the real sec-core scanner, both tool mappings and audit recovery with synthetic events; it does not claim native Agent coverage. Native model turns remain explicit acceptance as above. The general AW development gate retains Python test tooling outside the delivery path.
 
-Package CI runs for changes to the package/Provider crates, sec-core V2 and systemd assets, AW manifests, this guide and its workflow. Changes elsewhere in AW require a manual run on the exact source commit before distribution. Successful PR artifacts are retained for three days; manual artifacts for fourteen. Failed runs retain diagnostics but do not publish packages. Archives are rebuildable but not guaranteed byte-identical; a unified release channel is future work.
+CI / AW Integration runs nightly and can be dispatched manually for an exact source commit; PRs do not automatically run package acceptance. Package artifacts are retained for three days for both triggers. Distribute packages only after the full integration result passes; failed jobs retain diagnostic evidence. Archives are rebuildable but not guaranteed byte-identical; a unified release channel is future work.
 
 ## Optional Tokenless PostTool package
 

@@ -152,27 +152,16 @@ impl PreparedLaunch for Prepared {
 }
 
 fn capabilities(args: &[String], version: &str) -> Capabilities {
-    Capabilities {
-        adapter: "qoder".into(),
-        version: version.into(),
-        entrypoint: if args
-            .iter()
-            .take_while(|arg| arg.as_str() != "--")
-            .any(|arg| matches!(arg.as_str(), "-p" | "--print"))
-        {
-            "print"
-        } else {
-            "tui"
-        }
-        .into(),
-        events: BTreeMap::from([
-            ("tool.before".into(), vec!["observe".into(), "block".into()]),
-            (
-                "tool.after".into(),
-                vec!["observe".into(), "replace_result".into()],
-            ),
-        ]),
-    }
+    let entrypoint = if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "-p" | "--print"))
+    {
+        "print"
+    } else {
+        "tui"
+    };
+    super::adapter::catalog::QODER.capabilities(version, entrypoint)
 }
 
 pub(super) fn check_args(args: &[String]) -> Result<()> {
