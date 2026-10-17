@@ -138,7 +138,10 @@ fn read_cap_from_file(path: &Path) -> Option<u64> {
         storage: Option<StorageProbe>,
     }
     let content = std::fs::read_to_string(path).ok()?;
-    let probe: ConfigProbe = serde_json::from_str(&content).ok()?;
+    // The startup loader accepts one leading UTF-8 BOM, so the hot read must
+    // too, or a marked file keeps its startup cap through every edit.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let probe: ConfigProbe = serde_json::from_str(content).ok()?;
     probe.storage.and_then(|storage| storage.max_total_size_mb)
 }
 
@@ -168,7 +171,9 @@ pub(crate) fn write_total_size_limit(
 ) -> Result<(), String> {
     StorageConfig::validate_total_size_mb(max_total_size_mb)?;
     let mut root: serde_json::Value = match std::fs::read_to_string(config_path) {
-        Ok(content) => serde_json::from_str(&content)
+        // One leading BOM is the format's, as in the config loader; the
+        // rewritten file is serialized without it.
+        Ok(content) => serde_json::from_str(content.strip_prefix('\u{feff}').unwrap_or(&content))
             .map_err(|error| format!("existing config is not valid JSON: {error}"))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             serde_json::json!({ "schema_version": crate::config::CURRENT_SCHEMA_VERSION })
@@ -317,6 +322,45 @@ mod tests {
         assert_eq!(budget.cap_mb(), 9);
         std::fs::write(&config_path, r#"{"storage": {"max_total_size_mb": 8}}"#).unwrap();
         assert_eq!(budget.cap_mb(), 9);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn cap_is_hot_read_from_a_bom_prefixed_config_file() {
+        // A Windows editor saving "UTF-8 with BOM" prefixes the file with
+        // U+FEFF, and the startup loader accepts that file. The hot read must
+        // see the same edit, not keep the startup value forever.
+        let base = unique_dir("hot-reload-bom");
+        let config_path = base.join("config.json");
+        let storage = StorageConfig {
+            base_path: base.clone(),
+            max_total_size_mb: 100,
+            ..StorageConfig::default()
+        };
+        std::fs::write(
+            &config_path,
+            "\u{feff}{\"storage\": {\"max_total_size_mb\": 9}}",
+        )
+        .unwrap();
+        let budget = StorageBudget::new(Some(config_path.clone()), &storage);
+        assert_eq!(budget.cap_mb(), 9, "a BOM must not hide the edited cap");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn total_size_limit_is_merged_into_a_bom_prefixed_config_file() {
+        let base = unique_dir("write-bom");
+        let config_path = base.join("config.json");
+        std::fs::write(
+            &config_path,
+            "\u{feff}{\"storage\": {\"max_total_size_mb\": 100}, \"keep\": 1}",
+        )
+        .unwrap();
+        write_total_size_limit(&config_path, 900).expect("a BOM-prefixed config is valid");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(written["storage"]["max_total_size_mb"], 900);
+        assert_eq!(written["keep"], 1, "other settings must survive the merge");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

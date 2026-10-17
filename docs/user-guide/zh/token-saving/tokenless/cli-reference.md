@@ -402,6 +402,58 @@ tokenless env-check --tool Shell --fix
 
 ## `stats`
 
+### 只读 HTTP 查询
+
+对已有统计数据库运行独立查询服务：
+
+```bash
+tokenless stats serve --data-dir /var/lib/tokenless \
+  --credential-file /run/secrets/tokenless-query
+```
+
+这两个路径均为部署占位值。`--data-dir` 必须是包含 `stats.db` 的绝对目录，
+服务不会创建或迁移数据库。`--credential-file` 包含非空、无空格的 ASCII
+Bearer 凭据（含末尾换行最多 4096 字节），启动时读取，轮换后需要重启服务。
+通过凭据文件或 Kubernetes Secret 挂载；AgentSight 后端使用该凭据，
+用户登录仍由 AgentSight 自己处理。
+
+默认监听 `127.0.0.1:7397`。使用 `--listen <address>:<port>` 指定私有服务端点。
+远程传输需通过私有网络或 TLS 反向代理保护；该监听器提供 HTTP，不提供 TLS。非 loopback 监听会在启动时警告。Unix 凭据文件建议
+使用仅所有者可访问的 0600 权限；group/other 权限会触发启动警告，但不会阻止
+服务启动。批量请求先鉴权，再读取请求体。
+
+匹配到损坏记录时返回 HTTP 500，包含 `error.code=invalid_record`、
+`error.record_id` 和 `error.field`，不返回无效值或内容。修复指定源记录后重试。
+手动使用 `before_id=<record_id>` 可检查旧记录，但会主动遗漏数据，不能作为
+完整统计。鉴权后先识别路由，未知路径（包括尾斜杠）在检查方法前返回 404。
+两个 GET 路由也支持 HEAD，沿用相同的查询校验和状态，但不返回响应体。
+HTTP 405 响应包含已识别路由的 `Allow: GET, HEAD` 或 `Allow: POST`。
+
+启动时若源库缺少 `idx_tool_use_id`，会警告一次：在新版原生 recorder 打开该库前，
+tool 查询可能扫描全表。服务仍正常启动，不创建索引或迁移源库。
+
+| 接口 | 查询选项或 JSON 请求体 | 响应 |
+|---|---|---|
+| `GET /v1/stats/records` | `limit`（默认 50，最多 100）、`before_id`、`session_id`、`tool_use_id` | `schema_version: 1`、`records`、`next_before_id` |
+| `GET /v1/stats/records/<id>` | `include_content=true` 请求已存储的 text/output | `schema_version: 1`、`record` |
+| `POST /v1/stats/records/query` | JSON：`tool_use_ids`（1–128 个非空 ID，每个最多 1024 字节）、`limit`（1–100）、可选 `before_id`；请求体最多 1 MiB | `schema_version: 1`、`records`、`next_before_id` |
+
+所有请求需要 `Authorization: Bearer <credential>`。缺失、错误或重复凭据
+返回 401，不接受 cookie 或查询参数中的凭据。数据响应使用
+`Cache-Control: no-store`。
+
+列表不包含内容。详情返回显式请求的全部已存储内容，`content_included`
+区分未请求内容与内容未存储时的 null。响应超过 8 MiB 时返回 413，不会
+静默截断。保留原始记录时间和字段，包括历史缺失的 mode 以及 RTK 记录。
+分页用于浏览当前数据库，不提供清空或替换数据库后的恢复能力。
+
+错误格式为 `{"schema_version":1,"error":{"code":"..."}}`：无效查询返回
+400，记录或路由不存在返回 404，其他方法返回 405，损坏记录返回 500，
+数据库不可用或不受支持返回 503。CLI/hook 退出后，服务仍可查询已提交记录。
+停止查询服务不影响压缩。
+
+### 本地命令
+
 ```bash
 tokenless stats summary
 tokenless stats summary --json

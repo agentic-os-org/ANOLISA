@@ -346,3 +346,30 @@ fn plugin_node_contract_tests_pass() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn observation_only_gateway_registers_callbacks_without_actions() {
+    let fixture = Fixture::new();
+    let mut config = document(&fixture);
+    fixture.observation(&mut config, "openclaw");
+    let service = Service::start(&fixture, &config);
+    let output = fixture.run(command(&fixture));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.root.join("tool-ran").exists());
+    let audit = fixture.run_audit(&service, &output);
+    assert_eq!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["record"]["phase"] == "native_callback")
+            .count(),
+        2
+    );
+    assert_eq!(audit["terminal"], true);
+    service.released(&fixture);
+}

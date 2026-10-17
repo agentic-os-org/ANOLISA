@@ -156,10 +156,11 @@ One-command health picture for a recent window.
 
 ```
 FLAGS:
-        --json           Output as JSON
+        --json                          Output as JSON
 OPTIONS:
-        --db <db>        Override the sessions database path
-        --last <last>    Query the last N hours (default: 24) [default: 24]
+        --db <db>                       Override the sessions database path
+        --last <last>                   Query the last N hours (default: 24) [default: 24]
+        --tokenless-db <tokenless-db>   Override the tokenless stats database path
 ```
 
 ```bash
@@ -181,6 +182,9 @@ Tokenless     10% saved (110.0K -> 99.0K, 20 ops)
 `--db` reads a copy of the databases — for example one copied off another host — instead of the
 default directory, so the report needs no `sudo` and mixes in no live data. The interruption
 database is read from the same directory (`interruption_events.db`), matching the default layout.
+The tokenless store lives outside those databases, in the caller's home directory, so `--db` does
+not move it: pass `--tokenless-db` to read a copy of `stats.db` and keep the whole report free of
+the reading host's own data.
 
 ```bash
 agentsight summary --last 24 --db /backup/agentsight/genai_events.db

@@ -564,6 +564,10 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.provider, LLMProvider::Anthropic);
+        // The model rides inside `message.model`; no streamed Anthropic event
+        // carries a top-level `model`, so reading only that key stored every
+        // Claude stream with an empty model in the token record.
+        assert_eq!(usage.model.as_deref(), Some("claude-3-opus"));
     }
 
     #[test]
@@ -865,6 +869,9 @@ mod tests {
         // OpenAI-style usage keys must keep the OpenAI provider label so
         // billed_input_tokens does not switch to the Anthropic formula.
         assert_eq!(usage.provider, LLMProvider::OpenAI);
+        // The model rides inside `response.model`; the event has no top-level
+        // `model`, so the token record kept an empty model for Responses calls.
+        assert_eq!(usage.model.as_deref(), Some("qwen3-coder-plus"));
     }
 
     #[test]

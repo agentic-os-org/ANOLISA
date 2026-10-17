@@ -1,0 +1,460 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "subject",
+    "source",
+    "association",
+    "times",
+    "kind",
+    "content_ref",
+    "coverage",
+    "trust",
+    "derivation",
+    "execution_ref"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "aw.evidence/v1"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "scope",
+        "instance_id",
+        "version",
+        "record_ref",
+        "revision"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "aw",
+            "agentsight"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "instance_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "record_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        }
+      }
+    },
+    "association": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "basis",
+        "session_id",
+        "tool_call_id"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "verified",
+            "unverified",
+            "unassociated"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "native_callback",
+            "native_session",
+            "none"
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "verified"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "enum": [
+                  "native_callback",
+                  "native_session"
+                ]
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "basis": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "times": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurred_at",
+        "received_at_ms",
+        "cutoff_at_ms"
+      ],
+      "properties": {
+        "occurred_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "received_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cutoff_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "kind": {
+      "enum": [
+        "native.callback",
+        "native.tool_result",
+        "trajectory.step"
+      ]
+    },
+    "content_ref": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "gaps"
+      ],
+      "properties": {
+        "status": {
+          "const": "unknown"
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z0-9_]+$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        }
+      }
+    },
+    "trust": {
+      "enum": [
+        "trusted_adapter",
+        "unverified_native",
+        "source_reported"
+      ]
+    },
+    "derivation": {
+      "enum": [
+        "native_report",
+        "source_history",
+        "model_echo"
+      ]
+    },
+    "execution_ref": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/evidence/v1",
+  "$defs": {
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "config_revision",
+        "binding_id",
+        "instance_id",
+        "event_id",
+        "adapter"
+      ],
+      "properties": {
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "config_revision": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        },
+        "adapter": {
+          "enum": [
+            "qoder",
+            "openclaw",
+            "hermes",
+            "qwenpaw"
+          ]
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9_]+$"
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "execution_ref": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "native.tool_result"
+          },
+          "association": {
+            "properties": {
+              "status": {
+                "const": "verified"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "trajectory.step"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "component": {
+                "const": "agentsight"
+              }
+            }
+          },
+          "trust": {
+            "const": "source_reported"
+          },
+          "derivation": {
+            "enum": [
+              "source_history",
+              "model_echo"
+            ]
+          },
+          "execution_ref": {
+            "type": "null"
+          },
+          "association": {
+            "properties": {
+              "tool_call_id": {
+                "type": "null"
+              }
+            },
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "verified"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "basis": {
+                  "const": "native_session"
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "source": {
+            "properties": {
+              "component": {
+                "const": "aw"
+              }
+            }
+          },
+          "derivation": {
+            "const": "native_report"
+          }
+        },
+        "if": {
+          "properties": {
+            "association": {
+              "properties": {
+                "status": {
+                  "const": "verified"
+                }
+              }
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "trust": {
+              "const": "trusted_adapter"
+            },
+            "association": {
+              "properties": {
+                "basis": {
+                  "const": "native_callback"
+                },
+                "tool_call_id": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "trust": {
+              "const": "unverified_native"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

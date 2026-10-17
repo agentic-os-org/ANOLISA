@@ -1653,7 +1653,7 @@ impl AgentSight {
                                     llm_call.agent_name.as_deref(),
                                     Some(llm_call.pid),
                                     llm_call.end_timestamp_ns as i64,
-                                    &recent,
+                                    recent.as_deref(),
                                 ) {
                                     let _ = istore.insert(&loop_event);
                                     log::warn!(

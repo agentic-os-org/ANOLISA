@@ -3,6 +3,10 @@
 
 mod transport;
 
+pub(crate) fn origin(endpoint: &str) -> Result<String, Error> {
+    Ok(transport::endpoint(endpoint)?.to_string())
+}
+
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::Value;
@@ -62,7 +66,7 @@ pub enum Error {
     /// An unexpected HTTP status was returned without exposing its body.
     #[error("AgentSight query HTTP status {0}")]
     Http(u16),
-    /// The source advertises an unsupported ATIF contract version.
+    /// The source advertises an unsupported ATIF schema version.
     #[error("AgentSight query version unsupported")]
     UnsupportedVersion,
     /// The successful response does not satisfy the selected query contract.
@@ -140,6 +144,56 @@ impl Client {
         })
     }
 
+    /// Check the query authentication contract without reading a session.
+    /// Collection, storage and eBPF readiness remain unknown.
+    ///
+    /// # Errors
+    /// Rejects expired/invalid bounds and the same source failures as trajectory reads.
+    pub fn probe_until(&self, deadline: Instant, bytes: usize) -> Result<Source, Error> {
+        if Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        if bytes == 0
+            || bytes > MAX_BYTES
+            || deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(60)
+        {
+            return Err(Error::Configuration("invalid query limits"));
+        }
+        let mut remaining = bytes;
+        self.probe_shared(deadline, &mut remaining)
+    }
+
+    fn get(
+        &self,
+        segments: &[&str],
+        deadline: Instant,
+        remaining: &mut usize,
+    ) -> Result<(u16, Value), Error> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|_| Error::InvalidResponse)?
+            .clear()
+            .extend(segments);
+        self.transport.get(url, deadline, remaining)
+    }
+
+    fn probe_shared(&self, deadline: Instant, remaining: &mut usize) -> Result<Source, Error> {
+        let (_, auth) = self.get(&["api", "auth", "status"], deadline, remaining)?;
+        match auth.get("auth_enabled").and_then(Value::as_bool) {
+            Some(true) => {}
+            Some(false) => return Err(Error::Authentication),
+            None => return Err(Error::InvalidResponse),
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        Ok(Source {
+            endpoint: self.endpoint.to_string(),
+            version: None,
+            authentication: self.transport.authentication(),
+        })
+    }
+
     /// Read one collected trajectory through the reviewed auth-status and ATIF-v1.7 APIs.
     /// HTTP and HTTPS use the same contract checks and shared deadline/byte budget.
     /// Missing store/record is unknown, never successful evidence of no activity.
@@ -147,6 +201,22 @@ impl Client {
     /// # Errors
     /// Returns sanitized admission, authentication, transport, limit or protocol failures.
     pub fn trajectory(&self, session_id: &str, limits: Limits) -> Result<QueryResult, Error> {
+        if limits.timeout < Duration::from_millis(1) || limits.timeout > Duration::from_secs(60) {
+            return Err(Error::Configuration("invalid query limits"));
+        }
+        self.trajectory_until(session_id, Instant::now() + limits.timeout, limits.bytes)
+    }
+
+    /// Read within an existing absolute deadline, including all compatibility probes.
+    ///
+    /// # Errors
+    /// Returns the same failures as [`Self::trajectory`]; expired deadlines never renew.
+    pub fn trajectory_until(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+        bytes: usize,
+    ) -> Result<QueryResult, Error> {
         if session_id.is_empty()
             || session_id.len() > 512
             || session_id.chars().any(char::is_control)
@@ -154,30 +224,22 @@ impl Client {
         {
             return Err(Error::Configuration("invalid session ID"));
         }
-        if limits.timeout < Duration::from_millis(1)
-            || limits.timeout > Duration::from_secs(60)
-            || limits.bytes == 0
-            || limits.bytes > MAX_BYTES
+        if Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        if deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(60)
+            || bytes == 0
+            || bytes > MAX_BYTES
         {
             return Err(Error::Configuration("invalid query limits"));
         }
-        let deadline = Instant::now() + limits.timeout;
-        let mut remaining = limits.bytes;
-        let get = |segments: &[&str], remaining: &mut usize| {
-            let mut url = self.endpoint.clone();
-            url.path_segments_mut()
-                .map_err(|_| Error::InvalidResponse)?
-                .clear()
-                .extend(segments);
-            self.transport.get(url, deadline, remaining)
-        };
-        let (_, auth) = get(&["api", "auth", "status"], &mut remaining)?;
-        match auth.get("auth_enabled").and_then(Value::as_bool) {
-            Some(true) => {}
-            Some(false) => return Err(Error::Authentication),
-            None => return Err(Error::InvalidResponse),
-        }
-        let (status, trajectory) = get(&["api", "trajectories", session_id], &mut remaining)?;
+        let mut remaining = bytes;
+        let source = self.probe_shared(deadline, &mut remaining)?;
+        let (status, trajectory) = self.get(
+            &["api", "trajectories", session_id],
+            deadline,
+            &mut remaining,
+        )?;
         let outcome = if status == 404 {
             Outcome::Unknown {
                 reason_code: "record_or_store_unavailable",
@@ -196,11 +258,7 @@ impl Client {
         }
         Ok(QueryResult {
             schema_version: "aw.agentsight.query/v1alpha1",
-            source: Source {
-                endpoint: self.endpoint.to_string(),
-                version: None,
-                authentication: self.transport.authentication(),
-            },
+            source,
             session_id: session_id.into(),
             association: "unassociated",
             coverage: "unknown",

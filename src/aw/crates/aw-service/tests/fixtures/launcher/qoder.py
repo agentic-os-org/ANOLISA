@@ -12,6 +12,8 @@ import time
 
 if sys.argv[1:] == ["--version"]:
     print(os.environ.get("FAKE_VERSION", "1.1.64"))
+    if os.environ.get("FAKE_REMOVE_AFTER_VERSION") == "1":
+        Path(sys.argv[0]).unlink()
     sys.exit(int(os.environ.get("FAKE_VERSION_EXIT", "0")))
 
 root = Path(os.environ["FAKE_ROOT"])
@@ -75,6 +77,10 @@ def hooks(name):
     results.append({"event": name, "hooks": event_results})
     return any(result["status"] == 2 for result in event_results)
 
+
+if scenario == "no-hooks":
+    print(json.dumps({"events": [], "tool_executed": False}), flush=True)
+    sys.exit(0)
 
 blocked = hooks("PreToolUse")
 if not blocked:

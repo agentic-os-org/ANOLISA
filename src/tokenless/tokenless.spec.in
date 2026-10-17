@@ -25,6 +25,11 @@ BuildRequires:  rust >= 1.91
 # builds where they are not pre-installed.
 BuildRequires:  nodejs
 BuildRequires:  npm
+# %build stamps the adapter templates through the Makefile, and the QwenPaw
+# requirements pin asks packaging/raw/wheel-version.py for the PEP 440 spelling
+# of the workspace version that wheel filenames carry. Provided by CI; declared
+# here for chroot builds where it is not pre-installed.
+BuildRequires:  python3
 
 # Runtime dependencies
 Requires:       python3

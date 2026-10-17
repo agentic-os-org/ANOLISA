@@ -72,10 +72,19 @@ fn read_workspace_path(pid: u32) -> Option<String> {
 /// procfs, mirroring [`read_ppid_from`]. Reading `cwd` through the configured
 /// root keeps `workspace_path` pointing at the agent's actual working
 /// directory when the observer reads a bind-mounted host procfs.
+///
+/// The target is decoded lossily: a directory name may hold non-UTF-8 bytes
+/// (the kernel does not require names to be UTF-8), and `to_str` returned
+/// `None` for exactly those, so `workspace_path` — the documented default
+/// protection scope — went missing for an agent working in such a directory.
+/// Every other procfs symlink read in this crate decodes the same way
+/// (`discovery::scanner` for `exe`, `genai::helpers` for `exe`,
+/// `health::port_detector` for the fd links), and [`read_ppid_from`] in this
+/// file already tolerates the same class of non-UTF-8 procfs content.
 fn read_workspace_path_from(root: &Path, pid: u32) -> Option<String> {
     fs::read_link(root.join(pid.to_string()).join("cwd"))
         .ok()
-        .and_then(|path| path.to_str().map(str::to_owned))
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Background health checker that periodically probes discovered agents
@@ -317,6 +326,20 @@ impl HealthChecker {
                         }
                         continue;
                     };
+
+                    // Trace mode records each agent's raw exit status into the
+                    // shared interruption DB, and both branches below read it:
+                    // a trace-confirmed clean exit retires the crash question,
+                    // and an unknown exit keeps the historical fallback.
+                    let exit_status_by_pid: HashMap<i32, ProcessExitStatus> = pids
+                        .iter()
+                        .filter_map(|&p| {
+                            istore
+                                .get_process_exit_recent(p, 120)
+                                .map(|raw| (p, ProcessExitStatus::decode(raw)))
+                        })
+                        .collect();
+
                     if !pending_calls.is_empty() {
                         // Trace mode records each agent's raw exit status into
                         // the shared interruption DB. When every offline pid in
@@ -326,19 +349,9 @@ impl HealthChecker {
                         // this backup path must not re-add one. Missing records
                         // keep the historical fallback (offline + pending →
                         // crash) for exits trace did not observe.
-                        let exit_status_by_pid: HashMap<i32, ProcessExitStatus> = pids
+                        let all_clean_exit = pids
                             .iter()
-                            .filter_map(|&p| {
-                                istore
-                                    .get_process_exit_recent(p, 120)
-                                    .map(|raw| (p, ProcessExitStatus::decode(raw)))
-                            })
-                            .collect();
-                        let all_clean_exit = exit_status_by_pid.len() == pids.len()
-                            && exit_status_by_pid.values().all(|s| {
-                                s.is_clean()
-                                    || (s.is_graceful_reap() && is_reap_worker_agent(agent_name))
-                            });
+                            .all(|&p| recorded_clean_exit(&exit_status_by_pid, agent_name, p));
                         if all_clean_exit {
                             log::debug!(
                                 "Agent {agent_name} (pids={pids:?}) exited cleanly (trace-recorded exit status) — treating as normal shutdown despite {} pending call(s)",
@@ -460,6 +473,58 @@ impl HealthChecker {
                             .iter()
                             .any(|&p| istore.agent_crash_exists_recent(p, 120))
                         {
+                            crash_pids.extend(group.iter().map(|o| o.pid));
+                        } else if let Some(oom_pid) = pids.iter().copied().find(|&p| {
+                            !recorded_clean_exit(&exit_status_by_pid, agent_name, p)
+                                && was_pid_oom_killed(p)
+                        }) {
+                            // A dmesg-confirmed OOM kill is an `agent_crash`
+                            // even without an in-flight call to correlate it
+                            // with — the rule the startup recovery applies to a
+                            // known agent comm, for the same reason: an idle
+                            // CLI between calls is the common case, and
+                            // dropping it as noise hides the crash. This is the
+                            // only path that can report it live: trace's exit
+                            // path records a crash only for a pid that still
+                            // has pending calls, and `recover_oom_events` runs
+                            // at a trace startup, so on a serve-only host
+                            // nothing else would ever record the kill.
+                            let mut detail = serde_json::json!({
+                                "pid": oom_pid,
+                                "agent_name": agent_name,
+                                "exe_path": rep.exe_path.clone(),
+                                "oom": true,
+                                "source": "healthchecker+dmesg",
+                            });
+                            // Attach the trace-recorded exit status when
+                            // available; omitted (not fabricated) when trace
+                            // did not observe this pid's exit.
+                            if let Some(status) = exit_status_by_pid.get(&oom_pid) {
+                                detail["exit_code"] = serde_json::json!(status.code);
+                                detail["signal"] = serde_json::json!(status.signal);
+                                detail["core_dump"] = serde_json::json!(status.core_dump);
+                            }
+                            let event = InterruptionEvent::new(
+                                InterruptionType::AgentCrash,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(oom_pid),
+                                Some(agent_name.clone()),
+                                now_ns,
+                                Some(detail),
+                            );
+                            if let Err(e) = istore.insert(&event) {
+                                log::warn!(
+                                    "Failed to record an OOM agent_crash for pid={oom_pid}: {e}"
+                                );
+                            } else {
+                                log::info!(
+                                    "Recorded agent_crash for {agent_name} (pid={oom_pid}, oom=true) with no in-flight calls"
+                                );
+                            }
+                            // Mark all PIDs in this group as having a crash event
                             crash_pids.extend(group.iter().map(|o| o.pid));
                         } else {
                             log::debug!(
@@ -665,6 +730,22 @@ fn build_restart_cmd(exe_path: &str, cmdline_args: &[String]) -> Vec<String> {
         .collect();
     cmd.extend(args);
     cmd
+}
+
+/// Whether trace recorded an exit for `pid` that retires the crash question.
+///
+/// A voluntary exit with status 0 is a normal shutdown, and so is the SIGTERM
+/// reap every per-request worker family performs between requests. Missing
+/// records mean trace did not observe the exit at all, so the caller keeps its
+/// fallback behavior instead of reading "unknown" as "clean".
+fn recorded_clean_exit(
+    exit_status_by_pid: &HashMap<i32, ProcessExitStatus>,
+    agent_name: &str,
+    pid: i32,
+) -> bool {
+    exit_status_by_pid.get(&pid).is_some_and(|status| {
+        status.is_clean() || (status.is_graceful_reap() && is_reap_worker_agent(agent_name))
+    })
 }
 
 /// Read the parent PID (ppid) from `<procfs root>/<pid>/stat`.
@@ -1047,6 +1128,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A working directory whose name holds non-UTF-8 bytes is legal on Linux
+    /// (an executable's name, a tree unpacked under a mismatched locale), and
+    /// `workspace_path` is the documented default protection scope: the
+    /// dashboard seeds its protection dialog from it and the enforcement API
+    /// answers `workspace_unavailable` without it. `to_str` rejected exactly
+    /// those targets, so the field went missing while `read_ppid_from` in this
+    /// same file already tolerated the same class of non-UTF-8 procfs content.
+    #[test]
+    fn read_workspace_path_from_survives_a_non_utf8_cwd() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = unique_tmp_dir("workspace-non-utf8");
+        let pid = 2_000_000_003;
+        let workspace = root.join(OsStr::from_bytes(b"project-\xff"));
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+        let pid_dir = root.join(pid.to_string());
+        std::fs::create_dir_all(&pid_dir).expect("create pid dir");
+        std::os::unix::fs::symlink(&workspace, pid_dir.join("cwd")).expect("symlink cwd");
+
+        assert_eq!(
+            read_workspace_path_from(&root, pid).as_deref(),
+            Some(workspace.to_string_lossy().as_ref())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn reports_current_process_workspace() {
         let expected = std::env::current_dir()
@@ -1336,6 +1445,144 @@ mod tests {
                 .expect("list pending")
                 .is_empty(),
             "crash path must mark the pending call as interrupted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `dmesg` stand-in reporting an OOM kill of the fixture pid just now,
+    /// in the `dmesg -T` wall-clock format `was_pid_oom_killed` parses. The
+    /// second line covers the control pid whose exit trace recorded as clean.
+    const FAKE_DMESG_IDLE_OOM: &str = r#"#!/bin/sh
+printf '[%s] Out of memory: Killed process 4100009 (cosh-core) total-vm:1024kB\n' "$(date '+%a %b %e %T %Y')"
+printf '[%s] Out of memory: Killed process 4100011 (cosh-core) total-vm:1024kB\n' "$(date '+%a %b %e %T %Y')"
+"#;
+
+    /// An OOM kill of an agent that had no in-flight call when it died is an
+    /// `agent_crash` with `oom: true` — the documented trigger ("or a `dmesg`
+    /// scan shows it was OOM-killed") and the rule the startup recovery
+    /// applies to a known agent comm. Neither live path reported it before:
+    /// trace's exit path records a crash only for a pid that still has pending
+    /// calls, and `recover_oom_events` runs at a trace startup, so on a
+    /// serve-only host the kill left no event and the health entry was erased
+    /// as a normal exit.
+    #[cfg(unix)]
+    #[test]
+    fn an_oom_killed_agent_without_pending_calls_is_recorded_as_a_crash() {
+        const CHILD: &str = "AGENTSIGHT_HEALTH_OOM_IDLE_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-oom-idle-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG_IDLE_OOM).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "health::checker::tests::an_oom_killed_agent_without_pending_calls_is_recorded_as_a_crash",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // The fake `dmesg` is first on PATH, so the pid it names is OOM-killed.
+        let dir = unique_tmp_dir("oom-idle");
+        let genai_store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .expect("genai store"),
+        );
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(30))
+            .with_interruption_store(Arc::clone(&istore))
+            .with_genai_store(Arc::clone(&genai_store));
+
+        let oom_pid = 4_100_009;
+        let clean_pid = 4_100_011;
+        let quiet_pid = 4_100_012;
+        // One agent name per pid: the checker decides a whole agent group at
+        // once, so three pids under one name would share a single verdict.
+        let status = |pid: i32, name: &str| {
+            let mut status = offline_status(pid as u32);
+            status.agent_name = name.to_string();
+            status
+        };
+        for (pid, name) in [
+            (oom_pid, "OomIdle"),
+            (clean_pid, "CleanExit"),
+            (quiet_pid, "QuietExit"),
+        ] {
+            store.write().unwrap().update(pid as u32, status(pid, name));
+        }
+        // Trace confirmed the second pid's exit as clean: that must outrank a
+        // recycled pid number appearing in dmesg.
+        istore
+            .record_process_exit(clean_pid, 0x0)
+            .expect("record clean exit");
+
+        checker.record_offline_agent_crashes(&[
+            status(oom_pid, "OomIdle"),
+            status(clean_pid, "CleanExit"),
+            status(quiet_pid, "QuietExit"),
+        ]);
+
+        let events = list_crash_events(&istore);
+        assert_eq!(
+            events.len(),
+            1,
+            "an OOM-killed agent with no in-flight call must still be one crash"
+        );
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_deref().expect("detail json"))
+                .expect("parse detail");
+        assert_eq!(detail["pid"], oom_pid);
+        assert_eq!(detail["oom"], true);
+        assert_eq!(detail["source"], "healthchecker+dmesg");
+
+        let agents = store.read().unwrap().all_agents();
+        let kept = agents
+            .iter()
+            .find(|agent| agent.pid == oom_pid as u32)
+            .expect("the OOM-killed entry must stay for the health page");
+        assert!(kept.has_crash, "the entry must carry the crash marker");
+        assert!(
+            !agents.iter().any(|agent| agent.pid == clean_pid as u32),
+            "a trace-confirmed clean exit is not a crash, even when dmesg names the pid"
+        );
+        assert!(
+            !agents.iter().any(|agent| agent.pid == quiet_pid as u32),
+            "a pid dmesg does not report is still a normal exit and must leave the store"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

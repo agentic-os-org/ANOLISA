@@ -1,13 +1,12 @@
 //! Token Savings API handlers
 //!
-//! Provides endpoints that cross-reference genai_events.db with the external
-//! ~/.tokenless/stats.db to compute token savings metrics.
+//! Join captured tool calls with Tokenless API statistics or the local statistics database.
 
 use actix_web::{HttpResponse, Responder, get, web};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
+use super::tokenless::{QueryClient, savings_rows};
 
 // ─── Query parameters ────────────────────────────────────────────────────────
 
@@ -349,13 +348,19 @@ fn compute_diff_lines(before: Option<&str>, after: Option<&str>) -> Vec<DiffLine
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Current UNIX time in nanoseconds
-fn now_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+/// Nanoseconds since the Unix epoch at `at`; 0 if that clock is before it.
+///
+/// Every `/api/token-savings` request that defaults `end_ns` lands here, so a
+/// pre-epoch realtime clock (a failed RTC battery, a VM snapshot restored
+/// with a stale clock) must degrade to 0 — the family contract,
+/// `utils::epoch_nanos` — instead of unwrapping and taking the handler
+/// thread down. This was the one production-code straggler the family fixes
+/// (#6626 hardened the dashboard handlers and the CLI, #7238 the health
+/// endpoints) left behind: the bare unwrap was carried into this file by the
+/// `handlers.rs` split, and `/api/token-savings` kept dying without a
+/// response after every sibling endpoint had been hardened.
+fn now_ns(at: std::time::SystemTime) -> u64 {
+    crate::utils::epoch_nanos(at)
 }
 
 /// Compute compression ratio clamped to [0.0, 100.0].
@@ -475,17 +480,19 @@ pub(crate) fn generate_optimization_tips(
 
 /// GET /api/token-savings?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
 ///
-/// Returns token savings data by cross-referencing genai_events.db
-/// with the external ~/.tokenless/stats.db.
+/// Refresh configured API statistics for captured tool IDs before computing savings.
 #[get("/token-savings")]
 pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
+    client: Option<web::Data<QueryClient>>,
 ) -> impl Responder {
     if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let end_ns = query
+        .end_ns
+        .unwrap_or_else(|| now_ns(std::time::SystemTime::now()) as i64);
     let start_ns = match super::handlers::start_or_default(
         query.start_ns,
         end_ns,
@@ -509,11 +516,6 @@ pub async fn get_token_savings(
         }
     };
 
-    // Step 2: Open stats.db (read-only, graceful if absent)
-    let stats_path = tokenless::default_stats_path();
-    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
-    let stats_available = stats_store.is_some();
-
     // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
     // This gives us all known tool_use_ids and their session membership.
     let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
@@ -521,10 +523,13 @@ pub async fn get_token_savings(
         .get_tool_call_turn_indices(&session_ids)
         .unwrap_or_default();
 
-    // Step 4: Query stats.db by tool_use_ids (instead of session_ids)
-    let stats_by_session = if let Some(ref store) = stats_store {
-        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
+    // Refresh and read statistics using the source tool IDs, not local session IDs.
+    let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let stats_by_session = {
         // Group by session: use turn_indices to determine session, fallback to row.session_id
         let mut map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
         for row in rows {
@@ -535,8 +540,6 @@ pub async fn get_token_savings(
             map.entry(sid).or_default().push(row);
         }
         map
-    } else {
-        std::collections::HashMap::new()
     };
 
     // Step 5: Build response
@@ -758,6 +761,7 @@ pub async fn get_token_savings(
 pub async fn get_session_savings(
     data: web::Data<AppState>,
     path: web::Path<String>,
+    client: Option<web::Data<QueryClient>>,
 ) -> impl Responder {
     let session_id = path.into_inner();
 
@@ -795,18 +799,14 @@ pub async fn get_session_savings(
         .get_tool_call_turn_indices(&session_ids)
         .unwrap_or_default();
 
-    // Step 3: Open stats.db
-    let stats_path = tokenless::default_stats_path();
-    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
-    let stats_available = stats_store.is_some();
-
+    let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    let (stats_available, rows) = match savings_rows(&data, client, &tool_use_ids).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let mut items = Vec::new();
     let mut total_compounded_saved: i64 = 0;
-
-    if let Some(ref store) = stats_store {
-        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
-
+    {
         for row in &rows {
             // Only include rows belonging to this session
             let sid = turn_indices
@@ -997,6 +997,24 @@ mod tests {
     }
 
     // ─── Unit tests for mapping functions ─────────────────────────────────
+
+    #[test]
+    fn now_ns_survives_a_pre_epoch_clock() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        // Red run: the previous body —
+        // `at.duration_since(UNIX_EPOCH).unwrap()` — panicked on this input,
+        // which is exactly what a /api/token-savings request with no `end_ns`
+        // did on a host whose realtime clock read before 1970-01-01 (a failed
+        // RTC battery, a VM snapshot restored with a stale clock): the unwrap
+        // took the handler thread down and the request died without a response
+        // while every sibling endpoint kept working.
+        assert_eq!(now_ns(SystemTime::UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(now_ns(UNIX_EPOCH - Duration::from_secs(1_000_000_000)), 0);
+        // The epoch itself reads as 0, never a panic.
+        assert_eq!(now_ns(UNIX_EPOCH), 0);
+        // Post-epoch clocks count forward in nanoseconds.
+        assert_eq!(now_ns(UNIX_EPOCH + Duration::from_millis(1)), 1_000_000);
+    }
 
     #[test]
     fn savings_fraction_guards_zero_and_bounds_both_ends() {

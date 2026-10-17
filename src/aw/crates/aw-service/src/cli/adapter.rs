@@ -84,7 +84,8 @@ pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) ->
         return Err("block reason must be nonempty and bounded".into());
     }
     match adapter {
-        "qoder" | "qwenpaw" => reply.stderr = format!("{text}\n").into_bytes(),
+        "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
+        "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
@@ -113,7 +114,9 @@ pub(super) trait Adapter: Sync {
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
     match name {
         "pi" => Ok(&super::adapters::pi::Pi),
+        "claude-sdk" => Ok(&super::adapters::claude_sdk::ClaudeSdk),
         "qoder" => Ok(&super::qoder::Qoder),
+        "agentscope" => Ok(&super::adapters::agentscope::AgentScope),
         "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
         "hermes" => Ok(&super::adapters::hermes::Hermes),
         "openclaw" => Ok(&super::adapters::openclaw::OpenClaw),
@@ -168,6 +171,41 @@ pub(super) fn version_output_with_timeout(
     Ok(std::str::from_utf8(&output.stdout)?.trim().into())
 }
 
+// This registration ID cannot name a configured step (configuration IDs are names).
+pub(super) const OBSERVE_STEP: &str = "$aw.observe";
+
+pub(super) fn observation_enabled(document: &Value, target: &str) -> bool {
+    let evidence = &document["spec"]["agents"][target]["evidence"];
+    evidence.is_object() && evidence["mode"] != "off"
+}
+
+#[derive(Clone)]
+pub(super) struct NativeStep {
+    pub step_id: String,
+    pub on_error: String,
+    pub replaces_result: bool,
+}
+
+pub(super) fn native_steps(steps: &[AdmittedStep], event: &str, observe: bool) -> Vec<NativeStep> {
+    let mut selected: Vec<_> = steps
+        .iter()
+        .filter(|step| step.event == event)
+        .map(|step| NativeStep {
+            step_id: step.step_id.clone(),
+            on_error: step.on_error.clone(),
+            replaces_result: step.execution.replaces_result(),
+        })
+        .collect();
+    if selected.is_empty() && observe {
+        selected.push(NativeStep {
+            step_id: OBSERVE_STEP.into(),
+            on_error: "report".into(),
+            replaces_result: false,
+        });
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,15 +213,30 @@ mod tests {
     #[test]
     fn retry_reasons_preserve_every_dialects_denial_and_never_emit_updates() {
         let message = "Retry: literal ; $(touch NEVER) ' spaces\nnot executable";
-        for name in ["qoder", "qwenpaw", "hermes", "openclaw", "pi"] {
+        for name in [
+            "qoder",
+            "qwenpaw",
+            "hermes",
+            "openclaw",
+            "pi",
+            "claude-sdk",
+            "agentscope",
+        ] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
             block_reason(name, &mut reply, message).unwrap();
             assert_eq!(matches!(reply.exit, Exit::Code(0)), was_success);
-            if matches!(name, "qoder" | "qwenpaw") {
+            if matches!(name, "qoder" | "qwenpaw" | "agentscope") {
                 assert!(matches!(reply.exit, Exit::Code(2)));
                 assert!(reply.stdout.is_empty());
                 assert_eq!(reply.stderr, format!("{message}\n").as_bytes());
+            } else if name == "claude-sdk" {
+                assert!(matches!(reply.exit, Exit::Code(2)));
+                assert!(reply.stderr.is_empty());
+                assert_eq!(
+                    serde_json::from_slice::<String>(&reply.stdout).unwrap(),
+                    message
+                );
             } else {
                 let value: Value = serde_json::from_slice(&reply.stdout).unwrap();
                 if name == "openclaw" {

@@ -836,6 +836,68 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    /// A body whose content the chat template cannot render (a content block
+    /// array, the shape multimodal clients send) made the template attempt in
+    /// `count_request_tokens` fail, and its `Err` arm answered a plain 0 while
+    /// claiming "count raw content + tools separately" — the request was
+    /// recorded as a zero-input breakdown next to a counted output side, with
+    /// `by_role`/`per_message` distributing that zero. The fallback must sum
+    /// the serialized messages, the same estimate the manual counter's own
+    /// fallback and the drain fallback answer with.
+    #[test]
+    fn unrenderable_content_still_counts_raw_tokens() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
+        });
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        assert!(
+            count.total_tokens > 0,
+            "the raw fallback must count the messages, got {count:?}"
+        );
+        assert!(
+            count.by_role.get("user").copied().unwrap_or(0) > 0,
+            "the distributed per-role count must be nonzero, got {count:?}"
+        );
+        assert_eq!(count.per_message.len(), 1);
+    }
+
+    /// Tool definitions ride along in the same fallback: a body the template
+    /// cannot render that also declares `tools` must count the definitions on
+    /// top of the raw messages (they never reached the template, and there is
+    /// no tool-role message to fold them into).
+    #[test]
+    fn unrenderable_content_still_counts_tool_definitions() {
+        let tokenizer = fixture_tokenizer();
+        let with_tools = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": "List the entries of a directory",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            }]
+        });
+        let without_tools = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
+        });
+        let counted = crate::analyzer::count_request_tokens(&with_tools, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        let baseline =
+            crate::analyzer::count_request_tokens(&without_tools, &tokenizer, &tokenizer)
+                .expect("request is counted");
+        assert!(
+            counted.total_tokens > baseline.total_tokens,
+            "the tool definitions must reach the fallback count: {} vs {}",
+            counted.total_tokens,
+            baseline.total_tokens
+        );
+        assert!(counted.tools_tokens > 0);
+    }
+
     /// The Responses API repeats the whole answer in `*.done` events; folding
     /// every captured event through `extract_response_content` used to count
     /// it once per event. `merge_response_output_text` must count the deltas

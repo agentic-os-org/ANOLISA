@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Statistics tracking for tokenless - SQLite-based metrics storage"
 
+[features]
+query-server = ["dep:actix-web", "dep:blake3"]
+
 [dependencies]
+actix-web = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 chrono = { workspace = true, features = ["serde"] }
