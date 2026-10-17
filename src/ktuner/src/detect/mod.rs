@@ -4321,6 +4321,46 @@ mod tests {
             "the pair end's fixed rate must not decide the host link speed: {names:?}"
         );
 
+        // Control: a bridge whose real port is genuinely 25 GbE reads 25000,
+        // above the veth default, so the new clause must keep it and the
+        // physical NIC's rate must still decide. The devices are added after
+        // the first read so the assertions above keep measuring the 1 GbE
+        // shape.
+        let eth25g = dir.join("eth25g");
+        fs::create_dir_all(&eth25g).expect("create eth25g");
+        fs::write(eth25g.join("speed"), "25000\n").expect("write speed");
+        fs::write(eth25g.join("ifindex"), "14\n").expect("write ifindex");
+        fs::write(eth25g.join("iflink"), "14\n").expect("write iflink");
+        fs::create_dir_all(eth25g.join("device")).expect("create the bus-device link");
+        let fast_bridge = dir.join("br2");
+        fs::create_dir_all(&fast_bridge).expect("create the bridge");
+        fs::write(fast_bridge.join("speed"), "25000\n").expect("write speed");
+        fs::write(fast_bridge.join("ifindex"), "15\n").expect("write ifindex");
+        fs::write(fast_bridge.join("iflink"), "15\n").expect("write iflink");
+        fs::write(
+            fast_bridge.join("uevent"),
+            "DEVTYPE=bridge\nINTERFACE=br2\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth25g, fast_bridge.join("lower_eth25g"))
+            .expect("link the lower device");
+        std::os::unix::fs::symlink(&veth, fast_bridge.join("lower_h1"))
+            .expect("link the lower device");
+
+        let mut control = info_with_processes(&[]);
+        control.network = read_network_info_from(&dir).expect("read the control tree");
+        let mut names: Vec<&str> = control.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert!(
+            names.contains(&"br2") && names.contains(&"eth25g"),
+            "a bridge whose real port outruns the veth default is not plumbing: {names:?}"
+        );
+        assert_eq!(
+            control.max_net_speed(),
+            25000,
+            "the physical 25 GbE NIC still decides: {names:?}"
+        );
+
         fs::remove_dir_all(&dir).ok();
     }
 
