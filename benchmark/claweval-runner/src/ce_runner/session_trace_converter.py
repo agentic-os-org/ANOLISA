@@ -235,9 +235,14 @@ def convert_session_to_trace(
 
     body_events = []      # messages + tool_dispatches — will be sorted by timestamp
 
+    task_tools = {tool.get("name") for tool in task.get("tools", [])}
+    endpoint_urls = {}
+    for endpoint in task.get("tool_endpoints", []):
+        endpoint_urls.setdefault(endpoint.get("tool_name"), endpoint.get("url", ""))
+
     # --- mcporter extraction helper ---
     def _try_extract_mcporter_dispatch(
-        tool_call_id: str, tc_info: dict, task: dict, trace_id: str,
+        tool_call_id: str, tc_info: dict, trace_id: str,
     ) -> dict | None:
         """If an exec call uses mcporter, return a virtual tool_dispatch for the actual tool."""
         cmd = tc_info.get("input", {}).get("command", "")
@@ -250,7 +255,6 @@ def convert_session_to_trace(
         # Check if first arg looks like an MCP server name (contains '-' or 'mock')
         # In mcporter, the pattern is: mcporter call --config <cfg> <server> <tool> <args>
         # or: mcporter call --config <cfg> <tool> <args> (when server name is omitted)
-        task_tools = {t.get("name") for t in task.get("tools", [])}
         if first_arg in task_tools:
             tool_name = first_arg
         elif "." in first_arg and first_arg.startswith("claw-eval-"):
@@ -271,11 +275,7 @@ def convert_session_to_trace(
             return None
 
         # Build virtual tool_dispatch
-        endpoint_url = ""
-        for ep in task.get("tool_endpoints", []):
-            if ep.get("tool_name") == tool_name:
-                endpoint_url = ep.get("url", "")
-                break
+        endpoint_url = endpoint_urls.get(tool_name, "")
 
         # Extract input params from remaining command args
         input_params = {}
@@ -322,14 +322,7 @@ def convert_session_to_trace(
         else:
             tool_name = raw_name
 
-        endpoint_url = ""
-        for tool_def in task.get("tools", []):
-            if tool_def.get("name") == tool_name:
-                for ep in task.get("tool_endpoints", []):
-                    if ep.get("tool_name") == tool_name:
-                        endpoint_url = ep.get("url", "")
-                        break
-                break
+        endpoint_url = endpoint_urls.get(tool_name, "") if tool_name in task_tools else ""
 
         return {
             "type": "tool_dispatch",
@@ -504,7 +497,7 @@ def convert_session_to_trace(
                 # tool_dispatch for the actual tool name so graders can detect it
                 if tc_info.get("name") == "exec":
                     virtual = _try_extract_mcporter_dispatch(
-                        tool_call_id, tc_info, task, trace_id,
+                        tool_call_id, tc_info, trace_id,
                     )
                     if virtual:
                         body_events.append(virtual)
