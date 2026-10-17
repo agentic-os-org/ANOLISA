@@ -211,18 +211,27 @@ class DockerManager:
             self._container_id,
         )
 
-        run_command(
-            ["docker", "cp", f"{self._container_id}:/testbed/.", str(self.work_dir)],
-            check=True,
-        )
-        logger.info(
-            "DOCKER_COPY_DONE instance=%s container=%s work_dir=%s",
-            self.instance_id,
-            self.container_name,
-            self.work_dir,
-        )
+        try:
+            run_command(
+                ["docker", "cp", f"{self._container_id}:/testbed/.", str(self.work_dir)],
+                check=True,
+            )
+            logger.info(
+                "DOCKER_COPY_DONE instance=%s container=%s work_dir=%s",
+                self.instance_id,
+                self.container_name,
+                self.work_dir,
+            )
 
-        install_repo_exclude_rules(self.work_dir, instance_id=self.instance_id)
+            install_repo_exclude_rules(self.work_dir, instance_id=self.instance_id)
+        except Exception:
+            # The cleanup callback that removes the container is only
+            # registered after start() returns (CoshAdapter.prepare), so
+            # remove it here or it keeps the work_dir bind mount alive
+            # until its sleep timeout.
+            run_command(["docker", "rm", "-f", self.container_name], timeout=30)
+            self._container_id = None
+            raise
 
         return self.work_dir
 
