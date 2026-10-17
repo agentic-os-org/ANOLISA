@@ -183,6 +183,16 @@ pub fn validate_user_id(id: &str) -> Result<()> {
             "user_id '{id}' contains '..'"
         )));
     }
+    // A bare "." is the other relative component that defeats a path join:
+    // it contains no separator and no "..", yet resolves to the directory
+    // it is joined against, so the per-user / per-session subtree would be
+    // built in (and, on cleanup, recursively removed from) the shared
+    // parent instead of a child of it.
+    if id == "." {
+        return Err(MemoryError::InvalidArgument(
+            "user_id must not be '.'".into(),
+        ));
+    }
     if id.chars().any(|c| c.is_control()) {
         return Err(MemoryError::InvalidArgument(format!(
             "user_id '{id}' contains control character"
@@ -194,6 +204,14 @@ pub fn validate_user_id(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_user_id_rejects_bare_dot() {
+        assert!(matches!(
+            validate_user_id("."),
+            Err(MemoryError::InvalidArgument(_))
+        ));
+    }
 
     #[test]
     fn user_accepts_normal_ids() {
