@@ -493,3 +493,22 @@ fn replacement_requires_one_text_payload_and_a_projected_after_result() {
         .bind_invocation(invoke("tool.before", json!(["replace_result"])))
         .is_err());
 }
+
+#[test]
+fn payloadless_describe_reply_names_the_missing_field() {
+    let protocol = Protocol::new().unwrap();
+    let describe = protocol
+        .parse_request(&bytes(&request("describe")))
+        .unwrap();
+    // The bare-ok response branch is schema-valid for any method, so a
+    // describe reply without payload passes schema validation and must then
+    // fail naming the field the method requires — not a shape-less
+    // "expected array".
+    let Err(err) = protocol.check_response(&describe, &bytes(&response())) else {
+        panic!("describe reply must carry operations")
+    };
+    assert_eq!(
+        err.to_string(),
+        "invalid AW Provider contract: describe response missing operations"
+    );
+}

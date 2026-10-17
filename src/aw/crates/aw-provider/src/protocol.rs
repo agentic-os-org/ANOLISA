@@ -115,7 +115,10 @@ impl Protocol {
         }
         if value["method"] == "invoke" {
             let before = value["event"]["name"] == "tool.before";
-            for effect in array(&value["allowed_effects"])? {
+            for effect in array(
+                &value["allowed_effects"],
+                "invoke request missing allowed_effects",
+            )? {
                 if effect != "observe"
                     && !(before && effect == "block")
                     && !(!before
@@ -224,7 +227,9 @@ impl Protocol {
         match request.0["method"].as_str() {
             Some("describe") => {
                 let mut names = BTreeSet::new();
-                for operation in array(&value["operations"])? {
+                for operation in
+                    array(&value["operations"], "describe response missing operations")?
+                {
                     if !names.insert(operation["name"].as_str()) {
                         return Err(Error::Invalid("duplicate operation name"));
                     }
@@ -244,7 +249,7 @@ impl Protocol {
                     return Err(Error::Invalid("response binding mismatch"));
                 }
                 let mut replacements = 0;
-                for effect in array(&value["effects"])? {
+                for effect in array(&value["effects"], "invoke response missing effects")? {
                     if effect["type"] == "replace_result" {
                         replacements += 1;
                         if replacements > 1 {
@@ -259,7 +264,12 @@ impl Protocol {
                             ));
                         }
                     }
-                    if !array(&request.0["allowed_effects"])?.contains(&effect["type"]) {
+                    if !array(
+                        &request.0["allowed_effects"],
+                        "invoke request missing allowed_effects",
+                    )?
+                    .contains(&effect["type"])
+                    {
                         return Err(Error::Invalid("response effect was not admitted"));
                     }
                 }
@@ -270,8 +280,12 @@ impl Protocol {
     }
 }
 
-fn array(value: &Value) -> Result<&Vec<Value>, Error> {
-    value.as_array().ok_or(Error::Invalid("expected array"))
+/// Borrow `value` as an array, or fail naming the absent protocol field.
+/// The response schema's bare-ok branch is method-agnostic, so a describe
+/// reply without payload reaches callers as `Value::Null`; the failure must
+/// then say which field the method requires, not just the expected shape.
+fn array<'a>(value: &'a Value, missing: &'static str) -> Result<&'a Vec<Value>, Error> {
+    value.as_array().ok_or(Error::Invalid(missing))
 }
 
 fn encode(value: &Value) -> Result<Vec<u8>, Error> {
