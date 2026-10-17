@@ -20,6 +20,9 @@ Exit codes:
 import sys
 import json
 import argparse
+import io
+import os
+import zipfile
 from pathlib import Path
 
 
@@ -27,7 +30,58 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+
+def _excel_input(path: Path, password: str | None) -> str | io.BytesIO:
+    if password == "":
+        raise ValueError("Encrypted workbook reading requires a non-empty known password")
+    if zipfile.is_zipfile(path):
+        return str(path)
+    if password is None:
+        with path.open("rb") as source:
+            if source.read(8) == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                raise ValueError(
+                    "Password-protected OOXML requires a known password. "
+                    "Use --password-env ENV_NAME."
+                )
+        return str(path)
+
+    try:
+        import msoffcrypto
+    except ImportError:
+        raise RuntimeError(
+            "Encrypted workbook reading requires msoffcrypto-tool. "
+            "Run: pip install msoffcrypto-tool"
+        ) from None
+
+    try:
+        with path.open("rb") as source:
+            office = msoffcrypto.OfficeFile(source)
+            if office.format != "ooxml":
+                raise ValueError("Only encrypted OOXML workbooks are supported")
+            office.load_key(password=password, verify_password=True)
+            decrypted = io.BytesIO()
+            office.decrypt(decrypted, verify_integrity=True)
+            decrypted.seek(0)
+            return decrypted
+    except msoffcrypto.exceptions.InvalidKeyError:
+        raise ValueError(
+            "Cannot decrypt workbook: incorrect password or encrypted payload integrity failure."
+        ) from None
+    except (
+        msoffcrypto.exceptions.FileFormatError,
+        msoffcrypto.exceptions.ParseError,
+        msoffcrypto.exceptions.DecryptionError,
+        ValueError,
+        OSError,
+    ):
+        raise ValueError(
+            "Cannot read encrypted OOXML workbook: unsupported or damaged input."
+        ) from None
+
+
+def detect_and_load(
+    file_path: str, sheet_name_filter: str | None = None, password: str | None = None
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
@@ -47,9 +101,12 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
 
     suffix = path.suffix.lower()
 
+    if password is not None and suffix not in (".xlsx", ".xlsm"):
+        raise ValueError("Passwords are supported only for .xlsx and .xlsm inputs")
+
     if suffix in (".xlsx", ".xlsm"):
         target = sheet_name_filter if sheet_name_filter else None
-        result = pd.read_excel(file_path, sheet_name=target)
+        result = pd.read_excel(_excel_input(path, password), sheet_name=target)
         # pd.read_excel with sheet_name=None returns dict; with a name, returns DataFrame
         if isinstance(result, dict):
             return result
@@ -332,10 +389,23 @@ def main() -> None:
         "--quality", action="store_true",
         help="Run data quality audit only (skip stats)"
     )
+    parser.add_argument(
+        "--password-env", metavar="ENV_NAME",
+        help="Read the known OOXML password from this environment variable"
+    )
     args = parser.parse_args()
+    password = None
+    if args.password_env is not None:
+        if Path(args.file).suffix.lower() not in (".xlsx", ".xlsm"):
+            parser.error("--password-env supports only .xlsx and .xlsm inputs")
+        if args.password_env not in os.environ:
+            parser.error(f"Password environment variable {args.password_env!r} is not set")
+        password = os.environ[args.password_env]
+        if not password:
+            parser.error("Password environment variable must contain a non-empty password")
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, password=password)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

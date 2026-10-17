@@ -84,6 +84,24 @@ confirm_destructive = true
 
 ---
 
+## 受密码保护的 Excel 分析
+
+使用已知密码分析 OOXML 工作簿，无需创建未加密文件。只读读取器通过可选 `msoffcrypto-tool` 后端支持 `.xlsx` 和 `.xlsm`：
+
+```bash
+pip install pandas openpyxl msoffcrypto-tool
+python3 SKILL_DIR/scripts/xlsx_reader.py protected.xlsx --password-env WORKBOOK_PASSWORD --json
+python3 SKILL_DIR/scripts/xlsx_reader.py protected.xlsx --password-env WORKBOOK_PASSWORD --sheet Sales --quality
+```
+
+运行示例前在命令环境中设置 `WORKBOOK_PASSWORD`；此选项接收环境变量名称，不接收密码值。变量未设置或为空时为用法错误；此后端要求非空密码。读取器不会提示输入、寻找或存储密码，报告也不包含凭据。
+
+已知密码解密在内存中完成，验证密码及支持的载荷完整性，原文件保持不变。全工作表和按名称选择沿用现有结构、质量与统计报告。普通 Excel 输入不依赖此可选后端，即使提供密码变量也如此。缺少凭据、后端，凭据错误或加密数据损坏时会报错，不会产生明文输出文件。
+
+此选项仅用于 OOXML `.xlsx`/`.xlsm`；与 CSV、TSV 或旧版 XLS 一起使用会被拒绝。读取存储的表格值而不执行宏。工作表保护与文件加密不同，读取受保护工作表不需要文件密码。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
