@@ -12,6 +12,7 @@
 | `svc` | `status`, `start`, `stop`, `restart`, `enable`, `disable`, `list` |
 | `checkpoint` | `init`, `recover`, `create`, `list`, `restore`, `status`, `delete`, `diff`, `cleanup` |
 | `audit` | `check`, `log`, `status`, `events`, `trace`, `export`, `prune`, `policy` |
+| `login-shell` | `status`, `register`, `unregister`, `set`, `restore` |
 
 Use `cosh-cli <domain> --help` and `cosh-cli <domain> <action> --help` for the exact arguments and defaults.
 
@@ -47,3 +48,5 @@ Package and service mutations normally need root privileges. Service operations 
 5. Keep stderr separate from stdout; stdout is the automation contract.
 
 See [Output format](../output-format.md) for the envelope and [Package management](package-management.md), [Service management](service-management.md), [Workspace checkpoints](checkpoint.md), and [Security audit](audit.md) for each domain.
+
+[Login-shell management](login-shell.md) keeps registration and explicit account selection separate from Agent session integration.
