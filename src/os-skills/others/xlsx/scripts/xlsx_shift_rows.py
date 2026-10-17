@@ -253,19 +253,22 @@ def process_chart(path: str, at: int, delta: int) -> int:
 
 
 def process_table(path: str, at: int, delta: int) -> int:
-    """Update the ref attribute on the <table> root element."""
+    """Update table, filter, and sort ranges after a row shift."""
     tree = ET.parse(path)
     root = tree.getroot()
-    # The root element IS the table
-    old = root.get("ref", "")
-    if not old:
-        return 0
-    new = shift_sqref(old, at, delta)
-    if new == old:
-        return 0
-    root.set("ref", new)
-    _write_tree(tree, path)
-    return 1
+    changes = 0
+    range_tags = {_tag(name) for name in ("table", "autoFilter", "sortState", "sortCondition")}
+    for element in root.iter():
+        if element.tag not in range_tags:
+            continue
+        old = element.get("ref", "")
+        new = shift_sqref(old, at, delta)
+        if new != old:
+            element.set("ref", new)
+            changes += 1
+    if changes:
+        _write_tree(tree, path)
+    return changes
 
 
 def process_pivot_cache(path: str, at: int, delta: int) -> int:
