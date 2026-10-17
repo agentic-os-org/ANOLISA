@@ -224,6 +224,16 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             dv.set("sqref", new)
             changes += 1
 
+    # 6. <hyperlink ref="A5"> — a link left on the pre-shift coordinate ends up
+    # decorating whatever data slid into the old cell, so it must move like the
+    # merged-cell and validation ranges above.
+    for hl in root.iter(_tag("hyperlink")):
+        old = hl.get("ref", "")
+        new = shift_sqref(old, at, delta)
+        if new != old:
+            hl.set("ref", new)
+            changes += 1
+
     if changes > 0:
         _write_tree(tree, path)
     return changes
