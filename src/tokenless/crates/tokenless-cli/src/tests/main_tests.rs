@@ -1954,3 +1954,41 @@ fn stats_after_text_records_the_candidate_only_when_it_was_measured() {
         );
     }
 }
+
+/// Every fail-soft notice the CLI prints — the rejected-path fallbacks,
+/// the stash-disabled report, the no-savings, passthrough, dry-run and
+/// mode-mismatch notices, and the stats warnings — goes through
+/// `warn_soft`, whose own write failure must not be able to fail the
+/// command. `eprintln!` panics when stderr cannot be written (a full
+/// filesystem behind redirected logs, a closed or EPIPE'd descriptor),
+/// which turned those notices into exit 101 while the command's output
+/// was fine. Redirect fd 2 to /dev/full, call the helper, restore, and
+/// assert the call returned — a panicking write makes this test fail.
+/// The binary-level shapes are covered end-to-end in
+/// `tests/cli_integration.rs`.
+#[test]
+#[cfg(target_os = "linux")]
+fn warn_soft_survives_an_unwritable_stderr() {
+    use std::os::unix::io::AsRawFd;
+
+    let dev_full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0, "dup stderr");
+    unsafe {
+        libc::dup2(dev_full.as_raw_fd(), 2);
+    }
+    // The helper's whole contract: no panic, the write error is
+    // discarded.
+    warn_soft("tokenless: simulated stderr failure");
+    // Restore before any assert can print.
+    let restored = unsafe { libc::dup2(saved, 2) };
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    assert!(restored >= 0, "restore stderr");
+    unsafe {
+        libc::close(saved);
+    }
+    drop(dev_full);
+}
