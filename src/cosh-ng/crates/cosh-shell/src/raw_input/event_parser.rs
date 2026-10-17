@@ -387,7 +387,13 @@ impl NativeLineState {
         self.dirty = false;
         self.in_paste = false;
         self.pending_paste_delimiter.clear();
-        self.multiline_paste_observed = false;
+        // `multiline_paste_observed` is NOT reset here: it is take()-style
+        // observation state (read once per chunk by `observe_native_line`),
+        // not mirror state. A paste tool or fast terminal can batch the
+        // multiline paste and its submitting newline into one PTY read; the
+        // newline reaches this `clear()` in the same chunk that set the
+        // flag, and resetting it here would drop the MultilinePasteObserved
+        // event the #1932 F5 hint depends on.
     }
 
     fn pop_visible_char(&mut self) {
@@ -691,5 +697,28 @@ mod tests {
 
         state.observe_shell_bytes(b"\n");
         assert!(starts_native_intercept_candidate(b"/mode", &state, false));
+    }
+
+    #[test]
+    fn multiline_paste_flag_survives_same_chunk_submit() {
+        // A paste tool or fast terminal can batch the multiline paste and the
+        // submitting newline into one PTY read. The submit newline clears the
+        // mirror, but the multiline-paste observation must survive until it is
+        // taken: `observe_native_line` reads it right after this chunk, and
+        // the #1932 F5 hint depends on the event firing.
+        let mut state = NativeLineState::default();
+        state.observe_shell_bytes(b"\x1b[200~cargo run\r\n--verbose\x1b[201~\r");
+        assert!(
+            state.take_multiline_paste_observed(),
+            "a paste and its submitting newline in one read chunk must still report the multiline paste"
+        );
+    }
+
+    #[test]
+    fn multiline_paste_flag_is_taken_exactly_once() {
+        let mut state = NativeLineState::default();
+        state.observe_shell_bytes(b"\x1b[200~a\nb\x1b[201~");
+        assert!(state.take_multiline_paste_observed());
+        assert!(!state.take_multiline_paste_observed());
     }
 }
