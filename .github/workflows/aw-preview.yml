@@ -1,31 +1,59 @@
-name: CI / AW Packages
+name: CI / AW Integration
 
 on:
-  pull_request:
-    paths:
-      - 'src/aw/crates/aw-package/**'
-      - 'src/aw/crates/aw-provider-tokenless/**'
-      - 'src/aw/crates/aw-provider-sec-core/**'
-      - 'src/agent-sec-core/v2/**'
-      - 'src/agent-sec-core/packaging/systemd/**'
-      - 'src/tokenless/crates/**'
-      - 'src/tokenless/Cargo.*'
-      - 'src/tokenless/scripts/setup-rtk.sh'
-      - 'src/tokenless/third_party/patches/**'
-      - 'src/aw/Cargo.*'
-      - 'docs/user-guide/*/user-entrypoint/aw-preview.md'
-      - '.github/workflows/aw-preview.yml'
+  schedule:
+    # 03:23 Asia/Shanghai. Heavy integration never runs automatically on PRs.
+    - cron: '23 19 * * *'
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character commit to validate before release
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: aw-preview-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: aw-integration-${{ github.event_name }}-${{ inputs.candidate_sha || github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  plan:
+    name: AW / Integration plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Select the exact candidate
+        id: candidate
+        env:
+          CANDIDATE_SHA: ${{ github.event_name == 'schedule' && github.sha || inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            src/aw
+            docs/user-guide/en/user-entrypoint
+      - name: Validate native coverage and select pinned runtimes
+        id: matrix
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: python3 -B src/aw/scripts/check_native.py --candidate-sha "$CANDIDATE_SHA"
+
   packages:
+    needs: plan
     name: AW / Package install tests
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
@@ -42,12 +70,14 @@ jobs:
             curl git pkg-config libssl-dev
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.97.1'
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.event_name == 'schedule' }}
           workspaces: |
             src/aw
             src/agent-sec-core/v2
@@ -60,6 +90,31 @@ jobs:
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
+      - name: Stage the same build for native acceptance
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          cargo build --locked --release --manifest-path src/aw/Cargo.toml -p aw-provider --example policy
+          mkdir -p "$AW_PREVIEW_DIR/native"
+          cp src/aw/target/release/{aw,aw-provider-tokenless,aw-provider-sec-core,rtk} "$AW_PREVIEW_DIR/native/"
+          cp src/aw/target/release/examples/policy src/tokenless/target/release/tokenless "$AW_PREVIEW_DIR/native/"
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path src/aw/Cargo.toml > "$AW_PREVIEW_DIR/native/aw-packages.json"
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path src/agent-sec-core/v2/Cargo.toml > "$AW_PREVIEW_DIR/native/sec-core-packages.json"
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path src/tokenless/Cargo.toml > "$AW_PREVIEW_DIR/native/tokenless-packages.json"
+          rustc --version > "$AW_PREVIEW_DIR/native/rustc-version.txt"
+          cd "$AW_PREVIEW_DIR/native"
+          sha256sum aw aw-provider-tokenless aw-provider-sec-core tokenless rtk policy > SHA256SUMS
+          printf '%s\n' "$CANDIDATE_SHA" > source-sha.txt
+          tar -czf "$AW_PREVIEW_DIR/native.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          path: ${{ env.AW_PREVIEW_DIR }}/native.tar.gz
+          retention-days: 3
+          if-no-files-found: error
       - name: Verify sec-core authenticated health contract
         env:
           AW_SEC_HEALTH_TEST_HELPER: ${{ github.workspace }}/src/agent-sec-core/v2/target/release/agent-sec-daemon-health
@@ -113,13 +168,23 @@ jobs:
           AW_TEST_PREFIX="$root/combined" AW_TEST_WORK_DIR="$runtime/demo" \
             timeout 180 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \
             -p aw-package --test installed -- --ignored
+          # Preview upgrades use a new prefix; retain the old one for rollback.
+          aw-all-in-one-*/aw-package install --prefix "$root/next"
+          diff -r "$root/combined/.aw-packages" "$root/next/.aw-packages"
+          "$root/next/bin/aw-package" configure --prefix "$root/next" \
+            --config "$runtime/next.yaml" --state-dir "$runtime/next-state" --qoder /bin/true
+          "$root/next/bin/aw" validate --config "$runtime/next.yaml"
+          aw-all-in-one-*/aw-package uninstall --prefix "$root/next"
+          test -x "$root/combined/bin/aw"
+          cp aw-all-in-one-*/manifest.json "$root/demo-manifest.json"
           aw-all-in-one-*/aw-package uninstall --prefix "$root/combined"
+          aw-core-*/aw-package uninstall --prefix "$root/split"
           test -f "$runtime/demo/result.json"
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: aw-preview-linux-x86_64-${{ github.sha }}${{ github.event_name == 'pull_request' && '-validation' || '' }}
-          retention-days: ${{ github.event_name == 'pull_request' && 3 || 14 }}
+          name: aw-preview-linux-x86_64-${{ needs.plan.outputs.sha }}
+          retention-days: 3
           path: |
             ${{ env.AW_PREVIEW_DIR }}/packages/*.tar.gz
             ${{ env.AW_PREVIEW_DIR }}/packages/SHA256SUMS
@@ -127,8 +192,94 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: aw-preview-evidence-${{ github.sha }}
+          name: aw-preview-evidence-${{ needs.plan.outputs.sha }}
           path: |
+            ${{ env.AW_PREVIEW_DIR }}/demo-manifest.json
             ${{ env.AW_PREVIEW_DIR }}/demo/result.json
             ${{ env.AW_PREVIEW_DIR }}/demo/*.log
           if-no-files-found: ignore
+
+  native:
+    needs: [plan, packages]
+    name: AW / Native (${{ matrix.agent }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            src/aw
+            docs/user-guide/en/user-entrypoint
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.13'
+          enable-cache: true
+          cache-suffix: ${{ matrix.agent }}
+          cache-dependency-glob: src/aw/tests/native-matrix.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-service/tests/fixtures/pi/package-lock.json') }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: aw-native-binaries-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/native-binaries
+      - name: Run pinned native acceptance
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+          NATIVE_AGENT: ${{ matrix.agent }}
+          NATIVE_PYTHON: ${{ matrix.python }}
+        run: |
+          # Standalone Python needs no loader overrides rejected by Hermes preflight.
+          uv python install "$NATIVE_PYTHON"
+          native_python="$(uv python find "$NATIVE_PYTHON")"
+          export PATH="$(dirname "$native_python"):$PATH"
+          tar -xzf src/aw/target/native-binaries/native.tar.gz -C src/aw/target/native-binaries
+          "$native_python" -B src/aw/scripts/native_acceptance.py --agent "$NATIVE_AGENT" \
+            --candidate-sha "$CANDIDATE_SHA" --bin src/aw/target/native-binaries \
+            --output "src/aw/target/native-evidence/$NATIVE_AGENT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aw-native-evidence-${{ matrix.agent }}-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/native-evidence/${{ matrix.agent }}
+          retention-days: 7
+          if-no-files-found: error
+
+  result:
+    needs: [plan, packages, native]
+    if: always()
+    name: AW / Integration result
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            src/aw
+            docs/user-guide/en/user-entrypoint
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: aw-native-evidence-*-${{ needs.plan.outputs.sha }}
+          path: src/aw/target/native-results
+      - name: Require all automated suites and report manual boundaries
+        if: always()
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PACKAGE_RESULT: ${{ needs.packages.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: python3 -B src/aw/scripts/native_summary.py --candidate-sha "$CANDIDATE_SHA" --results src/aw/target/native-results

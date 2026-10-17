@@ -96,18 +96,7 @@ impl Adapter for ClaudeSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            adapter: "claude-sdk".into(),
-            version: "0.2.88".into(),
-            entrypoint: "sdk-worker".into(),
-            events: BTreeMap::from([
-                ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                (
-                    "tool.after".into(),
-                    vec!["observe".into(), "replace_result".into()],
-                ),
-            ]),
-        }
+        super::super::adapter::catalog::CLAUDE_SDK.capabilities("0.2.88", "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, steps).map(|_| ())

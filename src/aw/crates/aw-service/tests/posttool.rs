@@ -5,6 +5,9 @@
 #[path = "launcher/support.rs"]
 mod support;
 
+#[path = "regression/native.rs"]
+mod native;
+
 use serde_json::{json, Value};
 use std::fs;
 use support::{Fixture, Service};
@@ -184,7 +187,8 @@ fn qoder_callback_delivers_one_replacement_and_keeps_audit_metadata_only() {
 fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use aw_service::{Binding, Capabilities, Operation};
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Instant};
-    for adapter in ["qoder", "openclaw", "qwenpaw", "agentscope", "hermes"] {
+    for agent in native::agents() {
+        let adapter = agent.as_str();
         let fixture = Fixture::new();
         let mut document = fixture.document();
         document["spec"]["agents"] =
@@ -233,23 +237,13 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
         fs::write(&path,json!({"adapter":adapter,"binding":binding,"socket":fixture.root.join("state/aw.sock"),"cwd":fixture.root,"events":{"tool.after":{"budget_ms":5000,"replacement_step":"compress","steps":{"security":"report","custom":"report","user":"report","compress":"report"}}}}).to_string()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let input = json!({"command":"printf original"});
-        let mut native = match adapter {
-            "qoder" => {
-                json!({"hook_event_name":"PostToolUse","cwd":fixture.root,"session_id":"session","tool_use_id":"call","tool_name":"Bash","tool_input":input,"tool_response":"original"})
-            }
-            "openclaw" => {
-                json!({"hook":"after_tool_call","event":{"toolName":"Custom/Tool","params":input,"toolCallId":"call","runId":"run","result":{"content":[{"type":"text","text":"original"}]}},"context":{"sessionId":"session","runId":"run","toolCallId":"call"}})
-            }
-            "qwenpaw" | "agentscope" => {
-                json!({"event":"tool.after","invocation_id":"call","session_id":"session","tool_call":{"name":"exec","id":"call","input":input.to_string()},"tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"}})
-            }
-            _ => {
-                json!({"hook_event_name":"post_tool_call","cwd":fixture.root,"session_id":"session","tool_name":"terminal","tool_input":input,"extra":{"api_request_id":"api","tool_call_id":"call","status":"ok","duration_ms":3,"error_type":null,"error_message":null,"middleware_trace":[{"kept":true}],"result":"{\"output\":\"original\",\"exit_code\":0}"}})
-            }
-        };
-        if adapter == "agentscope" {
-            native["effective_input"] = input;
-        }
+        let mut native = native::callback(
+            adapter,
+            "tool.after",
+            "00000000-0000-4000-8000-000000000001",
+            input,
+            &fixture.root,
+        );
         native["run_id"] = json!("coexist");
         let mut original = serde_json::to_vec(&native).unwrap();
         let snapshot = String::from_utf8(original.clone()).unwrap();

@@ -421,7 +421,7 @@ def owned(
         "command": command,
         "cwd": str(root),
         "ports": [],
-        "lifetime_seconds": 200,
+        "lifetime_seconds": 740,
         "logs": [str(output / (name + ".stdout")), str(output / (name + ".stderr"))],
     }
     path = output / (name + "-process.json")
@@ -529,7 +529,9 @@ def main() -> None:
                     "worker",
                     env,
                 ) as child:
-                    child.wait(timeout=180)
+                    # This sequential stress suite runs nearly 300 cancellation/error cases.
+                    # Keep the per-event budgets fixed while allowing hosted-runner overhead.
+                    child.wait(timeout=720)
                     assert child.returncode == 0, (output / "worker.stderr").read_text()
                 status = json.loads(
                     subprocess.check_output(

@@ -74,6 +74,72 @@ reasons and PostTool single-text replacement. Its per-invocation UUID pairs both
 hooks while preserving the SDK session and original tool ID; see the
 [SDK launch guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-a-pi-sdk-worker).
 
+## One configuration, native Agents
+
+The preferred path is `aw run --config aw.yaml --agent <target>`. Select another
+configured target while keeping security, Tokenless and user Hook policy in the
+same file. Native permissions still apply to every new tool call.
+
+```mermaid
+flowchart LR
+    Config["Unified AW configuration"] --> Run["aw run --config aw.yaml --agent target"]
+    Run --> Native["Native Agent / SDK worker"]
+    Native --> Before["tool.before: observe / block"]
+    Before --> Security["Optional sec-core checks + Tokenless retry suggestion"]
+    Security --> Tool["Native permission and tool execution"]
+    Tool --> After["tool.after: observe / final text replacement"]
+    After --> Result["Model-visible result + metadata audit"]
+```
+
+A Tokenless retry suggestion stops the original call. The Agent must submit a
+fresh call through the same security and native permission checks. A rejection
+never becomes approval because another policy is neutral.
+
+## Hook coverage and roadmap
+
+The grid is generated from the [regression matrix](tests/regression-matrix.json).
+A checkmark means the runtime declares the capability and the required CI gate
+checks its callback/service contract. It does not certify every native tool type
+or a real SDK run on every push.
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
+| --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ |
+| `pi` | ✓ | ✓ | ✓ | ✓ |
+| `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
+Replacement is limited to one supported text slot. Claude SDK supports Bash
+stdout replacement; MCP results remain observation-only. OpenClaw completion
+observers run after native compression, and compression can be degraded when
+its replacement middleware is unavailable. Other native adoption constraints
+remain in the linked Adapter guides above. The required matrix also tracks
+lifecycle, security denial/failure, fresh-call retry and final replacement
+composition; real SDK acceptance is separate.
+
+| Stage | Supported or planned points | Completion condition |
+| --- | --- | --- |
+| Current | `tool.before` and `tool.after` across the seven registered Agents | Required runnable contract cases, native capability admission and documented adoption limits |
+| Next: deeper acceptance | Real SDK/CLI checks at the pinned versions, including security + Tokenless coexistence | Isolated, bounded fixtures and explicit native adoption evidence; keep heavyweight acceptance separate from the push gate |
+| Planned: lifecycle and context | Session start/end, user prompt and model/context preparation | Define native semantics and failure policy, then add catalog entries and per-Agent matrix cases before declaring support |
+| Planned: broader effects | Additional result shapes and explicit approval/context effects where native APIs allow them | Versioned contracts, preserved native authorization and tests for denied/unsupported combinations |
+
+These are priorities, not delivery dates or capabilities enabled by configuration.
+New Agent or Hook support must extend the matrix and pass CI before it is listed
+as supported. See [contribution checks](CONTRIBUTING.md) for the local workflow.
+
+Daily PR checks run only for changes under `src/aw/`. Nightly builds all-in-one
+and tests real component contracts plus pinned Agent/SDK native hooks. The
+[native inventory](tests/native-matrix.json) records versions and acceptance
+boundaries; see [CI coverage](CONTRIBUTING.md#daily-ci-and-nightly-integration).
+Qoder remains manual; OpenClaw Gateway and QwenPaw App/model flows are not covered
+by their automated Hook/middleware suites.
+
 ## Basic use
 
 From the repository root on Linux with rustup and Qoder CLI available:

@@ -13,8 +13,12 @@ from pathlib import Path
 if sys.version_info < (3, 9):
     raise SystemExit("AW CI control jobs require Python 3.9 or newer")
 
+sys.dont_write_bytecode = True
+
 AW = Path(__file__).resolve().parents[1]
 REPO = AW.parents[1]
+# Also support importlib-based gate tests without loading full-tree modules in scope jobs.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def run(command: list[str], cwd: Path, timeout: float = 600, capture: bool = False) -> str:
@@ -115,124 +119,27 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
             )
         )
     return any(
-        path.startswith("src/aw/") or path == ".github/workflows/aw-ci.yml" for path in changed
+        path.startswith("src/aw/")
+        or (
+            event_name != "pull_request"
+            and path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-preview.yml"}
+        )
+        for path in changed
     )
 
 
-def inventory(text: str) -> set[str]:
-    """Parse libtest's list output and reject truncated or unknown formats."""
-    tests = set()
-    summary = None
-    for line in text.splitlines():
-        if line.endswith(": test"):
-            tests.add(line[:-6])
-        elif match := re.fullmatch(r"(\d+) tests?, (\d+) benchmarks?", line):
-            if summary is not None:
-                raise ValueError("duplicate test inventory summary")
-            summary = int(match[1])
-        elif line.strip():
-            raise ValueError(f"unexpected test inventory line: {line!r}")
-    if summary is None or summary != len(tests):
-        raise ValueError("missing or inconsistent test inventory summary")
-    return tests
+def check_inventory(metadata: dict) -> None:
+    """Build once, then validate the runnable matrix against real test executables."""
+    from check_inventory import check_inventory as check_tests
 
-
-def check_inventory() -> None:
-    """Require runnable tests for configuration, contracts, execution and journals."""
-    for package, target in (
-        ("aw-package", "installation"),
-        ("aw-contracts", "canonical"),
-        ("aw-contracts", "schemas"),
-        ("aw-contracts", "contracts"),
-        ("aw-contracts", "orchestration"),
-        ("aw-core", "execution"),
-        ("aw-core", "journal"),
-        ("aw-config", "configuration"),
-        ("aw-provider", "protocol"),
-        ("aw-provider", "views"),
-        ("aw-provider", "admission"),
-        ("aw-exec", "execution"),
-        ("aw-host", "host"),
-        ("aw-provider-sec-core", "provider"),
-        ("aw-provider-tokenless", "provider"),
-        ("aw-provider-tokenless", "views"),
-        ("aw-service", "service"),
-        ("aw-service", "inspect"),
-        ("aw-service", "qwenpaw"),
-        ("aw-service", "pi"),
-        ("aw-service", "claude_sdk"),
-        ("aw-service", "agentscope"),
-    ):
-        command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
-        tests = inventory(run(command, AW, capture=True))
-        ignored = inventory(run([*command, "--ignored"], AW, capture=True))
-        if not ignored <= tests or not tests - ignored:
-            raise ValueError(f"{target}: no runnable tests or inconsistent ignored inventory")
-        print(f"{target}: {len(tests - ignored)} runnable tests", flush=True)
+    check_tests(AW, metadata, run)
 
 
 def structure(metadata: dict, root: Path) -> None:
-    """Keep the reviewed crate boundaries and Rust source sizes explicit."""
-    allowed = {
-        "aw-package": {"serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile", "aw-config", "aw-exec", "aw-service"},
-        "aw-provider-tokenless": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "sha2", "aw-provider-sec-core"},
-        "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc", "jsonschema"},
-        "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
-        "aw-core": {"aw-contracts", "serde_json", "thiserror"},
-        "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
-        "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
-        "aw-exec": {"libc", "thiserror"},
-        "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
-        "aw-service": {"aw-contracts", "aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "reqwest", "semver", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "tempfile"},
-    }
-    members = {
-        p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
-    }
-    if members.keys() != allowed.keys():
-        raise ValueError("AW workspace members changed; review the crate boundaries")
-    for name, package in members.items():
-        directory = root if name == "aw-contracts" else root / "crates" / name
-        if Path(package["manifest_path"]).resolve() != (directory / "Cargo.toml").resolve():
-            raise ValueError(f"{name}: workspace crate moved outside its reviewed location")
-        source_roots = [directory / kind for kind in ("src", "tests", "examples")]
-        for target in package["targets"]:
-            source = Path(target["src_path"]).resolve()
-            if not any(source.is_relative_to(path.resolve()) for path in source_roots):
-                raise ValueError(f"{name}: Cargo target is outside the audited source layout")
-        for dependency in package["dependencies"]:
-            if dependency["name"] not in allowed[name]:
-                raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
-            local = {name: root if name == "aw-contracts" else root / "crates" / name for name in allowed}
-            if dependency["name"] in local:
-                path = dependency.get("path")
-                if (
-                    not path
-                    or dependency.get("source") is not None
-                    or Path(path).resolve() != local[dependency["name"]].resolve()
-                ):
-                    raise ValueError(f"{name}: local dependency must use this workspace")
-            elif dependency.get("path") is not None or dependency.get("source", "").startswith(
-                "git+"
-            ):
-                raise ValueError(f"{name}: dependency must come from the locked registry")
-        for source_root in source_roots:
-            if source_root.is_symlink():
-                raise ValueError(f"source symlink is outside the layout audit: {source_root}")
-            for file in source_root.rglob("*"):
-                if file.is_symlink():
-                    raise ValueError(f"source symlink is outside the layout audit: {file}")
-                if not file.is_file() or file.suffix != ".rs":
-                    continue
-                relative = file.relative_to(root).as_posix()
-                if file.name == "mod.rs" and not relative.endswith("tests/common/mod.rs"):
-                    raise ValueError(f"use named Rust modules instead of mod.rs: {relative}")
-                # Retain the existing contract validator without expanding or refactoring it here.
-                limit = 711 if relative == "src/validation.rs" else 699
-                lines = len(file.read_text(encoding="utf-8").splitlines())
-                if lines > limit:
-                    raise ValueError(f"{relative}: {lines} lines exceed the reviewed limit {limit}")
-                if lines >= 600:
-                    print(f"AW layout: {relative}: {lines} lines (ceiling {limit})", flush=True)
+    """Load layout checks only after sparse scope selection."""
+    from check_layout import structure as check_structure
+
+    check_structure(metadata, root)
 
 
 def selftest(scope_only: bool = False) -> None:
@@ -245,7 +152,7 @@ def selftest(scope_only: bool = False) -> None:
             """
 import sys
 import unittest
-suite = unittest.defaultTestLoader.discover('tests', pattern='test_ci_checks.py')
+suite = unittest.defaultTestLoader.discover('tests', pattern='test_ci_*.py')
 if sys.argv[1] == "scope":
     suite = unittest.defaultTestLoader.loadTestsFromName("test_ci_checks.ScopeTests")
 if suite.countTestCases() == 0:
@@ -267,18 +174,19 @@ def check() -> None:
     actual = candidate()
     selftest()
     run(["cargo", "fmt", "--all", "--", "--check"], AW)
-    structure(
-        json.loads(
-            run(
-                ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
-                AW,
-                capture=True,
-            )
-        ),
-        AW,
+    from check_native import load
+
+    load(AW)
+    metadata = json.loads(
+        run(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            AW,
+            capture=True,
+        )
     )
+    structure(metadata, AW)
     run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], AW)
-    check_inventory()
+    check_inventory(metadata)
     run(["cargo", "test", "--workspace", "--locked"], AW)
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
     run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], AW)

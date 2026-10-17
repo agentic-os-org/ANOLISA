@@ -60,6 +60,66 @@ Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南
 Pi 使用应用工厂模块与 `adapter: pi`，复用 PreTool 重试理由和 PostTool 单文本替换；
 每次调用的 UUID 配对前后 Hook，保留 SDK 会话和模型原工具 ID。见 [SDK 启动指南](../../docs/user-guide/zh/user-entrypoint/aw.md#启动-pi-sdk-worker)。
 
+## 一份配置，接入原生 Agent
+
+推荐入口是 `aw run --config aw.yaml --agent <target>`。切换配置中的 Agent
+目标时，安全、Tokenless 和用户 Hook 策略仍由同一份文件管理；每次新的工具
+调用仍须通过原生权限检查。
+
+```mermaid
+flowchart LR
+    Config["统一 AW 配置"] --> Run["aw run --config aw.yaml --agent target"]
+    Run --> Native["原生 Agent / SDK worker"]
+    Native --> Before["tool.before：观察 / 阻断"]
+    Before --> Security["可选 sec-core 检查 + Tokenless 重试建议"]
+    Security --> Tool["原生权限检查与工具执行"]
+    Tool --> After["tool.after：观察 / 最终文本替换"]
+    After --> Result["模型可见结果 + 元数据审计"]
+```
+
+Tokenless 给出重试建议时会阻止原调用；Agent 必须发起一次新的调用，重新经过
+安全和原生权限检查。其他策略的中性结果不能把已有拒绝变成批准。
+
+## Hook 覆盖与路线图
+
+下表由[回归矩阵](tests/regression-matrix.json)生成。勾选表示运行时声明该能力，
+必需 CI 门禁覆盖其回调与服务契约；它不表示所有原生工具形态都支持，也不表示
+每次推送都完成真实 SDK 验收。
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
+| --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ |
+| `pi` | ✓ | ✓ | ✓ | ✓ |
+| `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
+结果替换限于一个受支持的文本位置。Claude SDK 支持 Bash stdout 替换，MCP
+结果仅观察；OpenClaw 的完成观察发生在原生压缩之后，缺少替换 middleware API
+时压缩会降级。其他原生采纳边界见上方链接的各 Adapter 指南。必需矩阵同时
+覆盖生命周期、安全拒绝与失败、重新授权的重试、最终替换的组合行为；真实 SDK
+验收单独执行。
+
+| 阶段 | 已支持或计划中的点位 | 完成条件 |
+| --- | --- | --- |
+| 当前 | 七个已注册 Agent 的 `tool.before`、`tool.after` | 可运行的必需契约测试、原生能力准入和明确的采纳边界 |
+| 下一步：深化验收 | 固定版本的真实 SDK/CLI，包括安全与 Tokenless 共存 | 隔离、有时限的 fixture 与真实效果采纳证据；重验收与推送门禁分开 |
+| 计划：生命周期与上下文 | 会话开始/结束、用户输入、模型调用/上下文准备 | 先明确原生语义和失败策略，再增加 catalog 与各 Agent 的矩阵用例，最后声明支持 |
+| 计划：扩展效果 | 原生 API 允许的更多结果形态、显式批准与上下文效果 | 版本化契约、保留原生授权，以及拒绝和不支持组合的回归 |
+
+上述内容表示优先方向，不是交付日期或配置即生效的承诺。新增 Agent 或 Hook
+须先补齐矩阵并通过 CI，再列为支持。开发入口见[贡献检查](CONTRIBUTING_zh.md)。
+
+日常 PR 仅在改动 `src/aw/` 时运行 AW 检查。Nightly 构建 all-in-one，验证真实组件
+契约和固定版本 Agent/SDK 的原生 Hook。[原生清单](tests/native-matrix.json) 记录
+版本及验收边界，执行分工见 [CI 看护](CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
+Qoder 仍需人工验收；OpenClaw Gateway 和 QwenPaw App/模型流程不在自动
+Hook/middleware 套件覆盖范围内。
+
 ## 基本使用
 
 在 Linux 上准备 rustup 和 Qoder CLI，从仓库根目录执行：
