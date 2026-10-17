@@ -117,7 +117,15 @@ def main():
         print(f"no such dir: {root}", file=sys.stderr)
         sys.exit(1)
 
-    runs = [root / args.run] if args.run else sorted(p for p in root.iterdir() if p.is_dir())
+    if args.run is not None:
+        if not args.run or args.run in {".", ".."} or Path(args.run).name != args.run:
+            ap.error("--run must name a direct child directory of --root")
+        run_dir = root / args.run
+        if not run_dir.is_dir():
+            ap.error(f"no such run directory: {args.run}")
+        runs = [run_dir]
+    else:
+        runs = sorted(p for p in root.iterdir() if p.is_dir())
 
     rows = []
     summary = {
@@ -134,6 +142,8 @@ def main():
     for run_dir in runs:
         pairs = find_pairs(run_dir)
         if not pairs:
+            if args.run is not None:
+                ap.error(f"no session/trace pairs found in selected run: {args.run}")
             continue
         for stem, sess, trace in pairs:
             summary["total_pairs"] += 1
