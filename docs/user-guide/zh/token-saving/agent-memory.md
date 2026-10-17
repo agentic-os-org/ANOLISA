@@ -367,6 +367,8 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 
 服务关闭时自动从会话审计日志中提取原子事实（`mem_consolidate`），使用 6 条启发式规则（零 LLM 调用）识别高频路径、搜索模式等行为特征并持久化为结构化记忆。也可通过 `mem_consolidate` 工具手动触发。含情景记忆提取与冲突检测（BM25 阈值）。
 
+冲突检测只在事实之间比较：扫描范围限定在 `facts/`，因此新事实绝不会把派生出它的那份普通记忆文件顶掉（被 supersede 的行会从所有搜索路径中隐藏，且该标记在重建索引后依然保留）。足够相似的旧事实会被写入 `superseded_by` 并从搜索结果中移除。`conflict_bm25_threshold` 使用 FTS5 `bm25()` 的量纲：分数为负且*越负越相似*，因此数值越小越严格——默认 `-2.0` 只标记近似重复，`-0.5` 连主题松散重叠也会标记。`bm25()` 的 IDF 取自整个索引，全新的命名空间里没有可区分的语料，阈值也就无从生效；此时只要旧事实的内容已被新事实完整复述就会被 supersede，阈值只决定边界情况。
+
 ### 审计与可观测性
 
 每次成功工具调用向 `<mount>/.anolisa/audit.log` 追加 JSONL，启用会话还写入 `/run/anolisa/sessions/<sid>/log.jsonl`。`audit.journald=true` 时 fan-out 到 systemd-journald，带结构化字段（`MESSAGE_ID`、`AGENT_MEMORY_TOOL` 等），便于 `journalctl --user-unit=anolisa-memory@<user>` 过滤。
@@ -468,7 +470,7 @@ conflict_bm25_threshold = -2.0
 | `MEMORY_MIN_EPISODE_STEPS` | 情景最少步骤数 | 3 |
 | `MEMORY_MAX_EPISODES` | 每会话最多情景数 | 10 |
 | `MEMORY_CONFLICT_DETECTION` | 冲突检测 | true |
-| `MEMORY_CONFLICT_THRESHOLD` | BM25 冲突阈值 | -2.0 |
+| `MEMORY_CONFLICT_THRESHOLD` | BM25 冲突阈值（`bm25()` 量纲：越小越严格，仅作用于 facts） | -2.0 |
 
 数据存储：`~/.anolisa/memory/<namespace>/`。
 
