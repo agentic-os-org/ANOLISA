@@ -1926,9 +1926,10 @@ pub(crate) fn is_monitoring_helper(pid: &str) -> bool {
 }
 
 /// Whether a command line names a metrics collector. Only the program being
-/// run decides — argv[0], the payload of a `sh -c` wrapper, or the jar a JVM
-/// runs — because a bare `exporter` token in a later argument (a config
-/// path, say) does not make the process a collector.
+/// run decides — argv[0], the payload of a `sh -c` wrapper, the jar a JVM
+/// runs, or the script an interpreter launches — because a bare `exporter`
+/// token in a later argument (a config path, say) does not make the process a
+/// collector.
 fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     let args: Vec<&str> = args.collect();
     let Some(&program) = args.first() else {
@@ -1937,16 +1938,24 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     if is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program)) {
         return true;
     }
-    if is_shell_program(program) {
+    if is_shell_program(program) && args.get(1) == Some(&"-c") {
         // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
         // the payload, not as argv[0]; the payload's first word is its command.
-        return args.get(1) == Some(&"-c")
-            && args
-                .get(2)
-                .and_then(|&payload| payload.split_whitespace().next())
-                .is_some_and(|program| {
-                    is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
-                });
+        return args
+            .get(2)
+            .and_then(|&payload| payload.split_whitespace().next())
+            .is_some_and(|program| {
+                is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
+            });
+    }
+    // The kernel rewrites every shebang exec to
+    // `[interpreter, script, ...]`, so a directly executed
+    // `postgres_exporter.sh` and `python3 /opt/kafka_exporter.py` put the
+    // program-to-run in the argument after the interpreter.
+    if let Some(script) = interpreter_script(program, &args) {
+        if is_monitoring_helper_name(script.rsplit('/').next().unwrap_or(script)) {
+            return true;
+        }
     }
     if program.rsplit('/').next().unwrap_or_default() == "java" {
         // A JVM names its program in the jar after `-jar`; argv[0] is only the
@@ -1969,6 +1978,32 @@ fn is_shell_program(program: &str) -> bool {
         program.rsplit('/').next().unwrap_or_default(),
         "sh" | "bash" | "dash" | "zsh" | "ksh"
     )
+}
+
+/// The script argument of an interpreter command line, when the first argument
+/// after the interpreter names a file rather than an option or an inline
+/// payload.
+///
+/// A shebang exec is rewritten by the kernel to
+/// `[interpreter, (optional arg), script, ...]` (`fs/binfmt_script.c`), for
+/// every interpreter, not only shells. The script is the program being run, so
+/// the collector/tool filters have to look at it: `python3
+/// /opt/kafka_exporter.py` is a collector even though argv[0] is the
+/// interpreter. `-c`/`-m`/`-e` payloads and option values are not script
+/// paths, so a leading `-` answers `None`; the common direct form is covered
+/// without guessing which options take a value.
+fn interpreter_script<'a>(program: &str, args: &[&'a str]) -> Option<&'a str> {
+    let basename = program.rsplit('/').next().unwrap_or(program);
+    let interpreter = is_shell_program(program)
+        || matches!(
+            basename,
+            "python" | "python3" | "node" | "nodejs" | "ruby" | "perl"
+        );
+    if !interpreter {
+        return None;
+    }
+    let script = *args.get(1)?;
+    (!script.starts_with('-')).then_some(script)
 }
 
 /// ClickHouse's client-side entry points. The vendor's `clickhouse-client`
@@ -2069,11 +2104,11 @@ fn is_service_tool(pid: &str) -> bool {
 /// Pure core of [`is_service_tool`], assertable against a synthetic command
 /// line the way [`runtime_service_from_cmdline`] is.
 fn cmdline_names_service_tool(cmdline: &str) -> bool {
-    let mut args = cmdline.split('\0').filter(|arg| !arg.is_empty());
-    let Some(program) = args.next() else {
+    let args: Vec<&str> = cmdline.split('\0').filter(|arg| !arg.is_empty()).collect();
+    let Some(&program) = args.first() else {
         return false;
     };
-    let next = args.next();
+    let next = args.get(1).copied();
     if program_names_service_tool(program) {
         return true;
     }
@@ -2085,7 +2120,9 @@ fn cmdline_names_service_tool(cmdline: &str) -> bool {
         // host.
         return next != Some("server");
     }
-    is_shell_program(program) && next.is_some_and(program_names_service_tool)
+    // A script is run by an interpreter, and the kernel puts its path in the
+    // first argument after the interpreter for every shebang, not only `sh`.
+    interpreter_script(program, &args).is_some_and(program_names_service_tool)
 }
 
 /// Whether `program` (an argv[0]) is ClickHouse's multi-call binary, whose name
@@ -5529,6 +5566,10 @@ mod tests {
             "/opt/exporter/postgres_exporter\0--web.listen-address=:9187",
             "sh\0-c\0/opt/exporter/postgres_exporter --web.listen-address=:9187",
             "java\0-jar\0/opt/client/jmx_prometheus_httpserver.jar",
+            // A script is run by its interpreter; argv[0] is not the program.
+            "sh\0/opt/postgres_exporter.sh\0--web.listen-address=:9187",
+            "/usr/bin/python3\0/opt/postgres_exporter.py\0--web.listen-address=:9187",
+            "node\0/opt/node_exporter.js\0--web.listen-address=:9100",
         ] {
             assert!(cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
         }
@@ -5586,7 +5627,42 @@ mod tests {
         assert!(!cmdline_names_helper(
             "sh\0-c\0cat /etc/exporter.conf".split('\0')
         ));
+        // An interpreter option is not a script path, and a plain script's
+        // later config path still does not decide.
+        assert!(!cmdline_names_helper(
+            "python3\0-c\0import postgres_exporter".split('\0')
+        ));
+        assert!(!cmdline_names_helper(
+            "python3\0/opt/manage.py\0--config=/etc/exporter.conf".split('\0')
+        ));
         assert!(!cmdline_names_helper("".split('\0')));
+    }
+
+    /// The tool-side twin of the collector filter: the same kernel shape, and
+    /// the same documented rule that the program decides.
+    #[test]
+    fn service_tool_scripts_run_by_any_interpreter_are_tools() {
+        for tool in [
+            "/usr/bin/python3\0/opt/kafka-topics.py",
+            "/usr/bin/node\0/opt/elasticsearch-keystore.js",
+            "/bin/bash\0/opt/spark-submit.sh",
+            "/opt/kafka-topics.sh\0--list",
+        ] {
+            assert!(
+                cmdline_names_service_tool(tool),
+                "{tool:?} runs a tool, not the service"
+            );
+        }
+        for daemon in [
+            "/usr/bin/python3\0/opt/manage.py",
+            "/usr/bin/python3\0-c\0import kafka",
+            "/usr/bin/node\0-e\0require('kafka')",
+        ] {
+            assert!(
+                !cmdline_names_service_tool(daemon),
+                "{daemon:?} is not a service tool"
+            );
+        }
     }
 
     #[test]
