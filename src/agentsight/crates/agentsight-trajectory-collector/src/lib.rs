@@ -527,4 +527,44 @@ mod tests {
         assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
         assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
     }
+
+    #[test]
+    fn test_scan_once_reads_a_bom_prefixed_rollout() {
+        let base = tmp_dir("codex-bom");
+        // The same rollout the routing test ingests, with the byte-order mark
+        // Windows tooling adds when a file is saved as "UTF-8 with BOM" or
+        // copied through PowerShell. The mark lands on the first line only,
+        // and for a Codex rollout that line is `session_meta` — the sole
+        // source of the session cwd (the project column), the CLI version and
+        // the session id.
+        let sessions_root = base.join(".codex").join("sessions");
+        let nested = sessions_root.join("2026").join("08");
+        std::fs::create_dir_all(&nested).unwrap();
+        let content = concat!(
+            "\u{feff}{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-1\",\"cwd\":\"/w/demo-app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n",
+        );
+        std::fs::write(nested.join("rollout-c0ffee.jsonl"), content).unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![sessions_root]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+
+        scan_once(&store, &config);
+        assert_eq!(store.count().unwrap(), 1);
+
+        let rec = store.get("rollout-c0ffee").unwrap().unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(
+            rec.project, "demo-app",
+            "the marked session_meta still carries the project"
+        );
+        assert_eq!(doc["agent"]["version"], "0.146.0");
+        assert_eq!(doc["extra"]["cwd"], "/w/demo-app");
+        assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
+    }
 }

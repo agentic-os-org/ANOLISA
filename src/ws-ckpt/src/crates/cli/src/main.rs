@@ -1009,7 +1009,7 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
             message,
         } => {
             eprintln!("\x1b[33m⚠ {}\x1b[0m", message);
-            eprint!("确认操作? [y/N]: ");
+            eprint!("Confirm operation? [y/N]: ");
             io::stderr().flush()?;
 
             let stdin = io::stdin();
@@ -1035,7 +1035,7 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
                 let response = send_request_to_daemon(&force_request).await?;
                 Box::pin(handle_response(response, &force_request)).await?;
             } else {
-                println!("操作已取消");
+                println!("Operation cancelled");
             }
         }
         Response::Error {

@@ -26,12 +26,15 @@ pub(super) enum PruneTable {
     Resources,
     /// Evaluation results owned by the same physical database.
     Evaluations,
+    /// Saved metadata and explicitly fetched Tokenless content.
+    Tokenless,
 }
 
 impl GenAISqliteStore {
     /// Initialize database tables
     pub(super) fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        super::tokenless::init_tables(&conn)?;
         // This migration must run before any index that references the added
         // column: on databases created before conversation_id existed,
         // creating the index first aborts the batch and the `?` below returns
@@ -356,6 +359,7 @@ impl GenAISqliteStore {
         let cutoff_i64 = i64::try_from(cutoff_ns).unwrap_or(i64::MAX);
         let mut deleted = 0;
         for table in [
+            PruneTable::Tokenless,
             PruneTable::Events,
             PruneTable::Resources,
             PruneTable::Evaluations,
@@ -417,6 +421,12 @@ impl GenAISqliteStore {
             };
 
         let candidates = [
+            {
+                let (count, bytes): (i64,i64) = conn.query_row(
+                    "SELECT COUNT(*),COALESCE(SUM(octet_length(record_json)),0) FROM tokenless_statistics", [],
+                    |row| Ok((row.get(0)?,row.get(1)?)))?;
+                (bytes.max(count), PruneTable::Tokenless, count)
+            },
             (
                 event_bytes.max(event_count),
                 PruneTable::Events,
@@ -474,6 +484,14 @@ impl GenAISqliteStore {
             return Ok(0);
         }
         let (select, delete, cutoff) = match table {
+            PruneTable::Tokenless => (
+                "SELECT cache_id, COALESCE(octet_length(record_json), 0)
+                 FROM tokenless_statistics WHERE ?1 IS NULL OR timestamp_ns < ?1
+                 ORDER BY timestamp_ns, cache_id LIMIT ?2",
+                "DELETE FROM tokenless_statistics WHERE cache_id = ?1
+                 AND (?2 IS NULL OR timestamp_ns < ?2)",
+                expired_before,
+            ),
             PruneTable::Events => (
                 "SELECT id, COALESCE(octet_length(event_json), 0)
                     + COALESCE(octet_length(input_messages), 0)

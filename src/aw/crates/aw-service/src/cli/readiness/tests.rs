@@ -91,6 +91,7 @@ fn readiness_timeout_cancels_and_reaps_owned_agent() {
         &fixture.command("missing"),
         &AtomicI32::new(0),
         Some(fixture.ready()),
+        |_| {},
     );
     assert!(result.unwrap_err().to_string().contains("startup deadline"));
     assert!(started.elapsed() < Duration::from_secs(4));
@@ -104,6 +105,7 @@ fn successful_native_startup_preserves_exit_status() {
         &fixture.command("ready"),
         &AtomicI32::new(0),
         Some(fixture.ready()),
+        |_| {},
     )
     .unwrap();
     assert!(status.success());
@@ -117,6 +119,7 @@ fn process_exit_is_not_hook_readiness() {
         &fixture.command("early"),
         &AtomicI32::new(0),
         Some(fixture.ready()),
+        |_| {},
     );
     assert!(result
         .unwrap_err()
@@ -132,6 +135,7 @@ fn unrelated_live_pid_cannot_attest_readiness_and_owned_agent_is_reaped() {
         &fixture.command("unrelated"),
         &AtomicI32::new(0),
         Some(fixture.ready()),
+        |_| {},
     );
     assert!(result.unwrap_err().to_string().contains("does not match"));
     assert!(!fixture.0.join("continued").exists());
@@ -143,7 +147,7 @@ fn spawn_failure_returns_without_starting_a_readiness_watcher() {
     let fixture = Fixture::new();
     let mut command = fixture.command("ready");
     command.program = fixture.0.join("missing-agent");
-    assert!(run(&command, &AtomicI32::new(0), Some(fixture.ready())).is_err());
+    assert!(run(&command, &AtomicI32::new(0), Some(fixture.ready()), |_| {}).is_err());
     assert!(!fixture.ready().path.exists());
 }
 

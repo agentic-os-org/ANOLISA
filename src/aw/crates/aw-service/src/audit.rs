@@ -214,9 +214,130 @@ pub(crate) fn preparation(error: &aw_host::Error) -> Value {
 mod tests {
     use super::*;
     use std::{
+        collections::BTreeMap,
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn cancellation_fences_hook_opens_blocked_in_initial_audit_claim() {
+        use crate::{runtime::Runtime, Capabilities, Operation};
+
+        let directory = tempfile::Builder::new()
+            .prefix("hook-init-")
+            .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .unwrap();
+        let mut document = aw_config::Validator::new()
+            .unwrap()
+            .parse(include_bytes!("../../aw-config/examples/aw.minimal.yaml"))
+            .unwrap()
+            .as_value()
+            .clone();
+        document["spec"]["providers"]["raw"] = json!({
+            "protocol":"native-hook/v1alpha1", "config":{}, "timeout_ms":1000,
+            "max_output_bytes":32,
+            "transport":{"type":"stdio", "location":"agent", "argv":["/bin/true"]}
+        });
+        document["spec"]["events"]["tool.before"]["steps"] = json!([
+            {"id":"raw", "provider":"raw", "native":{}, "on_error":"report"}
+        ]);
+        let runtime = Runtime::new(
+            serde_json::to_vec(&document).unwrap(),
+            &directory.path().join("audit"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        struct Drain(Arc<Runtime>);
+        impl Drop for Drain {
+            fn drop(&mut self) {
+                self.0.maintain(true).unwrap();
+            }
+        }
+        let _drain = Drain(Arc::clone(&runtime));
+        let call = |operation, duration| {
+            runtime.handle(
+                operation,
+                Instant::now() + duration,
+                &AtomicBool::new(false),
+            )
+        };
+        let binding = call(
+            Operation::Bind {
+                target: "qoder".into(),
+                capabilities: Capabilities {
+                    adapter: "qoder".into(),
+                    version: "fixture".into(),
+                    entrypoint: "fixture".into(),
+                    events: BTreeMap::from([
+                        ("tool.before".into(), vec!["observe".into(), "block".into()]),
+                        ("tool.after".into(), vec!["observe".into()]),
+                    ]),
+                },
+                cwd: directory.path().to_str().unwrap().into(),
+                environment: BTreeMap::new(),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let instance = binding["instance_id"].as_str().unwrap().to_owned();
+        let open = || Operation::OpenHookEvent {
+            instance_id: instance.clone(),
+            native_input: b"{}".to_vec(),
+            event: json!({"name":"tool.before", "session_id":"session",
+                "agent":{"adapter":"qoder","binding_id":"qoder","instance_id":instance},
+                "tool":{"name":"tool","call_id":"call","input":{}}}),
+        };
+        let close = || Operation::CloseHookEvent {
+            instance_id: instance.clone(),
+            event: "tool.before".into(),
+            session_id: "session".into(),
+            call_id: "call".into(),
+        };
+        let (registered, closed, opened) = thread::scope(|scope| {
+            let journal = runtime.audit.journal.lock().unwrap();
+            let opening = scope.spawn(|| call(open(), Duration::from_secs(5)));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let registered = loop {
+                if call(Operation::Status, Duration::from_secs(1)).unwrap()["events"] == 1 {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(2));
+            };
+            let closed = call(close(), Duration::from_millis(50));
+            drop(journal);
+            (registered, closed, opening.join().unwrap())
+        });
+        let retry = call(open(), Duration::from_secs(1));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let drained = loop {
+            if call(Operation::Status, Duration::from_secs(1)).unwrap()["events"] == 0 {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert!(registered, "did not reach in-flight initialization");
+        match closed {
+            Ok(value) => assert_eq!(value["closed"], true),
+            Err(error) => assert!(
+                matches!(error, crate::Error::Rejected(code) if code == "event_close_timeout")
+            ),
+        }
+        assert!(
+            opened.is_err(),
+            "cancelled initialization published a handle"
+        );
+        assert!(
+            matches!(retry, Err(crate::Error::Rejected(code)) if code == "native_event_closed")
+        );
+        assert!(drained, "cancelled initialization retained its event slot");
+    }
 
     #[test]
     fn recent_publication_preserves_durable_order_and_latest_twenty() {

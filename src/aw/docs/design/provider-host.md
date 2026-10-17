@@ -76,6 +76,7 @@ chain retain their native scheduling.
 | Qoder | Parallel callbacks, or explicitly configured native `sequential` | `PostToolUse` returns `hookSpecificOutput.updatedToolOutput` | Original callback result | Yes: preceding AW attempts finish before the next step; external Hooks are not serialized | Independent callbacks share the same immutable native input and event handle |
 | OpenClaw | Result middleware precedes completion; native after handlers run concurrently | `registerAgentToolResultMiddleware` | Sanitized pre-compression result, with native completion metadata | No: the plugin runs AW observers serially at completion, after replacement | Original middleware snapshot binds replacement and observation; the first completion view is pinned |
 | QwenPaw | Acting middleware unwinds in reverse registration order | Final `ToolResponse` returned by `on_acting` | Original completed result | No: reverse registration makes AW observers unwind in configured order before replacement | Callbacks share the completed response and tool-call identity; intermediate chunks are not projected |
+| AgentScope SDK | Acting middleware unwinds in reverse registration order | Final `ToolResponse` returned by `on_acting` | Original completed result | No: reverse registration makes AW observers unwind in configured order before replacement | Callbacks share the completed response and fresh per-invocation identity; intermediate chunks are not projected |
 | Hermes | Completion callbacks precede the final result transform | `transform_tool_result` returns the final string | Original completion result | No: native callback registration preserves the AW observer order | `post_tool_call` and `transform_tool_result` share a binding that normalizes only the seam name and observer-only middleware trace |
 
 Every row shares one event deadline and once-only step claims. A reported failure
@@ -91,6 +92,8 @@ The executable contracts are in
 [`openclaw.mjs`](../../crates/aw-service/tests/openclaw.mjs), and the native
 [QwenPaw](../../crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py) and
 [Hermes](../../crates/aw-service/tests/fixtures/hermes/native_contract.py) fixtures.
+The [AgentScope lifecycle acceptance](../../crates/aw-service/tests/agentscope_lifecycle.py)
+also exercises the public SDK with a real Tokenless CLI and offline model.
 Fixture success alone does not establish real-model adoption.
 
 ## Default invoke-only hooks

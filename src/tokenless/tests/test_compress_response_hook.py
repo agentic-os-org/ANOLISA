@@ -213,8 +213,14 @@ def _create_broken_mock_claude(tmpdir: str, mode: str) -> str:
     return mock_script
 
 
-def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
-              isolated_home: str = None, stderr_sink: list = None) -> dict:
+def _run_hook(
+    stdin_data: dict,
+    agent_id: str,
+    mock_tokenless_path: str,
+    isolated_home: str = None,
+    stderr_sink: list = None,
+    cosh_runtime: bool = False,
+) -> dict:
     """Run the hook as a subprocess with mocked tokenless binary.
 
     Args:
@@ -225,6 +231,8 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
             touching the caller's ~/.tokenless state.
         stderr_sink: Optional list; when given, the hook's stderr is appended
             to it so callers can assert on `warn()` diagnostics.
+        cosh_runtime: Simulate Cosh runtime detection independently of the
+            declared agent ID.
 
     Returns:
         Parsed JSON output dict from the hook, or a dict with ``_subprocess_error``
@@ -237,8 +245,10 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
     hook_path = os.path.join(hooks_dir, "compress_response_hook.py")
 
     env = os.environ.copy()
+    env.pop("COSH_NG_VERSION", None)
+    env.pop("COSH_RUNTIME", None)
     env["TOKENLESS_AGENT_ID"] = agent_id
-    if agent_id == "cosh-ng":
+    if agent_id == "cosh-ng" or cosh_runtime:
         env["COSH_NG_VERSION"] = "0.5.0"
     env["PATH"] = os.path.dirname(mock_tokenless_path) + ":" + env.get("PATH", "")
     # Isolate HOME so hook doesn't read/write ~/.tokenless/.claude-version
@@ -486,6 +496,115 @@ class TestReplacementProtocol(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    def test_non_cosh_results_keep_wrapper_named_business_fields(self):
+        """Replacement hosts keep fields that only resemble Cosh wrappers."""
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+            for field in ("llmContent", "returnDisplay"):
+                for serialized in (False, True):
+                    with self.subTest(
+                        agent=agent_id, field=field, serialized=serialized
+                    ):
+                        payload = {
+                            field: {"message": "response details " * 30},
+                            "record_id": "record-123",
+                            "next_cursor": "page-2",
+                        }
+                        tool_response = json.dumps(payload) if serialized else payload
+                        result = _run_hook(
+                            {
+                                "tool_name": "mcp__reports__get_report",
+                                "tool_response": tool_response,
+                                "session_id": "s",
+                                "tool_use_id": "t",
+                            },
+                            agent_id=agent_id,
+                            mock_tokenless_path=self.mock_bin,
+                            isolated_home=self.isolated_home,
+                        )
+                        self.assertNotIn("_subprocess_error", result)
+                        with open(os.path.join(self.tmpdir, "request.json")) as f:
+                            request = json.load(f)
+                        self.assertEqual(json.loads(request["content"]), payload)
+                        replacement = result["hookSpecificOutput"]["updatedToolOutput"]
+                        if isinstance(replacement, str):
+                            replacement = json.loads(replacement)
+                        self.assertEqual(replacement["record_id"], payload["record_id"])
+                        self.assertEqual(replacement["next_cursor"], payload["next_cursor"])
+                        self.assertIn(field, replacement)
+
+    def test_cosh_runtime_overrides_declared_replacement_host(self):
+        payload = {"message": "response details " * 30}
+        wrapper = {"llmContent": payload, "returnDisplay": "display-only text"}
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+            for serialized in (False, True):
+                with self.subTest(agent=agent_id, serialized=serialized):
+                    result = _run_hook(
+                        {
+                            "tool_name": "mcp__reports__get_report",
+                            "tool_response": json.dumps(wrapper) if serialized else wrapper,
+                        },
+                        agent_id=agent_id,
+                        mock_tokenless_path=self.mock_bin,
+                        isolated_home=self.isolated_home,
+                        cosh_runtime=True,
+                    )
+                    self.assertNotIn("_subprocess_error", result)
+                    with open(os.path.join(self.tmpdir, "request.json")) as f:
+                        request = json.load(f)
+                    self.assertEqual(json.loads(request["content"]), payload)
+                    specific = result["hookSpecificOutput"]
+                    self.assertEqual(
+                        json.loads(specific["updatedToolResponse"]),
+                        {"message": payload["message"][:20]},
+                    )
+                    self.assertNotIn("updatedToolOutput", specific)
+
+    def test_cosh_runtime_preserves_wrapped_error_for_declared_replacement_host(self):
+        failure = {"stderr": "sh: rg: command not found", "exitCode": 127}
+        wrapper = {"llmContent": failure, "returnDisplay": "command failed"}
+        for agent_id in ("claude-code", "qoder-cli", "qwenwork", "opencode"):
+            for serialized in (False, True):
+                with self.subTest(agent=agent_id, serialized=serialized):
+                    result = _run_hook(
+                        {
+                            "tool_name": "run_shell_command",
+                            "tool_response": json.dumps(wrapper) if serialized else wrapper,
+                        },
+                        agent_id=agent_id,
+                        mock_tokenless_path=self.mock_bin,
+                        isolated_home=self.isolated_home,
+                        cosh_runtime=True,
+                    )
+                    self.assertNotIn("_subprocess_error", result)
+                    with open(os.path.join(self.tmpdir, "request.json")) as f:
+                        request = json.load(f)
+                    self.assertEqual(request["status"], "error")
+                    self.assertEqual(request["content"], failure["stderr"])
+                    specific = result["hookSpecificOutput"]
+                    self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+                    self.assertNotIn("updatedToolResponse", specific)
+                    self.assertNotIn("updatedToolOutput", specific)
+
+    def test_nonreplacement_wrappers_keep_error_attribution(self):
+        failure = {"stderr": "sh: rg: command not found", "exitCode": 127}
+        for agent_id in ("copilot-shell", "qwencode", "unknown"):
+            for payload in (
+                {"llmContent": failure, "returnDisplay": "command failed"},
+                json.dumps({"llmContent": failure, "returnDisplay": "command failed"}),
+                {"returnDisplay": failure},
+            ):
+                with self.subTest(agent=agent_id, payload=payload):
+                    result = _run_hook(
+                        {"tool_name": "run_shell_command", "tool_response": payload},
+                        agent_id=agent_id,
+                        mock_tokenless_path=self.mock_bin,
+                        isolated_home=self.isolated_home,
+                    )
+                    self.assertNotIn("_subprocess_error", result)
+                    specific = result["hookSpecificOutput"]
+                    self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+                    self.assertNotIn("updatedToolOutput", specific)
 
     def test_claude_code_uses_updated_tool_output(self):
         """Claude Code adapter should use updatedToolOutput, not additionalContext."""
