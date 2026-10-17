@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## 说明行之后的 Excel 表头
+
+如果导出的 Excel 文件开头包含标题或空白行，可以先选择实际列标题所在的行：
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py export.xlsx --header-row 3 --sheet Sales --json
+```
+
+将 `SKILL_DIR` 替换为已安装的 `others/xlsx` 目录。`--header-row` 接受从 1 开始的
+正整数 Excel 行号，仅适用于 `.xlsx` 和 `.xlsm`。该行之前的内容不会纳入数据表；
+该行提供列名，之后的数据用于预览、统计和数据质量检查。不使用 `--sheet` 时，每个工作表都
+使用相同的表头行号。省略该选项或使用 `--header-row 1` 时，仍以第一行为表头。
+CSV/TSV 会拒绝该 Excel 专用选项。读取器不会修改源文件。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

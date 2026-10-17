@@ -84,6 +84,25 @@ confirm_destructive = true
 
 ---
 
+## Excel headers after a preamble
+
+When an Excel export begins with a title or blank rows, select the actual
+column-header row before analyzing the data:
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py export.xlsx --header-row 3 --sheet Sales --json
+```
+
+Replace `SKILL_DIR` with the installed `others/xlsx` directory. `--header-row`
+is a positive, one-based Excel row number and applies to `.xlsx` and `.xlsm`
+only. Rows before it are excluded from the table. The selected row defines column
+names; rows below it drive previews, statistics, and data quality checks. Without `--sheet`, the
+same header row is used in every worksheet. Omit the option, or pass
+`--header-row 1`, to keep first-row headers. CSV/TSV reject this Excel-only
+option. The reader does not modify the source file.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
