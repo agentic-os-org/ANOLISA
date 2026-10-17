@@ -1105,16 +1105,96 @@ pub(crate) struct InstallHooks {
     pub(crate) post_enable: Vec<HookSpec>,
 }
 
+/// Hook phases an anolisa command actually executes.
+///
+/// `install` runs `pre_install`, `post_install` and `post_enable`;
+/// `uninstall` runs `pre_uninstall` and `post_uninstall` from the contract
+/// persisted at install time. The remaining `HookPhase` variants are valid
+/// manifest vocabulary but no command resolves them, so a component that
+/// declares one ships a script this CLI never runs. That capability
+/// limitation must be *surfaced*, but on its own it is not a reason to
+/// reject the whole component: the default is a warning naming the phase
+/// (see [`unrunnable_hook_phase_warnings`]), and only a `strict = true`
+/// declaration — the author stating the hook must run — refuses the
+/// install or update before any IO ([`strict_unrunnable_hook_phase_reason`]),
+/// exactly like an unresolvable script path.
+const RUNNABLE_HOOK_PHASES: [HookPhase; 5] = [
+    HookPhase::PreInstall,
+    HookPhase::PostInstall,
+    HookPhase::PostEnable,
+    HookPhase::PreUninstall,
+    HookPhase::PostUninstall,
+];
+
+/// The blocking contract error for a `strict = true` `[[component.hooks]]`
+/// phase no anolisa command executes, or `None` when no strict declaration
+/// is dead.
+///
+/// `strict` is the author's explicit "this hook must run" contract (see
+/// `ManifestHookSpec::strict`), and a phase this CLI cannot execute
+/// violates it outright, so the verb refuses instead of installing a
+/// component whose author-required behaviour silently cannot happen.
+/// Shared by the fresh-install resolver below and the raw-update preflight
+/// (`RawReplayOps::download_verify`), so the update path cannot accept a
+/// strict dead phase that a fresh install refuses.
+pub(crate) fn strict_unrunnable_hook_phase_reason(
+    manifest: &ComponentManifest,
+    component: &str,
+) -> Option<String> {
+    manifest
+        .install
+        .hooks
+        .iter()
+        .find(|hook| hook.strict && !RUNNABLE_HOOK_PHASES.contains(&hook.phase))
+        .map(|hook| {
+            format!(
+                "component '{component}' declares a strict [[component.hooks]] phase '{}' that no anolisa command runs (supported phases: pre_install, post_install, post_enable, pre_uninstall, post_uninstall); strict requires the hook to execute, so the install/update is refused",
+                hook.phase.as_str(),
+            )
+        })
+}
+
+/// Warnings for non-strict `[[component.hooks]]` phases no anolisa command
+/// executes — the default behaviour: the install or update proceeds, and
+/// the user is told exactly which declared hook this CLI will not run.
+pub(crate) fn unrunnable_hook_phase_warnings(
+    manifest: &ComponentManifest,
+    component: &str,
+) -> Vec<String> {
+    manifest
+        .install
+        .hooks
+        .iter()
+        .filter(|hook| !hook.strict && !RUNNABLE_HOOK_PHASES.contains(&hook.phase))
+        .map(|hook| {
+            format!(
+                "component '{component}' declares a [[component.hooks]] phase '{}' that the current CLI will not execute (no anolisa command runs it)",
+                hook.phase.as_str(),
+            )
+        })
+        .collect()
+}
+
 /// Resolve a component's `[[component.hooks]]` for the three install phases.
 ///
 /// Unlike the uninstall side (which degrades a missing/invalid snapshot to
 /// "no hooks"), install resolves strictly: an unresolvable script path is a
 /// contract authoring bug and aborts before any IO so it surfaces early.
+/// A hook phase no command runs follows the `strict` contract: a strict
+/// declaration refuses with [`CliError::InvalidArgument`] (an authored-input
+/// defect, not a machine failure), a non-strict one proceeds — the caller
+/// surfaces [`unrunnable_hook_phase_warnings`] alongside the result.
 pub(crate) fn resolve_install_hooks(
     manifest: &ComponentManifest,
     layout: &FsLayout,
     component: &str,
 ) -> Result<InstallHooks, CliError> {
+    if let Some(reason) = strict_unrunnable_hook_phase_reason(manifest, component) {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason,
+        });
+    }
     let resolve = |phase: HookPhase| -> Result<Vec<HookSpec>, CliError> {
         resolve_manifest_hooks(&manifest.install.hooks, layout, component, phase).map_err(|err| {
             CliError::Runtime {
@@ -1609,6 +1689,128 @@ mod tests {
         let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
         let err = resolve_install_hooks(&manifest, &layout, "demo").expect_err("must error");
         assert!(matches!(err, CliError::Runtime { .. }));
+    }
+
+    #[test]
+    fn resolve_install_hooks_rejects_strict_phase_no_command_runs() {
+        // `pre_enable`, `pre_disable`, `post_disable`, `pre_restart` and
+        // `post_restart` parse — `HookPhase` is the manifest vocabulary —
+        // but no anolisa command resolves any of them. A strict
+        // declaration is the author's "this hook must run" contract, and
+        // this CLI cannot honour it, so the install must fail fast with
+        // the phase named — mirroring the unresolvable-script-path rule.
+        for phase in [
+            "pre_enable",
+            "pre_disable",
+            "post_disable",
+            "pre_restart",
+            "post_restart",
+        ] {
+            let tmp = tempdir().expect("tmpdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let toml = hooks_manifest(&[(phase, "{datadir}/hooks/demo/hook.sh", true)]);
+            let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+            let err = resolve_install_hooks(&manifest, &layout, "demo").expect_err(&format!(
+                "strict phase {phase} must be rejected at install time"
+            ));
+            let CliError::InvalidArgument { reason, .. } = &err else {
+                panic!("expected INVALID_ARGUMENT for {phase}, got {err:?}");
+            };
+            assert!(
+                reason.contains(phase),
+                "error must name the dead phase {phase}, got: {reason}"
+            );
+            assert!(
+                reason.contains("strict"),
+                "error must state the strict contract, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_install_hooks_warns_but_accepts_non_strict_phase_no_command_runs() {
+        // The default for a phase no command runs is warn-and-continue:
+        // a hook the current CLI will not execute is a capability
+        // limitation to surface, not a reason to declare the whole
+        // component uninstalleable.
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[
+            ("pre_install", "{datadir}/hooks/demo/pre-install.sh", false),
+            ("pre_restart", "{datadir}/hooks/demo/hook.sh", false),
+        ]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+
+        let hooks = resolve_install_hooks(&manifest, &layout, "demo")
+            .expect("a non-strict dead phase must not block the install");
+        assert_eq!(
+            hooks.pre_install.len(),
+            1,
+            "runnable hooks resolve as usual"
+        );
+
+        let warnings = unrunnable_hook_phase_warnings(&manifest, "demo");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the dead phase warns: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("pre_restart"),
+            "warning must name the phase: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("current CLI will not execute"),
+            "warning must state what happens: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("demo"),
+            "warning must name the component: {}",
+            warnings[0]
+        );
+
+        // The strict twin on the same manifest shape refuses instead.
+        let toml = hooks_manifest(&[("pre_restart", "{datadir}/hooks/demo/hook.sh", true)]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        assert!(
+            resolve_install_hooks(&manifest, &layout, "demo").is_err(),
+            "the strict twin must refuse"
+        );
+    }
+
+    #[test]
+    fn resolve_install_hooks_accepts_every_phase_a_command_runs() {
+        // pre/post-uninstall belong to the uninstall verb (resolved from
+        // the contract persisted at install time), so install must keep
+        // accepting them alongside its own three phases.
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[
+            ("pre_install", "{datadir}/hooks/demo/pre-install.sh", false),
+            (
+                "post_install",
+                "{datadir}/hooks/demo/post-install.sh",
+                false,
+            ),
+            ("post_enable", "{datadir}/hooks/demo/post-enable.sh", false),
+            (
+                "pre_uninstall",
+                "{datadir}/hooks/demo/pre-uninstall.sh",
+                false,
+            ),
+            (
+                "post_uninstall",
+                "{datadir}/hooks/demo/post-uninstall.sh",
+                false,
+            ),
+        ]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let hooks = resolve_install_hooks(&manifest, &layout, "demo").expect("resolve");
+        assert_eq!(hooks.pre_install.len(), 1);
+        assert_eq!(hooks.post_install.len(), 1);
+        assert_eq!(hooks.post_enable.len(), 1);
     }
 
     // -- render mapping ------------------------------------------------------
