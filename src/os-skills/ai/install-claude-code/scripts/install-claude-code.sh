@@ -258,18 +258,78 @@ write_config() {
     info "Existing settings backed up to $backup"
   fi
 
-  cat > "$settings_file" <<JSONEOF
+  # The four keys go into the document the user already has, not over it: this
+  # file carries their permissions, hooks and status line, and "Also write ..."
+  # in --help means a merge. Without a JSON parser there is nothing that can
+  # merge, so a host that already has a file keeps it untouched (the backup
+  # above is the escape hatch); a fresh host has nothing to preserve.
+  if ! command_exists python3; then
+    if [[ -f "$settings_file" ]]; then
+      warn "python3 not found — leaving $settings_file untouched (backup: $backup)."
+      warn "Install python3, or merge the four env keys by hand, then re-run --config."
+      return 0
+    fi
+    # Nothing to merge into: escape the key so the document stays parseable.
+    local escaped_key
+    escaped_key="$(printf '%s' "$api_key" | sed 's/[\"]/\\&/g')"
+    cat > "$settings_file" <<JSONEOF
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "${api_key}",
+    "ANTHROPIC_AUTH_TOKEN": "${escaped_key}",
     "ANTHROPIC_MODEL": "qwen3-coder-plus",
     "ANTHROPIC_SMALL_FAST_MODEL": "qwen3-coder-plus"
   }
 }
 JSONEOF
+    ok "Configuration written to $settings_file"
+    return 0
+  fi
 
-  ok "Configuration written to $settings_file"
+  local merge_rc=0
+  python3 - "$settings_file" "$api_key" <<'PYEOF' || merge_rc=$?
+import json
+import os
+import sys
+
+path, api_key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+except FileNotFoundError:
+    document = {}
+except (OSError, ValueError) as error:
+    # A document we cannot read is not ours to drop, and overwriting it is what
+    # this fix exists to stop: report and let the caller keep it.
+    print(f"cannot read {path}: {error}", file=sys.stderr)
+    sys.exit(3)
+if not isinstance(document, dict):
+    print(f"{path} is not a JSON object", file=sys.stderr)
+    sys.exit(3)
+env = document.get("env")
+if not isinstance(env, dict):
+    env = {}
+    document["env"] = env
+env["ANTHROPIC_BASE_URL"] = "https://dashscope.aliyuncs.com/apps/anthropic"
+env["ANTHROPIC_AUTH_TOKEN"] = api_key
+env["ANTHROPIC_MODEL"] = "qwen3-coder-plus"
+env["ANTHROPIC_SMALL_FAST_MODEL"] = "qwen3-coder-plus"
+
+# Same file, atomically: a half-written settings.json is a broken Claude Code
+# on the next start.
+tmp = f"{path}.tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, ensure_ascii=False)
+    handle.write("\n")
+os.replace(tmp, path)
+print(f"merged the DashScope env block into {path}")
+PYEOF
+
+  case "$merge_rc" in
+    0) ok "Configuration written to $settings_file" ;;
+    3) warn "left $settings_file untouched — it is not a JSON document this script can merge into." ;;
+    *) err "Failed to update $settings_file (python3 exited $merge_rc)"; return 0 ;;
+  esac
 }
 
 # =============================================================================
