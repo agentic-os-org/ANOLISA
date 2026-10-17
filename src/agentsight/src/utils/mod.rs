@@ -1,3 +1,4 @@
+pub(crate) mod cpu_budget;
 #[cfg(target_os = "linux")]
 pub mod decompress;
 #[cfg(target_os = "linux")]

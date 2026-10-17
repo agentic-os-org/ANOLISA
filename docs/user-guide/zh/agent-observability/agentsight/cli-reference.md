@@ -454,6 +454,16 @@ Dashboard 的 Skill 指标页展示的是同一批数字。
 
 ## 基准测试产物
 
+从仓库根目录运行 `bash src/agentsight/scripts/benchmark/single_run/resource_run.sh --help`，
+可查看 Linux standalone 资源 benchmark（原 `memory_run.sh`）的参数。
+默认 32 个 Agent、每路 100 输出 tok/s、60 秒，需要 root 或 eBPF capabilities。
+`resource-report.txt` 和 `resource-summary.json` 汇总正式负载窗口的平均/峰值 RSS、
+平均/P95/峰值 CPU，尾部收流单独统计；CPU 100% 表示一个逻辑核。
+协作式 CPU 调度默认开启，目标为 25%；`--cpu-budget-percent N` 可覆盖目标，`0` 关闭，
+省略时沿用配置，配置未设置时使用 25%。
+评估时需同时检查 CPU、RSS、队列增长与尾部排空时间。配置、A/B 对比和有效性判断见
+[benchmark 使用指南](../../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE_zh.md)。
+
 运行 `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` 时还会导出 UTF-8 `run-inventory.csv`。清单包含 `runs/**/run-result.json` 下发现的 smoke、capacity、matrix、soak、recovery 和 fault 正式运行，按相对证据路径排序。列包含运行参数、harness 退出码、结论、缺失及失败门槛的 JSON 数组和 `result_path`；未提供的可选值留空。归档的不完整运行不在此清单内。既有汇总报告和原始证据保持不变。
 
 资源报告可通过 `render_report.py --metrics <file.csv.gz>` 读取普通 CSV 或 gzip CSV。Campaign 恢复证据优先使用 `measurement/metrics.csv`，仅在普通文件缺失时使用 `measurement/metrics.csv.gz`。压缩文件沿用相同列和计算方式；损坏的压缩输入仍会报错。

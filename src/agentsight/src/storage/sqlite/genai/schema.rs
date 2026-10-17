@@ -394,6 +394,26 @@ impl GenAISqliteStore {
         if pct == 0.0 {
             return Ok(0);
         }
+        let Some((table, count)) = self.prune_candidate()? else {
+            return Ok(0);
+        };
+        let delete_count = prune_count(count, pct);
+        let mut deleted = 0;
+        let target = usize::try_from(delete_count)?;
+        while deleted < target {
+            let batch = self.delete_maintenance_batch(table, None, target - deleted)?;
+            if batch == 0 {
+                break;
+            }
+            deleted += batch;
+            self.yield_maintenance();
+        }
+        Ok(deleted)
+    }
+
+    pub(super) fn prune_candidate(
+        &self,
+    ) -> Result<Option<(PruneTable, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
         let (event_count, event_bytes): (i64, i64) = conn.query_row(
             // Read stored byte lengths without loading and decoding every large
@@ -443,26 +463,11 @@ impl GenAISqliteStore {
                 evaluation_count,
             ),
         ];
-        let Some((_, table, count)) = candidates
+        let selected = candidates
             .into_iter()
             .filter(|(_, _, count)| *count > 0)
-            .max_by_key(|(bytes, _, _)| *bytes)
-        else {
-            return Ok(0);
-        };
-        let delete_count = prune_count(count, pct);
-        drop(conn);
-        let mut deleted = 0;
-        let target = usize::try_from(delete_count)?;
-        while deleted < target {
-            let batch = self.delete_maintenance_batch(table, None, target - deleted)?;
-            if batch == 0 {
-                break;
-            }
-            deleted += batch;
-            self.yield_maintenance();
-        }
-        Ok(deleted)
+            .max_by_key(|(bytes, _, _)| *bytes);
+        Ok(selected.map(|(_, table, count)| (table, count)))
     }
 
     /// Delete one bounded transaction, allowing one oversized row to make progress.
@@ -576,7 +581,23 @@ impl GenAISqliteStore {
         }
     }
 
-    fn maintenance_checkpoint(&self) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
+    /// Copy WAL frames in the worker without waiting for the capture writer.
+    pub(crate) fn checkpoint_passive(
+        &self,
+    ) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
+        if self.capture_has_priority() {
+            return Ok(CheckpointOutcome::Busy);
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI passive checkpoint mutex poisoned: {error}"))?;
+        agentsight_sqlite_lifecycle::checkpoint_passive(&conn).map_err(Into::into)
+    }
+
+    pub(super) fn maintenance_checkpoint(
+        &self,
+    ) -> Result<CheckpointOutcome, Box<dyn std::error::Error>> {
         let _timer = crate::runtime_metrics::StageTimer::start("genai_maintenance_checkpoint");
         if self.capture_has_priority() {
             return Ok(CheckpointOutcome::Busy);
@@ -590,11 +611,7 @@ impl GenAISqliteStore {
             .map_err(|error| format!("GenAI maintenance mutex poisoned: {error}"))?;
         // Copy the bulk of the WAL without excluding the live writer. Only
         // attempt truncation after every frame was copied; its busy timeout is zero.
-        let (busy, frames, copied): (i64, i64, i64) =
-            conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-        if busy != 0 || copied < frames {
+        if agentsight_sqlite_lifecycle::checkpoint_passive(&conn)? == CheckpointOutcome::Busy {
             return Ok(CheckpointOutcome::Busy);
         }
         checkpoint_truncate(&conn).map_err(Into::into)

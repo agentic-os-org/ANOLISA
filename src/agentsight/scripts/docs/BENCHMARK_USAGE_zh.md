@@ -4,7 +4,7 @@
 
 此 benchmark 生成可复现的独立模拟 Agent 负载，并控制每个 Agent 每秒接收的输出 Token 数。入口是 [`single_run/run.sh`](../benchmark/single_run/run.sh)，会启动本地 HTTPS/SSE mock 服务端、客户端进程，并生成报告。
 
-自动启动采集、测量内存和进行 Git A/B 对比时，使用 [`single_run/memory_run.sh`](../benchmark/single_run/memory_run.sh)，见第 7 节。
+自动启动采集、测量 RSS/CPU 和进行 Git A/B 对比时，使用 [`single_run/resource_run.sh`](../benchmark/single_run/resource_run.sh)，见第 7 节。
 
 ## 1. 准备环境
 
@@ -111,7 +111,7 @@ bash scripts/benchmark/single_run/run.sh \
 
 资源采样从统一测量起点开始，并覆盖尾部收流阶段。`metrics.csv` 中的 RSS 单位实际为 MiB，现有报告可能标为 MB。FFI 集成时传入宿主进程 PID，采集的是宿主的 RSS；LoongCollector WSS 需要按原实验的统计范围单独测量。
 
-## 7. 一键测内存与 A/B 对比
+## 7. 一键测资源与 A/B 对比
 
 脚本先让全部客户端建立 TLS 连接，再启动 AgentSight，使启动扫描能看到已加载的 TLS 库。
 每路客户端发送一条小预检请求；只有全部客户端的请求都在 SQLite 中形成完整且 Token 用量正确的记录后，
@@ -124,11 +124,11 @@ bash scripts/benchmark/single_run/run.sh \
 从 `src/agentsight` 目录执行：
 
 ```bash
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --agents 32 \
   --tokens-per-second 100 \
   --duration 60 \
-  --output-dir /tmp/agentsight-memory-single
+  --output-dir /tmp/agentsight-resource-single
 ```
 
 脚本会在独立缓存的 venv 中准备缺失的 Python 依赖，冻结当前工作区，并使用 Cargo lock 文件编译 release 二进制。Git/源码模式需要项目的 Rust 和 Linux eBPF 构建依赖；已有二进制时可通过 `--agentsight-bin PATH` 跳过编译。构建和依赖缓存在 `${XDG_CACHE_HOME:-$HOME/.cache}/agentsight-benchmark/` 下。采集和数据库校验会按需请求 `sudo`，可能需要输入密码；仅当当前用户已有 eBPF 权限时使用 `--no-sudo`。
@@ -142,23 +142,27 @@ bash scripts/benchmark/single_run/memory_run.sh \
 对比最近一次提交与当前工作区，包含暂存、未暂存和未被 ignore 的未跟踪文件：
 
 ```bash
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --ab \
   --baseline HEAD \
   --candidate working-tree \
   --agents 32 \
   --tokens-per-second 100 \
   --duration 60 \
-  --output-dir /tmp/agentsight-memory-ab
+  --output-dir /tmp/agentsight-resource-ab
 ```
 
 `--baseline` 和 `--candidate` 也接受 commit hash、本地分支和 tag。候选版本默认是 `working-tree`；`HEAD` 不包含未提交改动。源码在临时 detached worktree 中编译，工作区快照使用独立 index，保留当前分支和暂存区。两个二进制都在测量前编译完成，随后使用同一份冻结的负载脚本、配置和负载参数依次运行，每轮重新启动采集，并使用独立数据库。已有两个二进制时，使用 `--ab --baseline-bin PATH --candidate-bin PATH`。
 
-终端和 `memory-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、Load/Capture 的 PASS 或 FAIL，以及运行状态。A/B 额外显示减少的 MiB 和 `(before - after) / before × 100%`；负数表示内存增加。整机内存占比的变化使用百分点 `pp`。`memory-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告和日志位于 `run/`，A/B 则位于 `before/`、`after/`。
+终端和 `resource-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、平均/P95/峰值 CPU、Load/Capture 的 PASS 或 FAIL，以及运行状态。CPU 统计 standalone AgentSight 进程的全部线程，100% 表示一个逻辑核，允许超过 100%；报告记录主机逻辑核数，不包含 mock 服务端和客户端进程。
 
-只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且可用的探针计数未发现丢事件时，结果才是 VALID。报告分别打印 Ring Buffer 和用户态通道丢事件数；计数覆盖全部探针类型，不能据此确定丢失事件的类型。即使全部请求的 usage 正确，发现丢事件仍判为 INVALID，不计算优化比例。计数不可用时显示 N/A，旧二进制继续使用请求级校验。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/memory-<UTC 时间戳>-<PID>/`。
+A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告和日志位于 `run/`，A/B 则位于 `before/`、`after/`。
 
-此一键脚本默认 32 个 Agent、每路 100 tok/s、60 秒；仅负载的 `run.sh` 仍默认 900 秒。支持上面的负载、探针发现、端口和安全限制参数，完整列表见 `memory_run.sh --help`。RSS 每秒采样一次，覆盖尾部收流，单位为 MiB，并非十进制 MB。此脚本测量 standalone AgentSight RSS；原 LoongCollector WSS 目标需要按原实验范围另行测量。
+只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且可用的探针计数未发现丢事件时，结果才是 VALID。报告分别打印 Ring Buffer 和用户态通道丢事件数；计数覆盖全部探针类型，不能据此确定丢失事件的类型。即使全部请求的 usage 正确，发现丢事件仍判为 INVALID，不计算优化比例。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
+
+此一键脚本默认 32 个 Agent、每路 100 tok/s、60 秒；仅负载的 `run.sh` 仍默认 900 秒。支持上面的负载、探针发现、端口和安全限制参数，完整列表见 `resource_run.sh --help`。RSS 和 CPU 约每秒采样一次，覆盖尾部收流。主统计使用 `agents/start.json` 中的单调时钟起止窗口，尾部收流单独保存在每轮的 `tail` 对象和文本报告中。
+
+平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
 
 完整的优化前后对比设计见 [benchmark 计划](BENCHMARK_PLAN_zh.md)。
 
@@ -248,19 +252,26 @@ PY
 ```
 cd /home/peanut/myCode/anolisa-next/src/agentsight
 
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --agents 32 \
   --tokens-per-second 100 \
   --duration 60 \
-  --output-dir /tmp/agentsight-memory-single
+  --output-dir /tmp/agentsight-resource-single
 ```
 
 A/B 对比上次提交与当前工作区，默认同样是 **32 × 100 tok/s、60 秒**：
 
 ```
-bash scripts/benchmark/single_run/memory_run.sh \
+bash scripts/benchmark/single_run/resource_run.sh \
   --ab \
   --baseline HEAD \
   --candidate working-tree \
-  --output-dir /tmp/agentsight-memory-ab
+  --output-dir /tmp/agentsight-resource-ab
 ```
+
+
+`--cpu-budget-percent 25` 为采集进程设置 `runtime_limits.cpu_budget_percent`，省略时沿用配置，
+配置未设置时默认 25%，`0` 关闭。
+该协作式目标调度采集落库及 primary/GenAI 清理，必要时会增加投递延迟；负载生成、CPU 采样和有效性
+判断保持原口径。评估时同时查看 `metrics.csv` 的 `completion_queue_count` / `completion_queue_bytes`、
+探针丢事件和尾部排空；队列持续增长不能视为 CPU 优化成功。

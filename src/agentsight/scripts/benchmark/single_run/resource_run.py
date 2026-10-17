@@ -1,4 +1,4 @@
-"""Launch isolated AgentSight memory runs and optional sequential Git A/B comparisons."""
+"""Launch isolated AgentSight resource runs and sequential Git A/B comparisons."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from memory_inputs import Inputs, arguments, ensure_python
-from memory_report import report
 from mock_llm_server import PREFLIGHT_TOTAL_TOKENS
+from resource_inputs import Inputs, arguments, ensure_python
+from resource_report import report
 from validate_results import load_captured
 
 HERE = Path(__file__).resolve().parent
@@ -234,6 +234,7 @@ def worker(job_path: Path) -> int:
         if line.startswith("MemTotal:")
     )
     result["host_memory_mib"] = int(total.split()[1]) / 1024
+    result["logical_cpus"] = os.cpu_count()
     env = dict(
         os.environ,
         **job["env"],
@@ -356,7 +357,7 @@ def main() -> int:
     if args.worker:
         return worker(args.worker)
     if sys.platform != "linux":
-        raise RuntimeError("memory tracing requires Linux eBPF")
+        raise RuntimeError("resource tracing requires Linux eBPF")
     for tool in ("git", "bash", "openssl", "curl"):
         if not shutil.which(tool):
             raise RuntimeError(f"required command is missing: {tool}")
@@ -374,6 +375,10 @@ def main() -> int:
     config.setdefault("runtime_limits", {})["connection_capacity"] = args.connection_capacity
     if args.ring_buffer_mb is not None:
         config["runtime_limits"]["ring_buffer_mb"] = args.ring_buffer_mb
+    if args.cpu_budget_percent is not None:
+        config["runtime_limits"]["cpu_budget_percent"] = args.cpu_budget_percent
+    elif config["runtime_limits"].get("cpu_budget_percent") is None:
+        config["runtime_limits"]["cpu_budget_percent"] = 25
     cache = cache_directory()
     ensure_python(cache, HERE, sys.argv[1:], run_logged, require_venv=privileged)
     output = (
@@ -381,7 +386,7 @@ def main() -> int:
             args.output_dir
             or HERE.parent
             / "results"
-            / f"memory-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+            / f"resource-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
         )
         .expanduser()
         .resolve()
@@ -433,6 +438,7 @@ def main() -> int:
                 **{name: getattr(args, name) for name in flags},
                 "connection_capacity": args.connection_capacity,
                 "ring_buffer_mb": config["runtime_limits"].get("ring_buffer_mb", 32),
+                "cpu_budget_percent": config["runtime_limits"]["cpu_budget_percent"],
             },
         )
         load_args = [
@@ -483,7 +489,7 @@ def main() -> int:
             command = (["sudo", "-n", "--"] if privileged else []) + [
                 sys.executable,
                 "-B",
-                str(output / "harness/memory_run.py"),
+                str(output / "harness/resource_run.py"),
                 "--worker",
                 str(directory / "job.json"),
             ]
@@ -525,5 +531,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, Interrupted) as error:
-        print(f"memory benchmark: {error}", file=sys.stderr)
+        print(f"resource benchmark: {error}", file=sys.stderr)
         raise SystemExit(128 + error.signum if isinstance(error, Interrupted) else 1)

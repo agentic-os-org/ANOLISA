@@ -19,8 +19,8 @@ import pytest
 
 SINGLE_RUN = Path(__file__).parents[1] / "single_run"
 sys.path.insert(0, str(SINGLE_RUN))
-import memory_inputs
-import memory_report
+import resource_inputs
+import resource_report
 
 FAKE_TRACE = """#!/usr/bin/env python3
 import json, os, signal, sqlite3, sys, time
@@ -213,7 +213,7 @@ def isolated_runtime(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return runtime
 
 
-def command(output: Path, binary: Path, script: Path = SINGLE_RUN / "memory_run.sh") -> list[str]:
+def command(output: Path, binary: Path, script: Path = SINGLE_RUN / "resource_run.sh") -> list[str]:
     return [
         "bash",
         str(script),
@@ -260,9 +260,25 @@ def assert_reaped(output: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "capacity,ring_buffer,configured_ring",
-    [(None, None, 32), (48, 64, 32), (None, None, 128)],
-    ids=["configured-defaults", "explicit-capacity-and-ring", "preserve-configured-ring"],
+    "capacity,ring_buffer,configured_ring,cpu_budget,configured_cpu",
+    [
+        (None, None, 32, None, None),
+        (48, 64, 32, None, None),
+        (None, None, 128, None, None),
+        (None, None, 32, 25, 40),
+        (None, None, 32, 0, None),
+        (None, None, 32, None, 0),
+        (None, None, 32, None, 40),
+    ],
+    ids=[
+        "configured-defaults",
+        "explicit-capacity-and-ring",
+        "preserve-configured-ring",
+        "cpu-paced",
+        "explicit-cpu-disabled",
+        "configured-cpu-disabled",
+        "preserve-configured-cpu",
+    ],
 )
 def test_one_command_reports_real_rss_and_cleans_processes(
     tmp_path: Path,
@@ -270,12 +286,19 @@ def test_one_command_reports_real_rss_and_cleans_processes(
     capacity: int | None,
     ring_buffer: int | None,
     configured_ring: int,
+    cpu_budget: int | None,
+    configured_cpu: int | None,
 ) -> None:
     binary = executable(tmp_path / "observer", FAKE_TRACE.replace("MEMORY_MIB", "16"))
     output = tmp_path / "result"
     args = command(output, binary)
+    # Start the collector before the load and retain several CPU sampling intervals.
+    args[args.index("--startup-delay") + 1] = "1"
+    args[args.index("--duration") + 1] = "4"
     configuration = json.loads((SINGLE_RUN.parents[2] / "agentsight.json").read_text())
     configuration["runtime_limits"]["ring_buffer_mb"] = configured_ring
+    if configured_cpu is not None:
+        configuration["runtime_limits"]["cpu_budget_percent"] = configured_cpu
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(configuration))
     args.extend(["--config", str(config_path)])
@@ -283,11 +306,23 @@ def test_one_command_reports_real_rss_and_cleans_processes(
         args.extend(["--connection-capacity", str(capacity)])
     if ring_buffer is not None:
         args.extend(["--ring-buffer-mb", str(ring_buffer)])
+    if cpu_budget is not None:
+        args.extend(["--cpu-budget-percent", str(cpu_budget)])
     result = run(args, environment)
     assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     measured = summary["runs"]["run"]
     assert summary["valid"]
+    expected_cpu = cpu_budget if cpu_budget is not None else configured_cpu
+    if expected_cpu is None:
+        expected_cpu = 25
+    assert summary["settings"]["cpu_budget_percent"] == expected_cpu
+    applied = json.loads((output / "run/config.json").read_text())["runtime_limits"]
+    assert applied["cpu_budget_percent"] == expected_cpu
+    if expected_cpu:
+        assert f"Configured CPU pacing target: {expected_cpu}%" in result.stdout
+    else:
+        assert "Configured CPU pacing target:" not in result.stdout
     assert measured["load"] == measured["capture"] == "PASS"
     prepared = json.loads((output / "run/clients-ready.json").read_text())
     assert len(prepared["pids"]) == 2
@@ -299,11 +334,19 @@ def test_one_command_reports_real_rss_and_cleans_processes(
     ).stat().st_mtime_ns
     assert all(not request_id.startswith("bench-") for request_id in prepared["request_ids"])
     assert measured["rss_peak_mib"] >= measured["rss_average_mib"] > 16
+    assert measured["cpu_average_pct"] >= 0
+    # Time-weighted sums may exceed a constant sample by a floating-point ULP.
+    assert measured["cpu_average_pct"] <= measured["cpu_peak_pct"] + 1e-9
+    assert measured["cpu_samples"] > 0
+    assert measured["cpu_measurement_seconds"] == pytest.approx(4, abs=0.2)
+    assert measured["tail"]["cpu_samples"] > 0
+    assert "Average CPU" in result.stdout and "P95 CPU" in result.stdout
+    assert "100% = one logical CPU" in result.stdout
     assert measured["rss_peak_host_pct"] == pytest.approx(
         measured["rss_peak_mib"] / measured["host_memory_mib"] * 100
     )
     assert "Average RSS" in result.stdout and "Peak / host RAM" in result.stdout
-    assert "Load target: 2 agents x 100 output tok/s, 2s" in result.stdout
+    assert "Load target: 2 agents x 100 output tok/s, 4s" in result.stdout
     expected_capacity = capacity or 2
     assert f"Configured connection capacity: {expected_capacity}" in result.stdout
     assert summary["settings"]["connection_capacity"] == expected_capacity
@@ -321,7 +364,7 @@ def test_one_command_reports_real_rss_and_cleans_processes(
         == expected_ring
     )
     assert not summary["runs"]["run"]["probe_drops"]["ring_buffer_dropped"]
-    assert (output / "memory-report.txt").read_text() in result.stdout
+    assert (output / "resource-report.txt").read_text() in result.stdout
     assert_reaped(output)
     reused = run(command(output, binary), environment)
     assert reused.returncode != 0 and "already exists" in reused.stderr
@@ -356,7 +399,7 @@ def test_capture_readiness_failure_never_starts_the_measurement(
     assert not (output / "run/agents/start.json").exists()
     assert not (output / "run/metrics.csv").exists()
     assert not (output / "run/agent-summary.json").exists()
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert not summary["valid"] and not summary["comparison"]
     assert summary["runs"]["run"]["capture"] == "FAIL"
     assert summary["runs"]["run"]["rss_peak_mib"] is None
@@ -406,7 +449,7 @@ def test_delayed_capture_finishes_before_clients_exit(
         dict(environment, MEMORY_TEST_MODE="delayed-capture"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["valid"]
     assert summary["runs"]["run"]["capture"] == "PASS"
     counts = summary["runs"]["run"]["capture_counts"]
@@ -424,7 +467,7 @@ def test_probe_drops_invalidate_complete_request_capture(
     output = tmp_path / "result"
     result = run(command(output, binary), dict(environment, MEMORY_TEST_MODE=mode))
     assert result.returncode != 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     capture = json.loads((output / "run/report.json").read_text())
     assert capture["complete"] == capture["sent"] and capture["token_accuracy"] == 1
     assert summary["runs"]["run"]["load"] == "PASS"
@@ -446,7 +489,7 @@ def test_ab_with_probe_drops_suppresses_memory_improvement(
         dict(environment, MEMORY_TEST_MODE="ring-drop"),
     )
     assert result.returncode != 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert not summary["valid"] and not summary["comparison"]
     assert all(run["capture_counts"]["complete"] > 0 for run in summary["runs"].values())
     assert all(run["capture"] == "FAIL" for run in summary["runs"].values())
@@ -469,7 +512,7 @@ def test_host_memory_guard_reports_threshold_and_cleans_processes(
         command(output, binary) + ["--min-available-memory-mb", str(threshold)], environment
     )
     assert result.returncode != 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     stop = json.loads((output / "run/safety-stop.json").read_text())
     assert stop["reason"] == "available_memory"
     assert summary["runs"]["run"]["safety_stop"] == stop
@@ -516,9 +559,9 @@ def test_guard_record_invalidates_report_and_preserves_reason(
     )
     (directory / "metrics.csv").write_text("process_alive,rss_mb\n1,100\n")
     (directory / "safety-stop.json").write_text(json.dumps(record))
-    assert not memory_report.report(tmp_path, {"run": {"path": "test-observer"}})
+    assert not resource_report.report(tmp_path, {"run": {"path": "test-observer"}})
     assert f"run stopped by resource guard: {message}" in capsys.readouterr().out
-    summary = json.loads((tmp_path / "memory-summary.json").read_text())
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
     assert summary["runs"]["run"]["safety_stop"] == record
     assert not summary["valid"] and not summary["comparison"]
 
@@ -533,7 +576,7 @@ def test_failures_are_invalid_and_cleaned(
         command(output, binary) + ["--ready-timeout", "1"], dict(environment, MEMORY_TEST_MODE=mode)
     )
     assert result.returncode != 0
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert not summary["valid"] and not summary["comparison"]
     if mode in ("missing", "wrong-tokens"):
         assert summary["runs"]["run"]["capture"] == "FAIL"
@@ -569,7 +612,7 @@ def test_interrupt_preserves_report_and_reaps_agents(
         process.send_signal(signum)
         stdout, stderr = process.communicate(timeout=20)
         assert process.returncode == 128 + signum, stdout + stderr
-        summary = json.loads((output / "memory-summary.json").read_text())
+        summary = json.loads((output / "resource-summary.json").read_text())
         assert not summary["valid"]
         assert summary["runs"]["run"]["status"] == "interrupted"
         assert_reaped(output)
@@ -590,7 +633,7 @@ def test_ab_prebuilt_binaries_report_reductions(
         environment,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["valid"] and list(summary["runs"]) == ["before", "after"]
     change = summary["comparison"]["rss_peak_mib"]
     assert change["mib"] > 20 and change["percent"] > 30
@@ -624,7 +667,7 @@ def test_ab_does_not_publish_improvement_when_one_capture_fails(
     output = tmp_path / "result"
     result = run(command(output, after) + ["--ab", "--baseline-bin", str(before)], environment)
     assert result.returncode == 1
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["runs"]["before"]["capture"] == "FAIL"
     assert summary["runs"]["after"]["capture"] == "PASS"
     assert not summary["valid"] and not summary["comparison"]
@@ -644,7 +687,7 @@ def test_sudo_reuses_session_authentication(
         args.extend(["--ab", "--baseline-bin", str(binary)])
     result = run(args, sudo_environment)
     assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["valid"]
     assert Path(sudo_environment["MEMORY_TEST_SUDO_CACHE"]).exists()
     assert all(measured["capture"] == "PASS" for measured in summary["runs"].values())
@@ -675,7 +718,7 @@ def test_sudo_launcher_cancels_worker_without_fresh_credentials(
         process.send_signal(signal.SIGINT)
         stdout, stderr = process.communicate(timeout=20)
         assert process.returncode == 130, stdout + stderr
-        assert not json.loads((output / "memory-summary.json").read_text())["valid"]
+        assert not json.loads((output / "resource-summary.json").read_text())["valid"]
         assert_reaped(output)
     finally:
         if process.poll() is None:
@@ -771,7 +814,7 @@ assert Path("../../staged").read_text() in ("before", "staged and unstaged")
     status_before, head_before = git(repo, "status", "--porcelain"), git(repo, "rev-parse", "HEAD")
     index_before = index.read_bytes()
     output = tmp_path / "result"
-    script = repo / "src/agentsight/scripts/benchmark/single_run/memory_run.sh"
+    script = repo / "src/agentsight/scripts/benchmark/single_run/resource_run.sh"
     args = command(output, tmp_path / "unused", script)
     start = args.index("--agentsight-bin")
     del args[start : start + 2]
@@ -780,7 +823,7 @@ assert Path("../../staged").read_text() in ("before", "staged and unstaged")
         dict(environment, PATH=f"{tools}:{environment['PATH']}"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    summary = json.loads((output / "memory-summary.json").read_text())
+    summary = json.loads((output / "resource-summary.json").read_text())
     assert summary["valid"]
     assert summary["runs"]["before"]["source"]["commit"] == head_before
     assert summary["runs"]["after"]["source"]["dirty"]
@@ -796,7 +839,7 @@ def test_snapshot_contains_deletions_and_untracked_without_staging(tmp_path: Pat
     repo = fixture_repo(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
-    inputs = memory_inputs.Inputs(repo, output)
+    inputs = resource_inputs.Inputs(repo, output)
     try:
         source = inputs.prepare("after", "working-tree", None)
         snapshot = Path(source["component"]).parents[1]
@@ -815,7 +858,7 @@ def test_build_failure_removes_worktrees_and_reports_reason(
     tools.mkdir()
     executable(tools / "cargo", "#!/bin/sh\nexit 42\n")
     output = tmp_path / "result"
-    script = repo / "src/agentsight/scripts/benchmark/single_run/memory_run.sh"
+    script = repo / "src/agentsight/scripts/benchmark/single_run/resource_run.sh"
     args = command(output, tmp_path / "unused", script)
     start = args.index("--agentsight-bin")
     del args[start : start + 2]
@@ -824,7 +867,7 @@ def test_build_failure_removes_worktrees_and_reports_reason(
         dict(environment, PATH=f"{tools}:{environment['PATH']}"),
     )
     assert result.returncode == 1 and "release build failed" in result.stdout
-    assert not json.loads((output / "memory-summary.json").read_text())["valid"]
+    assert not json.loads((output / "resource-summary.json").read_text())["valid"]
     assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
     assert not list(output.glob("*/worker-pids.json"))
 
@@ -850,7 +893,7 @@ def test_invalid_binary_reports_specific_cause(
     result = run(command(output, binary), environment)
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"{message}: {binary}" in result.stdout
-    assert not json.loads((output / "memory-summary.json").read_text())["valid"]
+    assert not json.loads((output / "resource-summary.json").read_text())["valid"]
     assert not list(output.glob("*/worker-pids.json"))
 
 
@@ -864,15 +907,17 @@ def test_invalid_binary_reports_specific_cause(
         ["--connection-capacity", "0"],
         ["--ring-buffer-mb", "0"],
         ["--ring-buffer-mb", "3"],
+        ["--cpu-budget-percent", "-1"],
+        ["--cpu-budget-percent", "101"],
     ],
 )
 def test_invalid_arguments_fail_before_build(options: list[str]) -> None:
     result = subprocess.run(
-        ["bash", str(SINGLE_RUN / "memory_run.sh"), *options], capture_output=True, text=True
+        ["bash", str(SINGLE_RUN / "resource_run.sh"), *options], capture_output=True, text=True
     )
     assert result.returncode == 2 and "error:" in result.stderr
 
 
 def test_reduction_reports_regressions_and_zero_baselines() -> None:
-    assert memory_report.reduction(100, 125) == {"mib": -25, "percent": -25}
-    assert memory_report.reduction(0, 10) == {"mib": -10, "percent": None}
+    assert resource_report.reduction(100, 125) == {"mib": -25, "percent": -25}
+    assert resource_report.reduction(0, 10) == {"mib": -10, "percent": None}

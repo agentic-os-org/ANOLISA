@@ -1,6 +1,6 @@
 //! Pending-call lifecycle methods for GenAI SQLite store.
 
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::borrow::Cow;
@@ -30,6 +30,9 @@ struct MessageArray<'a> {
     messages: &'a RawValue,
 }
 
+/// Message columns borrowing the completed JSON whenever the whole array is retained.
+pub(super) type MessageColumns<'a> = (Option<Cow<'a, str>>, Option<Cow<'a, str>>);
+
 /// Serialize once for completion, insertion, and capacity-retry paths.
 pub(super) fn completed_event_json(
     event: &GenAISemanticEvent,
@@ -46,7 +49,7 @@ pub(super) fn completed_event_json(
 pub(super) fn message_columns<'a>(
     call: &crate::genai::semantic::LLMCall,
     event_json: &'a str,
-) -> (Option<Cow<'a, str>>, Option<Cow<'a, str>>) {
+) -> MessageColumns<'a> {
     let serialized = serde_json::from_str::<EventMessages<'_>>(event_json).ok();
     let latest = crate::genai::semantic::latest_round_input_messages(&call.request.messages);
     let input = if latest.is_empty() {
@@ -168,29 +171,67 @@ impl GenAISqliteStore {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let _priority = self.prioritize_capture();
         let _timer = crate::runtime_metrics::StageTimer::start("genai_capture_complete");
-        let has_pending = if let GenAISemanticEvent::LLMCall(call) = event {
+        let has_pending = {
             let conn = self
                 .conn
                 .lock()
                 .map_err(|error| format!("GenAI capture completion mutex poisoned: {error}"))?;
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM genai_events WHERE call_id = ?1)
-                    OR (SELECT COUNT(*) = 1 FROM genai_events
-                        WHERE event_type = 'llm_call'
-                          AND pending_origin = 'idle_drain'
-                          AND pending_match_key = ?2
-                          AND status IN ('pending', 'interrupted'))",
-                params![call.call_id, call.metadata.get("pending_match_key")],
-                |row| row.get::<_, bool>(0),
-            )?
-        } else {
-            false
+            Self::has_pending_completion(&conn, event)?
         };
         if has_pending {
             self.complete_pending(event)
         } else {
             self.store_event(event)
         }
+    }
+
+    /// Commit an existing delivery group in short transactions without buffering new calls.
+    pub(crate) fn complete_captured_batch(
+        &self,
+        events: &[GenAISemanticEvent],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _priority = self.prioritize_capture();
+        for batch in events.chunks(super::MAX_WRITE_BATCH) {
+            if batch.len() > 1 {
+                match self.try_store_batch(batch, true) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "GenAI completion batch rolled back; retrying individually: {error}"
+                        );
+                    }
+                }
+            }
+            // Rollback has released the writer before promotion or SQLITE_FULL
+            // recovery takes its normal path. Replays still reconcile call IDs.
+            for event in batch {
+                self.complete_captured(event)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Detect rows that need promotion or replay suppression instead of a new insert.
+    pub(super) fn has_pending_completion(
+        conn: &Connection,
+        event: &GenAISemanticEvent,
+    ) -> rusqlite::Result<bool> {
+        let GenAISemanticEvent::LLMCall(call) = event else {
+            return Ok(false);
+        };
+        conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM genai_events WHERE call_id = ?1)
+                OR (SELECT COUNT(*) = 1 FROM genai_events
+                    WHERE event_type = 'llm_call'
+                      AND pending_origin = 'idle_drain'
+                      AND pending_match_key = ?2
+                      AND status IN ('pending', 'interrupted'))",
+        )?
+        .query_row(
+            params![call.call_id, call.metadata.get("pending_match_key")],
+            |row| row.get(0),
+        )
     }
 
     /// Insert a PENDING record as soon as a request is captured.
@@ -323,6 +364,7 @@ impl GenAISqliteStore {
         let _timer = crate::runtime_metrics::StageTimer::start("genai_pending_complete");
         if let GenAISemanticEvent::LLMCall(call) = event {
             let event_json = completed_event_json(event)?;
+            let columns = message_columns(call, &event_json);
             {
                 let (input_tokens, output_tokens, total_tokens) = call
                     .token_usage
@@ -357,7 +399,7 @@ impl GenAISqliteStore {
                         serde_json::to_string(&sys).ok()
                     }
                 };
-                let (input_messages, output_messages) = message_columns(call, &event_json);
+                let (input_messages, output_messages) = &columns;
                 let finish_reasons: Option<String> = {
                     let reasons: Vec<_> = call
                         .response
@@ -382,8 +424,9 @@ impl GenAISqliteStore {
                     .lock()
                     .map_err(|error| format!("GenAI completion mutex poisoned: {error}"))?;
                 drop(lock_timer);
-                let updated = conn.execute(
-                    "UPDATE genai_events SET
+                let updated = conn
+                    .prepare_cached(
+                        "UPDATE genai_events SET
                         status = 'complete',
                         trace_id            = ?1,
                         conversation_id     = ?2,
@@ -418,7 +461,8 @@ impl GenAISqliteStore {
                         first_output_timestamp_ns = ?30,
                         is_sse = COALESCE(?32, is_sse)
                     WHERE call_id = ?31 AND status IN ('pending', 'interrupted')",
-                    params![
+                    )?
+                    .execute(params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
                         call.metadata.get("session_id"),
@@ -465,8 +509,7 @@ impl GenAISqliteStore {
                         call.metadata
                             .get("is_sse")
                             .map(|s| if s == "true" { 1i64 } else { 0 }),
-                    ],
-                )?;
+                    ])?;
 
                 if updated > 0 {
                     log::debug!(
@@ -498,8 +541,9 @@ impl GenAISqliteStore {
                     // must not erase the evidence the idle snapshot captured:
                     // the snapshot is then the only record of what the caller
                     // sent. The call-id branch above carries the same guard.
-                    let updated = conn.execute(
-                        "UPDATE genai_events SET
+                    let updated = conn
+                        .prepare_cached(
+                            "UPDATE genai_events SET
                             status = 'complete',
                             trace_id            = ?1,
                             conversation_id     = ?2,
@@ -542,7 +586,8 @@ impl GenAISqliteStore {
                               AND pending_match_key = ?32
                             HAVING COUNT(*) = 1
                          )",
-                        params![
+                        )?
+                        .execute(params![
                             call.metadata.get("response_id"),
                             call.metadata.get("conversation_id"),
                             call.metadata.get("session_id"),
@@ -587,8 +632,7 @@ impl GenAISqliteStore {
                             call.metadata
                                 .get("is_sse")
                                 .map(|s| if s == "true" { 1i64 } else { 0 }),
-                        ],
-                    )?;
+                        ])?;
 
                     if updated > 0 {
                         log::debug!(
@@ -600,7 +644,7 @@ impl GenAISqliteStore {
                 }
             }
             // Reuse the serialization when there was no pending row to promote.
-            self.store_serialized_event(event, &event_json)
+            self.store_serialized_event(event, &event_json, &columns)
         } else {
             // Non-LLMCall events have no pending lifecycle, store directly
             self.store_event(event)

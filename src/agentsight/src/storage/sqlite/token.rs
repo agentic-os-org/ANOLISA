@@ -293,6 +293,24 @@ fn token_table_available(conn: &Connection, table_name: &str) -> Result<bool> {
 }
 
 impl TokenStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
     /// Create a new token store with default table name.
     ///
     /// # Errors
@@ -391,23 +409,21 @@ impl TokenStore {
             self.table_name
         );
         self.conn
-            .execute(
-                &sql,
-                params![
-                    timestamp_ns as i64,
-                    record.pid as i64,
-                    record.comm,
-                    record.agent,
-                    record.model,
-                    record.provider,
-                    record.input_tokens as i64,
-                    record.output_tokens as i64,
-                    record.cache_creation_tokens.map(|v| v as i64),
-                    record.cache_read_tokens.map(|v| v as i64),
-                    record.request_id,
-                    record.endpoint,
-                ],
-            )
+            .prepare_cached(&sql)?
+            .execute(params![
+                timestamp_ns as i64,
+                record.pid as i64,
+                record.comm,
+                record.agent,
+                record.model,
+                record.provider,
+                record.input_tokens as i64,
+                record.output_tokens as i64,
+                record.cache_creation_tokens.map(|v| v as i64),
+                record.cache_read_tokens.map(|v| v as i64),
+                record.request_id,
+                record.endpoint,
+            ])
             .map_err(|e| anyhow::anyhow!("Failed to insert token record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())

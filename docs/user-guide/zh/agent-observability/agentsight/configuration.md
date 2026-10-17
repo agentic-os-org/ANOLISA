@@ -156,10 +156,11 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 | 配置项 | 默认值 | 含义 |
 |---|---|---|
+| `cpu_budget_percent` | `25` | trace 进程的协作式 CPU 目标；`0` 关闭调度，`100` 表示一个逻辑核 |
 | `event_channel_capacity` | `10000` | 探针到流水线的有界通道容量 |
 | `event_channel_policy` | `backpressure` | 通过字节限额后等待队列槽位；`drop_newest` 拒绝已满队列。`sample`、`sample:N`、`sample=N` 每 N 条保留一条（默认 N=10） |
 | `event_channel_max_bytes_mb` | `64` | 排队 probe payload 的字节上限；`0` 关闭限额。超过字节限额时丢弃事件并增加通道丢弃计数，与槽位策略分别执行 |
-| `pending_genai_max_count` | `1000` | 等待 session ID 的事件与因本地 SQLite 忙而等待重试的完成批次共享条数上限 |
+| `pending_genai_max_count` | `1000` | 原始完成记录、等待 session ID 的事件与本地 SQLite 重试共享条数上限 |
 | `pending_genai_max_bytes_mb` | `16` | 同一队列的字节上限 |
 | `pid_cache_size` | `1024` | PID → Agent 名称的 LRU 条目数 |
 | `connection_capacity` | `32` | HTTP 连接缓存条目数，必须大于零；至少应达到预计同时存在的连接数 |
@@ -175,6 +176,15 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 默认 `connection_capacity=32` 可容纳 32 个并发 HTTP/1 连接。应按所有 Agent 实际打开的连接数
 选择容量，一个 Agent 可能打开多个连接。HTTP/2 的流条目容量为该值的四倍，并共用同一字节预算。
 修改运行时限额后需要重启采集。
+
+CPU 调度默认开启，`cpu_budget_percent=25`；设为 `0` 可关闭。
+完成记录在分析和写入之前按进程 CPU 预算调度，并与 primary/GenAI
+维护共用工作准入。原始记录转移到有界队列，最多使用 pending 字节预算的一半；队列满时施加背压。
+清理在小步骤之间让出执行权，后续调度继续处理。较低目标可能增加投递和清理延迟。
+该参数是协作式目标，单次操作和其他进程线程仍可能导致超出目标；调整时需一起检查采集完整性、
+探针丢事件、队列增长及尾部排空时间。
+`agentsight_completion_queue_count`、`agentsight_completion_queue_bytes` 和
+`agentsight_completion_wait_seconds` 反映延迟投递，`agentsight_cpu_budget_deferred_total` 记录预算等待次数。
 
 容量淘汰、同 key 替换、字节超限、空闲硬超时、进程退出或采集关闭时，AgentSight 会输出已捕获的请求
 或部分响应，并设置 `finish_reason="incomplete"`。语义事件 metadata 包含 `abandon_reason` 和

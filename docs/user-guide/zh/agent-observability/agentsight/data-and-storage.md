@@ -76,6 +76,13 @@ GenAI 维护使用独立于采集投递与查询的连接。删除分成小批�
 等待时阻塞采集写入。
 采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
 
+开启定时维护时，trace 进程将 primary 和 GenAI 的 WAL checkpoint 交给该维护线程，避免在采集提交时触发。
+保留与容量检查之间约每秒执行一次 passive checkpoint；清理周期仍由 `check_interval_secs` 控制。
+SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动 WAL checkpoint。
+
+开启 `runtime_limits.cpu_budget_percent` 后，primary 与 GenAI 清理会在有界操作之间让出执行权，
+并在后续调度继续。维护与采集投递共用 CPU 准入，既有保留和容量目标继续生效，但清理一轮可能耗时更长。
+
 完成的采集记录遇到临时 SQLite 写锁冲突时，会留在现有 pending 队列中重试，与等待 session ID 的事件
 共享 `pending_genai_max_count` 和 `pending_genai_max_bytes_mb`。重试不会向外部出口重复发送记录。
 超出预算或永久写入失败会记录日志；`agentsight_genai_sqlite_retry_total` 按 queued、busy、stored、
