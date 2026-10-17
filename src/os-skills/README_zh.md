@@ -46,6 +46,8 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+发现 PDF 内嵌文件，并将所选内容提取到显式的新路径，详见[附件流程](../../docs/user-guide/zh/user-entrypoint/os-skills.md#pdf-内嵌附件)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
