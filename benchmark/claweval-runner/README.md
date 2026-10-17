@@ -200,6 +200,19 @@ Core logic: `src/ce_runner/tool_injector.py`
 
 ## Troubleshooting
 
+`list_tasks.py` supports a custom `--tasks-dir` and `--format json|names`; its default
+grouped display stays unchanged. JSON includes task metadata and `directory_name`.
+Names mode emits exact directory names for `--tasks-file`, including when a YAML's
+`task_id` differs from its directory. Empty selections produce `[]` JSON or an empty
+names stream. Both machine formats write UTF-8, including when the console's default
+encoding cannot represent task names.
+
+```bash
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --prefix T --format json
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --difficulty hard --format names > selected-tasks.txt
+uv run ce-runner batch --tasks-dir ./custom-tasks --tasks-file selected-tasks.txt --config claw-eval/config.yaml
+```
+
 | Issue | Fix |
 |---|---|
 | `uv` command not found after setup | `python -m pip install --upgrade uv` (rerun setup) |
