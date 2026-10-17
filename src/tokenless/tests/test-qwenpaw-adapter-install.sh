@@ -24,7 +24,8 @@ cp -R "$SOURCE_ADAPTER_DIR"/. "$ADAPTER_DIR"/
 # Source checkouts contain the version templates; packages contain the
 # stamped files. Stamp only the sandbox copy so this test never modifies the tree.
 for template in plugin.json requirements.txt; do
-    sed 's/@VERSION@/0.0.0-test/g' "$ADAPTER_DIR/qwenpaw/$template.in" > "$ADAPTER_DIR/qwenpaw/$template"
+    sed -e 's/@WHEEL_VERSION@/0.0.0-test/g' -e 's/@VERSION@/0.0.0-test/g' \
+        "$ADAPTER_DIR/qwenpaw/$template.in" > "$ADAPTER_DIR/qwenpaw/$template"
 done
 
 cat > "$QWENPAW_STUB" <<'STUBEOF'

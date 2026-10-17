@@ -65,6 +65,7 @@ impl Runtime {
                         closing: false,
                         observation: None,
                         hooks: Arc::new(Mutex::new(BTreeMap::new())),
+                        hook_open: Arc::new(Mutex::new(())),
                     }),
                 );
                 Ok(json!(Binding {

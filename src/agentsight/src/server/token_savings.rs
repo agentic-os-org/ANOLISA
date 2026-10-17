@@ -348,13 +348,19 @@ fn compute_diff_lines(before: Option<&str>, after: Option<&str>) -> Vec<DiffLine
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Current UNIX time in nanoseconds
-fn now_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+/// Nanoseconds since the Unix epoch at `at`; 0 if that clock is before it.
+///
+/// Every `/api/token-savings` request that defaults `end_ns` lands here, so a
+/// pre-epoch realtime clock (a failed RTC battery, a VM snapshot restored
+/// with a stale clock) must degrade to 0 — the family contract,
+/// `utils::epoch_nanos` — instead of unwrapping and taking the handler
+/// thread down. This was the one production-code straggler the family fixes
+/// (#6626 hardened the dashboard handlers and the CLI, #7238 the health
+/// endpoints) left behind: the bare unwrap was carried into this file by the
+/// `handlers.rs` split, and `/api/token-savings` kept dying without a
+/// response after every sibling endpoint had been hardened.
+fn now_ns(at: std::time::SystemTime) -> u64 {
+    crate::utils::epoch_nanos(at)
 }
 
 /// Compute compression ratio clamped to [0.0, 100.0].
@@ -484,7 +490,9 @@ pub async fn get_token_savings(
     if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let end_ns = query
+        .end_ns
+        .unwrap_or_else(|| now_ns(std::time::SystemTime::now()) as i64);
     let start_ns = match super::handlers::start_or_default(
         query.start_ns,
         end_ns,
@@ -989,6 +997,24 @@ mod tests {
     }
 
     // ─── Unit tests for mapping functions ─────────────────────────────────
+
+    #[test]
+    fn now_ns_survives_a_pre_epoch_clock() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        // Red run: the previous body —
+        // `at.duration_since(UNIX_EPOCH).unwrap()` — panicked on this input,
+        // which is exactly what a /api/token-savings request with no `end_ns`
+        // did on a host whose realtime clock read before 1970-01-01 (a failed
+        // RTC battery, a VM snapshot restored with a stale clock): the unwrap
+        // took the handler thread down and the request died without a response
+        // while every sibling endpoint kept working.
+        assert_eq!(now_ns(SystemTime::UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(now_ns(UNIX_EPOCH - Duration::from_secs(1_000_000_000)), 0);
+        // The epoch itself reads as 0, never a panic.
+        assert_eq!(now_ns(UNIX_EPOCH), 0);
+        // Post-epoch clocks count forward in nanoseconds.
+        assert_eq!(now_ns(UNIX_EPOCH + Duration::from_millis(1)), 1_000_000);
+    }
 
     #[test]
     fn savings_fraction_guards_zero_and_bounds_both_ends() {

@@ -242,6 +242,7 @@
           "enum": [
             "pi",
             "qwenpaw",
+            "agentscope",
             "qoder",
             "openclaw",
             "hermes",
