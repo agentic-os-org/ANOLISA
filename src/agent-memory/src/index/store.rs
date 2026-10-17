@@ -849,15 +849,34 @@ impl BM25Store {
 
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
+    ///
+    /// Superseded rows and, when `exclude_cold_on_search` is set, cold rows
+    /// are filtered before ranking so they never consume the `top_k` budget.
+    /// Vector rows without a matching `files` entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+    }
+
+    // Keep this override private: vector searches use the store default,
+    // while hybrid searches pass their per-call cold policy. Superseded and
+    // optionally cold rows are filtered before ranking; standalone vectors stay eligible.
+    fn search_vec_with_cold(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_cold: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
+        // exclude_cold binds as 0/1; 0 disables the cold predicate, keeping SQL static.
         let mut stmt = self.conn.prepare(
             "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+             FROM files_vec v LEFT JOIN files f ON f.path = v.path \
+             WHERE COALESCE(f.is_superseded, 0) = 0 \
+               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0)",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![exclude_cold], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -927,7 +946,7 @@ impl BM25Store {
     ) -> Result<Vec<SearchHit>> {
         // Run both search strategies.
         let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
