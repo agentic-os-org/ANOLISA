@@ -4,10 +4,13 @@
 //! - `memory_sessions`: list historical session summaries from facts/summary/
 //! - `memory_timeline`: show tool call log from a specific session
 
+use std::os::fd::AsFd;
+
 use serde::Serialize;
 
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// Summary of a historical session.
@@ -45,7 +48,18 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
     let summary_dir = svc.mount.root.join("facts").join("summary");
     let mut sessions: Vec<SessionSummary> = Vec::new();
 
-    if !summary_dir.exists() {
+    // Everything under the mount is agent-writable, so both the summary
+    // directory and its entries are attacker-controlled. `read_dir` follows a
+    // symlinked directory and `read_to_string` follows a symlinked file, so
+    // guard both ends: a missing directory and a planted link are the same
+    // "nothing to list" here, and a non-regular entry is skipped instead of
+    // read — otherwise this read-only tool would disclose an arbitrary file's
+    // contents through the model-visible `description` field (#5000).
+    // `symlink_metadata` and `DirEntry::file_type` do not follow symlinks;
+    // that is the same guard the other mounts-scoped readers apply
+    // (`mem_list`, `memory_get_context`, `memory_index_refresh`, ...).
+    let is_real_dir = std::fs::symlink_metadata(&summary_dir).is_ok_and(|m| m.file_type().is_dir());
+    if !is_real_dir {
         return Ok("(no historical sessions found)".to_string());
     }
 
@@ -54,11 +68,28 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
             Ok(e) => e,
             Err(_) => continue,
         };
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        // Read through the mount's `root_fd` (openat2 with RESOLVE_BENEATH |
+        // RESOLVE_NO_SYMLINKS) rather than by pathname: the entry-level check
+        // above is only a hint, and an attacker who can write the summary
+        // directory can swap the file for a link between the two calls. This
+        // is the invariant `memory_session_context` and `memory_get_context`
+        // already hold for the same `facts/` tree (#5000).
+        let rel = match path.strip_prefix(&svc.mount.root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), rel) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -279,5 +310,110 @@ mod tests {
     fn parse_count_returns_zero_when_not_found() {
         let body = "No tool calls mentioned here.";
         assert_eq!(parse_count_from_body(body, "tool calls"), 0);
+    }
+
+    /// Service over a temp dir with the subsystems `memory_sessions` does not
+    /// use switched off — it only reads `facts/summary/`.
+    fn setup() -> (tempfile::TempDir, MemoryService) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = tmp.path().to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        config.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().to_string();
+        config.memory.mount.strategy = crate::mount::MountStrategyKind::Userland;
+        let svc = MemoryService::new(config).unwrap();
+        (tmp, svc)
+    }
+
+    fn summary(session_id: &str, body: &str) -> String {
+        format!("---\nsession_id: {session_id}\ncreated_at: 2026-10-16T00:00:00Z\n---\n\n{body}\n")
+    }
+
+    /// A summary entry that is a symlink must be skipped, not followed: the
+    /// mount is agent-writable, so a planted link would otherwise make this
+    /// read-only tool disclose an arbitrary file's contents through the
+    /// model-visible `description` field (#5000).
+    #[test]
+    fn memory_sessions_skips_a_symlinked_summary_file() {
+        let (_tmp, svc) = setup();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, "SECRET-OUTSIDE-MOUNT-DATA\n").unwrap();
+
+        let summary_dir = svc.mount.root.join("facts").join("summary");
+        std::fs::create_dir_all(&summary_dir).unwrap();
+        std::fs::write(
+            summary_dir.join("ses_real.md"),
+            summary("ses_real", "Session had 42 tool calls."),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&secret, summary_dir.join("ses_leak.md")).unwrap();
+
+        let out = memory_sessions(&svc, 10).unwrap();
+        assert!(
+            out.contains("ses_real"),
+            "a regular summary must still be listed: {out}"
+        );
+        assert!(
+            !out.contains("SECRET-OUTSIDE-MOUNT-DATA"),
+            "the symlink target was disclosed: {out}"
+        );
+        assert!(
+            !out.contains("ses_leak"),
+            "the symlinked entry must not be listed at all: {out}"
+        );
+    }
+
+    /// The read is anchored on the mount's `root_fd`, so a link is refused
+    /// outright — even one whose target is inside the mount, where following
+    /// it would not disclose anything foreign but would still report a
+    /// session that has no summary of its own (#5000).
+    #[test]
+    fn memory_sessions_skips_a_link_to_a_file_inside_the_mount() {
+        let (_tmp, svc) = setup();
+        let summary_dir = svc.mount.root.join("facts").join("summary");
+        std::fs::create_dir_all(&summary_dir).unwrap();
+        std::fs::write(
+            summary_dir.join("ses_real.md"),
+            summary("ses_real", "Session had 42 tool calls."),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            summary_dir.join("ses_real.md"),
+            summary_dir.join("ses_alias.md"),
+        )
+        .unwrap();
+
+        let out = memory_sessions(&svc, 10).unwrap();
+        assert!(out.contains("ses_real"), "regular summary missing: {out}");
+        // The alias carries the same frontmatter, so it is only detectable as
+        // a second entry: a followed link reports a session twice.
+        assert_eq!(
+            out.matches("\"session_id\"").count(),
+            1,
+            "the link must not add a second entry: {out}"
+        );
+    }
+
+    /// Same guard one level up: `read_dir` follows a symlinked *directory*,
+    /// which would put every entry it yields outside the mount (#5000).
+    #[test]
+    fn memory_sessions_does_not_follow_a_symlinked_summary_dir() {
+        let (_tmp, svc) = setup();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("ses_planted.md"),
+            summary("ses_planted", "SECRET-OUTSIDE-MOUNT-DATA"),
+        )
+        .unwrap();
+
+        let facts = svc.mount.root.join("facts");
+        std::fs::create_dir_all(&facts).unwrap();
+        std::os::unix::fs::symlink(outside.path(), facts.join("summary")).unwrap();
+
+        let out = memory_sessions(&svc, 10).unwrap();
+        assert_eq!(out, "(no historical sessions found)");
     }
 }
