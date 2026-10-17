@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## PDF 导航链接
+
+将 `--links` 与 JSON 输出一起使用，可检查选中页中嵌入的导航目标。此操作仅读取元数据，不访问 URI 或打开目标文件。
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f handbook.pdf --format json --links --pages 1-3 --metadata
+```
+
+每个选中页增加 `links` 数组，无链接页使用 `[]`。记录保留 PyMuPDF 返回的字段：`kind` 表示动作类型，`from` 转为包含四个数字的热点矩形，点类型的 `to` 转为 `[x, y]`。非负目标 `page` 索引转为从 1 开始的页码，与页面报告一致；间接目标的负数标记保持不变。
+
+URI 动作提供 `uri`；远程或启动动作可能提供 `file`。`xref`、`id`、`zoom` 等可选字段会被保留。符号目标保留原文字。根据引擎版本，远程间接目标可能采用符号 `to` 与 `page: -1`，也可能采用文件名或 URI 中的锚点。返回的表示形式与引擎坐标保持不变。
+
+页面选择同时控制正文与链接，元数据仍可单独选择。省略选项时保留既有输出；文本模式会在加载引擎或访问文件前报错，原 PDF 保持不变。此功能覆盖页面链接动作，与目录书签和审阅批注分别使用。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
