@@ -81,6 +81,8 @@ def _iter_trace_files(trace_root: str | Path) -> Iterator[tuple[str, Path]]:
     root = Path(trace_root)
     if not root.exists():
         raise ExtractionError(f"Trace directory not found: {root}")
+    if not root.is_dir():
+        raise ExtractionError(f"Trace path must be a directory: {root}")
 
     for instance_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         for trace_file in sorted(instance_dir.glob("trace*.json")):
@@ -91,6 +93,17 @@ def _iter_selected_trace_files(trace_files: list[Path]) -> Iterator[tuple[str, P
     """Yield explicitly selected trace files."""
     for trace_file in sorted(trace_files):
         yield trace_file.parent.name, trace_file
+
+
+def _read_trace_object(trace_file: Path) -> dict[str, Any]:
+    """Read a trace JSON object with input failures attributed to its path."""
+    try:
+        trace_data = json.loads(trace_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExtractionError(f"Failed to read trace file {trace_file}: {exc}") from exc
+    if not isinstance(trace_data, dict):
+        raise ExtractionError(f"Trace file {trace_file} must contain a JSON object")
+    return trace_data
 
 
 def _json_counter_value(value: Any) -> str:
@@ -132,10 +145,7 @@ def analyze_trace_files(
     file_iter = _iter_selected_trace_files(trace_files) if trace_files is not None else _iter_trace_files(trace_root)
 
     for instance_id, trace_file in file_iter:
-        try:
-            trace_data = json.loads(trace_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ExtractionError(f"Failed to parse trace file {trace_file}: {exc}") from exc
+        trace_data = _read_trace_object(trace_file)
 
         task_id = trace_data.get("session_id") or trace_file.stem
         model_value = _extract_model_value(trace_data)
