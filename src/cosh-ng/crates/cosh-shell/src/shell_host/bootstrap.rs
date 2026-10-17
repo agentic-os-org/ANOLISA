@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -300,6 +300,14 @@ fn start_shell_session(
     })
 }
 
+/// Terminal EOF (Ctrl-D, `VEOF`) supplied to profile probes. Login startup
+/// files sometimes read from the terminal (`read`, `ssh-add` passphrase
+/// prompts, ...); the pipes-based probe fed the child `/dev/null`, so every
+/// read returned EOF immediately. A dedicated writer keeps submitting VEOF
+/// for the probe lifetime, preserving that inexhaustible EOF contract on the
+/// PTY without imposing a fixed limit on profile reads.
+const PROFILE_PROBE_VEOF: u8 = 0x04;
+
 pub(crate) fn spawn_profile_probe_on_pty(
     mut command: Command,
     winsize: &Winsize,
@@ -329,6 +337,16 @@ pub(crate) fn spawn_profile_probe_on_pty(
     }
     let child = command.spawn()?;
     drop(command);
+    // The probe never needs interactive input. Keep feeding its private PTY
+    // terminal EOF for as long as the slave exists, so every profile read
+    // fails fast just as it did with `/dev/null`. The writer naturally blocks
+    // under backpressure and exits once the probe closes the slave.
+    let mut eof_writer = master.try_clone()?;
+    std::thread::spawn(
+        move || {
+            while eof_writer.write_all(&[PROFILE_PROBE_VEOF]).is_ok() {}
+        },
+    );
     Ok((child, master))
 }
 
