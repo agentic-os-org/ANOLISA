@@ -79,6 +79,16 @@ else
     SRCDIR="$(cd "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd || printf '%s' "$SCRIPT_DIR/../../../..")"
 fi
 
+# Phase 1 is a hard precondition, so it sits above the preview: a host with
+# neither the binary nor the source tree stops here in both modes, with the same
+# message and the same exit code, and the preview has nothing to qualify.
+if [[ -z "$TOKENLESS_BIN" && ! -f "$SRCDIR/Cargo.toml" ]]; then
+    echo "[tokenless] ERROR: tokenless binary not found and no source tree at $SRCDIR" >&2
+    echo "[tokenless] Install the tokenless RPM package first:" >&2
+    echo "[tokenless]   rpm -Uvh tokenless-*.rpm" >&2
+    exit 1
+fi
+
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 if [ "$DRY_RUN" = "1" ]; then
     # Preview before the first write, in the order the real path acts and only
@@ -87,12 +97,8 @@ if [ "$DRY_RUN" = "1" ]; then
     # drives the CLI registrations, and a host without the codex CLI reaches
     # neither of the last two.
     if [[ -z "$TOKENLESS_BIN" ]]; then
-        if [[ -f "$SRCDIR/Cargo.toml" ]]; then
-            echo "DRY-RUN: cargo build --release -p tokenless-cli in ${SRCDIR}"
-            echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
-        else
-            echo "DRY-RUN: no tokenless binary and no source tree at ${SRCDIR}: the real run exits 1"
-        fi
+        echo "DRY-RUN: cargo build --release -p tokenless-cli in ${SRCDIR}"
+        echo "DRY-RUN: install the built binary to ${BINDIR}/tokenless (mode 755)"
     else
         echo "DRY-RUN: keep the existing tokenless binary ${TOKENLESS_BIN}"
     fi
@@ -110,15 +116,8 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 if [[ -z "$TOKENLESS_BIN" ]]; then
-    # No binary — try building from source (dev scenario). SRCDIR is resolved
-    # above the dry-run guard so both paths agree on the directory.
-    if [[ ! -f "$SRCDIR/Cargo.toml" ]]; then
-        echo "[tokenless] ERROR: tokenless binary not found and no source tree at $SRCDIR" >&2
-        echo "[tokenless] Install the tokenless RPM package first:" >&2
-        echo "[tokenless]   rpm -Uvh tokenless-*.rpm" >&2
-        exit 1
-    fi
-
+    # No binary — build from source (dev scenario). The source tree's presence
+    # is already guaranteed by the precheck above, which both modes share.
     echo "[tokenless] Building tokenless from source: $SRCDIR"
     cd "$SRCDIR"
     cargo build --release -p tokenless-cli 2>&1 | tail -3
