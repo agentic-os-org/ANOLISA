@@ -16,4 +16,9 @@
 
 __version__ = "1.0.0"
 
-from .run_task import main  # noqa: F401
+
+def main() -> None:
+    """Load evaluation runtime only when invoking the console entry point."""
+    from ce_runner.run_task import main as run_main
+
+    run_main()
