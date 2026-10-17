@@ -954,11 +954,24 @@ impl Analyzer {
                     Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0) as u64,
                     Err(e) => {
                         log::warn!("Failed to apply chat template: {e}, falling back to raw count");
-                        // Fallback: count raw message content
+                        // Fallback: count raw message content plus the tool
+                        // definitions — the Ok path renders the definitions
+                        // through the template, so an estimate without them
+                        // under-counts every tool-carrying request by exactly
+                        // the definitions the failed render never reached.
+                        // The same rule the drain fallback and
+                        // count_request_tokens answer with.
                         let mut total = 0u64;
                         for msg in &msgs {
                             if let Ok(msg_str) = serde_json::to_string(msg) {
                                 total += tokenizer.count(&msg_str).unwrap_or(0) as u64;
+                            }
+                        }
+                        if let Some(tools) = tools_json.as_ref() {
+                            for tool in tools {
+                                if let Ok(tool_str) = serde_json::to_string(tool) {
+                                    total += tokenizer.count(&tool_str).unwrap_or(0) as u64;
+                                }
                             }
                         }
                         total
