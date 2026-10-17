@@ -8,7 +8,7 @@
 ## 1. 准备工作空间
 
 cosh-ng 是以 Linux 为主要运行环境、同时可在 macOS 构建的 Rust 工作空间。
-最低 Rust 版本为 1.74，`rust-toolchain.toml` 会选择 stable Rust，并安装
+最低 Rust 版本为 1.88，`rust-toolchain.toml` 会选择 stable Rust，并安装
 rustfmt 和 Clippy。
 
 ```bash
@@ -22,7 +22,7 @@ cargo build --workspace
 
 ## 2. 先看清运行边界
 
-工作空间包含五个 crate，其中三个会生成面向用户的进程。
+工作空间包含八个 crate，其中三个会生成面向用户的进程。
 
 | 区域 | 阅读入口 | 边界 |
 |---|---|---|
@@ -34,6 +34,10 @@ cargo build --workspace
 
 `cosh-shell` 不链接工作空间中的其他 crate。它会启动 `cosh-core`，并通过带版本约束的
 JSONL 控制协议通信。两端必须共同维护这个兼容性边界。
+
+其余三个 crate —— `cosh-gateway-contracts`、`cosh-gateway` 和 `cosh-gateway-app` ——
+构成 Gateway Task Plane（本地任务控制面，通过 `cosh agent task` 入口访问），不改变
+上述三个面向用户的进程边界；详见[架构](architecture.md)。
 
 所有权和数据流详见[架构](architecture.md)。
 
