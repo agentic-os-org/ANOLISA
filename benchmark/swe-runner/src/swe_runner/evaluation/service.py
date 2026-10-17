@@ -61,9 +61,21 @@ def _get_instance_ids(preds_path: Path) -> list[str]:
     if not data:
         return []
 
+    # swebench's own get_predictions_from_file accepts both a list of
+    # prediction records and an instance_id-keyed dict; normalize the list
+    # form here so both shapes evaluate.
+    if isinstance(data, list):
+        data = {
+            pred["instance_id"]: pred
+            for pred in data
+            if isinstance(pred, dict) and "instance_id" in pred
+        }
+
     instance_ids: list[str] = []
     for iid, pred in data.items():
-        if not pred.get("model_patch", ""):
+        # A null/None prediction entry follows the empty-patch skip path
+        # instead of crashing on .get.
+        if not isinstance(pred, dict) or not pred.get("model_patch", ""):
             logger.warning("EVAL_SKIP_EMPTY_PATCH instance=%s", iid)
             continue
         instance_ids.append(iid)
@@ -154,7 +166,12 @@ def run_evaluation(
     if not instance_ids:
         logger.warning("EVAL_NO_VALID_PREDICTIONS preds_path=%s", preds_path)
 
-    dataset_name = get_dataset_name(subset)
+    # run/dataset.py passes custom subset paths straight to HuggingFace;
+    # the evaluator must resolve the same way so a dataset the run command
+    # accepts can also be evaluated.
+    from swe_runner.common.dataset_registry import DATASET_MAPPING
+
+    dataset_name = get_dataset_name(subset) if subset in DATASET_MAPPING else subset
 
     output_dir = output_dir.resolve()
     preds_path = preds_path.resolve()
