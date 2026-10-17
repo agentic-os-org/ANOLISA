@@ -8,6 +8,14 @@ pub(crate) struct OutputFault {
 
 impl OutputFault {
     pub(crate) fn build() -> Self {
+        Self::build_with_refault(false)
+    }
+
+    pub(crate) fn build_with_prompt_refault() -> Self {
+        Self::build_with_refault(true)
+    }
+
+    fn build_with_refault(prompt_refault: bool) -> Self {
         let root = tempfile::tempdir().expect("output interposer directory");
         let source = root.path().join("output_fault.c");
         let library = root.path().join("output_fault.so");
@@ -27,6 +35,26 @@ static ssize_t (*real_write)(int,const void*,size_t);
 static ssize_t (*real_writev)(int,const struct iovec*,int);
 static int shell, triggered, recorded, withdraw, audit_committed, cup_state, staged;
 static size_t matched, audit_matched;
+#ifdef PROMPT_REFAULT
+static size_t prompt_matched;
+static int prompt_refailed;
+static int refault_prompt(const void *data,size_t size) {
+ const char *arm=getenv("COSH_UI_OUTPUT_ARM"), *needle="owner@host:";
+ if(!shell||!recorded||prompt_refailed||!arm||!access(arm,F_OK))return 0;
+ const char *bytes=data;
+ for(size_t i=0;i<size;i++){
+  if(bytes[i]==needle[prompt_matched])prompt_matched++;else prompt_matched=bytes[i]=='o'?1:0;
+  if(prompt_matched==strlen(needle)){
+   prompt_refailed=1;const char *hit=getenv("COSH_UI_OUTPUT_HIT");
+   if(hit){int fd=open(hit,O_WRONLY|O_APPEND|O_CLOEXEC);
+    if(fd>=0){const char *reason="EIO during native prompt recovery\n";
+     real_write(fd,reason,strlen(reason));close(fd);}}
+   errno=EIO;return 1;
+  }
+ }
+ return 0;
+}
+#endif
 static const char audit_needle[]="\"event_type\":\"approval.resolved\"";
 __attribute__((constructor)) static void setup(void) {
  real_write=dlsym(RTLD_NEXT,"write"); real_writev=dlsym(RTLD_NEXT,"writev");
@@ -79,7 +107,11 @@ static void pause_stage(int fd) {
  for(int i=0;release&&access(release,F_OK)&&i<1000;i++)usleep(10000);
 }
 ssize_t write(int fd,const void *data,size_t size) {
- if(shell&&fd==1){inspect(data,size);if(failed())return -1;}
+ if(shell&&fd==1){inspect(data,size);if(failed())return -1;
+#ifdef PROMPT_REFAULT
+ if(refault_prompt(data,size))return -1;
+#endif
+ }
  pause_stage(fd);
  ssize_t written=real_write(fd,data,size);
  if(shell&&withdraw&&fd!=1&&written>0)inspect_audit(data,(size_t)written);
@@ -87,7 +119,11 @@ ssize_t write(int fd,const void *data,size_t size) {
 }
 ssize_t writev(int fd,const struct iovec *iov,int count) {
  if(shell&&fd==1){for(int i=0;i<count;i++)inspect(iov[i].iov_base,iov[i].iov_len);
- if(failed())return -1;}
+ if(failed())return -1;
+#ifdef PROMPT_REFAULT
+ for(int i=0;i<count;i++)if(refault_prompt(iov[i].iov_base,iov[i].iov_len))return -1;
+#endif
+ }
  pause_stage(fd);
  ssize_t written=real_writev(fd,iov,count);
  if(shell&&withdraw&&fd!=1&&written>0){size_t remaining=(size_t)written;
@@ -98,7 +134,11 @@ ssize_t writev(int fd,const struct iovec *iov,int count) {
 "#,
         )
         .expect("interposer source");
-        let output = Command::new("cc")
+        let mut compiler = Command::new("cc");
+        if prompt_refault {
+            compiler.arg("-DPROMPT_REFAULT");
+        }
+        let output = compiler
             .args(["-shared", "-fPIC", "-Wall", "-Werror"])
             .arg(&source)
             .arg("-o")

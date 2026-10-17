@@ -235,13 +235,9 @@ pub(crate) fn run_raw(
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
-    #[cfg(debug_assertions)]
     {
-        // A refused activation is a configuration error, not a reason to stop the
-        // shell: log the origin once and keep the inline path.
-        match crate::runtime::approval_ui::ApprovalSliceActivation::from_lookup(&|key| {
-            std::env::var(key).ok()
-        }) {
+        // A refused activation must keep the inline path rather than stop the shell.
+        match crate::runtime::approval_ui::ApprovalSliceActivation::for_current_process() {
             Ok(Some(_)) if !crate::runtime::logging::file_sink_is_ready() => {
                 tracing::warn!(
                     "approval slice requires a file logging sink, keeping the inline approval path"

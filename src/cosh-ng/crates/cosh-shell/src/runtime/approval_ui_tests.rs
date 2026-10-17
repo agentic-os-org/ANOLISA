@@ -259,3 +259,119 @@ fn a_heartbeat_interval_not_below_its_timeout_refuses_activation() {
         );
     }
 }
+
+#[test]
+fn production_policy_has_fixed_bounded_defaults() {
+    let activation = ApprovalSliceActivation::production_policy(std::path::PathBuf::from(
+        "/usr/libexec/anolisa/cosh-ng/cosh-ui-worker",
+    ));
+    assert_eq!(activation.columns, SLICE_COLUMNS);
+    assert_eq!(activation.max_surface_rows, 24);
+    assert_eq!(activation.limits.max_payload_bytes, 1_048_576);
+    assert_eq!(activation.limits.max_draw_ops, 4096);
+    assert_eq!(activation.limits.max_text_bytes, 16_384);
+    assert_eq!(activation.handshake_timeout, Duration::from_secs(5));
+    assert_eq!(activation.render_timeout, Duration::from_secs(5));
+    assert_eq!(activation.heartbeat_interval, Duration::from_millis(100));
+    assert_eq!(activation.heartbeat_timeout, Duration::from_secs(3));
+    assert_eq!(activation.backpressure_timeout, Duration::from_secs(5));
+    assert_eq!(activation.shutdown_timeout, Duration::from_secs(2));
+    assert_eq!(activation.failure_limit, 3);
+    assert_eq!(activation.coordinator_policy().pending_revision_capacity, 1);
+}
+
+#[cfg(target_os = "linux")]
+fn installed_profile() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _environment = crate::diagnostics::test_env::env_guard();
+    let home = std::env::var_os("HOME").expect("test home");
+    let profile = tempfile::tempdir_in(home).expect("private installed profile");
+    for name in ["cosh-shell", "cosh-ui-worker"] {
+        let path = profile.path().join(name);
+        std::fs::write(&path, b"fixture").expect("profile file");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("profile executable");
+    }
+    profile
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_discovers_only_the_trusted_installed_sibling() {
+    let profile = installed_profile();
+    let shell = profile.path().join("cosh-shell");
+    let activation =
+        ApprovalSliceActivation::from_installed_shell(&shell).expect("trusted installed profile");
+    assert_eq!(
+        activation.worker_path,
+        profile.path().join("cosh-ui-worker")
+    );
+    assert!(
+        ApprovalSliceActivation::from_installed_shell(std::path::Path::new("cosh-shell")).is_none()
+    );
+    std::fs::remove_file(&activation.worker_path).expect("remove worker");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_refuses_writable_or_nonexecutable_worker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let profile = installed_profile();
+    let shell = profile.path().join("cosh-shell");
+    let worker = profile.path().join("cosh-ui-worker");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_some());
+    for mode in [0o775, 0o757, 0o644, 0o4755, 0o2755] {
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(mode))
+            .expect("change worker mode");
+        assert!(
+            ApprovalSliceActivation::from_installed_shell(&shell).is_none(),
+            "mode {mode:o}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_refuses_symlink_worker_even_to_the_same_profile() {
+    let profile = installed_profile();
+    let shell = profile.path().join("cosh-shell");
+    let worker = profile.path().join("cosh-ui-worker");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_some());
+    std::fs::rename(&worker, profile.path().join("real-worker")).expect("move worker");
+    std::os::unix::fs::symlink("real-worker", worker).expect("worker symlink");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_refuses_group_writable_install_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let profile = installed_profile();
+    let shell = profile.path().join("cosh-shell");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_some());
+    std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(0o770))
+        .expect("make install directory writable");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_refuses_writable_ancestor_above_private_install_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let profile = installed_profile();
+    let install = profile.path().join("libexec");
+    std::fs::create_dir(&install).expect("private install directory");
+    for name in ["cosh-shell", "cosh-ui-worker"] {
+        std::fs::rename(profile.path().join(name), install.join(name)).expect("move executable");
+    }
+    let shell = install.join("cosh-shell");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_some());
+    std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(0o770))
+        .expect("make ancestor writable");
+    assert!(ApprovalSliceActivation::from_installed_shell(&shell).is_none());
+}

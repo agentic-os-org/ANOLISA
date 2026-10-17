@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::support::ui_approval_slice::{
     real_cosh_core_path, test_worker_profile, write_malformed_worker,
@@ -536,4 +536,91 @@ fn a_worker_kill_crossed_with_a_resize_still_resolves_the_approval_once() {
     observation
         .check_inline_baseline()
         .expect("a fault crossed with a resize must still approve exactly once");
+}
+
+#[test]
+fn missing_installed_worker_keeps_the_approval_inline_and_resolves_once() {
+    let profile = test_worker_profile(std::path::Path::new(env!("CARGO_BIN_EXE_cosh-ui-worker")));
+    let worker = profile.path().join("cosh-ui-worker");
+    std::fs::remove_file(&worker).expect("remove installed worker");
+    let mut harness = RealCoreApprovalHarness::spawn(SliceLaunch {
+        worker_profile: Some(profile.path().to_owned()),
+        worker_binary: Some(worker),
+        ..SliceLaunch::activated()
+    });
+    assert!(harness.request_approval_card());
+    assert!(harness.wait_for_no_workers(RECOVERY_TIMEOUT));
+    harness
+        .approve_execute_shell_second_request_from_visible_card()
+        .check_inline_baseline()
+        .expect("absent worker must retain Host approval and effect ownership");
+}
+
+#[test]
+fn exhausted_worker_failure_budget_keeps_one_inline_approval_and_one_effect() {
+    for fault in [WorkerFault::Kill, WorkerFault::Hang] {
+        let mut harness = RealCoreApprovalHarness::spawn(SliceLaunch::activated());
+        assert!(harness.request_approval_card());
+        for generation in 0..3 {
+            let victim = harness.fault_worker(fault);
+            assert!(harness.wait_for_pid_gone(victim, RECOVERY_TIMEOUT));
+            if generation < 2 {
+                assert!(harness
+                    .wait_for_rebuilt_worker(victim, RECOVERY_TIMEOUT)
+                    .is_some());
+            }
+        }
+        assert!(harness.wait_for_no_workers(RECOVERY_TIMEOUT));
+        let observation = harness.approve_execute_shell_second_request_from_visible_card();
+        assert!(observation
+            .transcript
+            .contains("The approval display above is no longer current"));
+        observation
+            .check_inline_baseline()
+            .expect("exhausted kill/hang budget must retain one Host-owned approval and effect");
+    }
+}
+
+#[test]
+fn healthy_worker_survives_an_idle_approval_without_new_input() {
+    let mut harness = RealCoreApprovalHarness::spawn(SliceLaunch::activated());
+    assert!(harness.request_approval_card());
+    let workers = harness.worker_descendants_within(Duration::from_secs(5));
+    assert_eq!(workers.len(), 1);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        assert_eq!(harness.live_worker_pids(), workers);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    harness
+        .approve_execute_shell_second_request_from_visible_card()
+        .check_inline_baseline()
+        .expect("idle polling must keep the healthy worker and the approval usable");
+}
+
+#[test]
+fn production_ignores_debug_worker_path_injection() {
+    let production = std::env::var_os("COSH_ACCEPT_RELEASE_PROFILE").is_some();
+    let mut harness = RealCoreApprovalHarness::spawn(SliceLaunch {
+        activation: true,
+        worker_binary: Some(std::path::PathBuf::from(
+            "/definitely-missing-cosh-7891/cosh-ui-worker",
+        )),
+        ..SliceLaunch::activated()
+    });
+    assert!(harness.request_approval_card());
+    if production {
+        assert_eq!(
+            harness
+                .worker_descendants_within(Duration::from_secs(5))
+                .len(),
+            1
+        );
+    } else {
+        assert!(harness.wait_for_no_workers(RECOVERY_TIMEOUT));
+    }
+    harness
+        .approve_execute_shell_second_request_from_visible_card()
+        .check_inline_baseline()
+        .expect("debug path injection must not change production approval ownership");
 }

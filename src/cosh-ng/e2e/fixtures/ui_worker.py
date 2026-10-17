@@ -64,6 +64,7 @@ def geometry(pid):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--production", action="store_true")
     parser.add_argument("--scenario", choices=["resize", "kill-start", "kill-frame"], required=True)
     parser.add_argument("--out", type=Path, default=Path("/tmp/cosh-ui-canonical-evidence"))
     args = parser.parse_args()
@@ -123,6 +124,10 @@ def main():
         environment.update({"HOME": str(home), "TMPDIR": str(home), "TERM": "xterm-256color", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "COSH_LOG": "debug", "COSH_SHELL_LANG": "en-US", "COSH_SHELL_WIDTH": "40", "COSH_SHELL_ISOLATED": "1", "COSH_SHELL_INTEGRATION": "enhanced", "COSH_SHELL_BOOTSTRAP_PATH": "0", "COSH_SHELL_HEALTH_SCAN": "disabled", "COSH_RECOMMENDATIONS_ENABLED": "0", "COSH_SHELL_RAW_SHELL": "bash", "COSH_SHELL_DEFAULT_SHELL": "bash", "COSH_SHELL_APPROVAL_MODE": "auto", "COSH_APPROVAL_MODE": "auto", "COSH_CORE_PATH": str(binaries["cosh-core"]), "COSH_AI_PROVIDER": "ui-approval-canonical", "COSH_MODEL": "ui-approval-canonical-model", "OPENAI_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1", "OPENAI_API_KEY": "canonical-test-only", "COSH_UI_APPROVAL_SLICE_TEST": "1", "COSH_UI_WORKER_PATH": str(binaries["cosh-ui-worker"])})
         for key, value in {"MAX_PAYLOAD_BYTES": 1048576, "MAX_DRAW_OPS": 4096, "MAX_TEXT_BYTES": 16384, "MAX_SURFACE_ROWS": 24, "HANDSHAKE_TIMEOUT_MS": 5000, "RENDER_TIMEOUT_MS": 5000, "HEARTBEAT_INTERVAL_MS": 100, "HEARTBEAT_TIMEOUT_MS": 3000, "BACKPRESSURE_TIMEOUT_MS": 5000, "SHUTDOWN_TIMEOUT_MS": 2000, "FAILURE_LIMIT": 3}.items():
             environment["COSH_UI_TEST_" + key] = str(value)
+        if args.production:
+            for key in list(environment):
+                if key.startswith("COSH_UI_"):
+                    environment.pop(key)
         command = [str(binaries["cosh-shell"]), "raw", "cosh-core"]
         physical_log = output / "script-output.bin"
         if args.scenario == "kill-frame":
@@ -212,7 +217,7 @@ def main():
         tool_result = len(requests) >= 2 and any(message.get("role") == "tool" for message in requests[1].get("messages", []))
         termios_restored = termios.tcgetattr(0) == outer_termios
         resize_proven = any(item["inner"] == item["outer"] == {"rows": 20, "cols": 47} for item in geometries)
-        result = {"execution": "scripted-pty", "real_provider": False, "model_fixture": "loopback SSE only", "scenario": args.scenario, "binary_sha256": hashes, "shell_exit": shell.returncode, "actual_shell_pid": actual_shell, "host_binding": host_binding, "geometry_observations": geometries, "outer_termios_restored": termios_restored, "request_count": len(requests), "host_tool_result": tool_result, "effect_count": len(effects), "worker_seen": worker_seen, "focus_roundtrip": focus_roundtrip, "fault": fault, "bash_baseline": bash, "bash_drift": bash_drift, "remaining_pids": remaining}
+        result = {"execution": "scripted-pty", "real_provider": False, "model_fixture": "loopback SSE only", "scenario": args.scenario, "production": args.production, "ui_test_environment": {key: value for key, value in environment.items() if key.startswith("COSH_UI_")}, "binary_sha256": hashes, "shell_exit": shell.returncode, "actual_shell_pid": actual_shell, "host_binding": host_binding, "geometry_observations": geometries, "outer_termios_restored": termios_restored, "request_count": len(requests), "host_tool_result": tool_result, "effect_count": len(effects), "worker_seen": worker_seen, "focus_roundtrip": focus_roundtrip, "fault": fault, "bash_baseline": bash, "bash_drift": bash_drift, "remaining_pids": remaining}
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         (output / "requests.json").write_text(json.dumps(requests, indent=2) + "\n")
         passed = shell.returncode == 0 and requests and requests[0].get("tools") and len(requests) == 2 and tool_result and effects == ["ui_canonical_effect"] and worker_seen and bash and not bash_drift and not remaining and termios_restored and resize_proven and (args.scenario == "resize" or len(fault) == 3)

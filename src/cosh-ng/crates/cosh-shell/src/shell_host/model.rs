@@ -163,6 +163,7 @@ pub(crate) struct CaptureRepresentationReset {
     committed_emit: Arc<AtomicBool>,
     pub(crate) display_handoff: Arc<Mutex<Option<String>>>,
     pub(crate) display_failed: Arc<AtomicBool>,
+    pub(crate) display_prompt_restore_pending: Arc<AtomicBool>,
 }
 
 impl CaptureRepresentationReset {

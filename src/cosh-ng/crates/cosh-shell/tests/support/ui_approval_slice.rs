@@ -136,8 +136,10 @@ impl SliceLaunch {
     /// Worker launch used by the eligibility and fault cases (Task 2 onward).
     #[allow(dead_code)]
     pub(crate) fn activated() -> Self {
+        let worker_profile = std::env::var_os("COSH_ACCEPT_RELEASE_PROFILE").map(PathBuf::from);
         Self {
-            activation: true,
+            activation: worker_profile.is_none(),
+            worker_profile,
             ..Self::inline()
         }
     }
@@ -442,6 +444,12 @@ impl RealCoreApprovalHarness {
         });
     }
 
+    pub(crate) fn assert_native_prompt_refault_was_injected(&self) {
+        let hit = fs::read_to_string(self.root.path().join("output-hit"))
+            .expect("physical fault evidence");
+        assert!(hit.contains("EIO during native prompt recovery"));
+    }
+
     pub(crate) fn persistent_output_fault_and_recovery(
         &mut self,
         timed_out: bool,
@@ -601,10 +609,21 @@ impl RealCoreApprovalHarness {
             !screen.hide_cursor(),
             "native editable cursor must be visible before input"
         );
-        assert_eq!(cursor_line.trim_end(), NATIVE_PROMPT_MARKER);
+        assert_eq!(
+            cursor_line.trim_end(),
+            NATIVE_PROMPT_MARKER,
+            "row={row} col={col} screen={:?} faults={:?} transcript={:?}",
+            screen.contents(),
+            fs::read_to_string(self.root.path().join("output-hit")),
+            self.terminal.raw_transcript()
+        );
         assert_eq!(usize::from(col), NATIVE_PROMPT_MARKER.len() + 1);
         assert_eq!(screen.cell(row, 0).unwrap().fgcolor(), vt100::Color::Idx(2));
         eprintln!("native-prompt-recovered: row={row} col={col} line={cursor_line:?}");
+        eprintln!(
+            "physical-output-faults: {}",
+            fs::read_to_string(self.root.path().join("output-hit")).expect("fault evidence")
+        );
         self.terminal.send_line("printf 'slice-ordinary-%s\n' ok");
         assert!(self
             .terminal
@@ -716,6 +735,17 @@ impl RealCoreApprovalHarness {
                 .filter(|pid| exe_name(*pid) == WORKER_EXE)
                 .collect();
             if !workers.is_empty() || Instant::now() >= deadline {
+                if let Some(profile) = std::env::var_os("COSH_ACCEPT_RELEASE_PROFILE") {
+                    for &pid in &workers {
+                        self.ledger
+                            .worker_identities
+                            .push(production_worker_identity(
+                                pid,
+                                shell_pid,
+                                &PathBuf::from(&profile),
+                            ));
+                    }
+                }
                 self.ledger.write();
                 return workers;
             }
@@ -1216,6 +1246,11 @@ struct BashFacts {
 }
 
 pub(crate) fn real_cosh_core_path() -> PathBuf {
+    if let Some(profile) = std::env::var_os("COSH_ACCEPT_RELEASE_PROFILE") {
+        let core = PathBuf::from(profile).join("cosh-core");
+        assert!(core.is_file(), "missing release Core: {}", core.display());
+        return core;
+    }
     let core = std::env::current_exe()
         .expect("current test binary")
         .parent()
@@ -1490,6 +1525,14 @@ impl SliceTerminal {
         });
         let mut command = Command::new(binary);
         configure_raw_cli_command(&mut command);
+        command.env_remove("COSH_ACCEPT_RELEASE_PROFILE");
+        if !launch.activation {
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("COSH_UI_") {
+                    command.env_remove(key);
+                }
+            }
+        }
         if launch.output_fault_library.is_some() {
             command
                 .env_remove("COSH_SHELL_ISOLATED")
@@ -1522,7 +1565,12 @@ impl SliceTerminal {
         // `pre_exec` runs, and `setsid()` then fails with EPERM by POSIX rule.
         // `setsid()` alone already gives the child its own process group, which
         // is what the Drop handler's `kill(-pid)` needs.
-        let mut worker_sha256 = None;
+        let mut worker_sha256 = launch.worker_profile.as_ref().and_then(|profile| {
+            std::env::var_os("COSH_UI_EVIDENCE_DIR")?;
+            fs::read(profile.join(WORKER_EXE))
+                .ok()
+                .map(|bytes| sha256_hex(&bytes))
+        });
         if launch.activation {
             // Spec v2 §4: activation needs every test policy key; a missing one
             // keeps the inline path, which would turn a wiring RED into a
@@ -1856,11 +1904,22 @@ impl WorkerFault {
 }
 
 pub(crate) fn test_worker_profile(worker: &Path) -> tempfile::TempDir {
-    let profile = tempfile::tempdir().expect("isolated same-build worker profile");
+    let release = std::env::var_os("COSH_ACCEPT_RELEASE_PROFILE").map(PathBuf::from);
+    let profile = match &release {
+        Some(_) => tempfile::tempdir_in(std::env::var_os("HOME").expect("secure profile HOME")),
+        None => tempfile::tempdir(),
+    }
+    .expect("isolated same-build worker profile");
+    let source = release
+        .as_ref()
+        .map(|path| path.join("cosh-shell"))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_cosh-shell")));
     let shell = profile.path().join("cosh-shell");
-    fs::hard_link(env!("CARGO_BIN_EXE_cosh-shell"), &shell)
-        .or_else(|_| fs::copy(env!("CARGO_BIN_EXE_cosh-shell"), &shell).map(|_| ()))
-        .expect("copy real shell into test profile");
+    fs::copy(&source, &shell).expect("copy real shell into test profile");
+    if let Some(release) = release {
+        fs::copy(release.join("cosh-core"), profile.path().join("cosh-core"))
+            .expect("copy release Core into test profile");
+    }
     fs::copy(worker, profile.path().join(WORKER_EXE)).expect("copy injected sibling worker");
     profile
 }
@@ -2002,6 +2061,7 @@ pub(crate) struct ProcessLedger {
     processes: Vec<LedgerProcess>,
     socket_inodes: BTreeSet<u64>,
     tmp_roots: Vec<String>,
+    worker_identities: Vec<serde_json::Value>,
 }
 
 static SLICE_LABEL_SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -2032,6 +2092,7 @@ impl ProcessLedger {
             processes: Vec::new(),
             socket_inodes: BTreeSet::new(),
             tmp_roots: vec![root.display().to_string()],
+            worker_identities: Vec::new(),
         }
     }
 
@@ -2072,6 +2133,7 @@ impl ProcessLedger {
             })).collect::<Vec<_>>(),
             "socket_inodes": self.socket_inodes.iter().copied().collect::<Vec<_>>(),
             "tmp_roots": self.tmp_roots,
+            "worker_identities": self.worker_identities,
         })
     }
 
@@ -2312,4 +2374,43 @@ fn approve_is_focused(screen: &str) -> bool {
         return false;
     };
     approve < deny && deny < details && flat[..approve].chars().rev().take(8).any(|ch| ch == '>')
+}
+
+fn production_worker_identity(pid: u32, shell_pid: u32, profile: &Path) -> serde_json::Value {
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).expect("worker executable");
+    assert_eq!(executable, profile.join(WORKER_EXE));
+    let bytes = fs::read(&executable).expect("release worker ELF");
+    assert!(bytes.starts_with(b"\x7fELF"));
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("worker stat");
+    let (_, tail) = stat.rsplit_once(") ").expect("worker stat fields");
+    let fields: Vec<_> = tail.split_whitespace().collect();
+    assert_eq!(fields[1].parse::<u32>().expect("worker parent"), shell_pid);
+    assert_eq!(fields[2].parse::<u32>().expect("worker group"), pid);
+    assert_eq!(fields[3].parse::<u32>().expect("worker session"), pid);
+    assert_eq!(
+        fs::read_link(format!("/proc/{pid}/cwd")).expect("worker cwd"),
+        Path::new("/")
+    );
+    assert!(fs::read(format!("/proc/{pid}/environ"))
+        .expect("worker environment")
+        .is_empty());
+    let mut descriptors = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(format!("/proc/{pid}/fd")).expect("worker descriptors") {
+        let entry = entry.expect("worker descriptor entry");
+        let fd = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .expect("descriptor number");
+        descriptors.insert(fd, fs::read_link(entry.path()).expect("descriptor target"));
+    }
+    assert_eq!(
+        descriptors.keys().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    for fd in 0..3 {
+        assert_eq!(descriptors[&fd], Path::new("/dev/null"));
+    }
+    assert!(descriptors[&3].to_string_lossy().starts_with("socket:["));
+    serde_json::json!({"pid": pid, "parent": shell_pid, "session": pid, "cwd": "/", "environment_empty": true, "exe": executable, "sha256": sha256_hex(&bytes), "fds": descriptors})
 }

@@ -65,7 +65,7 @@ where
     }
     let action = action?;
     update_locked_input_mode(&mut mode, &action, acknowledged);
-    if reset.display_is_failed() {
+    if reset.display_is_failed() || reset.display_prompt_restore_pending() {
         *mode = RawInputMode::Hold;
     }
     Ok(action)

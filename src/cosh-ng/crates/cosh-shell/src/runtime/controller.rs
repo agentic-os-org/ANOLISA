@@ -82,7 +82,23 @@ fn render_raw_inline_event_view<W: Write>(
                 view.base(),
             );
         }
-        if reset.display_is_failed() {
+        if reset.display_prompt_restore_pending()
+            && !reset.display_is_failed()
+            && !inline_state
+                .control
+                .shell_handoff()
+                .pending_front()
+                .is_some_and(|handoff| handoff.request().token == token)
+        {
+            // Recovery consumes native prompt bytes before the provider's final output.
+            inline_state.agent_run.needs_prompt_after_run = true;
+            inline_state.agent_run.native_prompt_after_run = false;
+            return Ok(RawObserverAction::RestorePrompt {
+                ghost_text: None,
+                ghost_route: Default::default(),
+            });
+        }
+        if reset.display_is_failed() || reset.display_prompt_restore_pending() {
             crate::approval::slice_present::invalidate_representation(inline_state);
             if let Some(session) = inline_state.approval_slice.session.as_mut() {
                 session.relinquish_untrusted();

@@ -44,7 +44,7 @@ pub(crate) struct ApprovalActionKey {
 /// one case in the reject matrix red instead of silently widening the slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SliceRejectReason {
-    /// The debug slice was not activated, or activation was incomplete.
+    /// No worker policy was admitted.
     NotActivated,
     /// The request is no longer pending.
     NotPending,

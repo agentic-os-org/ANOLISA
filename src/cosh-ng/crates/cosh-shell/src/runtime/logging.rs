@@ -11,10 +11,8 @@ const LOG_BUDGET_BYTES: u64 = 20 * 1024 * 1024;
 /// Log file prefixes managed by the per-user budget.
 const LOG_PREFIXES: &[&str] = &["cosh-shell.log.", "cosh-core.log."];
 
-#[cfg(debug_assertions)]
 static FILE_SINK_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-#[cfg(debug_assertions)]
 pub(crate) fn file_sink_is_ready() -> bool {
     FILE_SINK_READY.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -71,7 +69,6 @@ pub(crate) fn init_logging(config_log_level: &str) {
             .with_ansi(false)
             .with_target(true)
             .init();
-        #[cfg(debug_assertions)]
         FILE_SINK_READY.store(true, std::sync::atomic::Ordering::Release);
     } else {
         tracing_subscriber::fmt()

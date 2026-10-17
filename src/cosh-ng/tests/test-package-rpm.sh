@@ -10,6 +10,10 @@ TMP="$(mktemp -d /tmp/cosh-ng-rpm-scriptlet-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --- structural anchors: the lifecycle sections must stay in the spec ---
+grep -Fxq \
+    'install -m 0755 target/release/cosh-ui-worker %{buildroot}%{_libexecdir_cosh}/cosh-ui-worker' \
+    "$SPEC"
+grep -Fxq '%{_libexecdir_cosh}/cosh-ui-worker' "$SPEC"
 grep -q '^%preun$' "$SPEC"
 grep -q '^%define cosh_replacement_ready ' "$SPEC"
 grep -q '^Requires(preun): ' "$SPEC"

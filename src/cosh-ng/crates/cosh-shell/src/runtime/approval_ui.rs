@@ -1,16 +1,10 @@
-//! Debug-only activation of the standalone approval UI slice.
-//!
-//! Activation is deliberately all-or-nothing: a missing key, an unparsable
-//! value, a relative worker path, or a width other than the slice constant all
-//! refuse activation, and the shell keeps its existing inline behaviour. There
-//! is no partial activation and no production threshold here.
+//! Bounded production activation and isolated debug policy for the approval worker.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ui::worker_protocol::ProtocolLimits;
 
-#[cfg(debug_assertions)]
 use crate::ui::surface_frame::SLICE_COLUMNS;
 
 // Gated with the only reader so a release binary cannot carry the key names at
@@ -22,13 +16,12 @@ const WORKER_PATH_KEY: &str = "COSH_UI_WORKER_PATH";
 #[cfg(debug_assertions)]
 const WIDTH_KEY: &str = "COSH_SHELL_WIDTH";
 
-/// State of the debug approval UI slice, independent from the approval facts
+/// State of the approval UI slice, independent from the approval facts
 /// themselves so a slice failure can never take an approval decision with it.
 #[derive(Default)]
 pub(crate) struct ApprovalSliceState {
     pub(crate) capture_representation_reset: crate::shell_host::CaptureRepresentationReset,
-    /// Parsed debug activation, `None` when the slice was not requested or the
-    /// request was incomplete.
+    /// Admitted production or debug policy; `None` retains inline presentation.
     pub(crate) activation: Option<crate::runtime::approval_ui::ApprovalSliceActivation>,
     /// Live worker session, present only between spawn and release.
     pub(crate) session: Option<Box<crate::approval::surface_session::TtyApprovalSurfaceSession>>,
@@ -98,6 +91,76 @@ pub(crate) struct ApprovalSliceActivation {
 }
 
 impl ApprovalSliceActivation {
+    pub(crate) fn for_current_process() -> Result<Option<Self>, ActivationError> {
+        #[cfg(debug_assertions)]
+        {
+            Self::from_lookup(&|key| std::env::var(key).ok())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Ok(std::env::current_exe()
+                .ok()
+                .and_then(|shell| Self::from_installed_shell(&shell)))
+        }
+    }
+
+    pub(crate) fn from_installed_shell(shell: &std::path::Path) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            if !shell.is_absolute() {
+                return None;
+            }
+            let shell = shell.canonicalize().ok()?;
+            let owner = std::fs::metadata(&shell).ok()?.uid();
+            let worker = shell.with_file_name("cosh-ui-worker");
+            let metadata = std::fs::symlink_metadata(&worker).ok()?;
+            if !metadata.is_file()
+                || metadata.uid() != owner
+                || metadata.mode() & 0o6022 != 0
+                || metadata.mode() & 0o111 == 0
+            {
+                return None;
+            }
+            for directory in worker.parent()?.ancestors() {
+                let metadata = std::fs::symlink_metadata(directory).ok()?;
+                if !metadata.is_dir()
+                    || (metadata.uid() != 0 && metadata.uid() != owner)
+                    || metadata.mode() & 0o022 != 0
+                {
+                    return None;
+                }
+            }
+            Some(Self::production_policy(worker))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = shell;
+            None
+        }
+    }
+
+    pub(super) fn production_policy(worker_path: PathBuf) -> Self {
+        Self {
+            worker_path,
+            limits: ProtocolLimits {
+                max_payload_bytes: 1_048_576,
+                max_draw_ops: 4096,
+                max_text_bytes: 16_384,
+            },
+            max_surface_rows: 24,
+            columns: SLICE_COLUMNS,
+            handshake_timeout: Duration::from_secs(5),
+            render_timeout: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_millis(100),
+            heartbeat_timeout: Duration::from_secs(3),
+            backpressure_timeout: Duration::from_secs(5),
+            shutdown_timeout: Duration::from_secs(2),
+            failure_limit: 3,
+        }
+    }
+
     /// Reads the activation contract through `lookup`.
     ///
     /// Returns `Ok(None)` when the slice is not requested at all, so an
@@ -154,11 +217,6 @@ impl ApprovalSliceActivation {
     }
 
     /// Coordinator policy derived from this activation.
-    ///
-    /// Not debug-gated: it maps fields the struct already holds and contains none
-    /// of the activation key strings, so compiling it into a release build leaks
-    /// nothing. Gating it would break release callers that merely need to name the
-    /// type.
     pub(crate) fn coordinator_policy(&self) -> crate::runtime::ui_coordinator::CoordinatorPolicy {
         crate::runtime::ui_coordinator::CoordinatorPolicy {
             protocol_limits: self.limits,

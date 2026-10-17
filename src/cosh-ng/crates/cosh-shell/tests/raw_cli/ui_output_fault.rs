@@ -72,3 +72,26 @@ fn committed_handoff_survives_gate_withdraw_write_failure_after_audit_resolution
         .check_inline_baseline()
         .expect("physical Gate withdrawal failure must not abandon the approved effect");
 }
+
+#[test]
+fn native_prompt_recovers_without_input_after_a_second_physical_write_failure() {
+    let fault = OutputFault::build_with_prompt_refault();
+    let mut harness = RealCoreApprovalHarness::spawn(SliceLaunch {
+        server_script: ServerScript::DelayedEffect,
+        output_fault_library: Some(fault.path().to_owned()),
+        rows: 32,
+        ..SliceLaunch::activated()
+    });
+    assert!(harness.request_approval_card());
+    assert_eq!(
+        harness
+            .worker_descendants_within(std::time::Duration::from_secs(5))
+            .len(),
+        1
+    );
+    let observation = harness.persistent_output_fault_and_recovery(false);
+    observation
+        .check_inline_baseline()
+        .expect("a second physical failure must retain Bash and restore its original prompt");
+    harness.assert_native_prompt_refault_was_injected();
+}

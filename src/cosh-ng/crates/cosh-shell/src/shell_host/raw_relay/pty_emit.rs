@@ -221,43 +221,65 @@ pub(super) fn resolve_pty_emit<W: Write>(
             ghost_text,
             ghost_route,
         } => {
-            output.flush()?;
+            let restore = RawObserverAction::RestorePrompt {
+                ghost_text: ghost_text.clone(),
+                ghost_route: ghost_route.clone(),
+            };
             let raw_prompt = parser.last_prompt_display();
             let prompt = prompt_replay_bytes(raw_prompt);
             if prompt.is_empty() {
-                return Ok(RawObserverAction::RestorePrompt {
-                    ghost_text,
-                    ghost_route,
-                });
+                return Ok(restore);
             }
-            if parser.display_position() > *display_start {
-                write_pending_display(
-                    parser,
-                    output,
-                    display_start,
-                    prompt_replay,
-                    prompt_presentation,
-                )?;
-            } else {
-                prompt_presentation.write_restored_prompt(output, prompt)?;
-                mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
-                prompt_replay.arm_for_replay(raw_prompt);
+            let result = (|| {
+                let mut physical = super::degraded::PhysicalDisplayWriter(output);
+                physical.flush()?;
+                if parser.display_position() > *display_start {
+                    write_pending_display(
+                        parser,
+                        &mut physical,
+                        display_start,
+                        prompt_replay,
+                        prompt_presentation,
+                    )?;
+                } else {
+                    prompt_presentation.write_restored_prompt(&mut physical, prompt)?;
+                    mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
+                    prompt_replay.arm_for_replay(raw_prompt);
+                }
+                if let Some(text) = &ghost_text {
+                    let selection = matches!(
+                        ghost_route,
+                        crate::raw_input::PromptGhostRoute::AgentSelection { .. }
+                    );
+                    write_prompt_ghost(&mut physical, text, selection)?;
+                }
+                physical.flush()
+            })();
+            if let Err(error) = result {
+                match reset {
+                    Some(reset) => reset.defer_physical_error(error)?,
+                    None => return Err(error),
+                }
+                return Ok(restore);
             }
-            if let Some(text) = &ghost_text {
-                let selection = matches!(
-                    ghost_route,
-                    crate::raw_input::PromptGhostRoute::AgentSelection { .. }
-                );
+            let recovered = reset.is_some_and(|reset| reset.display_prompt_restore_pending());
+            if recovered {
+                reset
+                    .expect("recovered display lease")
+                    .end_display_handoff();
+            } else if let Some(text) = ghost_text {
                 if let Ok(mut mode) = input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
-                        text: text.clone(),
+                        text,
                         route: ghost_route,
                     };
                 }
-                write_prompt_ghost(output, text, selection)?;
             }
-            output.flush()?;
-            Ok(RawObserverAction::Continue)
+            Ok(if recovered {
+                RawObserverAction::HoldShellOutput
+            } else {
+                RawObserverAction::Continue
+            })
         }
         other => Ok(other),
     }

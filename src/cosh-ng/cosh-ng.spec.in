@@ -41,6 +41,7 @@ install -d %{buildroot}%{_libexecdir_cosh}
 install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
 install -m 0755 target/release/cosh-gateway %{buildroot}%{_libexecdir_cosh}/cosh-gateway
 install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
+install -m 0755 target/release/cosh-ui-worker %{buildroot}%{_libexecdir_cosh}/cosh-ui-worker
 
 # Install the rendered system-level Gateway template.
 install -d %{buildroot}%{_unitdir}
@@ -101,6 +102,7 @@ install -m 0644 skills/manage-task-checkpoints/SKILL.md \
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
+%{_libexecdir_cosh}/cosh-ui-worker
 %{_unitdir}/cosh-gateway@.service
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 %{_datadir}/anolisa/skills/manage-task-checkpoints/

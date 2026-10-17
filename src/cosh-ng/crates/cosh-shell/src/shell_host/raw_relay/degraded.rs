@@ -67,10 +67,15 @@ impl CaptureRepresentationReset {
     pub(crate) fn display_is_failed(&self) -> bool {
         self.display_failed.load(Ordering::Acquire)
     }
+    pub(crate) fn display_prompt_restore_pending(&self) -> bool {
+        self.display_prompt_restore_pending.load(Ordering::Acquire)
+    }
     pub(crate) fn defer_physical_error(&self, error: io::Error) -> io::Result<()> {
         if !physical_error(&error) || self.display_handoff_token().is_none() {
             return Err(error);
         }
+        self.display_prompt_restore_pending
+            .store(true, Ordering::Release);
         if !self.display_failed.swap(true, Ordering::AcqRel) {
             tracing::warn!(error = ?error, "approved handoff physical display failed; preserving OSC settlement");
         }
@@ -78,10 +83,14 @@ impl CaptureRepresentationReset {
         Ok(())
     }
     pub(crate) fn mark_committed_display_failure(&self) {
+        self.display_prompt_restore_pending
+            .store(true, Ordering::Release);
         self.display_failed.store(true, Ordering::Release);
         self.signal();
     }
     pub(crate) fn end_display_handoff(&self) {
+        self.display_prompt_restore_pending
+            .store(false, Ordering::Release);
         *self.display_handoff.lock().expect("display handoff lock") = None;
     }
 }
@@ -141,7 +150,7 @@ pub(super) fn update_input_mode_after_display(
     action: &crate::raw_input::RawObserverAction,
     acknowledged: Option<u64>,
 ) {
-    if reset.display_is_failed() {
+    if reset.display_is_failed() || reset.display_prompt_restore_pending() {
         if let Ok(mut mode) = mode.lock() {
             *mode = RawInputMode::Hold;
         }

@@ -30,6 +30,17 @@ pub(crate) fn physical_failures_require_an_emitted_token_and_never_mask_other_er
     let mut healthy = Vec::new();
     assert!(recover(&reset, &mut healthy, 24).expect("actual fresh flush"));
     assert!(!reset.display_is_failed());
+    update_input_mode_after_display(
+        &reset,
+        &mode,
+        &crate::raw_input::RawObserverAction::Continue,
+        None,
+    );
+    assert_eq!(
+        *mode.lock().unwrap(),
+        RawInputMode::Hold,
+        "a fresh region cannot release input before the original prompt is flushed"
+    );
     assert!(healthy.starts_with(b"\x18"));
     assert!(
         healthy.windows(6).any(|bytes| bytes == b"\x1b[?25h"),
