@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
+# Shared state is consumed by the scripts sourcing this file.
+# shellcheck disable=SC2034
 # _common.sh — Shared helpers for codex adapter scripts.
 # Source this file from install.sh and uninstall.sh.
+
+# The manifest and listing parser must agree on the registered identity and label.
+MARKETPLACE_NAME="anolisa-tokenless"
+MARKETPLACE_DISPLAY_NAME="ANOLISA Tokenless"
+PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
+PLUGIN_NAME="${PLUGIN_ID%%@*}"
 
 # Resolve the codex CLI binary.
 resolve_codex() {
