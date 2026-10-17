@@ -1389,13 +1389,27 @@ where
 /// today, so the healed restore changes no outcome, it only removes the
 /// duplicate write. Pure (no I/O) so both rules are unit-testable.
 fn heal_alias_duplicates(data: &mut RollbackData) {
-    // Group the entry keys by the kernel path they resolve to.
+    heal_alias_duplicates_with(data, |path| Path::new(path).exists());
+}
+
+/// [`heal_alias_duplicates`] with the existence probe injectable, so the
+/// stale-path identity below is assertable against a synthetic ledger.
+fn heal_alias_duplicates_with(data: &mut RollbackData, path_exists: impl Fn(&str) -> bool) {
+    // Group the entry keys by the kernel file they name with the SAME identity
+    // [`matching_record`] and [`merge_entries`] use: the recorded path, or the
+    // key's own path when the recorded one is gone (a pre-5448 dotted-interface
+    // translation). Grouping by the recorded path alone left a stale record
+    // and its live twin in separate groups, so the merge could not collapse
+    // them and the stale record's intermediate value survived into
+    // persistence and restore.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (key, entry) in &data.entries {
-        groups
-            .entry(canonicalize_path(&entry.path))
-            .or_default()
-            .push(key.clone());
+        let identity = if path_exists(&entry.path) {
+            canonicalize_path(&entry.path)
+        } else {
+            canonicalize_path(&param_to_path(key))
+        };
+        groups.entry(identity).or_default().push(key.clone());
     }
     for (_path, mut keys) in groups {
         if keys.len() < 2 {
@@ -6214,6 +6228,39 @@ mod tests {
         assert_eq!(entry.previous, "60");
         assert_eq!(entry.applied, "20");
         assert_eq!(entry.category, Some(Category::Security));
+    }
+
+    #[test]
+    fn heal_alias_duplicates_collapses_a_stale_record_and_its_live_twin() {
+        // A pre-5448 ledger holds the dotted interface spelling translated
+        // dot-to-slash (the file it names does not exist) while a later merge
+        // under the other spelling recorded the live file. Grouping by the
+        // recorded path alone left them apart, so the stale record's
+        // intermediate value survived into persistence and restore.
+        let stale = "/proc/sys/net/ipv4/conf/Br0/100/forwarding";
+        let live = "/proc/sys/net/ipv4/conf/Br0.100/forwarding";
+        let data: RollbackData = serde_json::from_str(&format!(
+            r#"{{"version":1,"entries":{{
+                "net.ipv4.conf.Br0.100.forwarding":{{
+                    "previous":"0","applied":"1","path":"{stale}"
+                }},
+                "net/ipv4/conf.Br0.100/forwarding":{{
+                    "previous":"1","applied":"2","path":"{live}"
+                }}
+            }}}}"#
+        ))
+        .unwrap();
+        let mut healed = data;
+        heal_alias_duplicates_with(&mut healed, |path| path == live);
+        assert_eq!(
+            healed.entries.len(),
+            1,
+            "one kernel file, one record: {:?}",
+            healed.entries.keys().collect::<Vec<_>>()
+        );
+        let entry = healed.entries.values().next().unwrap();
+        assert_eq!(entry.previous, "0", "the pristine original survives");
+        assert_eq!(entry.applied, "2", "the newest value survives");
     }
 
     #[test]
