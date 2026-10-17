@@ -220,8 +220,9 @@ export class McpStdioClient {
       detached: false,
     });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
-      this.handleData(chunk.toString("utf8"));
+    this.proc.stdout?.setEncoding("utf8");
+    this.proc.stdout?.on("data", (chunk: string) => {
+      this.handleData(chunk);
     });
 
     this.proc.stderr?.on("data", (chunk: Buffer) => {
