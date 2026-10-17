@@ -68,6 +68,19 @@ anolisa status os-skills
 
 ---
 
+## XLSX 行编辑
+
+使用已安装的 `xlsx` 技能目录，在解包后的工作簿上运行行移动工具：
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 2
+```
+
+工作表公式中的 `SUM(5:10)` 会变成 `SUM(7:12)`，图表的公式数据源也会同步
+更新。`$5:$10` 等整行引用会保留 `$` 标记和工作表限定符。行端点限制在
+1–1048576 内；字符串字面值和结构化表格标签不会作为整行引用匹配。
+命名范围和外部链接 XML 部件仍需人工检查。编辑后应重新打包并验证工作簿。
+
 ## 配置
 
 配置文件：`~/.config/os-skills/config.toml`
