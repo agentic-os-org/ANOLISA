@@ -8,13 +8,48 @@ Usage:
 """
 
 import json
-import sys
 import os
+import stat
+import sys
+import tempfile
 
 FORBIDDEN_FIELDS = {"type", "transport", "disabled", "alwaysAllow", "scope"}
 
 
-def merge(json_str, config_path):
+def _write_config_atomic(data: dict, config_path: str) -> None:
+    """Publish complete JSON without truncating the previous configuration."""
+    # Keep the old open()-based behavior when the config path is a symlink.
+    target_path = os.path.realpath(config_path)
+    directory = os.path.dirname(target_path)
+    os.makedirs(directory, exist_ok=True)
+    staging_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=".mcp-config-",
+            suffix=".tmp",
+            delete=False,
+        ) as staging_file:
+            staging_path = staging_file.name
+            json.dump(data, staging_file, indent=2, ensure_ascii=False)
+            staging_file.write("\n")
+            staging_file.flush()
+            os.fsync(staging_file.fileno())
+
+        if os.path.exists(target_path):
+            os.chmod(staging_path, stat.S_IMODE(os.stat(target_path).st_mode))
+        os.replace(staging_path, target_path)
+        staging_path = None
+    finally:
+        if staging_path is not None:
+            if os.name == "nt":
+                os.chmod(staging_path, stat.S_IWRITE)
+            os.unlink(staging_path)
+
+
+def merge(json_str: str, config_path: str) -> None:
     """Parse input JSON, merge mcpServers into existing config, write back."""
     try:
         new = json.loads(json_str)
@@ -50,10 +85,11 @@ def merge(json_str, config_path):
         existing["mcp"].update(new["mcp"])
 
     # Write
-    os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    try:
+        _write_config_atomic(existing, config_path)
+    except (OSError, UnicodeError) as error:
+        print(f"ERROR: Could not write {config_path}: {error}", file=sys.stderr)
+        sys.exit(1)
 
     print(json.dumps(existing, indent=2, ensure_ascii=False))
     print(f"\nWritten to: {config_path}", file=sys.stderr)
