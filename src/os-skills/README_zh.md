@@ -46,6 +46,8 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+通过明确的分析行数预算检查大型电子表格，详见[有界分析参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#有界电子表格分析)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
