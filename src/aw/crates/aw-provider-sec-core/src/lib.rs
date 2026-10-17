@@ -1,6 +1,7 @@
 //! AW Provider projection over the public agent-sec-cli scan-code command.
 
 mod config;
+pub mod health;
 mod scan;
 
 use std::io::{Read, Write};
@@ -150,6 +151,9 @@ fn remaining_budget(
 /// Transport/input failures do not represent security policy decisions.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The explicit diagnostic requires absolute paths and a nonzero deadline.
+    #[error("health diagnostic requires absolute helper/socket paths and a positive timeout")]
+    InvalidHealthArguments,
     /// Stdio could not be read or written.
     #[error("AW Provider stdio failed: {0}")]
     Io(#[from] std::io::Error),

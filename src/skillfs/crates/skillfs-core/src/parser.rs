@@ -186,7 +186,7 @@ fn parse_frontmatter(
     dir_name: &str,
     issues: &mut Vec<String>,
 ) -> SkillMetadata {
-    if yaml_str.is_empty() {
+    if yaml_str.trim().is_empty() {
         if !dir_name.is_empty() {
             issues.push("missing frontmatter".to_string());
         }
@@ -625,6 +625,35 @@ Search the web.
 
         assert_eq!(entry.metadata.name, "web-search"); // from dir_name
         assert!(entry.parse_status.is_degraded());
+    }
+
+    #[test]
+    fn whitespace_only_frontmatter_is_missing_not_invalid() {
+        // A blank line that keeps a stray space or tab is the same shape as
+        // an exactly empty block: missing frontmatter (degraded), never an
+        // invalid-YAML error that aborts validate and mounts.
+        for yaml in [" ", "\t", "  "] {
+            let content = format!("---\n{yaml}\n---\nBody\n");
+            let entry = parse_skill_md(&content, "demo");
+            assert!(
+                !entry.parse_status.is_error(),
+                "whitespace-only frontmatter {:?} must not be invalid YAML: {:?}",
+                yaml,
+                entry.parse_status
+            );
+            assert!(
+                entry.parse_status.is_degraded(),
+                "whitespace-only frontmatter {:?} must degrade like an empty block: {:?}",
+                yaml,
+                entry.parse_status
+            );
+            assert!(
+                format!("{:?}", entry.parse_status).contains("missing frontmatter"),
+                "whitespace-only frontmatter {:?} must report missing frontmatter: {:?}",
+                yaml,
+                entry.parse_status
+            );
+        }
     }
 
     #[test]

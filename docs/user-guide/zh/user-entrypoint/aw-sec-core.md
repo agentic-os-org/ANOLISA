@@ -44,6 +44,48 @@ aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
 两个路径均必填且必须为绝对路径，`--help` 输出用法。进程从 stdin 读取一份以 EOF
 结束的 AW Provider JSON 请求，并向 stdout 写入一份响应。通常由 Host 启动。
 
+## 包内后台与显式健康诊断
+
+Preview sec-core Provider 包包含同一次源码构建的 `agent-sec-cli`、
+`agent-sec-daemon` 和 `agent-sec-daemon-health`。拆分包和 all-in-one 均通过
+组件回执校验它们的哈希和执行权限。官方 systemd/配置模板作为参考资产放在
+`share/aw/providers/sec-core/`；安装 AW 包不会注册服务或修改 `/etc`。
+
+已有 root `agent-sec-core.service` 时复用其 socket。新后台按照
+[sec-core 安装指南](../agent-security/agent-sec-core/QUICKSTART.md)安装，服务生命周期
+由正式系统包负责。目前组件清单声明 Linux x86_64；本地 AW ARM64 包不代表
+sec-core 已有正式 ARM64 发行。源码 `make install-core-v2` 可通过
+`V2_BIN_BUILD_DIR` 读取本包二进制，但会覆盖目标系统二进制和 unit，不能直接用于
+已有受管理安装。root 服务的执行路径不得指向用户可写的 AW 前缀。
+
+安装器或诊断消费者可显式查询包内 helper：
+
+```bash
+AW_SEC_PROVIDER="$AW_PREVIEW_PREFIX/libexec/aw/providers/sec-core"
+"$AW_SEC_PROVIDER/aw-provider-sec-core" --health \
+  --helper "$AW_SEC_PROVIDER/agent-sec-daemon-health" \
+  --socket /run/agent-sec-core/daemon.sock
+```
+
+这是可选组件诊断接口，不增加 Agent 启动步骤；日常仍使用 `aw run`。
+它只调用已有 `daemon.health` 探测，进程期限为一秒，每路输出限制为 4 KiB，
+不会启动 daemon、扫描代码或执行目标准入。helper 校验后台的 root peer 凭据，
+AW 移除 sec-core 测试绕过环境变量。helper 非零退出、无效/不健康响应、非 root
+后台、组件缺失和超时均保持 unavailable；不返回 helper 私有输出。
+
+独立 `aw-sec-core-health/v1alpha1` JSON schema 位于
+`src/aw/crates/aw-provider-sec-core/schemas/health-v1alpha1.schema.json`，
+`tests/fixtures/` 包含可达和不可用 fixture。`helper_installed` 只说明文件存在；
+`socket_configured` 只说明传入了绝对 socket 路径。认证健康成功后才返回
+`backend: authenticated_reachable`。`admission` 和 `check_result` 保持
+`unknown`：后台健康和近期执行的 `status=ok` 都不能证明目标准入或扫描无风险。
+现有 `aw inspect`、Provider view 协议及其 unknown 字段不变。诊断结果不会替代
+每次调用的 `on_error` 配置；后台失联时 `on_error: block` 继续阻断。
+
+AW 卸载只移除本包回执拥有的 helper/模板，保留独立管理的系统服务、`/etc`
+配置及后台数据。后台升级/移除交给拥有它的系统包；AW 暂无自动服务安装、
+升级或卸载衔接。
+
 ## 配置 Provider
 
 复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-sec-core/examples/aw.yaml)为

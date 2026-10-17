@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anolisa.ai/schemas/aw-sec-core-health/v1alpha1",
+  "title": "Explicit sec-core backend health diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "helper_installed",
+    "socket_configured",
+    "backend",
+    "admission",
+    "check_result",
+    "code"
+  ],
+  "properties": {
+    "api_version": {
+      "const": "aw-sec-core-health/v1alpha1"
+    },
+    "helper_installed": {
+      "type": "boolean"
+    },
+    "socket_configured": {
+      "const": true
+    },
+    "backend": {
+      "enum": [
+        "authenticated_reachable",
+        "unavailable"
+      ]
+    },
+    "admission": {
+      "const": "unknown"
+    },
+    "check_result": {
+      "const": "unknown"
+    },
+    "code": {
+      "enum": [
+        null,
+        "component_missing",
+        "probe_failed",
+        "deadline_exceeded",
+        "probe_transport_error"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "authenticated_reachable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "helper_installed": {
+            "const": true
+          },
+          "code": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

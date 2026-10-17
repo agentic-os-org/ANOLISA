@@ -5,7 +5,7 @@ use super::{
     read_file, readiness, Arguments, Exit, Result,
 };
 use aw_exec::CommandSpec;
-use aw_service::{launch_service, Binding, Operation};
+use aw_service::{launch_service, Binding, Operation, RunOutcome};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -138,6 +138,8 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");
     let mut instance = None;
+    let mut observing = false;
+    let mut started = false;
     let executed: Result<Exit> = (|| {
         let plan = prepared.configure(&LaunchContext {
             files: &artifacts,
@@ -160,6 +162,23 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             Err(error) => return interrupted().map(Ok).unwrap_or_else(|| Err(error.into())),
         };
         instance = Some(binding.instance_id.clone());
+        if agent.get("evidence").is_some() {
+            let observation = match service.client.call_cancellable(
+                Operation::StartObservation {
+                    instance_id: binding.instance_id.clone(),
+                },
+                Instant::now() + Duration::from_secs(3),
+                &CANCELLED,
+            ) {
+                Ok(value) => value,
+                Err(error) => return interrupted_error(error.into()),
+            };
+            observing = observation["audit_key"].is_string();
+            eprintln!(
+                "AW observation {}; query {}; coverage unknown; audit {}",
+                observation["source_state"], observation["query_state"], observation["audit_key"]
+            );
+        }
         let hook_binding = HookBinding {
             adapter: name.into(),
             binding,
@@ -177,12 +196,62 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             service.paths.socket.display(),
             service.pid
         );
-        let status = readiness::run(&plan.command, &SIGNAL, plan.readiness)?;
+        let mut reported: Result<()> = Ok(());
+        let status = readiness::run(&plan.command, &SIGNAL, plan.readiness, |pid| {
+            if observing {
+                reported = service
+                    .client
+                    .call(
+                        Operation::ReportRun {
+                            instance_id: hook_binding.binding.instance_id.clone(),
+                            outcome: RunOutcome::Started { pid },
+                        },
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .map(|_| ())
+                    .map_err(Into::into);
+                if reported.is_err() {
+                    let _ = SIGNAL.compare_exchange(
+                        0,
+                        libc::SIGTERM,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    );
+                }
+            }
+            started = true;
+        });
+        reported?;
+        let status = status?;
         Ok(match status.code() {
             Some(code) => Exit::Code(code),
             None => Exit::Signal(status.signal().ok_or("Agent exit has no status")?),
         })
     })();
+    let reported = instance
+        .as_ref()
+        .filter(|_| observing)
+        .map(|instance_id| {
+            let outcome = match (&executed, started) {
+                (Ok(Exit::Code(code)), true) => RunOutcome::Exited {
+                    code: Some(*code),
+                    signal: None,
+                },
+                (Ok(Exit::Signal(signal)), true) => RunOutcome::Exited {
+                    code: None,
+                    signal: Some(*signal),
+                },
+                _ => RunOutcome::Failed,
+            };
+            service.client.call(
+                Operation::ReportRun {
+                    instance_id: instance_id.clone(),
+                    outcome,
+                },
+                Instant::now() + Duration::from_secs(2),
+            )
+        })
+        .transpose();
     let released = instance
         .map(|instance_id| {
             service.client.call(
@@ -193,9 +262,20 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         .transpose();
     let native_cleaned = prepared.finish();
     let cleaned = artifacts.cleanup();
-    released?;
+    if let Some(released) = released? {
+        if let Some(observation) = released.get("observation").filter(|value| !value.is_null()) {
+            eprintln!(
+                "AW observation finished {}; reason {}; gaps {}; audit {}",
+                observation["source_state"],
+                observation["source_reason"],
+                observation["gaps"],
+                observation["audit_key"]
+            );
+        }
+    }
     native_cleaned?;
     cleaned?;
+    reported?;
     executed
 }
 

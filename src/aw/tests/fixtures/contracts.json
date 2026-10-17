@@ -565,5 +565,135 @@
         "digest": "c052d8a67c17a925cc738e1e8b59d4842d18b679a9c9ddd3249407ad8bd64305"
       }
     ]
+  },
+  "evidence-v1": {
+    "schema_version": "aw.evidence/v1",
+    "evidence_id": "7f5c329a28a5a25d9b935d5f32ac78da65256f97299162611f40b8f067df938c",
+    "subject": {
+      "generation": "fixture-generation",
+      "config_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+      "binding_id": "target",
+      "instance_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "event_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "adapter": "qoder"
+    },
+    "source": {
+      "component": "aw",
+      "scope": "fixture-generation",
+      "instance_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "version": "aw-service/v1alpha3",
+      "record_ref": "3333333333333333333333333333333333333333333333333333333333333333",
+      "revision": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0"
+    },
+    "association": {
+      "status": "verified",
+      "basis": "native_callback",
+      "session_id": "session-1",
+      "tool_call_id": "call-1"
+    },
+    "times": {
+      "occurred_at": null,
+      "received_at_ms": 100,
+      "cutoff_at_ms": 200
+    },
+    "kind": "native.tool_result",
+    "content_ref": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0",
+    "coverage": {
+      "status": "unknown",
+      "gaps": [
+        "coverage_unknown"
+      ]
+    },
+    "trust": "trusted_adapter",
+    "derivation": "native_report",
+    "execution_ref": "2cf5d7ed16e8fcdac330613fe54b547888e68645b9dd541253be725d5b9adba7"
+  },
+  "evidence-context-v1": {
+    "schema_version": "aw.evidence-context/v1",
+    "subject": {
+      "generation": "fixture-generation",
+      "config_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+      "binding_id": "target",
+      "instance_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "event_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "adapter": "qoder"
+    },
+    "candidate_revision": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0",
+    "constraints_ref": "4cc548bc0c5a4b9ec66ccad311f9ec4597874438bd251f96d360d9499afdb7dd",
+    "projection_version": "aw.evidence-projection/v1",
+    "redaction_version": "selected-fields-no-redaction/v1",
+    "original_deadline_ns": "9007199254740992",
+    "cutoff_at_ms": 200,
+    "limits": {
+      "max_items": 32,
+      "max_bytes": 262144,
+      "query_bytes": 1048576,
+      "query_timeout_ms": 1000
+    },
+    "source_status": "not_configured",
+    "source_revision": null,
+    "gaps": [
+      "source_not_configured"
+    ],
+    "evidence": [
+      {
+        "schema_version": "aw.evidence/v1",
+        "evidence_id": "7f5c329a28a5a25d9b935d5f32ac78da65256f97299162611f40b8f067df938c",
+        "subject": {
+          "generation": "fixture-generation",
+          "config_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+          "binding_id": "target",
+          "instance_id": "2222222222222222222222222222222222222222222222222222222222222222",
+          "event_id": "3333333333333333333333333333333333333333333333333333333333333333",
+          "adapter": "qoder"
+        },
+        "source": {
+          "component": "aw",
+          "scope": "fixture-generation",
+          "instance_id": "2222222222222222222222222222222222222222222222222222222222222222",
+          "version": "aw-service/v1alpha3",
+          "record_ref": "3333333333333333333333333333333333333333333333333333333333333333",
+          "revision": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0"
+        },
+        "association": {
+          "status": "verified",
+          "basis": "native_callback",
+          "session_id": "session-1",
+          "tool_call_id": "call-1"
+        },
+        "times": {
+          "occurred_at": null,
+          "received_at_ms": 100,
+          "cutoff_at_ms": 200
+        },
+        "kind": "native.tool_result",
+        "content_ref": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0",
+        "coverage": {
+          "status": "unknown",
+          "gaps": [
+            "coverage_unknown"
+          ]
+        },
+        "trust": "trusted_adapter",
+        "derivation": "native_report",
+        "execution_ref": "2cf5d7ed16e8fcdac330613fe54b547888e68645b9dd541253be725d5b9adba7"
+      }
+    ],
+    "contents": [
+      {
+        "encoding": "json-utf8",
+        "digest": "5667c65fd4e892ba7d94dd771f5a1b5180c15d76d1fed6350c7648b30b137fd0",
+        "text": "{\"name\":\"tool.after\",\"tool\":{\"call_id\":\"call-1\",\"input\":{\"ratio\":0.125,\"标签\":\"data\"},\"result\":\"done\"}}"
+      },
+      {
+        "encoding": "json-utf8",
+        "digest": "4cc548bc0c5a4b9ec66ccad311f9ec4597874438bd251f96d360d9499afdb7dd",
+        "text": "{\"events\":{},\"execution\":{\"guarantee\":\"native_hook\"}}"
+      }
+    ],
+    "execution_refs": [
+      "2cf5d7ed16e8fcdac330613fe54b547888e68645b9dd541253be725d5b9adba7"
+    ],
+    "context_revision": "a99aeeccf39f1573ebf333080974d9de450aeb06ab2077e8821659ba0279bb34"
   }
 }

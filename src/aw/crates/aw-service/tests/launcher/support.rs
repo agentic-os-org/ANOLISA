@@ -151,6 +151,34 @@ impl Fixture {
         );
         serde_json::from_slice(&output.stdout).unwrap()
     }
+    // Used by observation integration binaries, not every shared-harness consumer.
+    #[allow(dead_code)]
+    pub fn observation(&self, document: &mut Value, target: &str) {
+        document["spec"]["agents"][target]["evidence"] = json!({
+            "source_id":"fixture", "endpoint":"http://127.0.0.1:1", "token_file":self.root.join("absent-source-token"),
+            "query_timeout_ms":1000, "query_bytes":1048576, "max_items":32, "max_bytes":262144,
+        });
+    }
+    // Used by observation integration binaries, not every shared-harness consumer.
+    #[allow(dead_code)]
+    pub fn run_audit(&self, service: &Service, output: &Output) -> Value {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let key = stderr
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("AW observation ")
+                    .and_then(|line| line.rsplit_once("audit "))
+                    .map(|(_, key)| key.trim_matches('"'))
+            })
+            .expect("run audit key");
+        service
+            .client
+            .call(
+                Operation::Audit { key: key.into() },
+                Instant::now() + TIMEOUT,
+            )
+            .unwrap()
+    }
     pub fn clean_launches(&self) {
         assert!(!fs::read_dir(self.root.join("state"))
             .unwrap()

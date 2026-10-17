@@ -166,7 +166,9 @@
                     "openclaw",
                     "hermes",
                     "qwenpaw",
-                    "pi"
+                    "pi",
+                    "claude-sdk",
+                    "agentscope"
                   ]
                 },
                 "binding_id": {

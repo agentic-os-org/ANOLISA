@@ -556,6 +556,11 @@ node npm/scripts/package-npm.js --all
 
 ## 查看 Token 节省明细
 
+`tokenless stats serve --data-dir /var/lib/tokenless --credential-file /run/secrets/tokenless-query`
+提供独立的只读 HTTP 查询服务，默认监听 `127.0.0.1:7397`，通过 Bearer 凭据校验。
+两个文件路径为部署占位值，统计数据库必须已存在。
+接口、分页和内容访问约定见 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#只读-http-查询)。
+
 `stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
 `diff` 用于解释估算 Token 节省，并只突出发生变化的行：
 

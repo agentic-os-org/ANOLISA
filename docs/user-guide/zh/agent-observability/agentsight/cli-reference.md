@@ -148,10 +148,11 @@ AgentSight 仪表盘状态
 
 ```
 FLAGS:
-        --json           Output as JSON
+        --json                          Output as JSON
 OPTIONS:
-        --db <db>        Override the sessions database path
-        --last <last>    Query the last N hours (default: 24) [default: 24]
+        --db <db>                       Override the sessions database path
+        --last <last>                   Query the last N hours (default: 24) [default: 24]
+        --tokenless-db <tokenless-db>   Override the tokenless stats database path
 ```
 
 ```bash
@@ -171,7 +172,9 @@ Tokenless     10% saved (110.0K -> 99.0K, 20 ops)
 ```
 
 `--db` 改为读取数据库副本（例如从别的机器拷来的），不再读默认目录，因此无需 `sudo`，也不会混入在跑
-主机的数据。中断库从同一目录解析（`interruption_events.db`），与默认布局一致。
+主机的数据。中断库从同一目录解析（`interruption_events.db`），与默认布局一致。tokenless 统计库不在
+这些数据库里（位于调用者的主目录），`--db` 不会移动它：用 `--tokenless-db` 指向 `stats.db` 的副本，
+整份报告才完全不混入读取主机的数据。
 
 ```bash
 agentsight summary --last 24 --db /backup/agentsight/genai_events.db
