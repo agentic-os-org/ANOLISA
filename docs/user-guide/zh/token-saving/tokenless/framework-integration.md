@@ -19,13 +19,13 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
-| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
+| OpenCode | `opencode` | 已硬关闭 | 替换 Shell 工具族输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
-Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook）；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。
+Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触发 `BeforeModel` Hook；OpenCode 1 通过其 `tool.definition` 插件 Hook 逐个压缩工具定义（MCP 工具不经过该 Hook），OpenCode 2 则通过 `session` 域的 `context` Hook 压缩本次请求实际发出的工具声明；Qwen Code 的清单声明了 `BeforeModel` Hook，但当前 Qwen Code 版本在注册时会跳过这一未知事件名，Schema Hook 实际不会运行，因此矩阵标记为不可用。该条目保留注册，未来 Qwen Code 版本实现该事件后会自动生效。
 
 这些 Adapter 仍会注册 Tool Ready，但会在检查、修复或阻断之前无条件硬退出，任何运行时设置都无法重新启用。工具执行后的失败归因不受影响。
 
@@ -424,6 +424,17 @@ receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
 仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+
+同一个 `plugin.js` 同时服务两代宿主：OpenCode 2 读取其 default 定义（`id` + `setup`），
+OpenCode 1.3.4 及更新版本读取同一导出对象的 `server()` 入口。OpenCode 1.0.0 至 1.3.3 不在支持范围内：
+这些版本的插件加载器会把模块的每个导出都当作插件函数调用，而 OpenCode 2 要求 default 导出是
+对象，两个加载契约互斥，因此受支持范围从首个能读取对象形 default 导出的 1.3.4 起算。命令重写
+和 Shell 失败证据按共享 Hook 归类的 Shell 工具族匹配（OpenCode 1 的内建 Shell Tool 叫 `bash`，
+OpenCode 2 叫 `shell`），而不是只认某一代宿主的拼写。
+
+OpenCode 2 将同样三条路径注册为 `tool` 域的 `execute.before` / `execute.after` Hook，
+以及 `session` 域的 `context` Hook；后者携带本次请求实际发出的工具声明。由于该请求没有声明
+Marker 授权的恢复路径，Core 目前原样返回工具声明，一旦声明了恢复路径该注册即刻生效。
 
 OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 

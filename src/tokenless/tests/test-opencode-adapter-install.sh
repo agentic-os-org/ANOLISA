@@ -20,10 +20,12 @@ mkdir -p "$FAKE_HOME" "$FAKE_BIN" "$ADAPTER_DIR/opencode/scripts"
 cp "$SOURCE_ADAPTER_DIR/opencode/plugin.js" "$ADAPTER_DIR/opencode/plugin.js"
 cp "$SOURCE_ADAPTER_DIR/opencode/scripts/"*.sh "$ADAPTER_DIR/opencode/scripts/"
 
+# The reported version is overridable so the supported-version floor can be
+# exercised without a second stub binary.
 cat > "$FAKE_BIN/opencode" <<'STUBEOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-    echo "1.2.3-test"
+    echo "${TOKENLESS_TEST_OPENCODE_VERSION:-1.19.2}"
     exit 0
 fi
 exit 2
@@ -142,6 +144,35 @@ if bash "$UNINSTALL_SH" >/dev/null; then
 else
     fail "real uninstall stopped working"
 fi
+
+# -- The supported-version floor ------------------------------------------------
+# OpenCode 1.0.0-1.3.3 call every module export as a plugin function, so the
+# object default export OpenCode 2 requires would abort their initialization
+# with `TypeError: fn is not a function`. The installer must not link the plugin
+# into those hosts, and detect must say why instead of reporting "installable".
+rm -f "$PLUGIN_LINK"
+for version in 1.3.4 1.19.2 2.0.29; do
+    if TOKENLESS_TEST_OPENCODE_VERSION="$version" bash "$INSTALL_SH" >/dev/null 2>&1 &&
+        [ -L "$PLUGIN_LINK" ] && [ "$(readlink "$PLUGIN_LINK")" = "$PLUGIN_SOURCE" ]; then
+        pass "installer supports OpenCode ${version}"
+    else
+        fail "installer refused supported OpenCode ${version}"
+    fi
+    rm -f "$PLUGIN_LINK"
+done
+
+for version in 1.0.0 1.2.3-test 1.3.3; do
+    detect_rc=0
+    TOKENLESS_TEST_OPENCODE_VERSION="$version" bash "$DETECT_SH" >/dev/null 2>&1 || detect_rc=$?
+    install_rc=0
+    TOKENLESS_TEST_OPENCODE_VERSION="$version" bash "$INSTALL_SH" >/dev/null 2>&1 || install_rc=$?
+    if [ "$detect_rc" -eq 2 ] && [ "$install_rc" -eq 0 ] &&
+        [ ! -e "$PLUGIN_LINK" ] && [ ! -L "$PLUGIN_LINK" ]; then
+        pass "OpenCode ${version} is reported unsupported and never linked"
+    else
+        fail "OpenCode ${version}: detect_rc=${detect_rc} install_rc=${install_rc} link left behind"
+    fi
+done
 
 echo ""
 echo "OpenCode adapter tests: $PASS passed, $FAIL failed"

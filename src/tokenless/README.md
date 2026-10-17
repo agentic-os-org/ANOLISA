@@ -768,15 +768,28 @@ Schema compression uses the host's model-facing JSON Schema while preserving its
 parameter validator. Hosts that expose only a runtime validator skip schema compression;
 response compression and command rewriting remain available.
 
+One `plugin.js` serves both host generations. OpenCode 2 loads its default definition
+(`id` + `setup`), and OpenCode 1.3.4 and newer load the same export's `server()` entrypoint.
+OpenCode 1.0.0 through 1.3.3 are not supported: their plugin loader calls every module export as
+a plugin function, which the object default export OpenCode 2 requires cannot satisfy. The two
+loader contracts are mutually exclusive, so the supported range starts at 1.3.4, the first
+release that reads an object default export. Command rewriting and shell failure evidence match
+the shell tool family the shared hooks classify — OpenCode 1 names its built-in shell tool
+`bash`, OpenCode 2 names it `shell` — instead of a single host spelling.
+
 The local plugin uses OpenCode's mutable tool hooks, so compressed output
 replaces the original model-visible response instead of being appended to it.
 
-| Strategy | Event | Action | Status |
-|---|---|---|---|
-| Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
-| Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
-| Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+| Strategy | OpenCode 1 event | OpenCode 2 registration | Action | Status |
+|---|---|---|---|---|
+| Tool Ready | `tool.execute.before` | `tool` hook `execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
+| Command rewriting | `tool.execute.before` | `tool` hook `execute.before` | Rewrites shell-family commands via RTK | ✅ Active |
+| Response + TOON compression | `tool.execute.after` | `tool` hook `execute.after` | Replaces the model-visible tool result with a smaller representation | ✅ Active |
+| Schema compression | `tool.definition` | `session` hook `context` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+
+The schema path is registered on both generations. Because the shared BeforeModel request
+declares no marker-authorized recovery path, Core currently returns the declarations unchanged;
+the registration takes effect as soon as such a path is declared.
 
 Enable the installed plugin through ANOLISA, then restart OpenCode:
 
