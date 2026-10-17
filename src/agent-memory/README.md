@@ -9,7 +9,7 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 - **File-form memory** — read/write with filesystem semantics via 37 MCP tools; namespace isolation and path sandboxing (openat2 RESOLVE_BENEATH)
 - **Hybrid semantic search** — BM25 keyword + dense vector embeddings with reciprocal rank fusion (RRF); time-decay ranking
 - **Auto capture & recall** — observes at conversation end, injects relevant context before the next prompt
-- **Memory consolidation** — automatic extraction of atomic facts from session audit logs
+- **Memory consolidation** — automatic extraction of atomic facts from session audit logs; conflict detection uses `conflict_bm25_threshold` as a raw BM25 ceiling (more negative means stricter; the retained `-2.0` default is corpus-dependent and uncalibrated)
 - **Versioning & snapshots** — optional git auto-commit + tar.gz snapshots for file-level and mount-level rollback
 - **Safety** — prompt-injection detection and secret/PII redaction for injected content
 - **Cross-session tasks** — save/resume/close tasks across sessions with full context

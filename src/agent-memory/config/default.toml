@@ -69,4 +69,11 @@ episodic_enabled         = true
 min_episode_steps        = 3
 max_episodes_per_session = 10
 conflict_detection       = true
+# Raw FTS5 BM25 ceiling; more negative is stricter. Corpus/query dependent:
+# -2.0 is retained, not calibrated; term-dense corpora can miss duplicates.
+# Tune per workload. Semantics/calibration follow-up: https://github.com/agentic-os-org/ANOLISA/issues/4157
+# Any query token under 3 characters selects LIKE for the whole query, regardless
+# of threshold sign (including a short token from the writer's 100-character cut).
+# LIKE uses a frequency+decay floor; <= 0 admits all substring candidates.
+# FTS admits all matches at >= 0. The writer can supersede up to 5 facts per write.
 conflict_bm25_threshold  = -2.0

@@ -442,6 +442,14 @@ conflict_detection = true
 conflict_bm25_threshold = -2.0
 ```
 
+Raw FTS5 BM25 scores are smaller for stronger matches. `conflict_bm25_threshold` is an inclusive upper bound: more negative settings require stronger matches; `0` admits all FTS matches. Raw magnitudes depend on the corpus and query, so a cutoff tuned on one mount does not transfer reliably to another. The retained default `-2.0` is **not calibrated**: even an exact duplicate may remain active when the query terms occur throughout the corpus. Tune against representative data; recalibrating the default or adopting a corpus-relative policy is deferred.
+
+The query shape selects the scoring path, independently of the threshold's sign: **any query token shorter than three characters** sends the entire query to the substring fallback. This includes common English words and short word fragments created when the writer truncates content to its first 100 characters; a long query can therefore use the fallback too.
+
+The substring fallback uses a different score (term frequency plus time decay), accepted when it is **at least** the same configured threshold. At `-2.0` or any nonpositive setting, every substring candidate passes this score check, within the existing candidate limits. Only a positive setting imposes a meaningful frequency floor; it also admits every negative-scored FTS match. This shared setting cannot independently tune both paths. Any nonnegative value disables the FTS strength gate. Each eligible candidate that passes the chosen path's score check is submitted for supersession: **up to five older facts per write**. Superseded files remain on disk but disappear from normal search.
+
+Threshold semantics and calibration remain tracked in [#4157](https://github.com/agentic-os-org/ANOLISA/issues/4157); changing candidate recall is a separate topic tracked in [#4336](https://github.com/agentic-os-org/ANOLISA/issues/4336).
+
 ### Environment variables
 
 Every config key has a matching `MEMORY_*` env var. Priority: **env > config.toml > default**.
