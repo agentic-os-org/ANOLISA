@@ -1576,11 +1576,22 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
         // macvlan over a real NIC, a bond over real ports and a bridge with a
         // real port keep their reading, and a chain (a VLAN over a bridge over
         // a pair end) settles over the repeats.
+        //
+        // A bridge with both a real port and a pair/tap port is the mixed
+        // case: the driver reports the MAXIMUM over its ports, so the veth
+        // driver's fixed 10000 is the bridge's reading even when the real
+        // uplink is 1 GbE. That reading is plumbing too; the real NIC remains
+        // in the list with its own rate. A genuinely faster bridge (25/40 G)
+        // does not equal the veth default and keeps its reading.
         loop {
             let mut survivors: Vec<(String, u64, Vec<String>)> = Vec::new();
             let mut dropped = false;
             for (name, speed_mbps, lowers) in kept {
-                if !lowers.is_empty() && lowers.iter().all(|lower| plumbing.contains(lower)) {
+                let plumbing_reading = lowers.iter().any(|lower| plumbing.contains(lower));
+                if !lowers.is_empty()
+                    && (lowers.iter().all(|lower| plumbing.contains(lower))
+                        || (speed_mbps == VETH_SPEED_MBPS && plumbing_reading))
+                {
                     plumbing.push(name);
                     dropped = true;
                 } else {
@@ -4265,7 +4276,8 @@ mod tests {
         std::os::unix::fs::symlink(&veth, bridge.join("lower_h1")).expect("link the lower device");
 
         // A VLAN over the real NIC keeps its parent's reading, and a bridge
-        // with the real NIC as one of its ports keeps the best port's.
+        // with the real NIC as one of its ports reports the best port's — the
+        // veth port's fixed 10000, even though the real uplink is 1 GbE.
         let real_vlan = dir.join("eth0.200");
         fs::create_dir_all(&real_vlan).expect("create the vlan");
         fs::write(real_vlan.join("speed"), "1000\n").expect("write speed");
@@ -4279,7 +4291,9 @@ mod tests {
         std::os::unix::fs::symlink(&eth0, real_vlan.join("lower_eth0")).expect("link the lower");
         let mixed_bridge = dir.join("br1");
         fs::create_dir_all(&mixed_bridge).expect("create the bridge");
-        fs::write(mixed_bridge.join("speed"), "1000\n").expect("write speed");
+        // br_get_link_ksettings reports the maximum over the up ports, so the
+        // veth port's fixed 10000 is the bridge's reading on a 1 GbE uplink.
+        fs::write(mixed_bridge.join("speed"), "10000\n").expect("write speed");
         fs::write(mixed_bridge.join("ifindex"), "13\n").expect("write ifindex");
         fs::write(mixed_bridge.join("iflink"), "13\n").expect("write iflink");
         fs::write(
@@ -4298,13 +4312,53 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["br1", "eth0", "eth0.200"],
+            ["eth0", "eth0.200"],
             "only the devices that read a real link survive: {names:?}"
         );
         assert_eq!(
             info.max_net_speed(),
             1000,
             "the pair end's fixed rate must not decide the host link speed: {names:?}"
+        );
+
+        // Control: a bridge whose real port is genuinely 25 GbE reads 25000,
+        // above the veth default, so the new clause must keep it and the
+        // physical NIC's rate must still decide. The devices are added after
+        // the first read so the assertions above keep measuring the 1 GbE
+        // shape.
+        let eth25g = dir.join("eth25g");
+        fs::create_dir_all(&eth25g).expect("create eth25g");
+        fs::write(eth25g.join("speed"), "25000\n").expect("write speed");
+        fs::write(eth25g.join("ifindex"), "14\n").expect("write ifindex");
+        fs::write(eth25g.join("iflink"), "14\n").expect("write iflink");
+        fs::create_dir_all(eth25g.join("device")).expect("create the bus-device link");
+        let fast_bridge = dir.join("br2");
+        fs::create_dir_all(&fast_bridge).expect("create the bridge");
+        fs::write(fast_bridge.join("speed"), "25000\n").expect("write speed");
+        fs::write(fast_bridge.join("ifindex"), "15\n").expect("write ifindex");
+        fs::write(fast_bridge.join("iflink"), "15\n").expect("write iflink");
+        fs::write(
+            fast_bridge.join("uevent"),
+            "DEVTYPE=bridge\nINTERFACE=br2\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth25g, fast_bridge.join("lower_eth25g"))
+            .expect("link the lower device");
+        std::os::unix::fs::symlink(&veth, fast_bridge.join("lower_h1"))
+            .expect("link the lower device");
+
+        let mut control = info_with_processes(&[]);
+        control.network = read_network_info_from(&dir).expect("read the control tree");
+        let mut names: Vec<&str> = control.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert!(
+            names.contains(&"br2") && names.contains(&"eth25g"),
+            "a bridge whose real port outruns the veth default is not plumbing: {names:?}"
+        );
+        assert_eq!(
+            control.max_net_speed(),
+            25000,
+            "the physical 25 GbE NIC still decides: {names:?}"
         );
 
         fs::remove_dir_all(&dir).ok();
