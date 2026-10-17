@@ -554,6 +554,29 @@ async fn tier_b_observe_search_and_context_via_mcp() {
         "expected one of the seeded body snippets in preview: {text}"
     );
 
+    // Regression (#4425): the wrapper passes an explicit client value
+    // straight through (only the absent case defaults to 2048), so
+    // max_tokens: 0 reached the tool as a zero byte budget and the answer
+    // was "(no memory files yet)" even though the store has files. The
+    // shared tool floor must turn it into a minimal real prefix instead.
+    let resp = call_tool(
+        &mut reader,
+        &mut stdin,
+        105,
+        "memory_get_context",
+        json!({"max_tokens": 0}),
+    )
+    .await;
+    let text = extract_text(&resp);
+    assert_ne!(
+        text, "(no memory files yet)",
+        "max_tokens: 0 must not claim the store is empty"
+    );
+    assert!(
+        text.starts_with("## "),
+        "max_tokens: 0 should still yield a truncated section header: {text:?}"
+    );
+
     drop(stdin);
     let _ = child.kill().await;
 }

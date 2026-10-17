@@ -239,6 +239,35 @@ fn get_context_respects_token_budget() {
 }
 
 #[test]
+fn get_context_zero_max_tokens_still_returns_content() {
+    // Regression: max_tokens=0 became a zero byte budget, the walk loop hit
+    // its `bytes_used >= max_bytes` check before reading anything, and the
+    // tool answered "(no memory files yet)" for a store that has files.
+    // The budget is floored at one token, so a zero request now yields a
+    // minimal-but-real prefix of the newest section instead of an emptiness
+    // claim.
+    let (_tmp, svc) = setup();
+    svc.write("a.md", "first note body", false).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    svc.write("b.md", "second note body", false).unwrap();
+
+    let ctx = svc.memory_get_context(0).unwrap();
+    assert_ne!(
+        ctx, "(no memory files yet)",
+        "zero max_tokens must not claim the store is empty:\n{ctx}"
+    );
+    assert!(
+        ctx.starts_with("## "),
+        "zero max_tokens should still yield the newest section header, got: {ctx:?}"
+    );
+    assert!(
+        ctx.len() <= 4,
+        "zero max_tokens must stay within the one-token floor: {} bytes",
+        ctx.len()
+    );
+}
+
+#[test]
 fn get_context_skips_meta_dir() {
     let (_tmp, svc) = setup();
     svc.write("note.md", "real note body", false).unwrap();
