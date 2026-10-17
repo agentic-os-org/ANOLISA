@@ -84,6 +84,21 @@ confirm_destructive = true
 
 ---
 
+## Headerless spreadsheet inputs
+
+Use `--no-header` when a CSV, TSV or Excel worksheet starts with data rather than column labels:
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py records.csv --no-header --json
+python3 SKILL_DIR/scripts/xlsx_reader.py records.xlsx --no-header --sheet Sales --quality
+```
+
+The first data record is included in previews, quality findings and numeric statistics. Columns are named `column_1`, `column_2`, and so on in left-to-right order; names are generated independently for each Excel worksheet. The option applies to all loaded sheets, including `--sheet` selection, and works with both text and JSON reports. Missing values, CSV quoting, TSV separators and the existing encoding fallback retain their behavior.
+
+Omit `--no-header` for files with column labels: the default still uses the first row as headers. The option selects a single headerless input mode, without detecting multi-level or merged headers. The original file is never modified.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

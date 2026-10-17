@@ -23,9 +23,14 @@ python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx                 # full repor
 python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --sheet Sales   # single sheet
 python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --quality       # quality audit only
 python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --json          # machine-readable
+python3 SKILL_DIR/scripts/xlsx_reader.py records.csv --no-header    # first row is data
 ```
 
 Supported formats: `.xlsx`, `.xlsm`, `.csv`, `.tsv`. The script tries multiple encodings for CSV (utf-8-sig, gbk, utf-8, latin-1).
+
+With `--no-header`, both delimited files and selected/all Excel sheets retain their first
+data record; generated column names are `column_1`, `column_2`, ... . Default header
+handling and report formats are unchanged.
 
 ### Step 2 — Custom Analysis with pandas
 
@@ -43,7 +48,7 @@ df = pd.read_excel("input.xlsx", sheet_name=None)  # dict of all sheets
 |-----------|------|
 | Header on row 3 | `pd.read_excel(path, header=2)` |
 | Multi-level merged header | `pd.read_excel(path, header=[0, 1])` |
-| No header | `pd.read_excel(path, header=None)` |
+| No header | `xlsx_reader.py path --no-header` (or `pd.read_excel(path, header=None)` for custom analysis) |
 
 **Analysis quick reference:**
 
