@@ -151,9 +151,25 @@ $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json: $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json.i
 	@echo "==> Generating qwenpaw/plugin.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
+# The requirements file is the one stamped artifact whose content needs more
+# than the raw workspace version: it pins release-asset wheel URLs, where the
+# filename carries the PEP 440 normalized spelling (the pinned maturin names a
+# Cargo 0.9.0-rc.1 wheel anolisa_tokenless-0.9.0rc1-..., and pip refuses the
+# unnormalized form) while the release-tag path keeps the raw Cargo spelling
+# the release workflow tags verbatim. packaging/raw/verify-release.py owns that
+# contract and the normalization behind it, so the stamping asks its normalizer
+# through packaging/raw/wheel-version.py instead of carrying a second
+# implementation that could drift from the gate it has to satisfy. python3 is
+# already a hard requirement of this component (runtime Requires, the hooks,
+# and packaging/raw/package.sh, which runs the same gate).
 $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt: $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt.in Cargo.toml
-	@echo "==> Generating qwenpaw/requirements.txt (version=$(VERSION))..."
-	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+	@wheel_version=$$(python3 packaging/raw/wheel-version.py '$(VERSION)') || { \
+	    echo "ERROR: cannot normalize $(VERSION) into a wheel filename version" >&2; \
+	    exit 1; }; \
+	test -n "$$wheel_version" || { \
+	    echo "ERROR: no wheel filename version for $(VERSION)" >&2; exit 1; }; \
+	echo "==> Generating qwenpaw/requirements.txt (version=$(VERSION), wheel version=$$wheel_version)..."; \
+	sed -e 's/@WHEEL_VERSION@/'"$$wheel_version"'/g' -e 's/@VERSION@/$(VERSION)/g' $< > $@
 
 $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml: \
     $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml.in Cargo.toml
@@ -494,8 +510,15 @@ stage-raw:
 	@$(MAKE) build-openclaw-plugin build-dsh-plugin
 	@./packaging/raw/package.sh stage
 
+# The second pass publishes a prerelease: that is the only version shape whose
+# release-tag path (raw Cargo 0.9.0-rc.1) and wheel filenames (PEP 440
+# normalized 0.9.0rc1, what the pinned maturin builds and what pip accepts)
+# differ, so it is the pass that would catch a stamping rule writing one
+# spelling into both positions. Both passes run packaging/raw/package.sh, whose
+# verify-release.py gate rejects the mix.
 test-raw-package:
 	@bash tests/test-package-raw.sh
+	@TOKENLESS_RAW_TEST_VERSION=0.9.0-rc.1 bash tests/test-package-raw.sh
 
 # tests/test-package-npm-prebuilt.sh drives npm/scripts/package-npm.js, whose
 # buildAdapters() recursively runs `make build-openclaw-plugin build-dsh-plugin`.

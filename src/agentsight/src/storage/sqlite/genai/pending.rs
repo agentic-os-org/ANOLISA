@@ -672,13 +672,20 @@ impl GenAISqliteStore {
 
     /// Fetch the most recent N LLM calls for a conversation (for loop detection).
     ///
-    /// Returns lightweight summaries ordered oldest-first (ascending timestamp).
-    /// Used by LoopDetector to analyze repetitive patterns across calls.
+    /// Returns lightweight summaries ordered oldest-first (ascending timestamp),
+    /// or `None` when the window could not be read at all.
+    ///
+    /// Used by LoopDetector to analyze repetitive patterns across calls, and
+    /// that is why the failure is reported instead of folded into an empty
+    /// list: a short window is exactly what the detector reads as "too few
+    /// repetitions to be a loop", so an unreadable one would disable the
+    /// DeadLoop interruption — and the auto-kill behind it — for the whole
+    /// conversation while leaving no trace of why.
     pub fn get_recent_calls_for_conversation(
         &self,
         conversation_id: &str,
         limit: usize,
-    ) -> Vec<crate::interruption::RecentCallSummary> {
+    ) -> Option<Vec<crate::interruption::RecentCallSummary>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Subquery fetches latest N rows desc, outer query reverses to asc order
         let sql = "SELECT call_id, output_messages, \
@@ -696,34 +703,46 @@ impl GenAISqliteStore {
                          ORDER BY start_timestamp_ns DESC \
                          LIMIT ?2) \
                    ORDER BY start_timestamp_ns ASC";
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        let rows = match stmt.query_map(params![conversation_id, limit as i64], |row| {
-            let call_id: String = row.get(0)?;
-            let output_messages_json: Option<String> = row.get(1)?;
-            let input_tokens: i64 = row.get(2)?;
-            let output_tokens: i64 = row.get(3)?;
-            Ok((call_id, output_messages_json, input_tokens, output_tokens))
-        }) {
-            Ok(r) => r,
-            Err(_) => return vec![],
-        };
+        // The whole read gets one failure arm: `prepare` and `query_map` both
+        // run statements, and on a foreign or half-migrated file either can
+        // fail — reporting that once beats one swallow per call site.
+        let calls = (|| -> rusqlite::Result<Vec<crate::interruption::RecentCallSummary>> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+                let call_id: String = row.get(0)?;
+                let output_messages_json: Option<String> = row.get(1)?;
+                let input_tokens: i64 = row.get(2)?;
+                let output_tokens: i64 = row.get(3)?;
+                Ok((call_id, output_messages_json, input_tokens, output_tokens))
+            })?;
 
-        rows.filter_map(|r| r.ok())
-            .map(|(call_id, output_json, input_tokens, output_tokens)| {
-                let (tool_calls, output_text_snippet) =
-                    parse_output_messages_for_loop_detection(output_json.as_deref());
-                crate::interruption::RecentCallSummary {
-                    call_id,
-                    tool_calls,
-                    output_text_snippet,
-                    input_tokens,
-                    output_tokens,
-                }
-            })
-            .collect()
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .map(|(call_id, output_json, input_tokens, output_tokens)| {
+                    let (tool_calls, output_text_snippet) =
+                        parse_output_messages_for_loop_detection(output_json.as_deref());
+                    crate::interruption::RecentCallSummary {
+                        call_id,
+                        tool_calls,
+                        output_text_snippet,
+                        input_tokens,
+                        output_tokens,
+                    }
+                })
+                .collect())
+        })();
+
+        match calls {
+            Ok(calls) => Some(calls),
+            Err(error) => {
+                // Which read failed, for which conversation: the caller only
+                // sees `None`, and the detection it skips leaves no other mark.
+                log::warn!(
+                    "recent calls could not be read for conversation {conversation_id}, so DeadLoop detection was skipped for this call: {error}"
+                );
+                None
+            }
+        }
     }
 
     /// List all pending calls for a specific PID.
