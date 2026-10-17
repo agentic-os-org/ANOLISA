@@ -22,7 +22,7 @@ import os
 import tarfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -92,16 +92,12 @@ def _copy_to_container_normalized_owner(container: Any, src: Path, dst: Path | P
     if os.path.dirname(str(dst)) == "":
         raise ValueError(f"Destination path parent directory cannot be empty!, dst: {dst}")
 
-    tar_path = src.with_suffix(".tar")
-    try:
-        with tarfile.open(tar_path, "w") as tar:
+    with BytesIO() as archive:
+        with tarfile.open(fileobj=archive, mode="w") as tar:
             tar.add(src, arcname=dst.name, filter=_normalize_tar_owner)
 
-        data = tar_path.read_bytes()
         container.exec_run(f"mkdir -p {dst.parent}")
-        container.put_archive(os.path.dirname(str(dst)), data)
-    finally:
-        tar_path.unlink(missing_ok=True)
+        container.put_archive(os.path.dirname(str(dst)), archive.getvalue())
 
 
 def _install_swebench_rootless_copy_patch() -> None:
