@@ -161,7 +161,26 @@ pub(crate) fn configure_using(
             entrypoint(Path::new(program), libc::X_OK, "executable")?;
         }
     }
-    let value = document(settings)?;
+    let mut value = document(settings)?;
+    if let Some(component) = installed.get("aw-provider-tokenless") {
+        let name = "libexec/aw/providers/tokenless/rtk";
+        require(
+            std::env::join_paths([prefix.join("libexec/aw/providers/tokenless")]).is_ok(),
+            "managed RTK directory cannot be represented in PATH",
+        )?;
+        let payload = component.files.get(name).ok_or_else(|| {
+            crate::Error::Invalid("installed Tokenless receipt lacks managed RTK".into())
+        })?;
+        value["spec"]["providers"]["tokenless"]["transport"]["argv"]
+            .as_array_mut()
+            .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
+            .extend([
+                serde_json::json!("--rtk"),
+                serde_json::json!(prefix.join(name)),
+                serde_json::json!("--rtk-sha256"),
+                serde_json::json!(payload.sha256),
+            ]);
+    }
     let yaml = serde_yaml_ng::to_string(&value)?;
     aw_config::Validator::new()
         .and_then(|validator| validator.parse(yaml.as_bytes()))

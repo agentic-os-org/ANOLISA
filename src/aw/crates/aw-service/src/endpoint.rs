@@ -1,11 +1,13 @@
 //! A private, locked service endpoint removes only the socket inode it created.
 
 use std::{
+    ffi::CString,
     fs::{self, DirBuilder, File, Metadata, OpenOptions},
     io,
     os::{
         fd::AsRawFd,
         unix::{
+            ffi::OsStrExt,
             fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
@@ -47,8 +49,29 @@ impl Endpoint {
             return Err(io::Error::last_os_error());
         }
         let socket = state_dir.join("aw.sock");
-        // Existing sockets, including stale ones, require explicit operator cleanup.
-        let listener = UnixListener::bind(&socket)?;
+        // The socket must be private from the instant it is observable at its
+        // final path: launch_service rejects broader modes without retrying,
+        // so a chmod after binding aw.sock races every readiness poll. Bind a
+        // staging name inside this locked state directory, apply the permanent
+        // mode, then rename: the final path appears atomically at 0600.
+        // Existing sockets, including stale ones, require explicit operator
+        // cleanup, and the no-replace rename keeps an unexpected aw.sock
+        // intact instead of silently replacing it. The reserved staging
+        // basename is exactly as long as aw.sock, so the public socket-path
+        // limit resolve enforces on the final path (one byte below
+        // sockaddr_un's sun_path capacity) also covers the staged bind: every
+        // accepted state directory can hold both names at once.
+        let staged = state_dir.join(".aw.tmp");
+        // The service lock serializes binders of this state directory; leftover
+        // staging files are debris from a crashed binder.
+        let _ = fs::remove_file(&staged);
+        let listener = match bind_staged(&staged, &socket) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = fs::remove_file(&staged);
+                return Err(error);
+            }
+        };
         let metadata = fs::symlink_metadata(&socket)?;
         let endpoint = Self {
             listener,
@@ -56,7 +79,6 @@ impl Endpoint {
             identity: (metadata.dev(), metadata.ino()),
             _lock: lock,
         };
-        fs::set_permissions(&endpoint.socket, fs::Permissions::from_mode(0o600))?;
         endpoint.listener.set_nonblocking(true)?;
         Ok(endpoint)
     }
@@ -84,6 +106,106 @@ impl Drop for Endpoint {
 fn current_uid() -> u32 {
     // geteuid has no preconditions and identifies the service's filesystem owner.
     unsafe { libc::geteuid() }
+}
+
+// Deterministic test synchronization for the publication sequence: bind_staged
+// notifies this thread's installed checker at every phase boundary, so tests
+// assert the publication invariants exactly where they hold instead of polling
+// the filesystem from a racing watcher thread.
+#[cfg(test)]
+mod publication {
+    use std::{cell::RefCell, path::Path};
+
+    /// Publication phases of the endpoint socket, notified in order.
+    pub(super) enum Phase<'a> {
+        /// The staging name is bound; the final path must not exist yet.
+        Staged(&'a Path),
+        /// The permanent 0600 mode is installed on the staging name; the final
+        /// path must not exist yet.
+        Sealed(&'a Path),
+        /// The final path is published; it must already hold the permanent
+        /// mode and accept connections.
+        Published(&'a Path),
+    }
+
+    /// Name of a phase, for asserting that the full ordered sequence ran.
+    fn name(phase: &Phase<'_>) -> &'static str {
+        match phase {
+            Phase::Staged(_) => "staged",
+            Phase::Sealed(_) => "sealed",
+            Phase::Published(_) => "published",
+        }
+    }
+
+    thread_local! {
+        static CHECK: RefCell<Option<fn(&Phase<'_>)>> = RefCell::new(None);
+        static RECORDED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Run this thread's installed checker, if any, at one phase boundary and
+    /// record the phase for [`during`].
+    pub(super) fn notify(phase: &Phase<'_>) {
+        CHECK.with(|cell| {
+            if let Some(check) = *cell.borrow() {
+                check(phase);
+                RECORDED.with(|recorded| recorded.borrow_mut().push(name(phase)));
+            }
+        });
+    }
+
+    /// Run `body` with `check` called synchronously at every publication phase
+    /// of endpoint binds on this thread, returning the body's value and the
+    /// ordered names of the phases that ran.
+    pub(super) fn during<T>(
+        check: fn(&Phase<'_>),
+        body: impl FnOnce() -> T,
+    ) -> (T, Vec<&'static str>) {
+        CHECK.with(|cell| {
+            assert!(
+                cell.borrow_mut().replace(check).is_none(),
+                "nested publication checks are unsupported"
+            );
+        });
+        RECORDED.with(|cell| cell.borrow_mut().clear());
+        let value = body();
+        CHECK.with(|cell| *cell.borrow_mut() = None);
+        let recorded = RECORDED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        (value, recorded)
+    }
+}
+
+fn bind_staged(staged: &Path, socket: &Path) -> io::Result<UnixListener> {
+    let listener = UnixListener::bind(staged)?;
+    #[cfg(test)]
+    publication::notify(&publication::Phase::Staged(socket));
+    fs::set_permissions(staged, fs::Permissions::from_mode(0o600))?;
+    #[cfg(test)]
+    publication::notify(&publication::Phase::Sealed(socket));
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket paths must not contain a NUL byte",
+        )
+    };
+    let from = CString::new(staged.as_os_str().as_bytes()).map_err(|_| invalid())?;
+    let to = CString::new(socket.as_os_str().as_bytes()).map_err(|_| invalid())?;
+    // SAFETY: both names are owned, NUL-terminated path strings that remain
+    // valid for the duration of this synchronous system call.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(test)]
+    publication::notify(&publication::Phase::Published(socket));
+    Ok(listener)
 }
 
 fn permission(message: &'static str) -> io::Error {
@@ -188,6 +310,116 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    fn assert_private_publication(phase: &publication::Phase<'_>) {
+        match phase {
+            publication::Phase::Staged(final_path) | publication::Phase::Sealed(final_path) => {
+                // Before publication the final path must not exist at all: a
+                // bind directly at the final path would already be observable
+                // here with its umask-derived mode.
+                match fs::symlink_metadata(final_path) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("{error}"),
+                    Ok(_) => panic!("final path observable before publication"),
+                }
+            }
+            publication::Phase::Published(final_path) => {
+                let mode = fs::symlink_metadata(final_path)
+                    .expect("published socket")
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600, "published socket is not private");
+                ipc::connect(final_path, Instant::now() + Duration::from_secs(1))
+                    .expect("published socket accepts connections");
+            }
+        }
+    }
+
+    #[test]
+    fn socket_permissions_are_private_from_creation() {
+        // The launcher's readiness probe rejects a socket whose mode is broader
+        // than 0600 without retrying, so the final path must never be observable
+        // before its permanent mode is installed. The publication path calls
+        // this thread's checker at each phase boundary, which makes the checks
+        // exact regardless of scheduling: a watcher thread polling the
+        // filesystem can only hope to be running between the vulnerable bind
+        // and its chmod.
+        let fixture = Fixture::new();
+        let state = fixture.state();
+        let socket = state.join("aw.sock");
+        let (endpoint, phases) = publication::during(assert_private_publication, || {
+            Endpoint::bind(&state).unwrap()
+        });
+        // A revert that binds aw.sock directly cannot produce this sequence:
+        // either a phase observes the final path before publication, or the
+        // publication phases never run at all.
+        assert_eq!(phases, ["staged", "sealed", "published"]);
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        drop(endpoint);
+        assert!(!socket.exists());
+    }
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new() -> Self {
+            let mut template = b"/tmp/aw-boundary-XXXXXX\0".to_vec();
+            // SAFETY: mkdtemp receives a writable, terminated template and
+            // creates an exclusively owned 0700 directory; Drop removes it.
+            let pointer = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+            assert!(!pointer.is_null(), "{}", io::Error::last_os_error());
+            let name = std::ffi::CStr::from_bytes_with_nul(&template).unwrap();
+            Self(PathBuf::from(name.to_str().unwrap()))
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn accepted_maximum_socket_path_binds_publishes_and_connects() {
+        // resolve accepts socket paths of at most 107 bytes (sockaddr_un
+        // reserves its final byte for the terminator), so the staging name has
+        // to fit the same budget: staging under a longer basename would push
+        // accepted paths past the bind limit. Drive the accepted maximum end
+        // to end through resolve and Server::bind, and keep the one-byte-longer
+        // path rejected.
+        let root = TempRoot::new();
+        // A state directory of exactly 99 bytes makes state/aw.sock exactly
+        // 107 bytes, the accepted maximum.
+        let state = root
+            .0
+            .join("x".repeat(99 - root.0.as_os_str().as_bytes().len() - 1));
+        let mut document = serde_json::json!({
+            "apiVersion":"aw/v1alpha1","kind":"AWConfiguration","metadata":{"name":"launch"},"spec":{
+                "daemon":{"startup":"on_demand","endpoint":"auto","state_dir":"auto"},
+                "execution":{"guarantee":"native_hook","default_event_budget_ms":1000},
+                "audit":{"enabled":true,"payload":"metadata_only"},
+                "agents":{"qoder":{"adapter":"qoder","argv":["qodercli"]}},"providers":{},"events":{}}
+        });
+        document["spec"]["daemon"]["state_dir"] = serde_json::json!(state.to_str().unwrap());
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let paths = crate::launch_service::resolve(&bytes, None).unwrap();
+        assert_eq!(paths.socket.as_os_str().as_bytes().len(), 107);
+        assert_eq!(paths.socket, state.join("aw.sock"));
+        let server = crate::Server::bind(bytes, &state).unwrap();
+        let socket = server.socket_path();
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        let client = ipc::connect(&socket, Instant::now() + Duration::from_secs(1)).unwrap();
+        drop(client);
+        drop(server);
+        assert!(!socket.exists());
+        // One byte more stays rejected by resolve before any bind is attempted.
+        let too_long = root
+            .0
+            .join("x".repeat(100 - root.0.as_os_str().as_bytes().len() - 1));
+        document["spec"]["daemon"]["state_dir"] = serde_json::json!(too_long.to_str().unwrap());
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(crate::launch_service::resolve(&bytes, None).is_err());
     }
 
     #[test]

@@ -8,7 +8,8 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 
 当前 Linux 源码版本支持 Qoder CLI >=1.1.64、OpenClaw 2026.9.6、
 QwenPaw 2.2.2b4 / AgentScope 2.0.8、Hermes 官方提交 `952c941e`，以及显式接入的
-Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker。
+Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker，
+以及在前台 Python worker 中通过显式公共工厂接线的 AgentScope SDK 2.0.6。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
@@ -40,6 +41,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动 Pi SDK 0.84.2 worker | ✅ 公共 SDK 工厂；见[worker 指南](#启动-pi-sdk-worker) |
 | 启动 Claude SDK 0.2.88 worker | ✅ 显式公共工厂 Bridge；见 [worker 指南](#启动-claude-sdk-worker) |
+| 通过 AW 启动 AgentScope SDK | ✅ 单个前台 Python worker 中[显式接线的公共工厂](#启动-agentscope-sdk) |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、输入改写或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
 | 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](aw-preview.md)，尚非稳定发行 |
@@ -229,6 +231,52 @@ AW 打开 Qoder 的原生终端界面，Qoder 退出后回到原 shell，并释�
 target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
+
+## 启动 AgentScope SDK
+
+使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的
+AgentScope 2.0.8 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
+`-m MODULE`。AW 校验该 SDK 版本，提供 `aw_agentscope` 与受保护的运行配置，
+等待真实公共工厂安装 middleware 后生成的回执。
+
+在 `src/aw` 中，将该环境的 `python3` 放到 PATH 后执行：
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.agentscope.yaml --agent agentscope
+target/debug/aw status --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.agentscope.yaml
+```
+
+示例使用确定性的离线 model 与本地 Echo 工具，无需凭据。before 布尔 Hook 返回
+false（没有 block 命中），after 返回 true（observe）。把 before 命令改为
+`printf true` 即可拒绝工具；原生 final response 为 denied，after 观察该拒绝。
+修改配置之前先停止服务。
+
+已有应用在**每个**公共工厂中使用 `AwBridge().create_agent(...)`，原样传入已有
+middleware 列表。可信参数注入应先于追加的 AW middleware。readiness 回执只
+覆盖所构造的 Agent，不覆盖其他工厂或直接 dispatch 路由。
+[工厂合同](../../../../src/aw/docs/design/agentscope-adapter_zh.md)说明顺序、预算、
+调用身份与覆盖边界。
+
+before 等待并可在工具副作用前阻断；after 等待一次 final `ToolResponse`，保留
+success/error/interrupted，不重复中间 stream chunk。`on_acting` 之前的原生
+参数/权限拒绝、直接 Toolkit 调用和外部执行请求需要另接。launcher 支持单个
+前台 worker；fork 型 Gunicorn supervisor、多 worker 和远端部署不在此合同内。
+常驻进程必须显式管理 service 每实例 1024 个事件关联的容量限制。
+
+接入 PreTool 重试建议和最终 PostTool 压缩时，复制
+[SDK 生命周期示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)，
+替换所有路径，并在 sec-core 映射 Toolkit 的准确工具名和参数指针。示例先做安全检查，
+再执行 Tokenless PreTool；工具完成后先观察原始结果，再压缩一个成功的文本槽。
+custom/native after Hook 放在最终压缩步骤之前；启用替换后 AW 按声明顺序执行此链。
+native 和观察 Hook 不替换响应；只有最后一个已准入的结构化替换步骤可以修改模型
+可见文本。Hook 故障按 report 处理后，后续步骤仍收到原始输入。
+只有观察的链保持原生逆序退出。
+
+PreTool 拒绝原始调用，向模型返回完整重试参数；每次新尝试重新经过原生权限和
+sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩。PreTool 需独立安装
+RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配置见
+[Tokenless 行为](aw-tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
 
 ## 启动 QwenPaw
 
@@ -538,7 +586,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi 和 Claude SDK 不支持 |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
@@ -546,10 +594,11 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
 当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.8
-和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88 与 Pi SDK 0.84.2 worker。
+和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
+与 AgentScope SDK 2.0.6 worker。
 `aw install` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
-Qoder、OpenClaw、QwenPaw、Pi 和 Claude SDK 拒绝此命令。该命令不安装 AW 包
-或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
+Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 拒绝此命令。
+该命令不安装 AW 包或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
 
 | Adapter 专用参数 | 命令 | 当前支持情况 |
 | --- | --- | --- |
@@ -557,8 +606,8 @@ Qoder、OpenClaw、QwenPaw、Pi 和 Claude SDK 拒绝此命令。该命令不安
 | `--native-profile PROFILE` | `run`、`install` | Hermes：`run` 和 `install` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw：必填的原生状态目录绝对路径。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
 
-公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。Pi 和 Claude SDK 拒绝
-这些原生覆盖参数。QwenPaw 也拒绝它们，使用 `QWENPAW_WORKING_DIR`。
+公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。Pi、Claude SDK
+和 AgentScope SDK 拒绝这些原生覆盖参数。QwenPaw 也拒绝它们，使用 `QWENPAW_WORKING_DIR`。
 受支持的 AW 参数放在 `--` 前，之后的参数
 按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
 和当前支持范围。

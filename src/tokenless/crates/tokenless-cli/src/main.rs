@@ -199,6 +199,18 @@ impl From<DiffSortArg> for DiffSort {
 
 #[derive(Subcommand)]
 enum StatsCommands {
+    /// Serve existing statistics over HTTP with a service credential
+    Serve {
+        /// Existing Tokenless data directory (contains stats.db)
+        #[arg(long)]
+        data_dir: std::path::PathBuf,
+        /// File containing the Bearer credential; read at startup
+        #[arg(long)]
+        credential_file: std::path::PathBuf,
+        /// Listen address; use a private network or TLS proxy for remote access
+        #[arg(long, default_value = "127.0.0.1:7397")]
+        listen: std::net::SocketAddr,
+    },
     /// Show summary statistics with breakdown by operation
     Summary {
         #[arg(long, value_parser = parse_positive_usize)]
@@ -839,6 +851,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         }
         Commands::Stats(stats_cmd) => {
             match stats_cmd {
+                StatsCommands::Serve {
+                    data_dir,
+                    credential_file,
+                    listen,
+                } => {
+                    let dir = tokenless_stats::validate_data_dir(&data_dir)
+                        .map_err(|error| (error.to_string(), 1))?;
+                    let db =
+                        tokenless_stats::validate_database_path(&dir.join("stats.db"), &[&dir])
+                            .map_err(|error| (error.to_string(), 1))?;
+                    tokenless_stats::http::serve(db, listen, &credential_file)
+                        .map_err(|error| (error.to_string(), 1))?;
+                }
                 StatsCommands::Summary {
                     limit,
                     json,

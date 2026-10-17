@@ -6,7 +6,9 @@ AW provides a shared configuration and local service for Agent policies. On
 Linux, it starts Qoder CLI >=1.1.64, OpenClaw, QwenPaw, Hermes and explicit Claude SDK workers through supported native
 entrypoints, runs external Providers and retains execution metadata after Agent
 sessions end. Frameworks keep their native interfaces, model configuration,
-scheduling and permissions. It also manages public Pi SDK workers. The current release is a Preview.
+scheduling and permissions. It also manages public Pi SDK workers and explicitly
+wired AgentScope SDK 2.0.6 public factories in a foreground Python worker.
+The current release is a Preview.
 
 ## Start here
 
@@ -17,7 +19,7 @@ scheduling and permissions. It also manages public Pi SDK workers. The current r
 | Build from source and connect your component | [Integration walkthrough](../../docs/developer-guide/en/aw/integration.md) |
 | Write and validate configuration | [Configuration reference](../../docs/developer-guide/en/aw/configuration.md) |
 | Launch four frameworks with one policy, verify and clean up | [User guide](../../docs/user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks) |
-| Compress model-visible results across six frameworks, including Pi and Claude SDK | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
+| Compress model-visible tool results | [Tokenless Provider](../../docs/user-guide/en/user-entrypoint/aw-tokenless.md) |
 | Use an existing sec-core backend | [sec-core Provider](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md) |
 | Deploy in a container and retain audit data | [Runtime and persistence](../../docs/user-guide/en/user-entrypoint/aw.md#containers-and-persistent-data) |
 
@@ -31,16 +33,26 @@ credentials. Core works without sec-core or any Provider. The source walkthrough
 includes a [shared YAML](crates/aw-service/examples/aw.shared.yaml) and a small
 [boolean policy](crates/aw-service/examples/check-tool.py) that need no backend.
 
+The sec-core package also includes its authenticated health helper and official
+service/configuration reference assets. Optional explicit diagnostics are documented
+in the sec-core guide; `aw inspect` remains unchanged and does not probe the backend.
+
 ## Supported native entrypoints
 
 | Framework | Native prerequisite | Entrypoint |
 | --- | --- | --- |
 | Qoder CLI | Native command Hook contract; detected version recorded | Interactive or print |
 | OpenClaw | 2026.9.6 | A new Gateway |
+| AgentScope SDK | 2.0.6 | Explicit public factory in one foreground Python worker |
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | Public SDK factory in an AW-owned foreground Node worker |
 | Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | Foreground Python worker using its public AW client factory |
+
+AgentScope factories also support the shared PreTool/PostTool operations; use the
+[SDK lifecycle YAML](crates/aw-service/examples/aw.agentscope-lifecycle.yaml) to
+combine sec-core checks/observation with Tokenless retry suggestions and final
+text compression. See the [SDK launch guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-agentscope-sdk).
 
 Runtime supports tool-before `observe`/`block` and tool-after `observe` or single-text
 `replace_result`, plus
@@ -48,7 +60,7 @@ framework-specific native commands. Completion observers and user Hooks can
 precede one final replacement step (OpenClaw observes natively after compression); the combined sec-core/Tokenless template
 retains scanning/observation and adds Tokenless PreTool retry suggestions before
 execution plus final PostTool compression. Suggested commands require a fresh call
-and pass sec-core/native permissions again; RTK is an external PreTool dependency.
+and pass sec-core/native permissions again; Preview Tokenless packages include the pinned RTK for PreTool; PostTool stays usable without it.
 RTK ownership survives quoted arguments, symlinked state paths and the execution
 prefix forms listed in the user guide. After-event coverage varies by framework.
 If OpenClaw lacks the replacement middleware API, startup reports degraded
@@ -113,6 +125,7 @@ are independently versioned.
 - [Core execution and durable journal](docs/design/core-execution.md)
 
 - [AgentSight lifecycle and phase-one contracts](docs/design/agentsight-integration.md)
+- [AgentScope public factory Bridge](docs/design/agentscope-adapter.md)
 
 Claude SDK workers explicitly compose `aw_claude.create_client(options)`; see the
 [factory and launcher guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-a-claude-sdk-worker)
