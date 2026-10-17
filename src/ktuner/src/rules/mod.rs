@@ -11010,6 +11010,7 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
         recs,
         "/proc/sys/kernel/softlockup_all_cpu_backtrace",
         "/proc/sys/kernel/soft_watchdog",
+        "/proc/sys/kernel/watchdog_thresh",
     )
 }
 
@@ -11039,11 +11040,22 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
 /// kernel's default is the soft detector *on*, and so does one the reader
 /// cannot interpret: the same "a failed read leaves the kernel default, which
 /// does use the knob" rule the core_uses_pid gate follows.
+///
+/// `watchdog_thresh = 0` disables lockup detection altogether
+/// (`Documentation/admin-guide/sysctl/kernel.rst`: "Setting this tunable to
+/// zero will disable lockup detection altogether"), but `soft_watchdog` keeps
+/// reporting the user-enabled bit: `lockup_detector_update_enable()`
+/// (`kernel/watchdog.c`, v6.6 :341-353) builds `watchdog_enabled` from the
+/// user flags alone, and `__lockup_detector_reconfigure()` only starts the
+/// soft timers when `watchdog_enabled && watchdog_thresh` (v6.6 :1176-1198).
+/// So a readable 0 there also leaves the knob with no report to extend; a
+/// missing or unreadable thresh keeps the advice under the kernel default.
 fn eval_softlockup_all_cpu_backtrace_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
     soft_watchdog_path: &str,
+    watchdog_thresh_path: &str,
 ) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -11053,6 +11065,11 @@ fn eval_softlockup_all_cpu_backtrace_at(
     }
     // No soft-lockup report, no place for the all-CPU backtrace to fire.
     if !soft_lockup_detector_is_live(soft_watchdog_path) {
+        return 1;
+    }
+    // watchdog_thresh=0 stops the soft-lockup timers even though
+    // soft_watchdog still reads the user-enabled bit.
+    if read_switch(watchdog_thresh_path) == Some(0) {
         return 1;
     }
     // read_sysctl_u64 maps a file it could not read or parse to the same 0
@@ -24372,6 +24389,8 @@ mod tests {
         let (off, on, others) = switch_fixture("softlockup_all_cpu_backtrace");
         let watchdog = off.with_file_name("soft_watchdog");
         std::fs::write(&watchdog, b"1\n").unwrap();
+        let thresh = off.with_file_name("watchdog_thresh");
+        std::fs::write(&thresh, b"10\n").unwrap();
         let mut info = make_test_info();
         info.cpu_cores = 64;
         let advice = |path: &std::path::Path| {
@@ -24381,6 +24400,7 @@ mod tests {
                 &mut recs,
                 path.to_str().unwrap(),
                 watchdog.to_str().unwrap(),
+                thresh.to_str().unwrap(),
             );
             recs
         };
@@ -24432,6 +24452,11 @@ mod tests {
         std::fs::write(&detector_empty, b"").unwrap();
         let detector_dir = dir.join("soft_watchdog.dir");
         std::fs::create_dir_all(&detector_dir).unwrap();
+        let thresh_on = dir.join("watchdog_thresh.on");
+        std::fs::write(&thresh_on, b"10\n").unwrap();
+        let thresh_off = dir.join("watchdog_thresh.off");
+        std::fs::write(&thresh_off, b"0\n").unwrap();
+        let thresh_missing = dir.join("watchdog_thresh.missing");
 
         let mut info = make_test_info();
         info.cpu_cores = 96;
@@ -24442,10 +24467,26 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_off.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(
             recs.is_empty(),
             "the soft detector is off: no soft-lockup report can use the backtrace"
+        );
+
+        // watchdog_thresh=0 disables lockup detection even though
+        // soft_watchdog still reads the user-enabled bit.
+        let mut recs = Vec::new();
+        eval_softlockup_all_cpu_backtrace_at(
+            &info,
+            &mut recs,
+            knob.to_str().unwrap(),
+            detector_on.to_str().unwrap(),
+            thresh_off.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "watchdog_thresh=0 stops the detector the backtrace belongs to"
         );
 
         for detector in [
@@ -24461,12 +24502,35 @@ mod tests {
                 &mut recs,
                 knob.to_str().unwrap(),
                 detector.to_str().unwrap(),
+                thresh_on.to_str().unwrap(),
             );
             assert!(
                 recs.iter()
                     .any(|r| r.param == "kernel.softlockup_all_cpu_backtrace"),
                 "{}: a live soft detector keeps the rule",
                 detector.display()
+            );
+        }
+
+        // A missing or unreadable threshold keeps the kernel default (10).
+        let thresh_malformed = dir.join("watchdog_thresh.malformed");
+        std::fs::write(&thresh_malformed, b"off\n").unwrap();
+        let thresh_empty = dir.join("watchdog_thresh.empty");
+        std::fs::write(&thresh_empty, b"").unwrap();
+        for thresh in [&thresh_missing, &thresh_malformed, &thresh_empty] {
+            let mut recs = Vec::new();
+            eval_softlockup_all_cpu_backtrace_at(
+                &info,
+                &mut recs,
+                knob.to_str().unwrap(),
+                detector_on.to_str().unwrap(),
+                thresh.to_str().unwrap(),
+            );
+            assert!(
+                recs.iter()
+                    .any(|r| r.param == "kernel.softlockup_all_cpu_backtrace"),
+                "{}: an unreadable threshold keeps the advice",
+                thresh.display()
             );
         }
 
@@ -24478,6 +24542,7 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_on.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "small hosts still skip the rule");
 
@@ -24490,6 +24555,7 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_on.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "an enabled knob needs no advice");
 
