@@ -198,11 +198,20 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        event_routes(&self.input.document, steps).map(|_| ())
+        event_routes(
+            &self.input.document,
+            steps,
+            adapter::observation_enabled(&self.input.document, &self.input.target),
+        )
+        .map(|_| ())
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = event_routes(&self.input.document, context.steps)?;
+        let (events, hooks) = event_routes(
+            &self.input.document,
+            context.steps,
+            adapter::observation_enabled(&self.input.document, &self.input.target),
+        )?;
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -276,12 +285,13 @@ fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
 fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
+    observe: bool,
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
     // After wrappers are outermost, so they also observe an inner before denial.
     for event in ["tool.after", "tool.before"] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
+        let selected = adapter::native_steps(steps, event, observe);
         if selected.is_empty() {
             continue;
         }
@@ -295,7 +305,7 @@ fn event_routes(
             return Err("QwenPaw native event budgets must be 1..55000 ms".into());
         }
         let mut registration = selected.clone();
-        if selected.iter().any(|step| step.execution.replaces_result()) {
+        if selected.iter().any(|step| step.replaces_result) {
             // After handlers unwind the native middleware stack inside out.
             registration.reverse();
         }
@@ -308,7 +318,7 @@ fn event_routes(
                 budget_ms: budget,
                 replacement_step: selected
                     .iter()
-                    .find(|step| step.execution.replaces_result())
+                    .find(|step| step.replaces_result)
                     .map(|step| step.step_id.clone()),
                 steps: selected
                     .into_iter()
@@ -384,6 +394,7 @@ mod tests {
         let (events, hooks) = event_routes(
             &json!({"spec":{"events":{},"execution":{"default_event_budget_ms":5000}}}),
             &steps,
+            false,
         )
         .unwrap();
         assert_eq!(

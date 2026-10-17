@@ -107,6 +107,7 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
             vec![
                 "libexec/aw/providers/tokenless/aw-provider-tokenless",
                 "libexec/aw/providers/tokenless/tokenless",
+                "libexec/aw/providers/tokenless/rtk",
             ]
         } else {
             require(
@@ -117,6 +118,7 @@ pub fn inspect(bundle: &Path) -> Result<Manifest> {
                 "libexec/aw/providers/sec-core/aw-provider-sec-core",
                 "libexec/aw/providers/sec-core/agent-sec-cli",
                 "libexec/aw/providers/sec-core/agent-sec-daemon",
+                "libexec/aw/providers/sec-core/agent-sec-daemon-health",
             ]
         };
         require(

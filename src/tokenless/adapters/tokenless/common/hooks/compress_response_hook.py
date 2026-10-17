@@ -37,6 +37,10 @@ Output contract per agent:
     replacement remain passthrough (roadmap §7). Environment attribution is
     still injected: it is additive by design.
 
+For claude-code, qoder-cli, qwenwork, and opencode, ``llmContent`` and
+``returnDisplay`` are ordinary business fields: the complete response reaches
+Core. Cosh and legacy diagnostic-only hosts retain their wrapper extraction.
+
 The agent ID is resolved from the host runtime, ``--agent-id`` argument, or
 TOKENLESS_AGENT_ID environment variable. When running under Cosh-NG, runtime
 detection overrides the declared ID for correct stats attribution. Fallback
@@ -98,6 +102,14 @@ _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
 _QODER_AGENT_ID = "qoder-cli"
 _QWENWORK_AGENT_ID = "qwenwork"
 _OPENCODE_AGENT_ID = "opencode"
+_REPLACE_AGENT_IDS = frozenset(
+    {
+        _CLAUDE_AGENT_ID,
+        _QODER_AGENT_ID,
+        _QWENWORK_AGENT_ID,
+        _OPENCODE_AGENT_ID,
+    }
+)
 
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
 # invalidate it. Hooks run as a fresh process per tool call and spawning the
@@ -274,17 +286,21 @@ def main() -> None:
         # Desktop MCP wrappers expose telemetry here, not their model-visible result.
         skip()
 
-    # 5. For Cosh-NG, extract only llmContent from the wrapped response.
-    #    Never include returnDisplay in the provider-visible replacement.
+    # 5. These replacement hosts expose the tool result directly, so fields
+    # named llmContent/returnDisplay are business data. Keep Cosh and legacy
+    # diagnostic-only hosts' existing wrapper handling.
+    # Runtime detection currently resolves agent_id to cosh-ng. Keep the
+    # explicit runtime guard so wrapper handling survives precedence changes.
     llm_content = None
-    if isinstance(tool_response_raw, dict):
-        llm_content = tool_response_raw.get("llmContent")
-        if llm_content is None:
-            llm_content = tool_response_raw.get("returnDisplay")
-    elif isinstance(tool_response_raw, str):
-        parsed_wrapper = try_parse_json(tool_response_raw)
-        if isinstance(parsed_wrapper, dict) and "llmContent" in parsed_wrapper:
-            llm_content = parsed_wrapper["llmContent"]
+    if cosh_ng_detected or agent_id not in _REPLACE_AGENT_IDS:
+        if isinstance(tool_response_raw, dict):
+            llm_content = tool_response_raw.get("llmContent")
+            if llm_content is None:
+                llm_content = tool_response_raw.get("returnDisplay")
+        elif isinstance(tool_response_raw, str):
+            parsed_wrapper = try_parse_json(tool_response_raw)
+            if isinstance(parsed_wrapper, dict) and "llmContent" in parsed_wrapper:
+                llm_content = parsed_wrapper["llmContent"]
 
     # The model-visible content we will send for compression
     model_visible_before = llm_content if llm_content is not None else tool_response_raw
@@ -330,7 +346,7 @@ def main() -> None:
     if cosh_ng_detected:
         can_replace = True
         replace_with_text = True  # updatedToolResponse accepts any text
-    elif agent_id in {_QODER_AGENT_ID, _QWENWORK_AGENT_ID, _OPENCODE_AGENT_ID}:
+    elif agent_id in _REPLACE_AGENT_IDS and agent_id != _CLAUDE_AGENT_ID:
         can_replace = True
         # An unwrapped shell field is plain text regardless of its envelope.
         replace_with_text = text_field is not None or not isinstance(

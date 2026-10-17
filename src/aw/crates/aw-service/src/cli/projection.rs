@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
-        "qoder" | "qwenpaw" | "pi" => &native["tool_response"],
+        "qoder" | "qwenpaw" | "pi" | "agentscope" => &native["tool_response"],
         "claude-sdk"
             if native["hook_event_name"] == "PostToolUse"
                 && native["tool_name"] == "Bash"
@@ -65,6 +65,10 @@ fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
         "pi" => (
             native["tool_call"]["name"].as_str().unwrap_or(""),
             &native["tool_call"]["input"],
+        ),
+        "agentscope" => (
+            native["tool_call"]["name"].as_str().unwrap_or(""),
+            &native["effective_input"],
         ),
         "qwenpaw" => (
             native["tool_call"]["name"].as_str().unwrap_or(""),
@@ -144,7 +148,7 @@ pub(super) fn project(adapter: &str, native: &Value) -> Option<Value> {
         _ => "api_response",
     };
     let status = match adapter {
-        "qwenpaw" => value["state"].as_str()?,
+        "qwenpaw" | "agentscope" => value["state"].as_str()?,
         "openclaw" if openclaw_result_failed(&value) => "error",
         "hermes" => match native["extra"]["status"].as_str()? {
             "ok" => "success",
@@ -205,7 +209,7 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
         "hermes" => {
             json!({"aw_replacement": if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}})
         }
-        "openclaw" | "qwenpaw" | "pi" => json!({"aw_replacement":value}),
+        "openclaw" | "qwenpaw" | "pi" | "agentscope" => json!({"aw_replacement":value}),
         _ => return Err("unsupported result replacement adapter".into()),
     };
     Ok(HookOutput {
@@ -259,8 +263,19 @@ mod tests {
     }
 
     #[test]
+    fn agentscope_projection_uses_effective_command_instead_of_raw_json() {
+        let native = json!({"tool_call":{"name":"exec","input":"{\"command\":\"raw"},
+            "effective_input":{"command":"echo repaired"},
+            "tool_response":{"state":"success","content":[{"type":"text","text":"output"}]}});
+        assert_eq!(
+            project("agentscope", &native).unwrap()["command"],
+            "echo repaired"
+        );
+    }
+
+    #[test]
     fn empty_or_unbounded_replacements_are_rejected_for_every_adapter() {
-        for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi"] {
+        for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi", "agentscope"] {
             assert!(reply(adapter, &json!({}), "").is_err());
             assert!(reply(
                 adapter,
@@ -345,7 +360,7 @@ mod tests {
 
     #[test]
     fn text_replacement_preserves_native_metadata_and_does_not_add_a_copy() {
-        for adapter in ["openclaw", "qwenpaw", "pi"] {
+        for adapter in ["openclaw", "qwenpaw", "pi", "agentscope"] {
             let original = json!({"content":[{"type":"text","text":"original","annotations":{"kept":true}}],"metadata":{"kept":42},"state":"success"});
             let native = if adapter == "openclaw" {
                 json!({"event":{"result":original}})
@@ -367,9 +382,14 @@ mod tests {
             json!([{"type":"image","data":"opaque"}]),
             json!([{"type":"text","text":"a"},{"type":"text","text":"b"}]),
         ] {
-            assert!(
-                project("openclaw", &json!({"event":{"result":{"content":content}}})).is_none()
-            );
+            for adapter in ["openclaw", "qwenpaw", "agentscope"] {
+                let native = if adapter == "openclaw" {
+                    json!({"event":{"result":{"content":content}}})
+                } else {
+                    json!({"tool_response":{"content":content,"state":"success"}})
+                };
+                assert!(project(adapter, &native).is_none());
+            }
         }
     }
 

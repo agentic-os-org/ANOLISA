@@ -25,8 +25,11 @@ Token authentication is on by default.
 
 | Access path | What is required |
 |---|---|
-| `http://127.0.0.1:7396` from the same host | Nothing; loopback requests skip authentication |
+| `http://127.0.0.1:7396` from the same host | Read-only page requests normally skip authentication; API exceptions apply |
 | `http://<host>:7396` from elsewhere | The Dashboard token, as `?token=<TOKEN>` in the URL, as `Authorization: Bearer <TOKEN>`, or typed into the login form |
+
+Saved Tokenless record lists require the Dashboard credential even on loopback. This changes
+metadata access control; the existing page, login flow and statistics calculation remain unchanged.
 
 ![Dashboard login screen](../../../../images/agentsight/en/dashboard-login.png)
 
@@ -66,7 +69,7 @@ components on every page load and reports the result through `GET /api/auth/stat
 | Page | Appears when |
 |---|---|
 | Agent Dashboard, Agent Observability, Sessions, Reuse Labels, Optimization, Skill Metrics, Trajectory Viewer, Settings | Always |
-| Token Savings | `tokenless` is installed, or its statistics database exists |
+| Token Savings | `tokenless` is installed, its statistics database exists, or a Tokenless API is configured |
 | Security Observability, System Audit | `agent-sec-core` is installed (daemon or CLI) |
 | Risk Enforcement | `agentsight-enforcer` is installed or its socket exists |
 
@@ -143,6 +146,12 @@ optimization type, plus a savings ranking and concrete tips.
 
 Press **Query** after choosing a range; the page starts empty on purpose. Setup:
 [Integrations](integrations.md#tokenless-token-savings).
+
+With `tokenless_api` configured, **Query** refreshes statistics for captured tool-call IDs
+before computing savings. The existing page and controls stay unchanged. Only uniquely associated
+`active` records returned by the source query contribute; source failures display an error instead
+of stale totals. The existing AgentSight login is required, including on loopback. Saved metadata
+and explicitly requested content remain available through the [recording API](integrations.md#record-statistics-through-the-api).
 
 **Export CSV** downloads the displayed sessions from the last successful query as
 `token-savings.csv`, in their displayed order. It includes session IDs, Agent names,

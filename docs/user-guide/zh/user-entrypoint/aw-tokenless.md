@@ -4,17 +4,32 @@
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
-Qoder、OpenClaw、QwenPaw、Hermes、Pi 及 Claude SDK 原生 Bash 共用一份 Provider 配置，支持 PreTool 重试建议
+Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK 原生 Bash 共用一份 Provider 配置，支持 PreTool 重试建议
 与 PostTool 压缩。Schema 压缩和授权恢复仍是独立能力。
 
 ## 安装与启用
 
-使用 [AW Preview 包](aw-preview.md)。`aw-provider-tokenless` 包含桥接程序
-`aw-provider-tokenless` 和从同一源码提交构建的 `tokenless` CLI，要求匹配的
-`aw-core`；`aw-all-in-one` 包含 core、sec-core 和 Tokenless。PostTool 不依赖 RTK；
-PreTool 额外要求 Agent 环境能够定位兼容 RTK，安装方式见
-[Tokenless 安装指南](../token-saving/tokenless/QUICKSTART.md)。当前 AW 包未包含 RTK。
-无需 Python wheel 或 Tokenless 原生插件。Agent 安装及其运行依赖仍由用户准备。
+使用 [AW Preview 包](aw-preview.md)。`aw-provider-tokenless` 包含从同一源码提交
+构建的桥接程序和 Tokenless CLI，以及固定到
+`b1c0dc00649c50fbe8930f849c800d4d6ca12091` 的 RTK v0.49.0，附带 Tokenless 的
+统计和 pytest 补丁。要求匹配的 `aw-core`；`aw-all-in-one` 将完全相同的组件内容
+和回执与 core、sec-core 组合。无需 Python wheel 或 Tokenless 原生插件；Agent
+安装及其运行依赖仍由用户准备。
+
+RTK 位于不可变前缀内的 `libexec/aw/providers/tokenless/rtk`。源码 pin、setup
+脚本、两份补丁、共享的 Tokenless home/path-policy 源文件与 Apache-2.0 许可位于 `share/doc/aw-provider-tokenless/rtk`，
+它们和二进制的哈希均纳入 Tokenless 组件回执。`provenance.json` 记录上游与
+ANOLISA 源码提交、各输入的来源和哈希，以及 RTK 复用 home/path-policy 模块的原因。
+源码构建通过官方 setup 脚本创建本次
+专用源码目录，保留已有 RTK 源码缓存与本地修改，打包后清理临时源码；
+不替换用户 RTK 或全局 PATH。受管理 RTK 的安装前缀必须可编码到 PATH，不能包含
+`:`；配置在发布前明确拒绝这种路径。
+PostTool 不依赖 RTK。包生成的 PreTool 先校验受管理 RTK 及其直接父目录：两者必须
+属于当前用户或 root，且不能允许所有用户写入；父目录必须是真实目录，不能是符号链接。
+仅组可写不会被拒绝，与 Tokenless 的依赖信任规则一致。仅在 Tokenless 子进程的
+受控 PATH 前加入其目录；重试建议使用绝对执行路径。受管理 RTK 缺失、被修改、
+不可执行或不可用时，返回 Provider 错误并沿用已有 `on_error` 策略，不回退用户 RTK。
+PostTool 和只读 view 继续工作。现有 view/schema 及其 unknown 就绪字段保持不变。
 
 先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
 前缀。Qoder/OpenClaw 使用 `aw-package configure --provider tokenless`，并提供既有
@@ -23,15 +38,24 @@ sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步�
 原有单独 `sec-core` 选项保持既有行为。
 
 受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
-替换可执行路径，并将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
+替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
+`PREFIX/.aw-packages/aw-provider-tokenless.json` 中 RTK 条目的 `sha256`，
+将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
 启动参数见 [AW 指南](aw.md#四框架使用同一份配置)。
+
+AgentScope SDK 的每个公共工厂都需通过 `AwBridge` 接线；
+[SDK 生命周期示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
+组合 sec-core 检查/观察与两项 Tokenless 操作。Python 和工厂设置见
+[SDK 启动合同](aw.md#启动-agentscope-sdk)。
 
 Pi 使用 [Pi 启动指南](aw.md#启动-pi-sdk-worker)中的 SDK 应用工厂；
 包配置生成器仍只面向 Qoder/OpenClaw。
 
 Provider 私有配置只接受 `{version: 1}`。固定 argv 为
-`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`；桥接通过 Protocol v2
-调用 `tokenless compress`，为该子进程设置 `TOKENLESS_DATA_DIR`。CLI 统计使用 AW
+`aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`，可追加
+`--rtk ABS_FILE --rtk-sha256 HEX`。包配置生成器从已校验的安装内容生成这两个参数；
+不含它们的手写配置沿用 Tokenless 原生依赖发现。view 命令不包含这两个参数。
+桥接通过 Protocol v2 调用 `tokenless compress`，为该子进程设置 `TOKENLESS_DATA_DIR`。CLI 统计使用 AW
 提供的 Agent、Session 和工具调用标识。CLI 统计度量选中的压缩，不证明原生采用。
 
 AW Journal 与 Tokenless 统计具有独立的内容留存边界。Tokenless CLI 默认开启 SQLite
@@ -77,6 +101,7 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装，�
 | Hermes | `transform_tool_result` 最终字符串回调 |
 | Pi SDK | 原 callback 之后的 Core `afterToolCall` content override |
 | Claude SDK | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` 原生 Bash envelope |
+| AgentScope SDK 2.0.6 | 公共工厂 Bridge 返回最终 `ToolResponse` |
 
 OpenClaw 要求 middleware API 和显式插件启用；AW 生成的原生 profile 声明 middleware
 合同。观察型 `after_tool_call` 的返回值无法替换模型可见内容。
@@ -96,7 +121,7 @@ Session/工具调用 ID，而不是工具名。
 结果保留。AW 持久 Journal 仍仅记录元数据，不保存替换文本。
 
 在 `tool.after.steps` 中保留既有完成观察和用户自定义 Hook，将压缩放在最后。
-启用结果替换时，Qoder、QwenPaw、Hermes 和 Pi 按声明顺序执行这些步骤，观察步骤看到原结果。
+启用结果替换时，Qoder、QwenPaw、Hermes、Pi 和 AgentScope SDK 按声明顺序执行这些步骤，观察步骤看到原结果。
 只有最后一个结构化步骤可以请求 `replace_result`；替换后还有启用步骤，或有第二个
 替换步骤时，准入会拒绝。观察 Provider 保持原输入形态，只有替换 Provider 收到文本
 投影。所有步骤共享一个事件截止时间；观察或用户 Hook 故障按 `report` 处理，预算
@@ -104,7 +129,7 @@ Session/工具调用 ID，而不是工具名。
 
 Qoder 保留独立的原生回调，仅在 AW 服务内部约束自身 after 调用的顺序，不强制设置
 原生 `sequential`，不改变外部 Hook 的调度。用户显式配置该选项时，仍遵循 Qoder
-对整个匹配计划生效的原生语义。QwenPaw 反向注册 after 链，使 middleware 解包时
+对整个匹配计划生效的原生语义。QwenPaw 和 AgentScope SDK 反向注册 after 链，使 middleware 解包时
 保持配置顺序；Hermes 保留完成观察，并在原生最终结果转换阶段压缩。
 
 OpenClaw 的原生完成事件发生在结果 middleware 之后，因此先压缩，再在原生 after

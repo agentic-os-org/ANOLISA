@@ -11,8 +11,8 @@ defines the public shape. Rust validation also checks references and relationshi
 between fields. The local Host performs Provider discovery and admission; the
 selected Adapter performs its native preparation checks before binding. Qoder
 requires CLI >=1.1.64 and records the probed version instead of an exact-release gate; OpenClaw,
-QwenPaw, Hermes, Pi and Claude SDK retain their adapter-specific version or revision
-restrictions.
+QwenPaw, Hermes, Pi, Claude SDK and AgentScope SDK retain their adapter-specific
+version or revision restrictions. AgentScope SDK requires exactly 2.0.6.
 For a working four-framework example, start with the [integration walkthrough](integration.md).
 
 ## Document fields
@@ -31,7 +31,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes`, `pi` or `claude-sdk`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
 | `agents.<id>.qoder.sequential` | Optional boolean for `adapter: qoder`; marks generated native groups as sequential; false does not override other matching groups |
 | `providers.<id>.protocol` | Defaults to invoke-only `aw-hook/v1alpha1`; explicit `aw-provider/v1alpha1` retains structured messages, `native-hook/v1alpha1` retains native callback bytes |
@@ -100,7 +100,8 @@ with `observe` or a single final structured `replace_result`, plus native steps
 at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, exact selectors, guards and stronger execution guarantees
-are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi and Claude SDK have launch Adapters; their supported versions, entrypoints and
+are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
+their supported versions, entrypoints and
 after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
 
 ## Events, effects and tool selection

@@ -66,6 +66,36 @@ if (!version) {
   process.exit(1);
 }
 
+// The QwenPaw requirements pin carries two spellings of this one version: the
+// release-tag path keeps the raw Cargo form (the release workflow tags it
+// verbatim) while the wheel filename takes the PEP 440 normalized form the
+// pinned maturin builds and pip accepts -- a Cargo 0.9.0-rc.1 publishes
+// anolisa_tokenless-0.9.0rc1-.... packaging/raw/wheel-version.py supplies that
+// spelling from the normalizer inside packaging/raw/verify-release.py, the gate
+// that rejects a payload mixing the two up, and the Makefile's
+// stamp-adapter-templates rule asks the same helper, so the npm bundle cannot
+// drift from the raw and RPM payloads. Asked on demand: only adapter bundling
+// stamps templates.
+const WHEEL_VERSION_SCRIPT = join(tokenlessRoot, 'packaging', 'raw', 'wheel-version.py');
+
+function wheelFilenameVersion() {
+  let normalized;
+  try {
+    normalized = execFileSync('python3', [WHEEL_VERSION_SCRIPT, version], {
+      encoding: 'utf-8',
+    }).trim();
+  } catch (error) {
+    throw new Error(
+      `cannot normalize ${version} into a wheel filename version ` +
+      `(python3 ${WHEEL_VERSION_SCRIPT}): ${error.message}`,
+    );
+  }
+  if (!normalized) {
+    throw new Error(`wheel-version.py returned no wheel filename version for ${version}`);
+  }
+  return normalized;
+}
+
 const BINARIES = ['tokenless', 'rtk'];
 
 // npm registry every generated manifest and publish command is pinned to.
@@ -401,7 +431,7 @@ function buildAdapters() {
 /**
  * Copy the adapter tree into the root package, mirroring what the Makefile's
  * install-adapter-resources does for FHS installs: strip build-only
- * artifacts, stamp @VERSION@ templates, and mark scripts executable.
+ * artifacts, stamp the version templates, and mark scripts executable.
  */
 function copyAdapters(rootPkgDir) {
   const adaptersSrc = join(tokenlessRoot, 'adapters', 'tokenless');
@@ -424,10 +454,14 @@ function copyAdapters(rootPkgDir) {
   });
 
   // Stamp *.in templates with the release version (Makefile does this via
-  // stamp-adapter-templates for RPM installs) and drop the raw templates.
+  // stamp-adapter-templates for RPM installs) and drop the raw templates. The
+  // QwenPaw requirements pin also needs the wheel-filename spelling.
+  const wheelVersion = wheelFilenameVersion();
   walkFiles(adaptersDest, (p) => {
     if (p.endsWith('.in')) {
-      const stamped = readFileSync(p, 'utf-8').replaceAll('@VERSION@', version);
+      const stamped = readFileSync(p, 'utf-8')
+        .replaceAll('@WHEEL_VERSION@', wheelVersion)
+        .replaceAll('@VERSION@', version);
       writeFileSync(p.slice(0, -3), stamped);
       rmSync(p);
     }

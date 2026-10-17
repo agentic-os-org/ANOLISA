@@ -277,7 +277,7 @@ impl PreparedLaunch for Prepared {
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         for event in ["tool.before", "tool.after"] {
-            if steps.iter().any(|step| step.event == event) {
+            if !self.native_steps(steps, event).is_empty() {
                 let budget = self.budget(event)?;
                 if self.callback_timeout > 0.0
                     && (budget.div_ceil(1000) + 4) as f64 > self.callback_timeout
@@ -293,18 +293,14 @@ impl PreparedLaunch for Prepared {
         let mut events = BTreeMap::new();
         let mut hooks = Vec::new();
         for event in ["tool.before", "tool.after"] {
-            let selected: Vec<_> = context
-                .steps
-                .iter()
-                .filter(|step| step.event == event)
-                .collect();
+            let selected = self.native_steps(context.steps, event);
             if selected.is_empty() {
                 continue;
             }
             let budget = self.budget(event)?;
             for step in &selected {
                 hooks.push(json!({"event":event, "step":step.step_id,
-                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.execution.replaces_result()}));
+                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result}));
             }
             events.insert(
                 event.into(),
@@ -312,7 +308,7 @@ impl PreparedLaunch for Prepared {
                     budget_ms: budget,
                     replacement_step: selected
                         .iter()
-                        .find(|step| step.execution.replaces_result())
+                        .find(|step| step.replaces_result)
                         .map(|step| step.step_id.clone()),
                     steps: selected
                         .into_iter()
@@ -367,6 +363,14 @@ impl PreparedLaunch for Prepared {
 }
 
 impl Prepared {
+    fn native_steps(&self, steps: &[AdmittedStep], event: &str) -> Vec<adapter::NativeStep> {
+        adapter::native_steps(
+            steps,
+            event,
+            adapter::observation_enabled(&self.input.document, &self.input.target),
+        )
+    }
+
     fn budget(&self, event: &str) -> Result<u64> {
         let spec = &self.input.document["spec"];
         let budget = spec["events"][event]

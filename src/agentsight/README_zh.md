@@ -546,3 +546,5 @@ Token 解析支持多种 LLM API 格式：
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。
+
+可通过可选的 `tokenless_api` 配置记录远程 Tokenless 统计数据，详见[配置](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#tokenless-统计-api)。

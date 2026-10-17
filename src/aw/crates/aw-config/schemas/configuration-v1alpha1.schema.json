@@ -242,6 +242,7 @@
           "enum": [
             "pi",
             "qwenpaw",
+            "agentscope",
             "qoder",
             "openclaw",
             "hermes",
@@ -257,6 +258,72 @@
           "properties": {
             "sequential": {
               "type": "boolean"
+            }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "endpoint",
+            "query_timeout_ms",
+            "query_bytes",
+            "max_items",
+            "max_bytes"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "endpoint": {
+                    "pattern": "^https://"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "token_file"
+                ]
+              }
+            }
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/name"
+            },
+            "endpoint": {
+              "$ref": "#/$defs/text"
+            },
+            "token_file": {
+              "$ref": "#/$defs/text"
+            },
+            "query_timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            },
+            "query_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4194304
+            },
+            "max_items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 4096,
+              "maximum": 2097152
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "off"
+              ]
             }
           }
         }

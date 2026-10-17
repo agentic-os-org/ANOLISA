@@ -49,22 +49,47 @@ fn is_token_limit_finish(reason: Option<&str>) -> bool {
     matches!(reason, Some("length" | "max_tokens"))
 }
 
+/// Structured error reported inside a `200` SSE body, if any.
+///
+/// An event's payload may arrive split over several `data:` lines — the SSE
+/// grammar joins an event's data lines with a newline — so a pretty-printed or
+/// wrapped error object never parses as a single line. Reading the lines one by
+/// one therefore missed the error the provider streamed, and the call was
+/// recorded without one. Each event's data lines are folded back into one
+/// payload at its blank-line boundary, while the per-line attempt stays: a
+/// payload that arrives whole must keep reading exactly as before.
 fn structured_stream_error_text(raw_body: &str) -> Option<String> {
     if let Some(error) = structured_error_json_text(raw_body.trim()) {
         return Some(error);
     }
 
-    raw_body.lines().find_map(|line| {
-        let payload = line
-            .trim()
+    let mut event_data = String::new();
+    for line in raw_body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // A blank line ends the event: its payload is complete.
+            if let Some(error) = structured_error_json_text(&event_data) {
+                return Some(error);
+            }
+            event_data.clear();
+            continue;
+        }
+        let payload = trimmed
             .strip_prefix("data:")
             .map(str::trim)
-            .unwrap_or_else(|| line.trim());
+            .unwrap_or(trimmed);
         if payload.is_empty() || payload == "[DONE]" || payload.starts_with("event:") {
-            return None;
+            continue;
         }
-        structured_error_json_text(payload)
-    })
+        if let Some(error) = structured_error_json_text(payload) {
+            return Some(error);
+        }
+        if !event_data.is_empty() {
+            event_data.push('\n');
+        }
+        event_data.push_str(payload);
+    }
+    structured_error_json_text(&event_data)
 }
 
 fn structured_error_json_text(candidate: &str) -> Option<String> {
@@ -1504,6 +1529,34 @@ mod tests {
         call.duration_ns = 100_000_000;
         call.response.raw_body =
             Some(r#"data: {"error":{"message":"upstream failed before completion"}}"#.to_string());
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
+    /// The SSE grammar joins an event's `data:` lines with a newline, so a
+    /// pretty-printed or wrapped payload arrives split and no single line
+    /// parses. Reading the lines one by one lost the error the provider
+    /// streamed: the call was recorded as an ordinary success.
+    #[test]
+    fn test_detects_a_sse_error_split_over_data_lines() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 100_000_000;
+        call.response.raw_body = Some(
+            "event: error\n\
+             data: {\n\
+             data:   \"error\": {\n\
+             data:     \"message\": \"upstream failed before completion\",\n\
+             data:     \"type\": \"server_error\"\n\
+             data:   }\n\
+             data: }\n\n"
+                .to_string(),
+        );
 
         let events = detector.detect(&call);
 
