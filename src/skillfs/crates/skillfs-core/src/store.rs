@@ -308,8 +308,27 @@ impl SkillStore {
     }
 
     /// Insert or update a skill entry.
+    ///
+    /// The write path — mkdir placeholders, the sync worker's reparse
+    /// refresh, the rename refresh, the inbox install flow — keys
+    /// entries by their adopted name and carries no category of its
+    /// own. A same-source reparse refreshes the entry the loaders
+    /// scanned, so its category record stays; a changed `source_path`
+    /// means the record belongs to the entry being replaced (an
+    /// ordinary skill installed over a pre-scanned staging category's
+    /// leaf name, say), and keeping it would leave the staging-private
+    /// view filters acting on a category the new entry was never
+    /// scanned under — drop it instead.
     pub fn upsert(&mut self, entry: SkillEntry) {
-        self.skills.insert(entry.metadata.name.clone(), entry);
+        let name = entry.metadata.name.clone();
+        let source_replaced = match self.skills.get(&name) {
+            Some(existing) => existing.source_path != entry.source_path,
+            None => false,
+        };
+        if source_replaced {
+            self.skill_categories.remove(&name);
+        }
+        self.skills.insert(name, entry);
     }
 
     /// Remove a skill by name.
@@ -333,6 +352,18 @@ impl SkillStore {
         let mut names: Vec<&str> = self.skills.keys().map(|s| s.as_str()).collect();
         names.sort_unstable();
         names
+    }
+
+    /// The category a skill was discovered under, if any.
+    ///
+    /// A present record always names the category the live entry was
+    /// scanned under: the loaders insert it with the entry,
+    /// [`SkillStore::upsert`] (the write-path reparse and refresh
+    /// surface) preserves it across a same-source reparse and drops it
+    /// when the entry's source changes, and [`SkillStore::remove`]
+    /// drops the record with the entry.
+    pub fn category_of(&self, name: &str) -> Option<&str> {
+        self.skill_categories.get(name).map(String::as_str)
     }
 
     /// Get the number of skills.
