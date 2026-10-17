@@ -715,11 +715,21 @@ fn check_permission(perm: &str) -> bool {
         "file_write" => {
             let test_path =
                 std::env::temp_dir().join(format!(".tokenless-ready-test-{}", std::process::id()));
-            let can_write = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&test_path)
-                .is_ok();
+            // O_EXCL keeps the probe symlink-safe (a pre-placed symlink or
+            // file makes create_new fail instead of being followed). A
+            // leftover probe from a crashed earlier run whose pid we
+            // inherited must not permanently flip the check to denied:
+            // unlink it (remove_file never follows symlinks) and retry
+            // once. A leftover that cannot be unlinked — foreign owner in
+            // a sticky temp dir — keeps the probe denied.
+            let probe = || {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&test_path)
+                    .is_ok()
+            };
+            let can_write = probe() || (fs::remove_file(&test_path).is_ok() && probe());
             if can_write {
                 let _ = fs::remove_file(&test_path);
             }
