@@ -46,6 +46,11 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 电子表格编辑预览
+
+XLSX 行移动辅助脚本支持 `--dry-run`，可在应用编辑前查看工作表、图表、表格和
+透视缓存的修改计数。预览流程详见[用户指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

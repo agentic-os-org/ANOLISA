@@ -11,6 +11,9 @@ Usage:
     # Delete 1 row at row 8 (rows 9+ shift up by 1)
     python3 xlsx_shift_rows.py <work_dir> delete 8 1
 
+    # Preview the same changes without writing any file
+    python3 xlsx_shift_rows.py <work_dir> insert 5 2 --dry-run
+
 What it updates in every XML file under <work_dir>:
   - <row r="N"> attributes in worksheet sheetData
   - <c r="XN"> cell address attributes in worksheet sheetData
@@ -33,11 +36,12 @@ Limitations:
   - External workbook links in xl/externalLinks/ are NOT updated.
 """
 
-import sys
+import argparse
 import os
 import re
-import xml.etree.ElementTree as ET
+import sys
 import xml.dom.minidom
+import xml.etree.ElementTree as ET
 
 
 def col_letter(n: int) -> str:
@@ -155,7 +159,7 @@ def _tag(local: str) -> str:
     return f"{{{NS_MAIN}}}{local}"
 
 
-def process_worksheet(path: str, at: int, delta: int) -> int:
+def process_worksheet(path: str, at: int, delta: int, dry_run: bool = False) -> int:
     """Update row/cell references in a worksheet XML. Returns change count."""
     tree = ET.parse(path)
     root = tree.getroot()
@@ -224,12 +228,12 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             dv.set("sqref", new)
             changes += 1
 
-    if changes > 0:
+    if changes > 0 and not dry_run:
         _write_tree(tree, path)
     return changes
 
 
-def process_chart(path: str, at: int, delta: int) -> int:
+def process_chart(path: str, at: int, delta: int, dry_run: bool = False) -> int:
     """Update data range references in a chart XML."""
     # Charts use DrawingML namespace; we look for <f> elements with range strings
     with open(path, "r", encoding="utf-8") as fh:
@@ -246,13 +250,13 @@ def process_chart(path: str, at: int, delta: int) -> int:
     new_content = re.sub(r'(<(?:[^:>]+:)?f>)([^<]+)(</(?:[^:>]+:)?f>)',
                           replace_f, content)
     changes = content != new_content
-    if changes:
+    if changes and not dry_run:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_content)
     return 1 if changes else 0
 
 
-def process_table(path: str, at: int, delta: int) -> int:
+def process_table(path: str, at: int, delta: int, dry_run: bool = False) -> int:
     """Update the ref attribute on the <table> root element."""
     tree = ET.parse(path)
     root = tree.getroot()
@@ -264,11 +268,12 @@ def process_table(path: str, at: int, delta: int) -> int:
     if new == old:
         return 0
     root.set("ref", new)
-    _write_tree(tree, path)
+    if not dry_run:
+        _write_tree(tree, path)
     return 1
 
 
-def process_pivot_cache(path: str, at: int, delta: int) -> int:
+def process_pivot_cache(path: str, at: int, delta: int, dry_run: bool = False) -> int:
     """Update worksheetSource ref in a pivot cache definition."""
     tree = ET.parse(path)
     root = tree.getroot()
@@ -282,7 +287,7 @@ def process_pivot_cache(path: str, at: int, delta: int) -> int:
                 if new != old:
                     ws.set("ref", new)
                     changes += 1
-    if changes:
+    if changes and not dry_run:
         _write_tree(tree, path)
     return changes
 
@@ -308,18 +313,22 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if len(sys.argv) < 5:
-        print(__doc__)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("work_dir", help="Unpacked xlsx working directory")
+    parser.add_argument("operation", type=str.lower, choices=("insert", "delete"))
+    parser.add_argument("at", type=int, help="Starting row number")
+    parser.add_argument("count", type=int, help="Number of rows to shift")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report changes without writing files"
+    )
+    args = parser.parse_args()
 
-    work_dir = sys.argv[1]
-    operation = sys.argv[2].lower()
-    at = int(sys.argv[3])
-    count = int(sys.argv[4])
-
-    if operation not in ("insert", "delete"):
-        print(f"ERROR: operation must be 'insert' or 'delete', got '{operation}'")
-        sys.exit(1)
+    work_dir = args.work_dir
+    operation = args.operation
+    at = args.at
+    count = args.count
 
     if operation == "insert":
         delta = count
@@ -332,6 +341,8 @@ def main() -> None:
 
     print(f"Operation : {operation} {count} row(s) at row {at} (delta={delta:+d})")
     print(f"Work dir  : {work_dir}")
+    if args.dry_run:
+        print("Mode      : preview")
     print()
 
     total_changes = 0
@@ -342,7 +353,7 @@ def main() -> None:
         for fname in sorted(os.listdir(ws_dir)):
             if fname.endswith(".xml"):
                 fpath = os.path.join(ws_dir, fname)
-                n = process_worksheet(fpath, at, delta)
+                n = process_worksheet(fpath, at, delta, dry_run=args.dry_run)
                 if n:
                     print(f"  Updated {n:3d} references in xl/worksheets/{fname}")
                     total_changes += n
@@ -353,7 +364,7 @@ def main() -> None:
         for fname in sorted(os.listdir(charts_dir)):
             if fname.endswith(".xml"):
                 fpath = os.path.join(charts_dir, fname)
-                n = process_chart(fpath, at, delta)
+                n = process_chart(fpath, at, delta, dry_run=args.dry_run)
                 if n:
                     print(f"  Updated chart ranges in xl/charts/{fname}")
                     total_changes += n
@@ -364,7 +375,7 @@ def main() -> None:
         for fname in sorted(os.listdir(tables_dir)):
             if fname.endswith(".xml"):
                 fpath = os.path.join(tables_dir, fname)
-                n = process_table(fpath, at, delta)
+                n = process_table(fpath, at, delta, dry_run=args.dry_run)
                 if n:
                     print(f"  Updated table ref in xl/tables/{fname}")
                     total_changes += n
@@ -375,7 +386,7 @@ def main() -> None:
         for fname in sorted(os.listdir(cache_dir)):
             if "Definition" in fname and fname.endswith(".xml"):
                 fpath = os.path.join(cache_dir, fname)
-                n = process_pivot_cache(fpath, at, delta)
+                n = process_pivot_cache(fpath, at, delta, dry_run=args.dry_run)
                 if n:
                     print(f"  Updated pivot source range in xl/pivotCaches/{fname}")
                     total_changes += n
@@ -386,6 +397,9 @@ def main() -> None:
     print("IMPORTANT: Review named ranges in xl/workbook.xml <definedNames> manually.")
     print("           Structured table references (Table[@Col]) are NOT updated.")
     print()
+    if args.dry_run:
+        print("Preview complete: no files were written. Run without --dry-run to apply.")
+        return
     print("Next steps:")
     print("  1. Review the changes above")
     print(f"  2. python3 xlsx_pack.py {work_dir} output.xlsx")

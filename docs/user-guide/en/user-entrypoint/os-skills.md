@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## Spreadsheet Edit Preview
+
+After unpacking an XLSX workbook, preview row-reference shifts before applying them:
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2 --dry-run
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2
+```
+
+The arguments are the unpacked directory, `insert` or `delete`, starting row,
+and row count. `--dry-run` runs the same transformations and reports per-part and
+total change counts while leaving every file unchanged. It covers the helper's
+existing worksheet, chart, table and pivot-cache references. Named ranges,
+structured table references and external workbook links still need manual review.
+Review the preview, run the command without `--dry-run` to apply, then repack and
+validate the workbook. A successful preview exits 0; invalid CLI syntax exits 2.
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
