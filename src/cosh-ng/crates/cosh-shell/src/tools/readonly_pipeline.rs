@@ -1,6 +1,8 @@
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::readonly_compound::resolve_trusted_executable;
 use super::temp_output::TempOutput;
 use super::{is_sensitive_target, strip_ansi};
 
@@ -16,6 +18,11 @@ pub struct ReadonlyPipelinePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadonlyPipelineStage {
+    /// Trusted-dirs path the validator resolved for `argv[0]`. The
+    /// executor spawns this path, never a `PATH` lookup, so a
+    /// user-writable directory earlier in `PATH` cannot substitute a
+    /// different binary for the one the verdict allowlisted.
+    pub program: PathBuf,
     pub argv: Vec<String>,
 }
 
@@ -54,22 +61,22 @@ pub struct ReadonlyPipelineError {
 pub fn validate_readonly_pipeline(
     command: &str,
 ) -> Result<ReadonlyPipelinePlan, ReadonlyPipelineError> {
-    let stages = parse_pipeline(command)?;
-    if stages.len() < 2 {
+    let argv_stages = parse_pipeline(command)?;
+    if argv_stages.len() < 2 {
         return Err(error(
             "not-pipeline",
             "readonly pipeline requires at least two stages",
         ));
     }
-    for (index, stage) in stages.iter().enumerate() {
-        validate_stage(stage, index)?;
+    let mut stages = Vec::with_capacity(argv_stages.len());
+    for (index, argv) in argv_stages.iter().enumerate() {
+        let program = validate_stage(argv, index)?;
+        stages.push(ReadonlyPipelineStage {
+            program,
+            argv: argv.clone(),
+        });
     }
-    Ok(ReadonlyPipelinePlan {
-        stages: stages
-            .into_iter()
-            .map(|argv| ReadonlyPipelineStage { argv })
-            .collect(),
-    })
+    Ok(ReadonlyPipelinePlan { stages })
 }
 
 pub fn run_readonly_pipeline(
@@ -107,7 +114,11 @@ fn run_plan(
             None => Stdio::null(),
         };
 
-        let mut command = Command::new(&stage.argv[0]);
+        // The trusted-dirs path the validator bound the verdict to —
+        // never a `PATH` lookup, so a user-writable directory
+        // prepended to `PATH` cannot shadow an allowlisted stage
+        // program with a different binary.
+        let mut command = Command::new(&stage.program);
         command
             .args(&stage.argv[1..])
             .stdin(stdin)
@@ -200,7 +211,7 @@ fn parse_pipeline(command: &str) -> Result<Vec<Vec<String>>, ReadonlyPipelineErr
     Ok(stages)
 }
 
-fn validate_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPipelineError> {
+fn validate_stage(argv: &[String], index: usize) -> Result<PathBuf, ReadonlyPipelineError> {
     let Some(program) = argv.first().map(|value| value.as_str()) else {
         return Err(error("empty-stage", "empty stage"));
     };
@@ -220,7 +231,15 @@ fn validate_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPipelineE
         "grep" | "rg" => validate_search_stage(argv, index),
         "head" | "sort" | "uniq" | "cut" | "wc" => validate_stdin_filter_stage(argv, index),
         _ => Err(error("unsupported-command", program)),
-    }
+    }?;
+    // Eligibility (allowlisted name) and executability (trusted-dirs
+    // resolution) are one verdict — the same contract the compound
+    // executor established. A program only reachable through the
+    // inherited `PATH` (e.g. a cargo-installed `rg`) stays on the
+    // AskUser path instead of letting a user-writable `PATH` entry
+    // supply a fake `ps`/`head` that would run without approval under
+    // an allowlisted name.
+    resolve_trusted_executable(program).ok_or_else(|| error("program-not-in-trusted-dirs", program))
 }
 
 fn validate_search_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPipelineError> {
@@ -356,6 +375,58 @@ mod tests {
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[0].argv[0], "ps");
         assert_eq!(plan.stages[1].argv, vec!["head", "-5"]);
+        // The plan carries the trusted-dirs path each verdict bound
+        // to, not a bare name the executor would re-resolve through
+        // the inherited PATH. Assert the shape the contract actually
+        // promises — an absolute path inside a trusted directory with
+        // the expected file name — instead of one fixed spelling:
+        // which trusted directory wins varies by Unix (`/bin/ps` on
+        // merged-/usr layouts, `/usr/bin/ps` elsewhere).
+        for (stage, name) in [&plan.stages[0], &plan.stages[1]]
+            .iter()
+            .zip(["ps", "head"])
+        {
+            let program = &stage.program;
+            assert!(
+                program.is_absolute(),
+                "{name} path must be absolute: {program:?}"
+            );
+            assert_eq!(
+                program.file_name().and_then(|n| n.to_str()),
+                Some(name),
+                "{name} file name: {program:?}"
+            );
+            let parent = program
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or_default();
+            assert!(
+                super::super::readonly_compound::TRUSTED_EXECUTABLE_DIRS.contains(&parent),
+                "{name} parent must be a trusted directory: {program:?}"
+            );
+        }
+    }
+
+    // Ordinary diagnostic pipelines keep the auto-allow route: every
+    // stage program resolves from the trusted system directories, so
+    // the trusted-dirs requirement narrows only PATH-only programs.
+    #[test]
+    fn readonly_pipeline_keeps_trusted_programs_auto_allowable() {
+        let plan = validate_readonly_pipeline("df -h | grep -v Filesystem | sort | head -1")
+            .expect("trusted programs stay auto-allowable");
+        let programs: Vec<&str> = plan
+            .stages
+            .iter()
+            .map(|stage| {
+                stage
+                    .program
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("program file name")
+            })
+            .collect();
+        assert_eq!(programs, ["df", "grep", "sort", "head"]);
+        assert!(plan.stages.iter().all(|stage| stage.program.is_absolute()));
     }
 
     #[test]
@@ -403,6 +474,63 @@ mod tests {
         .expect("pipeline output");
         assert!(output.stdout.lines().count() <= 2, "{}", output.stdout);
         assert!(output.stdout.contains("<truncated>"), "{}", output.stdout);
+    }
+
+    // A user-writable directory prepended to PATH (~/.local/bin, an
+    // npm global bin dir) must not be able to shadow an allowlisted
+    // pipeline program: the validator resolves stage programs from
+    // the trusted system directories only, and the executor spawns
+    // that resolved path — the contract the compound executor already
+    // pins. Against the pre-fix executor (`Command::new(argv[0])`, a
+    // bare PATH lookup) this test observes the shadow binary's marker
+    // in the captured output.
+    //
+    // The PATH mutation is process-global, so it is serialized with
+    // every other PATH-mutating test through the project-level lock in
+    // tools::test_support and restored by an RAII guard: a mid-test
+    // panic must not leak the shadowed PATH into every later test that
+    // spawns children.
+    #[cfg(unix)]
+    #[test]
+    fn readonly_pipeline_executor_ignores_path_shadowing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _restore = super::super::test_support::path_env_guard();
+
+        let shadow_dir = tempfile::tempdir().expect("shadow dir");
+        let fake_head = shadow_dir.path().join("head");
+        let mut script = std::fs::File::create(&fake_head).expect("create fake head");
+        writeln!(script, "#!/bin/sh").expect("write fake head");
+        writeln!(script, "echo PATH_SHADOW_MARKER").expect("write fake head");
+        drop(script);
+        std::fs::set_permissions(&fake_head, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake head");
+
+        let original_path = std::env::var_os("PATH").expect("PATH is set");
+        let shadowed_path = std::env::join_paths(
+            std::iter::once(shadow_dir.path().to_path_buf())
+                .chain(std::env::split_paths(&original_path)),
+        )
+        .expect("build shadowed PATH");
+        std::env::set_var("PATH", &shadowed_path);
+        let output = run_readonly_pipeline(
+            "ps aux | head -1",
+            &ReadonlyPipelineConfig {
+                output_limit_bytes: 4096,
+                ..ReadonlyPipelineConfig::default()
+            },
+        );
+        std::env::set_var("PATH", &original_path);
+
+        let output = output.expect("trusted-dirs programs keep the auto-allow route");
+        assert!(
+            !output.stdout.contains("PATH_SHADOW_MARKER"),
+            "PATH shadow binary executed instead of the validated one: {}",
+            output.stdout
+        );
+        assert!(!output.stdout.trim().is_empty());
+        assert_eq!(output.exit_code, Some(0));
     }
 
     // Pipeline stage temp output must never appear at a predictable path
