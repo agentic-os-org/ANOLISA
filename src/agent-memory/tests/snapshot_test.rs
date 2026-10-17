@@ -192,17 +192,105 @@ fn repeated_restore_preserves_each_displaced_tree() {
 }
 
 #[test]
-fn unavailable_trash_keeps_displaced_content_in_meta() {
+fn unavailable_trash_preserves_every_displaced_tree_across_restores() {
     let (_tmp, svc) = setup();
     svc.write("doc.md", "baseline", false).unwrap();
+    svc.write("notes/nested.md", "baseline nested", false)
+        .unwrap();
     let snap = svc.mem_snapshot(None).unwrap();
     std::fs::write(svc.mount.meta_dir.join("trash"), "occupied").unwrap();
-    svc.write("doc.md", "recoverable", true).unwrap();
-    svc.mem_snapshot_restore(&snap.id).unwrap();
-    assert_eq!(svc.read("doc.md").unwrap(), "baseline");
-    let rollback = svc
+    // Pin compatibility with older versions' stranded, fixed rollback names.
+    let legacy = svc
         .mount
         .meta_dir
         .join(format!(".{}.rollback.doc.md", snap.id));
-    assert_eq!(std::fs::read_to_string(rollback).unwrap(), "recoverable");
+    std::fs::write(&legacy, "legacy backup").unwrap();
+    for version in ["first", "second", "third"] {
+        svc.write("doc.md", version, true).unwrap();
+        svc.write("notes/nested.md", version, true).unwrap();
+        svc.mem_snapshot_restore(&snap.id).unwrap();
+        assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+        assert_eq!(svc.read("notes/nested.md").unwrap(), "baseline nested");
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "legacy backup");
+    }
+    let prefix = format!(".{}.rollback.", snap.id);
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(&svc.mount.meta_dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && entry.file_type().unwrap().is_dir()
+        {
+            let version = std::fs::read_to_string(entry.path().join("doc.md")).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(entry.path().join("notes/nested.md")).unwrap(),
+                version
+            );
+            versions.push(version);
+        }
+    }
+    let audit = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let recovery_events: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|entry| entry["tool"] == "mem_snapshot_restore_recovery")
+        .collect();
+    assert_eq!(recovery_events.len(), 3);
+    for event in recovery_events {
+        let relative = event["path"].as_str().unwrap();
+        assert!(relative.starts_with(&format!(".anolisa/.{}.rollback.entries", snap.id)));
+        assert!(svc.mount.root.join(relative).join("doc.md").is_file());
+        assert_eq!(event["ok"], true);
+    }
+    versions.sort();
+    assert_eq!(versions, ["first", "second", "third"]);
+    assert_eq!(
+        std::fs::read_to_string(svc.mount.meta_dir.join("trash")).unwrap(),
+        "occupied"
+    );
+}
+
+#[test]
+fn exhausted_rollback_reservation_keeps_user_data_and_cleans_staging() {
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "snapshot", false).unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+    svc.write("doc.md", "current must survive", true).unwrap();
+    // Match the documented 10,000-candidate reservation bound.
+    let prefix = format!(".{}.rollback.entries", snap.id);
+    for suffix in 0..10_000 {
+        let name = if suffix == 0 {
+            prefix.clone()
+        } else {
+            format!("{prefix}~{suffix}")
+        };
+        std::fs::write(svc.mount.meta_dir.join(name), "occupied").unwrap();
+    }
+    let error = svc.mem_snapshot_restore(&snap.id).unwrap_err();
+    assert!(error.to_string().contains("reservation attempts exhausted"));
+    assert!(
+        error
+            .to_string()
+            .contains(&svc.mount.meta_dir.display().to_string())
+    );
+    assert!(error.to_string().contains("10000"));
+    assert!(error.to_string().contains(&prefix));
+    assert_eq!(svc.read("doc.md").unwrap(), "current must survive");
+    assert!(
+        !svc.mount
+            .meta_dir
+            .join("snapshots")
+            .join(format!(".{}.staging", snap.id))
+            .exists()
+    );
+    for suffix in 0..10_000 {
+        let name = if suffix == 0 {
+            prefix.clone()
+        } else {
+            format!("{prefix}~{suffix}")
+        };
+        assert_eq!(
+            std::fs::read_to_string(svc.mount.meta_dir.join(name)).unwrap(),
+            "occupied"
+        );
+    }
 }

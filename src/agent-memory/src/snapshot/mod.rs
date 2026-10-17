@@ -66,6 +66,17 @@ pub fn list(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
     tar::list_tarballs(mount)
 }
 
+/// Restore a snapshot while preserving the original unit-returning API.
 pub fn restore(mount: &MountPoint, id: &str) -> Result<()> {
-    tar::restore_tarball(mount, id)
+    restore_with_outcome(mount, id).map(|_| ())
+}
+
+/// Successful restore details used for tool responses and audit records.
+pub(crate) struct RestoreOutcome {
+    /// A recovery directory whose cleanup could not be confirmed.
+    pub(crate) retained_dir: Option<PathBuf>,
+}
+
+pub(crate) fn restore_with_outcome(mount: &MountPoint, id: &str) -> Result<RestoreOutcome> {
+    tar::restore_tarball_with_outcome(mount, id)
 }
