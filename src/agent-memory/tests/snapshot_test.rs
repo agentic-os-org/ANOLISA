@@ -294,3 +294,34 @@ fn exhausted_rollback_reservation_keeps_user_data_and_cleans_staging() {
         );
     }
 }
+
+#[test]
+fn restore_treats_rollback_prefixed_root_names_as_user_data() {
+    let (_tmp, svc) = setup();
+    let id = "prefix-fixture";
+    let archived = format!(".{id}.rollback.document");
+    let added = format!(".{id}.rollback.after-snapshot");
+    svc.write(&archived, "snapshot contents", false).unwrap();
+    agent_memory::snapshot::tar::create_tarball(&svc.mount, id, "prefix fixture").unwrap();
+    svc.write(&archived, "current must be backed up", true)
+        .unwrap();
+    svc.write(&added, "post-snapshot must be backed up", false)
+        .unwrap();
+    svc.mem_snapshot_restore(id).unwrap();
+    assert_eq!(svc.read(&archived).unwrap(), "snapshot contents");
+    assert!(matches!(svc.read(&added), Err(MemoryError::NotFound(_))));
+    let trash = svc.mount.meta_dir.join("trash");
+    let backups: Vec<_> = std::fs::read_dir(trash)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(backups[0].join(archived)).unwrap(),
+        "current must be backed up"
+    );
+    assert_eq!(
+        std::fs::read_to_string(backups[0].join(added)).unwrap(),
+        "post-snapshot must be backed up"
+    );
+}
