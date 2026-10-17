@@ -11,6 +11,30 @@ use tempfile::TempDir;
 
 static PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// How long the fixture gets to record its pid.
+///
+/// This bounds host scheduling, not product behaviour: the caller has asked for
+/// a child, and the wait covers the runner finding a CPU for the fork, the shell
+/// starting, and the `printf` that records the pid. A product-shaped budget here
+/// is what made `configure_response_does_not_wait_indefinitely_for_process_exit`
+/// flake on the shared CI runners -- that test starts polling *before* the
+/// request is issued, so its budget also has to cover the main thread being
+/// scheduled into `registry_query`. Expiry still panics, so a fixture that never
+/// starts fails on the first call instead of once per loop iteration.
+const FIXTURE_PID_BUDGET: Duration = Duration::from_secs(30);
+
+/// How long `registry_query("auth", "configure")` gets to return once the
+/// fixture is up.
+///
+/// This is the assertion under test: the fixture hangs after responding, so a
+/// configure that waited for process exit would block until the watchdog kills
+/// it. The production path spends up to ~500 ms of that on purpose -- the 250 ms
+/// `wait_timeout` in the configure branch, then the 250 ms SIGTERM grace in
+/// `terminate_and_reap_process`, which the fixture's `trap '' TERM` always
+/// exhausts -- so the budget has to sit well above that and well below "never
+/// returns".
+const CONFIGURE_RETURN_BUDGET: Duration = Duration::from_secs(6);
+
 fn fixture(mode: &str) -> (TempDir, CoshCoreAdapter, PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let program = home.path().join("core");
@@ -42,7 +66,7 @@ fi
 }
 
 fn started_pid(path: &Path) -> i32 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + FIXTURE_PID_BUDGET;
     loop {
         if let Some(pid) = fs::read_to_string(path)
             .ok()
@@ -179,7 +203,7 @@ fn configure_response_does_not_wait_indefinitely_for_process_exit() {
     let watchdog_pid = pid_file.clone();
     let watchdog = thread::spawn(move || {
         let pid = started_pid(&watchdog_pid);
-        if finished.recv_timeout(Duration::from_secs(2)).is_err() {
+        if finished.recv_timeout(CONFIGURE_RETURN_BUDGET).is_err() {
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
@@ -190,7 +214,9 @@ fn configure_response_does_not_wait_indefinitely_for_process_exit() {
     });
     let result = adapter.registry_query("auth", "configure", serde_json::json!({}));
     let _ = done.send(());
-    let forced_cleanup = watchdog.join().unwrap();
+    let forced_cleanup = watchdog
+        .join()
+        .expect("watchdog must report whether it had to kill the fixture");
     assert_reaped(started_pid(&pid_file));
     assert!(
         !forced_cleanup,
