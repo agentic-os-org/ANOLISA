@@ -144,9 +144,24 @@ impl IndexHandle {
     /// behavioural divergence. The `compact()` method only marks files
     /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
     /// indexed file is unaffected regardless of which path inserts it.
-    pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
+    ///
+    /// Agent attribution: `agent_id` is the observing agent's identity
+    /// (`MCP_CLIENT_NAME`), the same value the watcher's flush and full-scan
+    /// paths tag their rows with. It must not be hard-coded to `None` here —
+    /// an untagged row is invisible to `isolated:<agent>` search, which
+    /// defeats the immediate-recall guarantee this synchronous upsert exists
+    /// for, and is shared with every *other* agent under `filter:<agent>`
+    /// until the watcher happens to re-tag it (#4538).
+    pub fn reindex_file(
+        &self,
+        rel_path: &str,
+        body: &str,
+        mtime_ms: i64,
+        size: u64,
+        agent_id: Option<&str>,
+    ) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.upsert(rel_path, mtime_ms, size, body, None)
+        store.upsert(rel_path, mtime_ms, size, body, agent_id)
     }
 
     /// Compact the index: mark old, never-accessed files as cold.
