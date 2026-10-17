@@ -499,8 +499,8 @@ export default {
   'Enables an extension.': 'Enables an extension.',
   'The name of the extension to enable.':
     'The name of the extension to enable.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extension in. If not set, will be enabled in all scopes.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully enabled in all scopes.':
@@ -510,8 +510,8 @@ export default {
   'Disables an extension.': 'Disables an extension.',
   'The name of the extension to disable.':
     'The name of the extension to disable.',
-  'The scope to disable the extenison in.':
-    'The scope to disable the extenison in.',
+  'The scope to disable the extension in.':
+    'The scope to disable the extension in.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':

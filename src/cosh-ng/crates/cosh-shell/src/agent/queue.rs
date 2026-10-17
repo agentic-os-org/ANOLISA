@@ -5,7 +5,7 @@ use crate::agent::run::{AgentRunOrigin, AgentStartDisposition, AgentStartIntent}
 use crate::runtime::state::{AgentRunState, InlineState};
 use crate::types::AgentRequest;
 
-/// Maximum number of *normal* (cappable) requests held in the pending queue.
+/// Maximum number of *normal* (capable) requests held in the pending queue.
 ///
 /// Bounds unbounded growth when the user keeps submitting requests while the
 /// Agent is paused (e.g. a long background compaction). Beyond this, new
