@@ -239,3 +239,24 @@ class TestExtractVerdict:
     def test_both_pass_and_deny_returns_none(self) -> None:
         verdict, reason = _extract_verdict("PASS and DENY")
         assert verdict is None
+
+    def test_password_in_deny_narrative_is_not_a_pass(self) -> None:
+        """A substring 'PASS' inside 'password' must not fabricate PASS.
+
+        An exfiltration narrative that mentions the password store used to
+        yield verdict PASS with ok=True from the scanner.
+        """
+        verdict, _ = _extract_verdict(
+            "The code reads password store and exfiltrates data"
+        )
+        assert verdict is None
+
+    def test_bypass_in_deny_narrative_is_not_a_pass(self) -> None:
+        verdict, _ = _extract_verdict("analysis: bypass attempt detected")
+        assert verdict is None
+
+    def test_real_token_still_matches(self) -> None:
+        verdict, _ = _extract_verdict("verdict should be PASS here")
+        assert verdict == "PASS"
+        verdict, _ = _extract_verdict("decision: DENY")
+        assert verdict == "DENY"
