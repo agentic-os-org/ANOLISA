@@ -427,27 +427,28 @@ fn full_scan(
     Ok(())
 }
 
-/// Compute and store embeddings for every indexed file that lacks one.
-/// The embedding HTTP call happens outside the store mutex so concurrent
-/// searches are not blocked; only the brief path-query and final vec-write
-/// hold the lock. No-op when no provider is configured.
+/// Compute and store embeddings for every indexed file that lacks one, and
+/// re-embed indexed files whose stored vector was produced by a *different*
+/// embedding model (dimensionality mismatch). The embedding HTTP calls
+/// happen outside the store mutex so concurrent searches are not blocked;
+/// only the brief path-query and final vec-write hold the lock. No-op when
+/// no provider is configured.
 fn backfill_vectors(
     mount: &MountPointLite,
     store: &Arc<Mutex<BM25Store>>,
     embedding: Option<&dyn EmbeddingProvider>,
     rt_handle: Option<&tokio::runtime::Handle>,
 ) -> Result<()> {
+    // No provider configured: nothing to backfill and nothing to migrate.
     if embedding.is_none() {
         return Ok(());
     }
+
     // Phase 1 (locked, brief): which indexed paths lack a vector?
     let missing: Vec<String> = {
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
         store.paths_without_vec()?
     };
-    if missing.is_empty() {
-        return Ok(());
-    }
 
     // Phase 2 (lock-free): read body + embed. Holding the mutex across an
     // embedding HTTP call would block every concurrent search.
@@ -469,6 +470,114 @@ fn backfill_vectors(
         for (rel, v) in to_upsert {
             if let Err(e) = store.upsert_vec(&rel, &v) {
                 tracing::warn!("index full-scan vec upsert failed for {rel}: {e}");
+            }
+        }
+    }
+
+    // Phase 4: embedding-model migration. Switching the configured model
+    // leaves every stored vector at the OLD model's dimensionality, and
+    // `search_vec` silently skips length-mismatched rows — vector and
+    // hybrid recall die until the rows are re-embedded. The rows exist, so
+    // the missing-vector backfill above cannot surface them; probe by
+    // byte length instead. In the steady state this costs one path query
+    // and one probe embedding per full scan, and rewrites nothing.
+    //
+    // The probe must NOT be gated on `provider.dimensions()`: that value
+    // is only a constructor-time estimate on some providers (an unknown
+    // OpenAI model reports 1536 until the first real response corrects
+    // it, and Ollama's match table answers 768 for every unknown model
+    // with no self-correction at all), so an estimate that happens to
+    // equal the stored dimensionality would silently skip the migration
+    // entirely — the motivating "Ollama model change" case. Instead the
+    // live dimensionality is confirmed by embedding one readable,
+    // non-blank body: both providers short-circuit blank input to a zero
+    // vector sized from the estimate, so a blank body is no more
+    // authoritative than the estimate itself. A candidate whose body
+    // cannot be read (deleted or replaced with non-UTF-8 content between
+    // the walk and this phase) is skipped, not fatal — the same treatment
+    // phase 2 gives it.
+    let carriers: Vec<String> = {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        store.paths_with_vec()?
+    };
+    if carriers.is_empty() {
+        // No vectors at all — nothing to migrate (the backfill above owns
+        // the missing-row case).
+        return Ok(());
+    }
+    let mut probe: Option<(String, Vec<f32>)> = None;
+    for rel in &carriers {
+        let Some(body) = extract_text(mount.root_fd.as_fd(), Path::new(rel)) else {
+            continue;
+        };
+        if body.trim().is_empty() {
+            continue;
+        }
+        match embed_sync(embedding, rt_handle, &body) {
+            Some(v) if v.is_empty() => {
+                // A provider answering with no components confirms
+                // nothing; reading it as dimensionality 0 would flag
+                // every stored row as stale and overwrite the corpus
+                // with empty blobs.
+                tracing::warn!(
+                    "embedding provider returned an empty vector; cannot \
+                     confirm dimensionality, skipping migration until the \
+                     next full scan"
+                );
+                return Ok(());
+            }
+            Some(v) => {
+                probe = Some((rel.clone(), v));
+                break;
+            }
+            None => {
+                tracing::warn!(
+                    "cannot verify embedding dimensionality for vector migration; \
+                     skipping until the next full scan"
+                );
+                return Ok(());
+            }
+        }
+    }
+    let Some((probe_rel, probe_vec)) = probe else {
+        tracing::warn!(
+            "no indexed file with a stored vector has a readable non-blank \
+             body to confirm the embedding dimensionality; skipping \
+             migration until the next full scan"
+        );
+        return Ok(());
+    };
+    let stale: Vec<String> = {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        store.paths_with_stale_vec(probe_vec.len())?
+    };
+    if stale.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        "re-embedding {} file(s) whose vectors were stored by a different \
+         embedding model (dimensionality changed)",
+        stale.len()
+    );
+
+    // The probe already holds a fresh embedding of its own body.
+    let mut to_upsert: Vec<(String, Vec<f32>)> = vec![(probe_rel.clone(), probe_vec)];
+    for rel in stale {
+        if rel == probe_rel {
+            continue;
+        }
+        let Some(body) = extract_text(mount.root_fd.as_fd(), Path::new(&rel)) else {
+            continue;
+        };
+        if let Some(v) = embed_sync(embedding, rt_handle, &body) {
+            to_upsert.push((rel, v));
+        }
+    }
+    if !to_upsert.is_empty() {
+        let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+        for (rel, v) in to_upsert {
+            if let Err(e) = store.upsert_vec(&rel, &v) {
+                tracing::warn!("index model-migration vec upsert failed for {rel}: {e}");
             }
         }
     }

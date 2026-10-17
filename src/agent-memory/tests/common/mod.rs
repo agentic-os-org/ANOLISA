@@ -4,6 +4,10 @@
 //! providing a reusable client for both automated (`cargo test`) and
 //! interactive (`mcp-harness`) testing.
 
+// Included by several test binaries that each use a different subset of
+// the harness; an item unused by one binary is not dead code for the suite.
+#![allow(dead_code)]
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -146,4 +150,131 @@ pub fn extract_text(resp: &Value) -> String {
         .and_then(|i| i["text"].as_str())
         .unwrap_or("")
         .to_string()
+}
+
+// ---- Shared embedding mock + config harness for index-worker tests ----
+//
+// `KeywordEmbedding` started life duplicated between tier_b_test.rs and
+// index_vector_dim_migration_test.rs; the model-migration tests need it to
+// also model the provider quirks the migration has to survive, so it lives
+// here now and both binaries import it.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use agent_memory::config::AppConfig;
+use agent_memory::embedding::{Embedding, EmbeddingProvider};
+use agent_memory::service::MemoryService;
+
+/// Deterministic embedding for tests: maps a keyword to a basis vector so
+/// cosine similarity cleanly separates "rust" docs from "python" docs
+/// (dims used here are >= 3 so every basis index exists).
+///
+/// Beyond the honest mode it can model the provider quirks the
+/// model-migration path has to survive:
+///
+/// - `lying(declared, real)` — `dimensions()` reports `declared` while
+///   `embed` produces `real`-wide vectors, the constructor-time estimate
+///   that never self-corrects (unknown Ollama models, pre-first-response
+///   OpenAI models);
+/// - blank input short-circuits to a zero vector sized from the
+///   *estimate*, exactly like both real providers;
+/// - `empty_payload(declared)` — a broken backend answering with no
+///   components at all, which carries no dimensionality and must not be
+///   treated as authoritative;
+/// - `embed_calls` counts every `embed` invocation so tests can pin
+///   steady-state costs.
+pub struct KeywordEmbedding {
+    pub declared_dim: usize,
+    pub real_dim: usize,
+    pub empty_payload: bool,
+    pub embed_calls: AtomicUsize,
+}
+
+impl KeywordEmbedding {
+    /// `dimensions()` tells the truth and embeddings are `dim`-wide.
+    pub fn honest(dim: usize) -> Self {
+        Self {
+            declared_dim: dim,
+            real_dim: dim,
+            empty_payload: false,
+            embed_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// `dimensions()` reports `declared` while `embed` produces `real`
+    /// vectors — the estimate that never self-corrects.
+    pub fn lying(declared: usize, real: usize) -> Self {
+        Self {
+            declared_dim: declared,
+            real_dim: real,
+            empty_payload: false,
+            embed_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// A backend answering with an empty vector: the answer carries no
+    /// dimensionality at all.
+    pub fn empty_payload(declared: usize) -> Self {
+        Self {
+            declared_dim: declared,
+            real_dim: 0,
+            empty_payload: true,
+            embed_calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn embed_calls(&self) -> usize {
+        self.embed_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for KeywordEmbedding {
+    async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {
+        self.embed_calls.fetch_add(1, Ordering::SeqCst);
+        if self.empty_payload {
+            return Ok(Embedding { vector: Vec::new() });
+        }
+        if text.trim().is_empty() {
+            // Both real providers short-circuit blank input before any
+            // request and answer with a zero vector sized from the
+            // estimate, not from the model.
+            return Ok(Embedding {
+                vector: vec![0.0_f32; self.declared_dim],
+            });
+        }
+        let mut v = vec![0.0_f32; self.real_dim];
+        let t = text.to_lowercase();
+        if t.contains("rust") {
+            v[0] = 1.0;
+        } else if t.contains("python") {
+            v[1] = 1.0;
+        } else {
+            v[2] = 1.0;
+        }
+        Ok(Embedding { vector: v })
+    }
+
+    fn dimensions(&self) -> usize {
+        self.declared_dim
+    }
+}
+
+/// Hermetic `AppConfig` for index-worker tests: userland mount, sessions
+/// in a sub-temp of the same temp dir, no /run dependency.
+pub fn base_config(tmp: &tempfile::TempDir) -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg
+}
+
+/// Wait until the BM25 index holds at least `expected_min` rows.
+pub fn wait_for_index(svc: &MemoryService, expected_min: usize) -> bool {
+    svc.index
+        .as_ref()
+        .map(|h| h.wait_until_at_least(expected_min, 4000))
+        .unwrap_or(false)
 }
