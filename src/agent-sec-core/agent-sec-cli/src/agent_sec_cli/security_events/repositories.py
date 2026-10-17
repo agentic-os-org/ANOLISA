@@ -315,6 +315,36 @@ class SecurityEventRepository:
             self._store.dispose()
             return 0
 
+    def count_session_results(
+        self, session_id: str, categories: Sequence[str]
+    ) -> dict[str, dict[str, int]] | None:
+        """Count all category/result pairs in one session snapshot.
+
+        Return ``None`` when the database is unavailable, so callers cannot
+        mistake an incomplete query for a clean session.
+        """
+        session_factory = self._store.session_factory()
+        if session_factory is None:
+            return None
+        stmt = (
+            select(SecurityEventRecord.category, SecurityEventRecord.result, func.count())
+            .where(
+                SecurityEventRecord.session_id == session_id,
+                SecurityEventRecord.category.in_(tuple(categories)),
+            )
+            .group_by(SecurityEventRecord.category, SecurityEventRecord.result)
+        )
+        try:
+            with session_factory() as session:
+                rows = session.execute(stmt).all()
+        except SQLAlchemyError:
+            self._store.dispose()
+            return None
+        counts: dict[str, dict[str, int]] = {}
+        for category, result, count in rows:
+            counts.setdefault(category, {})[result] = int(count)
+        return counts
+
     def count_by(
         self,
         group_field: str,
