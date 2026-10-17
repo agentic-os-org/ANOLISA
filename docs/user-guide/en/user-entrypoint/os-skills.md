@@ -84,6 +84,21 @@ confirm_destructive = true
 
 ---
 
+## Spreadsheet Row Inputs
+
+The XLSX editing helpers require positive integer row parameters:
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2
+python3 src/os-skills/others/xlsx/scripts/xlsx_insert_row.py /tmp/xlsx_work --at 5 --copy-style-from 4 --values A=1
+```
+
+The shift helper rejects zero or negative starting rows/counts, and reports
+noninteger input without a traceback. The insertion helper rejects nonpositive
+`--at` or `--copy-style-from` values. Invalid parameters fail before modifying
+workbook files. This validates argument positivity; resulting-reference limits
+and whole-workbook transaction guarantees are outside this check.
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

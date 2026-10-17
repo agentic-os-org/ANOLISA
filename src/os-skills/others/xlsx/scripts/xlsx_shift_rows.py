@@ -33,11 +33,11 @@ Limitations:
   - External workbook links in xl/externalLinks/ are NOT updated.
 """
 
-import sys
 import os
 import re
-import xml.etree.ElementTree as ET
+import sys
 import xml.dom.minidom
+import xml.etree.ElementTree as ET
 
 
 def col_letter(n: int) -> str:
@@ -307,6 +307,7 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
 # Main driver
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     if len(sys.argv) < 5:
         print(__doc__)
@@ -314,8 +315,16 @@ def main() -> None:
 
     work_dir = sys.argv[1]
     operation = sys.argv[2].lower()
-    at = int(sys.argv[3])
-    count = int(sys.argv[4])
+    try:
+        at = int(sys.argv[3])
+        count = int(sys.argv[4])
+    except ValueError:
+        print("ERROR: Starting row and row count must be integers", file=sys.stderr)
+        sys.exit(1)
+
+    if at < 1 or count < 1:
+        print("ERROR: Starting row and row count must be positive", file=sys.stderr)
+        sys.exit(1)
 
     if operation not in ("insert", "delete"):
         print(f"ERROR: operation must be 'insert' or 'delete', got '{operation}'")

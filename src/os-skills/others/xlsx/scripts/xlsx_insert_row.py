@@ -154,11 +154,21 @@ def main() -> None:
                         help="Text cells: COL=VALUE (e.g., A=Utilities)")
     parser.add_argument("--values", nargs="+", default=None,
                         help="Numeric cells: COL=VALUE (e.g., B=3000 C=3000)")
-    parser.add_argument("--formula", nargs="+", default=None,
-                        help="Formula cells: COL=FORMULA with {row} (e.g., F=SUM(B{row}:E{row}))")
-    parser.add_argument("--copy-style-from", type=int, default=None,
-                        help="Copy cell styles from this row number")
+    parser.add_argument(
+        "--formula",
+        nargs="+",
+        default=None,
+        help="Formula cells: COL=FORMULA with {row} (e.g., F=SUM(B{row}:E{row}))",
+    )
+    parser.add_argument(
+        "--copy-style-from", type=int, default=None, help="Copy cell styles from this row number"
+    )
     args = parser.parse_args()
+
+    if args.at < 1:
+        parser.error("--at must be a positive row number")
+    if args.copy_style_from is not None and args.copy_style_from < 1:
+        parser.error("--copy-style-from must be a positive row number")
 
     at = args.at
     text_cells = parse_kv(args.text)

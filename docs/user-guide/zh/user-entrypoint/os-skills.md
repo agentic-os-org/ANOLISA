@@ -84,6 +84,19 @@ confirm_destructive = true
 
 ---
 
+## 电子表格行参数
+
+XLSX 编辑辅助脚本要求行参数为正整数：
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2
+python3 src/os-skills/others/xlsx/scripts/xlsx_insert_row.py /tmp/xlsx_work --at 5 --copy-style-from 4 --values A=1
+```
+
+行移动脚本拒绝零或负数的起始行和行数，并对非整数参数报错而不输出 traceback。
+插入行脚本拒绝非正数的 `--at` 和 `--copy-style-from`。无效参数会在修改工作簿文件前报错。
+此检查验证参数为正整数，不验证所有结果引用的上限，也不提供整个工作簿的事务保证。
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

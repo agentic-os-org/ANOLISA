@@ -489,6 +489,10 @@ Rules:
 
 Inserting a row at position N shifts all rows from N downward. Every reference to those rows in every XML file must be updated.
 
+The shift script requires positive integer starting rows and counts. The row
+insertion helper also requires positive `--at` and `--copy-style-from` values.
+Invalid row parameters are rejected before workbook files are modified.
+
 **Files to check and update:**
 
 | XML region | What to update | Example shift |
