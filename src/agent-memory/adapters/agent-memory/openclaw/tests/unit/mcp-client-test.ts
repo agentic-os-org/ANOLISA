@@ -6,10 +6,12 @@
  * - `buildChildEnv` allowlist behaviour
  * - `McpStdioClient.stop()` safety on an unstarted client
  * - `callTool` rejection when the binary can't spawn
+ * - Restart framing and late stdout from a replaced worker
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,6 +157,52 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         assert.equal(await readFile(eofPath, "utf8"), "eof");
       }
       await client.stop();
+    });
+  }
+
+  for (const lateChunk of [false, true]) {
+    it(`recovers after a partial response${lateChunk ? " and late stdout" : ""}`, {
+      timeout: 20_000,
+    }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-restart-framing-"));
+      const binaryPath = join(directory, "worker.mjs");
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      context.after(async () => {
+        try { await client.stop(); } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
+      await writeFile(binaryPath, `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const marker = ${JSON.stringify(join(directory, "started"))};
+const firstRun = !existsSync(marker);
+writeFileSync(marker, "started");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === "tools/call" && firstRun) {
+    process.stdout.write('{"jsonrpc":"2.0","id":' + request.id + ',"result":', () => process.exit(1));
+    return;
+  }
+  const result = request.method === "initialize" ? {} : {
+    content: [{ type: "text", text: "recovered:" + process.env.MEMORY_SESSION_ID }],
+  };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o700 });
+      const first = client.callTool("memory_observe", { content: "first" });
+      const oldChild = Reflect.get(client, "proc") as ChildProcess;
+      assert.ok(oldChild?.stdout);
+      await assert.rejects(first, /code=1/);
+      const retry = client.callTool("memory_observe", { content: "retry" });
+      if (lateChunk) {
+        // Deterministically deliver the old stream's tail after respawn;
+        // exit does not guarantee that all stdout data has been delivered.
+        oldChild.stdout.emit("data", Buffer.from('{"stale":'));
+      }
+      // The retry keeps the same logical session across worker generations.
+      assert.equal(await retry, "recovered:ses_test");
     });
   }
 

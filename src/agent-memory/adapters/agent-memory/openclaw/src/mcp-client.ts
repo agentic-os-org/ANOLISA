@@ -194,6 +194,8 @@ export class McpStdioClient {
   }
 
   private spawnProcess(): void {
+    // An incomplete frame from a previous worker cannot belong to this stream.
+    this.buffer = "";
     const pluginEnv: Record<string, string> = {
       MEMORY_PROFILE: this.config.profile,
       MEMORY_MAX_READ_BYTES: String(this.config.maxReadBytes),
@@ -220,7 +222,9 @@ export class McpStdioClient {
       detached: false,
     });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
+    const child = this.proc;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (this.proc !== child) return;
       this.handleData(chunk.toString("utf8"));
     });
 
