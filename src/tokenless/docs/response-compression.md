@@ -14,7 +14,7 @@ PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类
 | R4 | **字段删除** | key 匹配黑名单 | 整个字段移除（不递归进入） | 7 个字段 |
 | R5 | **null 移除** | 值为 `null` | 从对象/数组中删除 | 启用 |
 | R6 | **空值移除** | 值为 `""` / `[]` / `{}` | 从对象/数组中删除 | 启用 |
-| R7 | **深度截断** | 嵌套深度 > 8 | 替换为 `<{type} truncated at depth {N}>` | 8 层 |
+| R7 | **深度截断** | 嵌套深度 > 8 | 对象 / 数组 / 字符串替换为 `<{type} truncated at depth {N}>`；`null` / bool / number 无法再嵌套，按 R8 原样保留，不占 Stash、不计入截断数 | 8 层 |
 | R8 | **原始类型保留** | bool / number | 直接保留，不做处理 | — |
 
 **R4 默认黑名单字段**：`debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
