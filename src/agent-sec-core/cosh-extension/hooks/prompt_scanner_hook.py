@@ -140,6 +140,12 @@ def main() -> None:
         print(_allow())
         return
 
+    if not isinstance(input_data, dict):
+        # 载荷不是对象（数组/标量）：无 prompt 可扫，安全放行
+        # —— 与 pii_checker_hook 等姊妹钩子的守卫对齐
+        print(_allow())
+        return
+
     # 2. Extract user prompt text
     prompt_text = input_data.get("prompt", "")
     if not prompt_text or not isinstance(prompt_text, str) or not prompt_text.strip():
