@@ -112,9 +112,12 @@ impl SkillFs {
                 // before the S3 mkdir gate fires.
                 skill_names.retain(|n| !is_reserved_lifecycle_name(n));
                 // I2: staging roots are installer-private workspaces,
-                // not skills. Hide them from the /skills listing.
-                if let Some(ref matcher) = self.staging_matcher {
-                    skill_names.retain(|n| !matcher.is_staging_root(n));
+                // not skills. Hide them — and any store entry scanned
+                // out of a pre-seeded staging category — from the
+                // /skills listing. One guard covers the whole filter.
+                if self.staging_matcher.is_some() {
+                    let store = self.store.read();
+                    skill_names.retain(|n| !self.store_entry_is_staging_private(&store, n));
                 }
                 // Pending installs are hidden from discovery until
                 // completeness check passes and activation exists.
@@ -786,9 +789,12 @@ impl SkillFs {
                 // so the snapshot taken at `opendir` cannot leak them
                 // even if a placeholder lands in the store later.
                 skill_names.retain(|n| !is_reserved_lifecycle_name(n));
-                // I2: staging roots are hidden from the opendir snapshot.
-                if let Some(ref matcher) = self.staging_matcher {
-                    skill_names.retain(|n| !matcher.is_staging_root(n));
+                // I2: staging roots — and store entries scanned out of
+                // a pre-seeded staging category — are hidden from the
+                // opendir snapshot. One guard covers the whole filter.
+                if self.staging_matcher.is_some() {
+                    let store = self.store.read();
+                    skill_names.retain(|n| !self.store_entry_is_staging_private(&store, n));
                 }
                 // Pending installs are hidden from opendir snapshot.
                 if self.pending_install_controller.is_some() {

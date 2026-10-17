@@ -332,6 +332,47 @@ impl SkillFs {
         })
     }
 
+    /// I2: whether a store entry is installer-private staging content.
+    ///
+    /// The loader enforces no staging rule of its own — it skips only
+    /// dot-prefixed top-level directories, while the staging validator
+    /// accepts non-dot patterns — so a staging root pre-seeded on disk
+    /// (an installer that stages before the mount, or the residue of a
+    /// crashed install) is scanned in as a category and its nested
+    /// skills enter the store under their bare leaf names. Matching the
+    /// pattern against the leaf alone then lets the staged half-install
+    /// surface in the ordinary views; the entry is staging-private when
+    /// either the adopted name or the category it was scanned under
+    /// names a staging root. Write-path mutations inside a staging root
+    /// never reach the store: the observe dispatcher drops them first
+    /// (H3), so the category record of a scan-loaded entry is the
+    /// authoritative staging signal for the listing surfaces.
+    ///
+    /// The caller supplies the borrowed store — this predicate must
+    /// never acquire the store lock itself. Discover rendering holds
+    /// one read guard across the whole listing, and parking_lot's
+    /// RwLock is fair: a second acquisition from inside that guard
+    /// blocks behind any queued writer (the background sync worker's
+    /// reparse refresh queues exactly such a write) while the writer
+    /// waits for the outer guard to drop, so reading or statting the
+    /// discover manifest would stall FUSE request processing for good.
+    /// Callers that do not already hold a guard take one before
+    /// filtering the names.
+    pub(super) fn store_entry_is_staging_private(
+        &self,
+        store: &skillfs_core::store::SkillStore,
+        name: &str,
+    ) -> bool {
+        self.staging_matcher.as_ref().is_some_and(|m| {
+            if m.is_staging_root(name) {
+                return true;
+            }
+            store
+                .category_of(name)
+                .is_some_and(|category| m.is_staging_root(category))
+        })
+    }
+
     pub(super) fn is_pending_install(&self, skill_name: &str) -> bool {
         let ctrl = match self.pending_install_controller.as_ref() {
             Some(c) => c,
