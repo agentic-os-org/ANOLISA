@@ -18,6 +18,11 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 
+#[cfg(test)]
+#[path = "unified/capture_runtime_tests.rs"]
+mod capture_runtime_tests;
+#[path = "unified/completion.rs"]
+mod completion;
 #[path = "unified/delivery.rs"]
 mod delivery;
 #[path = "unified/maintenance.rs"]
@@ -51,12 +56,16 @@ use crate::interruption::{
     DetectorConfig, InterruptionDetector, ProcessExitStatus, recover_oom_events,
 };
 use crate::parser::Parser;
-use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
+use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent};
+#[cfg(not(test))]
+use crate::probes::{Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
 use crate::runtime_metrics::{MetricsFileExporter, RuntimeMetrics, record_event_received};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
+#[cfg(test)]
+use capture_runtime_tests::{TestPoller as ProbesPoller, TestProbes as Probes};
 
 /// Main AgentSight struct for tracing AI agent activity
 ///
@@ -103,6 +112,8 @@ pub struct AgentSight {
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session resolution or retrying a local write.
     pending_genai: PendingGenAiQueue,
+    /// Own raw completions and their shared CPU admission budget before analysis.
+    completions: completion::CompletionScheduler,
     /// Calls exported with a fallback session_id after the deferral window
     /// timed out, keyed by pid, awaiting a late FileWrite mapping for
     /// retroactive session fix-up (issue #2059).
@@ -825,6 +836,12 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
+        let cpu_budget = (config.runtime_limits.cpu_budget_percent != 0)
+            .then(|| {
+                crate::utils::cpu_budget::CpuBudget::new(config.runtime_limits.cpu_budget_percent)
+            })
+            .transpose()?
+            .map(Arc::new);
         // Global capacity budget shared by every maintenance job: each job
         // re-evaluates its effective size limit right before running.
         let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
@@ -839,18 +856,38 @@ impl AgentSight {
             let target = database_manager.open_read_write(DatabaseId::Primary, |db_path| {
                 Self::create_storage(db_path, &config)
             })?;
+            storage.use_managed_checkpoints()?;
+            target.use_managed_checkpoints()?;
             let budget = Arc::clone(&storage_budget);
             let own_limit_mb = config.storage.primary.max_db_size_mb;
-            maintenance_jobs.push(database_manager.maintenance_job(
+            let paced = cpu_budget.is_some();
+            let mut cursor = crate::storage::MaintenanceCursor::default();
+            let mut pass_limit: Option<u64> = None;
+            maintenance_jobs.push(database_manager.maintenance_job_with_checkpoints(
                 DatabaseId::Primary,
                 Duration::from_secs(config.storage.primary.check_interval_secs),
-                move || {
-                    let limit_mb = budget.effective_limit_mb(DatabaseId::Primary, own_limit_mb);
-                    target
-                        .maintain_with_limit_bytes(limit_mb.saturating_mul(1024 * 1024))
-                        .map_err(|error| {
-                            LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
-                        })
+                cpu_budget.clone(),
+                move |cleanup| {
+                    let result = if cleanup {
+                        let limit_mb = *pass_limit.get_or_insert_with(|| {
+                            budget.effective_limit_mb(DatabaseId::Primary, own_limit_mb)
+                        });
+                        if paced {
+                            target.maintain_step(limit_mb.saturating_mul(1024 * 1024), &mut cursor)
+                        } else {
+                            target
+                                .maintain_with_limit_bytes(limit_mb.saturating_mul(1024 * 1024))
+                                .map(|_| true)
+                        }
+                    } else {
+                        target.checkpoint_passive().map(|_| true)
+                    };
+                    if cleanup && matches!(result, Ok(true)) {
+                        pass_limit = None;
+                    }
+                    result.map_err(|error| {
+                        LifecycleError::MaintenanceJobFailed(format!("primary: {error:#}"))
+                    })
                 },
             )?);
         }
@@ -860,14 +897,35 @@ impl AgentSight {
             let target = database_manager.open_read_write(DatabaseId::GenAi, |path| {
                 GenAISqliteStore::open_maintenance_existing(path, config.storage.genai, capture)
             })?;
+            capture.use_managed_checkpoints().map_err(|error| {
+                anyhow::anyhow!("Failed to configure GenAI capture checkpoints: {error}")
+            })?;
             let budget = Arc::clone(&storage_budget);
             let own_limit_mb = config.storage.genai.max_db_size_mb;
-            maintenance_jobs.push(database_manager.maintenance_job(
+            let paced = cpu_budget.is_some();
+            let mut cursor = crate::storage::sqlite::genai::MaintenanceCursor::default();
+            let mut pass_limit: Option<u64> = None;
+            maintenance_jobs.push(database_manager.maintenance_job_with_checkpoints(
                 DatabaseId::GenAi,
                 Duration::from_secs(config.storage.genai.check_interval_secs),
-                move || {
-                    let limit_mb = budget.effective_limit_mb(DatabaseId::GenAi, own_limit_mb);
-                    target.maintain_with_limit_mb(limit_mb).map_err(|error| {
+                cpu_budget.clone(),
+                move |cleanup| {
+                    let result = if cleanup {
+                        let limit_mb = *pass_limit.get_or_insert_with(|| {
+                            budget.effective_limit_mb(DatabaseId::GenAi, own_limit_mb)
+                        });
+                        if paced {
+                            target.maintain_step(limit_mb, &mut cursor)
+                        } else {
+                            target.maintain_with_limit_mb(limit_mb).map(|_| true)
+                        }
+                    } else {
+                        target.checkpoint_passive().map(|_| true)
+                    };
+                    if cleanup && matches!(result, Ok(true)) {
+                        pass_limit = None;
+                    }
+                    result.map_err(|error| {
                         LifecycleError::MaintenanceJobFailed(format!("genai: {error}"))
                     })
                 },
@@ -1003,6 +1061,7 @@ impl AgentSight {
                 ResponseSessionMapper::disabled()
             },
             pending_genai: PendingGenAiQueue::default(),
+            completions: completion::CompletionScheduler::new(cpu_budget),
             // RETRO_FIXUP_CAPACITY is a non-zero constant, so the unwrap is
             // guaranteed unreachable.
             retro_session_fixup: lru::LruCache::new(
@@ -1408,6 +1467,7 @@ impl AgentSight {
                 }
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
+                self.flush_completions_for_pid(*pid);
                 if let Ok(mut targets) = self.resource_targets.write() {
                     targets.remove(pid);
                 }
@@ -1477,9 +1537,11 @@ impl AgentSight {
             }
         }
 
+        self.flush_completions();
         // On shutdown, flush all remaining pending events with fallback session_id
         let abandoned = self.aggregator.drain_pending();
         self.process_aggregated_results(abandoned);
+        self.flush_completions();
         self.flush_all_pending_genai();
         self.export_final_runtime_metrics();
 
@@ -1498,8 +1560,10 @@ impl AgentSight {
             log::warn!("Agent resource sampler panicked during shutdown");
         }
         // Flush all pending GenAI events before exit
+        self.flush_completions();
         let abandoned = self.aggregator.drain_pending();
         self.process_aggregated_results(abandoned);
+        self.flush_completions();
         self.flush_all_pending_genai();
         self.export_final_runtime_metrics();
         // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit
@@ -1578,6 +1642,16 @@ impl AgentSight {
     /// method updates it via `complete_pending` and avoids double-writing by
     /// skipping the SQLite exporter in the fan-out.
     fn complete_and_export_deferred_genai(&mut self, events: crate::genai::DeferredPayload) {
+        let budget = self.completions.budget.clone();
+        let _permit = budget.as_ref().and_then(|budget| {
+            match budget.acquire(crate::utils::cpu_budget::WorkClass::Capture) {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    log::error!("CPU pacing failed during deferred delivery: {error}");
+                    None
+                }
+            }
+        });
         let events = events.into_events();
         complete_deferred_genai(
             &events,
@@ -2333,7 +2407,14 @@ impl AgentSight {
     /// If pending GenAI queue exceeds count or byte limits, flush the oldest
     /// entries with the fallback session_id to prevent unbounded memory growth.
     fn enforce_pending_genai_limits(&mut self) {
-        for events in self.pending_genai.enforce_limits(&self.runtime_limits) {
+        let mut limits = self.runtime_limits;
+        limits.pending_genai_max_bytes = limits
+            .pending_genai_max_bytes
+            .saturating_sub(self.completions.bytes);
+        limits.pending_genai_max_count = limits
+            .pending_genai_max_count
+            .saturating_sub(self.completions.len());
+        for events in self.pending_genai.enforce_limits(&limits) {
             self.complete_and_export_deferred_genai(events);
         }
     }
@@ -2384,8 +2465,13 @@ impl AgentSight {
             channel_dropped: self.probes.channel_dropped() as u64,
             ring_buffer_dropped: self.probes.ring_buffer_dropped()?,
             connection_cache_bytes: connections.connection_cache_bytes as u64,
-            pending_genai_count: self.pending_genai.len() as u64,
-            pending_genai_bytes: self.pending_genai.bytes as u64,
+            pending_genai_count: (self.pending_genai.len() + self.completions.len()) as u64,
+            pending_genai_bytes: self
+                .pending_genai
+                .bytes
+                .saturating_add(self.completions.bytes) as u64,
+            completion_queue_count: self.completions.len() as u64,
+            completion_queue_bytes: self.completions.bytes as u64,
             pending_connection_count: connections.pending_connection_count as u64,
             pending_connection_bytes: connections.pending_connection_bytes as u64,
             eviction_count: connections.eviction_count,

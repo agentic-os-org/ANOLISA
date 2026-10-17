@@ -89,6 +89,16 @@ reader does not make maintenance wait while excluding the capture writer.
 Maintenance yields before starting another delete batch while capture writes or queued retries
 need the writer, and resumes on a later scheduled pass.
 
+When periodic maintenance is enabled, the trace process delegates primary and GenAI WAL checkpoints
+to that worker instead of triggering them on capture commits. Passive checkpoints run about once a
+second between retention/capacity checks; `check_interval_secs` still controls cleanup. SQLite's
+synchronous durability setting is unchanged. Disabling periodic maintenance retains automatic WAL
+checkpointing on capture connections.
+
+With `runtime_limits.cpu_budget_percent` enabled, primary and GenAI cleanup yield between bounded
+operations and continue on later worker ticks. They share CPU admission with capture delivery;
+retention and capacity targets remain in effect, but a cleanup pass may take longer to finish.
+
 Completed captures that encounter a transient SQLite write lock stay in the existing pending
 queue for retry. They share `pending_genai_max_count` and `pending_genai_max_bytes_mb` with
 session-ID waits. Retries do not resend records to external sinks. Budget rejection and permanent

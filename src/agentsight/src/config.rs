@@ -691,6 +691,8 @@ pub struct JsonTrajectoryCollectionFeature {
 #[derive(serde::Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct JsonRuntimeLimits {
+    /// Cooperative process CPU target: 100 means one logical CPU, 0 disables pacing.
+    pub cpu_budget_percent: Option<u8>,
     /// HTTP connection LRU entries; configure at least the expected concurrent connections.
     pub connection_capacity: Option<usize>,
     pub event_channel_capacity: Option<usize>,
@@ -1057,6 +1059,8 @@ impl Default for BatchConfig {
 /// Resource limits to prevent in-memory buffering leaks.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeLimits {
+    /// Cooperative process CPU target as a percentage of one logical CPU; 0 disables pacing.
+    pub cpu_budget_percent: u8,
     /// Bounded channel capacity between probes and the event loop.
     pub event_channel_capacity: usize,
     /// Policy when the event channel is full.
@@ -1091,9 +1095,13 @@ pub struct RuntimeLimits {
     pub ring_buffer_mb: usize,
 }
 
+/// Default cooperative CPU target as a percentage of one logical CPU.
+pub const DEFAULT_CPU_BUDGET_PERCENT: u8 = 25;
+
 impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
+            cpu_budget_percent: DEFAULT_CPU_BUDGET_PERCENT,
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
             event_channel_policy: ChannelPolicy::Backpressure,
             event_channel_max_bytes: DEFAULT_EVENT_CHANNEL_MAX_BYTES,
@@ -1109,6 +1117,43 @@ impl Default for RuntimeLimits {
             retain_raw_sse: false,
             ring_buffer_mb: DEFAULT_RING_BUFFER_MB,
         }
+    }
+}
+
+#[cfg(test)]
+mod cpu_budget_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_pacing_defaults_to_25_and_preserves_explicit_overrides() {
+        let mut config = AgentsightConfig::default();
+        assert_eq!(config.runtime_limits.cpu_budget_percent, 25);
+        for json in [r#"{}"#, r#"{"runtime_limits":{}}"#] {
+            config.load_from_json(json).unwrap();
+            assert_eq!(config.runtime_limits.cpu_budget_percent, 25);
+        }
+        for percent in [0, 25, 40, 100] {
+            config
+                .load_from_json(&format!(
+                    r#"{{"runtime_limits":{{"cpu_budget_percent":{percent}}}}}"#
+                ))
+                .unwrap();
+            assert_eq!(config.runtime_limits.cpu_budget_percent, percent);
+        }
+        config
+            .load_from_json(r#"{"runtime_limits":{"connection_capacity":32}}"#)
+            .unwrap();
+        assert_eq!(config.runtime_limits.cpu_budget_percent, 25);
+        assert!(
+            config
+                .load_from_json(r#"{"runtime_limits":{"cpu_budget_percent":101}}"#)
+                .is_err()
+        );
+        assert!(
+            config
+                .load_from_json(r#"{"runtime_limits":{"cpu_budget_percent":-1}}"#)
+                .is_err()
+        );
     }
 }
 
@@ -1594,7 +1639,14 @@ impl AgentsightConfig {
                 })
                 .transpose()
             };
+            let cpu_budget_percent = limits
+                .cpu_budget_percent
+                .unwrap_or(DEFAULT_CPU_BUDGET_PERCENT);
+            if cpu_budget_percent > 100 {
+                return Err("runtime_limits.cpu_budget_percent must be between 0 and 100".into());
+            }
             self.runtime_limits = RuntimeLimits {
+                cpu_budget_percent,
                 event_channel_capacity: limits
                     .event_channel_capacity
                     .unwrap_or(DEFAULT_EVENT_CHANNEL_CAPACITY),

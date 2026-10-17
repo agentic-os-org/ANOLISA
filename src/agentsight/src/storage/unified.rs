@@ -46,6 +46,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
 
+#[path = "maintenance.rs"]
+mod maintenance;
+pub(crate) use maintenance::MaintenanceCursor;
+
 /// Storage backend type
 #[derive(Debug, Clone, Default)]
 pub enum StorageBackend {
@@ -138,6 +142,19 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Delegate WAL checkpoints on every primary writer to the maintenance worker.
+    pub(crate) fn use_managed_checkpoints(&self) -> Result<()> {
+        self.audit_store.use_managed_checkpoints()?;
+        self.token_store.use_managed_checkpoints()?;
+        self.http_store.use_managed_checkpoints()?;
+        self.token_consumption_store.use_managed_checkpoints()
+    }
+
+    /// Checkpoint the shared physical database without excluding capture writes.
+    pub(crate) fn checkpoint_passive(&self) -> Result<()> {
+        self.audit_store.checkpoint_passive().map(|_| ())
+    }
+
     /// Create a new Storage with the specified backend
     pub fn new(backend: StorageBackend) -> Result<Self> {
         match &backend {
@@ -569,7 +586,7 @@ mod tests {
     }
 
     /// Minimal HTTP record used by the Http persistence contract tests.
-    fn sample_http_record() -> HttpRecord {
+    pub(super) fn sample_http_record() -> HttpRecord {
         HttpRecord {
             timestamp_ns: 1_700_000_000_000_000_000,
             pid: 4242,

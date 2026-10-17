@@ -164,10 +164,11 @@ The packaged systemd unit still uses `MemoryMax=350M`.
 
 | Setting | Default | Meaning |
 |---|---|---|
+| `cpu_budget_percent` | `25` | Cooperative trace-process CPU target; `0` disables pacing, `100` means one logical CPU |
 | `event_channel_capacity` | `10000` | Bounded probe → pipeline channel |
 | `event_channel_policy` | `backpressure` | Wait for a queue slot after byte admission; `drop_newest` rejects a full queue. `sample`, `sample:N` and `sample=N` retain every Nth event (default N=10) |
 | `event_channel_max_bytes_mb` | `64` | Byte cap for queued probe payloads; `0` disables it. Byte-limit rejection drops the event and increments the channel drop counter, independently of the slot policy |
-| `pending_genai_max_count` | `1000` | Shared limit for session-ID waits and completed batches retrying a busy local SQLite write |
+| `pending_genai_max_count` | `1000` | Shared limit for raw completed captures, session-ID waits and local SQLite retries |
 | `pending_genai_max_bytes_mb` | `16` | Byte cap for the same queue |
 | `pid_cache_size` | `1024` | PID → Agent name LRU entries |
 | `connection_capacity` | `32` | HTTP connection cache entries; must be greater than zero. Set at least as high as the expected concurrent connections |
@@ -184,6 +185,18 @@ The default `connection_capacity=32` accommodates 32 concurrent HTTP/1 connectio
 Choose a capacity covering the actual connections used by all Agents; one Agent can open multiple
 connections. HTTP/2 allows four times that many stream entries and shares the same byte budget.
 Restart capture after changing runtime limits.
+
+CPU pacing is enabled by default with `cpu_budget_percent=25`; set it to `0` to disable it.
+Pacing runs before completed-capture analysis and writes, sharing
+process CPU admission with primary/GenAI maintenance. Raw captures move into a bounded queue,
+using at most half the shared pending-byte allowance; a full queue applies backpressure.
+Cleanup yields between small operations and resumes on later worker ticks. Lower targets can
+increase delivery and cleanup latency. This is a cooperative target rather than a kernel quota:
+individual operations and other process threads can exceed it. Check capture completeness,
+probe drops, queue growth and response-drain time when tuning it.
+`agentsight_completion_queue_count`, `agentsight_completion_queue_bytes` and
+`agentsight_completion_wait_seconds` expose delayed delivery; `agentsight_cpu_budget_deferred_total`
+records CPU admission deferrals.
 
 When capacity, replacement, a byte limit, hard inactivity, process exit or shutdown ends a call,
 AgentSight emits the captured request or partial response with `finish_reason="incomplete"`.

@@ -18,6 +18,24 @@ pub struct HttpStore {
 }
 
 impl HttpStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
     /// Create a new HttpStore with default table name
     pub fn new(path: &Path) -> Result<Self> {
         Self::with_table(path, "http_records")
@@ -67,25 +85,22 @@ impl HttpStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             self.table_name
         );
-        self.conn.execute(
-            &sql,
-            params![
-                record.timestamp_ns as i64,
-                record.pid,
-                record.comm,
-                record.method,
-                record.path,
-                record.status_code,
-                record.request_headers,
-                record.request_body,
-                record.response_headers,
-                record.response_body,
-                record.duration_ns as i64,
-                record.is_sse as i32,
-                record.sse_event_count as i64,
-                record.first_output_timestamp_ns.map(|v| v as i64),
-            ],
-        )?;
+        self.conn.prepare_cached(&sql)?.execute(params![
+            record.timestamp_ns as i64,
+            record.pid,
+            record.comm,
+            record.method,
+            record.path,
+            record.status_code,
+            record.request_headers,
+            record.request_body,
+            record.response_headers,
+            record.response_body,
+            record.duration_ns as i64,
+            record.is_sse as i32,
+            record.sse_event_count as i64,
+            record.first_output_timestamp_ns.map(|v| v as i64),
+        ])?;
 
         Ok(self.conn.last_insert_rowid())
     }

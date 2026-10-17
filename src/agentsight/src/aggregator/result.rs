@@ -82,6 +82,18 @@ pub enum AggregatedResult {
 }
 
 impl AggregatedResult {
+    /// Identify the owner before delayed analysis, including abandoned evidence.
+    pub(crate) fn pid(&self) -> u32 {
+        match self {
+            Self::Abandoned { partial, .. } => partial.pid(),
+            Self::HttpComplete(pair) | Self::SseComplete(pair) => pair.connection_id.pid,
+            Self::ProcessComplete(process) => process.pid,
+            Self::RequestOnly { connection_id, .. }
+            | Self::ResponseOnly { connection_id, .. }
+            | Self::Http2Frames { connection_id, .. } => connection_id.pid,
+            Self::Http2StreamComplete(stream) => stream.stream_id.connection_id.pid,
+        }
+    }
     /// Get the result type as a string
     pub fn result_type(&self) -> &'static str {
         match self {

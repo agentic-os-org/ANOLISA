@@ -292,7 +292,11 @@ fn busy_local_completions_survive_retry_and_deliver_each_external_record_once() 
         let error = super::delivery::complete_local_genai(&output, &store, &exporters).unwrap_err();
         assert!(super::delivery::is_retryable_sqlite_write(error.as_ref()));
         expected.push(serde_json::to_value(&output.events[0]).unwrap());
-        assert!(queue.queue_local_completion(output, &store, &limits));
+        assert!(
+            queue
+                .queue_local_completion(output, &store, &limits)
+                .is_ok()
+        );
     }
     assert_eq!(queue.len(), 5);
     assert!(queue.bytes > 0 && queue.bytes <= limits.pending_genai_max_bytes);
@@ -402,19 +406,31 @@ fn local_write_retries_share_session_count_and_byte_limits() {
         ..Default::default()
     };
     let (output, _) = delivery_fixture("local-retry", &mapper, false);
-    assert!(queue.queue_local_completion(output, &store, &limits));
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &limits)
+            .is_ok()
+    );
     let bytes = queue.bytes;
     let (output, _) = delivery_fixture("count-overflow", &mapper, false);
-    assert!(!queue.queue_local_completion(output, &store, &limits));
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &limits)
+            .is_err()
+    );
     let (output, _) = delivery_fixture("byte-overflow", &mapper, false);
-    assert!(!queue.queue_local_completion(
-        output,
-        &store,
-        &RuntimeLimits {
-            pending_genai_max_bytes: bytes,
-            ..Default::default()
-        }
-    ));
+    assert!(
+        queue
+            .queue_local_completion(
+                output,
+                &store,
+                &RuntimeLimits {
+                    pending_genai_max_bytes: bytes,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
     assert_eq!(queue.len(), 2);
     assert_eq!(queue.bytes, bytes);
     queue.resync();
@@ -441,7 +457,11 @@ fn local_write_retry_does_not_loop_on_non_lock_failures() {
     let error = super::delivery::complete_local_genai(&output, &store, &[]).unwrap_err();
     assert!(!super::delivery::is_retryable_sqlite_write(error.as_ref()));
     let mut queue = PendingGenAiQueue::default();
-    assert!(queue.queue_local_completion(output, &store, &RuntimeLimits::default()));
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &RuntimeLimits::default())
+            .is_ok()
+    );
     assert!(
         queue
             .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
@@ -479,7 +499,7 @@ fn delivery_fixture(
     (output, pending)
 }
 
-fn feed(aggregator: &mut Aggregator, rw: i32, bytes: &[u8]) -> Vec<AggregatedResult> {
+pub(super) fn feed(aggregator: &mut Aggregator, rw: i32, bytes: &[u8]) -> Vec<AggregatedResult> {
     let event = SslEvent {
         source: 0,
         timestamp_ns: 1_000_000_000,

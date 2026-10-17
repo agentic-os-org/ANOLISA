@@ -18,6 +18,29 @@ pub struct AuditStore {
 }
 
 impl AuditStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![ns_to_sqlite(cutoff_ns, "purge cutoff")?])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
+    /// Copy WAL frames without waiting for the capture writer.
+    pub(in crate::storage) fn checkpoint_passive(&self) -> anyhow::Result<CheckpointOutcome> {
+        Ok(agentsight_sqlite_lifecycle::checkpoint_passive(&self.conn)?)
+    }
+
     /// Create a new AuditStore with default table name, automatically creating the table and indexes
     pub fn new(path: &Path) -> Result<Self> {
         Self::with_table(path, "audit_events")
@@ -91,19 +114,16 @@ impl AuditStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             self.table_name
         );
-        self.conn.execute(
-            &sql,
-            params![
-                event_type_str,
-                timestamp_ns,
-                record.pid,
-                record.ppid.map(|v| v as i64),
-                record.comm,
-                duration_ns,
-                extra_json,
-                record.session_id,
-            ],
-        )?;
+        self.conn.prepare_cached(&sql)?.execute(params![
+            event_type_str,
+            timestamp_ns,
+            record.pid,
+            record.ppid.map(|v| v as i64),
+            record.comm,
+            duration_ns,
+            extra_json,
+            record.session_id,
+        ])?;
 
         Ok(self.conn.last_insert_rowid())
     }

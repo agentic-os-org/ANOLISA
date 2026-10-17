@@ -4,6 +4,7 @@ use super::*;
 
 impl AgentSight {
     pub(crate) fn tick(&mut self) {
+        self.drain_one_completion(false);
         if self.last_drain_check.elapsed() < std::time::Duration::from_secs(1) {
             return;
         }

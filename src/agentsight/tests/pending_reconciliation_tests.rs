@@ -239,3 +239,55 @@ fn failed_adoption_keeps_snapshot_and_allows_retry() {
     assert_eq!(fixture.count(), 1);
     fixture.finish();
 }
+
+#[test]
+fn completed_export_batches_preserve_large_message_columns_and_raw_evidence() {
+    use agentsight::genai::exporter::GenAIExporter;
+    use agentsight::genai::semantic::{InputMessage, MessagePart, OutputMessage};
+
+    let fixture = Fixture::new();
+    let text = "雪\"\n\0".repeat(32 * 1024);
+    let events: Vec<_> = (0..6)
+        .map(|index| {
+            let mut call = common::make_test_llm_call(&format!("batch-{index}"));
+            call.request.messages.push(InputMessage {
+                role: "user".into(),
+                parts: vec![MessagePart::Text {
+                    content: text.clone(),
+                }],
+                name: None,
+            });
+            call.request.raw_body = Some(serde_json::json!({"prompt":text}).to_string());
+            call.response.messages.push(OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::Text {
+                    content: "reply 雪".into(),
+                }],
+                name: None,
+                finish_reason: Some("stop".into()),
+            });
+            GenAISemanticEvent::LLMCall(call)
+        })
+        .collect();
+    fixture.store.export(&events);
+    fixture.store.flush();
+    assert_eq!(fixture.count(), 6);
+    for event in &events {
+        let GenAISemanticEvent::LLMCall(call) = event else {
+            unreachable!()
+        };
+        let stored: (String, String, String) = fixture.db.query_row(
+            "SELECT input_messages,output_messages,event_json FROM genai_events WHERE call_id=?1",
+            [&call.call_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            stored,
+            (
+                serde_json::to_string(&call.request.messages).unwrap(),
+                serde_json::to_string(&call.response.messages).unwrap(),
+                serde_json::to_string(event).unwrap(),
+            )
+        );
+    }
+    fixture.finish();
+}
