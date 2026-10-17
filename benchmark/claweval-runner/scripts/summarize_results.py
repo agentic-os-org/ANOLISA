@@ -43,6 +43,8 @@ import os
 import sys
 from pathlib import Path
 
+from report_paths import find_latest_batch_dir
+
 try:
     import yaml
 except ImportError:
@@ -54,14 +56,8 @@ DEFAULT_BASE_DIR = REPO_DIR
 
 
 def find_latest_trace_dir(base: Path) -> Path | None:
-    """Find the most recently modified directory under base/traces/."""
-    traces = base / "claw-eval" / "traces"
-    if not traces.is_dir():
-        return None
-    dirs = [d for d in traces.iterdir() if d.is_dir()]
-    if not dirs:
-        return None
-    return max(dirs, key=lambda d: d.stat().st_mtime)
+    """Find the most recently modified batch under base/claw-eval/traces/."""
+    return find_latest_batch_dir(base / "claw-eval" / "traces")
 
 
 def resolve_input(args) -> Path:
@@ -81,19 +77,17 @@ def resolve_input(args) -> Path:
         trace_dir_name = defaults.get("trace_dir", "traces")
         # config file is under claw-eval/, so trace_dir is relative to its parent
         base = config_path.parent.parent
-        traces = base / trace_dir_name
-        if traces.is_dir():
-            dirs = [d for d in traces.iterdir() if d.is_dir()]
-            if dirs:
-                latest = max(dirs, key=lambda d: d.stat().st_mtime)
-                return latest / "batch_results.json"
+        traces = config_path.parent / trace_dir_name
+        latest = find_latest_batch_dir(traces)
+        if latest:
+            return latest / "batch_results.json"
 
     # Fallback: find latest trace dir under repo
     latest = find_latest_trace_dir(base)
     if latest:
         return latest / "batch_results.json"
 
-    print("Error: no input file specified and no trace directories found.", file=sys.stderr)
+    print("Error: no input file specified and no batch result directories found.", file=sys.stderr)
     print("  Use --input to specify batch_results.json path.", file=sys.stderr)
     sys.exit(1)
 
