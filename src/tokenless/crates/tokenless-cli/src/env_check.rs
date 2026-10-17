@@ -1111,12 +1111,11 @@ fn generate_checklist_json(results: &[ToolReadyResult]) -> Value {
     })
 }
 
-/// Build the ordered candidate list for `auto_fix`.
+/// Build the ordered candidate list for the env-fix script lookup.
 ///
 /// Order mirrors `spec_path_candidates`: env override → user dot-dir →
-/// user FHS → system FHS → legacy flat-layout mirrors.
-fn fix_script_candidates() -> Vec<String> {
-    let home = super::get_home_dir();
+/// user FHS → system FHS → legacy flat-layout mirrors of the same roots.
+fn fix_script_candidates(home: &str) -> Vec<String> {
     vec![
         std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok(),
         Some(format!("{home}/.tokenless/tokenless-env-fix.sh")),
@@ -1136,16 +1135,43 @@ fn fix_script_candidates() -> Vec<String> {
     .collect()
 }
 
-/// Auto-fix missing dependencies via tokenless-env-fix.sh.
-fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
-    let home = super::get_home_dir();
-    let fix_script = fix_script_candidates()
-        .into_iter()
+/// Find the first env-fix script candidate that both exists and passes trust
+/// validation.
+///
+/// Mirrors `find_spec_path`: when no candidate is trusted, the lookup fails
+/// instead of falling back to executing an unchecked path. A fallback would
+/// defeat the trust scan entirely — a world-writable or foreign-owned script
+/// that `is_trusted_path` just rejected would be run through bash anyway
+/// merely because it sits at the default dot-dir location.
+fn find_fix_script(candidates: &[String]) -> Result<String, String> {
+    candidates
+        .iter()
         .find(|p| {
             let path = std::path::Path::new(p);
             path.exists() && is_trusted_path(path)
         })
-        .unwrap_or_else(|| format!("{home}/.tokenless/tokenless-env-fix.sh"));
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "No trusted env-fix script found in any candidate path: {}",
+                candidates.join(", ")
+            )
+        })
+}
+
+/// Auto-fix missing dependencies via tokenless-env-fix.sh.
+fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
+    let home = super::get_home_dir();
+    auto_fix_with_candidates(&fix_script_candidates(&home), missing_deps)
+}
+
+/// `auto_fix` against an explicit candidate list so tests can pin the
+/// lookup without depending on (or writing into) the real home directory.
+fn auto_fix_with_candidates(
+    candidates: &[String],
+    missing_deps: &[DepEntry],
+) -> Result<String, String> {
+    let fix_script = find_fix_script(candidates)?;
 
     // Build JSON array of missing deps
     let deps_json: Vec<Value> = missing_deps
