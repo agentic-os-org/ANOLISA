@@ -399,6 +399,10 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+使用 run metadata 时，显式 `--openclaw-profiles-dir` 优先于记录中的逐 profile
+目录路径。可用它收集迁移或替换后的 profile，并保留已记录的会话身份选择。
+不显式覆盖时，仍以记录中的 profile 目录为准。
+
 分析已有 trace：
 
 ```bash
