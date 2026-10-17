@@ -625,8 +625,32 @@ impl OpenAIParser {
         serde_json::from_value::<OpenAIResponse>(resp).ok()
     }
 
+    /// Answer text of a finished `message` output item, or `None`.
+    ///
+    /// A `response.output_item.done` for a message item carries the whole
+    /// answer in its `content[]` parts, the shape the token extractor's
+    /// `read_output_item` reads. Reasoning items also carry text, but it is
+    /// the thinking rather than the answer, so they are skipped here exactly
+    /// as they are there.
+    fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
+        let mut saw_text_delta = false;
+        // Answer text carried by a closing event, kept aside until the whole
+        // stream is read: a delta captured later supersedes it.
+        let mut closing_text: Option<String> = None;
         let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
@@ -644,7 +668,32 @@ impl OpenAIParser {
             match event_type {
                 "response.output_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_text_delta = true;
+                        }
                         content_buf.push_str(delta);
+                    }
+                }
+                // The closing events carry the finalized answer and repeat
+                // what the deltas delivered, so they are read only when no
+                // non-empty delta was captured: a capture that attached after
+                // the deltas, or whose delta events were dropped, has these
+                // events as its only copy of the text. The drain path applies
+                // the same delta-wins rule in `merge_response_output_text`.
+                // Both of them repeat the same answer, so the second one
+                // replaces the first rather than appending to it.
+                "response.output_text.done" => {
+                    if !saw_text_delta {
+                        if let Some(text) = chunk.get("text").and_then(|t| t.as_str()) {
+                            closing_text = Some(text.to_string());
+                        }
+                    }
+                }
+                "response.output_item.done" => {
+                    if !saw_text_delta {
+                        if let Some(text) = Self::closing_message_item_text(chunk) {
+                            closing_text = Some(text);
+                        }
                     }
                 }
                 // Reasoning models stream their thinking as text deltas on
@@ -739,6 +788,12 @@ impl OpenAIParser {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if content_buf.is_empty() {
+            if let Some(text) = closing_text {
+                content_buf = text;
             }
         }
 
@@ -2341,6 +2396,50 @@ mod tests {
                 .unwrap(),
             "{\"city\":\"Beijing\"}"
         );
+    }
+
+    /// A capture that attached after the deltas carries the answer only in the
+    /// closing `response.output_text.done` event. The aggregator read deltas
+    /// and tool-call events, and treated nothing else as a Responses stream,
+    /// so such a capture produced a null message even though the token
+    /// extractor counted its text.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_text_from_done_event() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.done", "text": "Hello world"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d02", "model": "qwen-plus", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing text must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the answer must survive the missing deltas: {other:?}"),
+        }
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("stop".to_string()),
+            "a completed stream closes with its own finish reason"
+        );
+    }
+
+    /// The same late-join shape one level up: the whole answer arrives in the
+    /// closing `response.output_item.done` for a `message` item. The
+    /// aggregator only looked at that event for function calls, so the text
+    /// was dropped even though the token extractor read it.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_text_from_item_done() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello world"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d03", "model": "qwen-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing item must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the answer must survive the missing deltas: {other:?}"),
+        }
     }
 
     /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
