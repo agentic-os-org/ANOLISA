@@ -42,8 +42,25 @@ def build_health_snapshot(runtime: DaemonRuntime) -> dict[str, Any]:
             "detail": _PROMPT_SCAN_UNTRACKED_DETAIL,
         },
         "jobs": runtime.jobs.status(),
-        "queues": runtime.queues.to_dict(),
+        "queues": {
+            **runtime.queues.to_dict(),
+            # The only real queue in the daemon is the skill-ledger
+            # activation backlog; without this a real backlog is invisible
+            # and `queued` reads as a constant 0.
+            "queued": _skill_ledger_backlog(runtime),
+        },
     }
+
+
+def _skill_ledger_backlog(runtime: DaemonRuntime) -> int:
+    """Return the skill-ledger activation job's pending change count."""
+    from agent_sec_cli.daemon.jobs.skill_ledger.activation import (
+        SKILL_LEDGER_ACTIVATION_JOB,
+    )
+
+    job = runtime.jobs.get(SKILL_LEDGER_ACTIVATION_JOB)
+    pending = getattr(job, "pending_count", None)
+    return pending if isinstance(pending, int) else 0
 
 
 def health_handler(_request: DaemonRequest, runtime: DaemonRuntime) -> HandlerResult:
