@@ -395,6 +395,9 @@ swe-runner evaluate --namespace none
 
 ## `swe-runner analyze-traces`
 
+通过时间窗口或 run metadata 收集 trace 时，报告只包含本次收集的 trace；
+没有匹配项时生成空报告。未使用收集选项时，分析 `--trace-root` 下的全部 trace。
+
 `analyze-traces` 会读取 trace JSON，导出 per-trace 明细、per-case 汇总和
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
