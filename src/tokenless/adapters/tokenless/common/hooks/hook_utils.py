@@ -148,6 +148,7 @@ _FALLBACK_SHELL_TOOLS = [
     "run_in_terminal",
     "get_terminal_output",
     "execute_command",
+    "RunCommand",
     "process",
 ]
 
