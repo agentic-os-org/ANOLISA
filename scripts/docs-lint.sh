@@ -22,10 +22,10 @@ fi
 
 # --- 2. en/zh tree parity for docs/user-guide --------------------------------
 exemptions_file=".github/docs-lint-exemptions.txt"
-exemptions=$(grep -v '^\s*#' "$exemptions_file" 2>/dev/null | grep -v '^\s*$' || true)
+exemptions=$(sed 's/\r$//; s|^\./||' "$exemptions_file" 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' || true)
 
 list_tree() {
-  (cd "docs/user-guide/$1" && find . -name '*.md' | sort)
+  (cd "docs/user-guide/$1" && find . -name '*.md' | sed 's|^\./||' | sort)
 }
 
 filter_exempt() {
