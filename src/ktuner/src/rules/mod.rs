@@ -9067,22 +9067,26 @@ fn eval_tcp_recovery_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path:
 /// detection algorithm" (Documentation/networking/ip-sysctl.rst, v6.17 on).
 /// The bitmap's remaining readers are the other two bits —
 /// `TCP_RACK_STATIC_REO_WND` (net/ipv4/tcp_input.c) and
-/// `TCP_RACK_NO_DUPTHRESH` (net/ipv4/tcp_recovery.c) — and writing `1` leaves
-/// both clear rather than setting them, so from 6.17 on this recommendation
-/// changes no behavior while its reason claims RACK loss detection is off.
+/// `TCP_RACK_NO_DUPTHRESH` (net/ipv4/tcp_recovery.c), so this rule tests and
+/// sets bit 0x1 alone and preserves whatever else the administrator
+/// configured.
 fn tcp_recovery_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
     // The bit lost its last readers in 6.17; kernels up to 6.16 still consume
     // it, so only they get the advice.
     if kernel_at_least(kernel_version, 6, 17) {
         return None;
     }
-    if current != 0 {
+    // The knob is a bitmap, not a boolean: `tcp_is_rack()` tests bit 0x1, so
+    // a value like 2 or 4 also leaves RACK off. Keeping the other bits is
+    // required because the sysctl is written as a whole word.
+    const TCP_RACK_LOSS_DETECTION: u64 = 0x1;
+    if current & TCP_RACK_LOSS_DETECTION != 0 {
         return None;
     }
     Some(Recommendation {
         param: "net.ipv4.tcp_recovery".to_string(),
-        current_value: "0".to_string(),
-        recommended_value: "1".to_string(),
+        current_value: current.to_string(),
+        recommended_value: (current | TCP_RACK_LOSS_DETECTION).to_string(),
         reason: "未启用 RACK 丢包检测，RACK 比传统 dupthresh 更准确地检测丢包和乱序".to_string(),
         confidence: Confidence::Medium,
         category: Category::Performance,
@@ -22848,6 +22852,15 @@ mod tests {
         let recs = advice(&off);
         assert_eq!(recs.len(), 1, "a readable 0 leaves RACK off");
         assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].recommended_value, "1");
+        // Bit 0 is the RACK gate; the other bitmap bits are independent
+        // options and must survive the write (`tcp_is_rack()` tests 0x1).
+        let bits = on.with_file_name("bits_set");
+        std::fs::write(&bits, b"2\n").unwrap();
+        let recs = advice(&bits);
+        assert_eq!(recs.len(), 1, "a readable 2 leaves the RACK bit clear");
+        assert_eq!(recs[0].current_value, "2");
+        assert_eq!(recs[0].recommended_value, "3");
         assert!(advice(&on).is_empty(), "a readable 1 does not");
         for path in &others {
             assert!(
