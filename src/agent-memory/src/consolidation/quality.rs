@@ -137,16 +137,12 @@ pub fn normalize_relative_dates(content: &str) -> String {
     // "N days ago" / "N 天前"
     result = DAYS_AGO_EN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            format_days_ago(caps, today)
         })
         .to_string();
     result = DAYS_AGO_CN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            format_days_ago(caps, today)
         })
         .to_string();
 
@@ -188,6 +184,22 @@ static KEYWORD_REGEXES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| 
 static DAYS_AGO_EN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)\s*days?\s*ago").unwrap());
 
 static DAYS_AGO_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)\s*天前").unwrap());
+
+/// Format a captured "N days ago" count as the absolute date it names, keeping the
+/// matched text when the count has no representable date. Day counts reach this code
+/// verbatim from memory content, so an out-of-range value must degrade to a no-op
+/// instead of aborting the whole consolidation run.
+fn format_days_ago(caps: &regex::Captures, today: NaiveDate) -> String {
+    let resolved = caps[1]
+        .parse::<i64>()
+        .ok()
+        .and_then(Duration::try_days)
+        .and_then(|span| today.checked_sub_signed(span));
+    match resolved {
+        Some(date) => date.format("%Y-%m-%d").to_string(),
+        None => caps[0].to_string(),
+    }
+}
 
 fn replace_date(text: &str, relative: &str, absolute: NaiveDate) -> String {
     let date_str = absolute.format("%Y-%m-%d").to_string();
@@ -291,6 +303,23 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         assert!(result.contains(&expected));
+    }
+
+    #[test]
+    fn normalize_absurd_days_ago_leaves_text_unchanged() {
+        // Beyond TimeDelta's day range, beyond NaiveDate's year range, and beyond i64
+        // itself all have to stay no-ops; such text arrives verbatim from memory file
+        // names embedded in fact content.
+        for text in [
+            "set 999999999999 days ago",
+            "notes/999999999999 days ago.md",
+            "found 100000000 days ago",
+            "seen 99999999999999999999999999 days ago",
+            "999999999999天前的记录",
+            "99999999999999999999999999天前的记录",
+        ] {
+            assert_eq!(normalize_relative_dates(text), text);
+        }
     }
 
     #[test]
