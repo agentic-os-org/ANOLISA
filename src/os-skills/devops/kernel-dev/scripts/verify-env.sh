@@ -47,7 +47,14 @@ case "$ARCH" in
 esac
 
 if grep -qi 'alinux\|alnx' /etc/os-release 2>/dev/null; then
-    OS_NAME=$(grep -i 'PRETTY_NAME' /etc/os-release | cut -d'"' -f2)
+    # os-release(5) allows double-quoted, single-quoted and unquoted
+    # values; cut on '"' alone returned the whole raw line for the other
+    # two styles. Take everything past the first '=' and strip quotes.
+    OS_NAME=$(grep -i '^PRETTY_NAME=' /etc/os-release | head -1 | cut -d'=' -f2-)
+    OS_NAME="${OS_NAME#\"}"
+    OS_NAME="${OS_NAME%\"}"
+    OS_NAME="${OS_NAME#\'}"
+    OS_NAME="${OS_NAME%\'}"
     check_pass "OS: $OS_NAME"
 else
     check_warn "Not Alinux4 system (may still work)"
