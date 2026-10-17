@@ -93,7 +93,10 @@ impl ResponsesToolCalls {
         match kind {
             Some("response.output_item.added") => {
                 let Some(item) = item else { return };
-                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                if !matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call" | "custom_tool_call")
+                ) {
                     return;
                 }
                 // A reused index with a different item ID is contradictory;
@@ -131,6 +134,7 @@ impl ResponsesToolCalls {
                         .to_owned(),
                     arguments: item
                         .get("arguments")
+                        .or_else(|| item.get("input"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_owned(),
@@ -161,12 +165,19 @@ impl ResponsesToolCalls {
             }
             Some("response.output_item.done") => {
                 let Some(item) = item else { return };
-                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                if !matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call" | "custom_tool_call")
+                ) {
                     return;
                 }
                 let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+                let arguments = item
+                    .get("arguments")
+                    .or_else(|| item.get("input"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if let Some(p) = position {
                     // The done item is authoritative: it supersedes whatever
                     // partial deltas the capture caught, and fills identity
@@ -546,13 +557,23 @@ impl OpenAIParser {
                         }
                     }
                 }
-                "function_call" => {
+                // A custom (freeform) tool answers under its own item name and
+                // carries its text in `input` instead of `arguments`, exactly
+                // as the replayed request of the same call does. Reading only
+                // `function_call` dropped the call from the recorded response
+                // while the request side kept it.
+                "function_call" | "custom_tool_call" => {
+                    let arguments = item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let tc = serde_json::json!({
                         "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "type": "function",
                         "function": {
                             "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                            "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or(""),
+                            "arguments": arguments,
                         }
                     });
                     tool_calls.push(tc);
@@ -1698,6 +1719,49 @@ mod tests {
         );
     }
 
+    /// A whole Responses body can answer with a custom (freeform) tool call,
+    /// the same item the request side already replays. The normalizer matched
+    /// only `function_call`, so the call vanished from the recorded response
+    /// while its replayed request kept it.
+    #[test]
+    fn test_parse_response_responses_custom_tool_call() {
+        let json = serde_json::json!({
+            "id": "resp_ctc001",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5",
+            "output": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_001",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch",
+                    "status": "completed"
+                }
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("the response must parse");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the custom tool call must become a tool call");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+    }
+
     #[test]
     fn test_aggregate_responses_sse_chunks_text() {
         let chunks = vec![
@@ -2312,6 +2376,36 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    /// The same call streamed instead of replayed: a custom tool's item
+    /// arrives as `response.output_item.added` / `.done` with type
+    /// `custom_tool_call` and its input under `input`. The item router accepted
+    /// only `function_call`, so the call was dropped from the streamed answer
+    /// the replay reader keeps.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_custom_tool_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ctc002", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "custom_tool_call", "id": "ctc_002", "call_id": "call_patch", "name": "apply_patch", "input": ""}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "custom_tool_call", "id": "ctc_002", "call_id": "call_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ctc002", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed custom tool call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
         );
     }
 
