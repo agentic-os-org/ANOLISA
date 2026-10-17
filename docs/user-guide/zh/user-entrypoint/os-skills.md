@@ -84,6 +84,32 @@ confirm_destructive = true
 
 ---
 
+## OpenClaw 运行参数范围
+
+OpenClaw 安装脚本在解析参数时校验端口和超时；此时尚未检查依赖、写入配置或调用模型：
+
+```bash
+python3 SKILL_DIR/scripts/install_openclaw.py --precheck-only --gateway-port 18789 --preflight-timeout 20
+```
+
+将 `SKILL_DIR` 替换为已安装的 `ai/install-openclaw` 目录。`--gateway-port`
+必须是 1 到 65535 之间的整数。五个超时选项必须是以秒为单位的正整数；
+零和负值会被拒绝。默认值保持不变：
+
+| 选项 | 默认值 |
+| --- | --- |
+| `--gateway-port` | 18789 |
+| `--gateway-command-timeout` | 30 秒 |
+| `--gateway-ready-timeout` | 30 秒 |
+| `--gateway-status-timeout` | 8 秒 |
+| `--gateway-write-check-timeout` | 60 秒 |
+| `--preflight-timeout` | 20 秒 |
+
+在 `--precheck-only` 或跳过模式中，传入的参数也接受校验。跳过模型检查时使用
+`--skip-preflight`；将超时设为零不能替代该选项。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
