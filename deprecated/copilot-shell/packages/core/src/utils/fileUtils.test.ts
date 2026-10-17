@@ -341,6 +341,66 @@ describe('fileUtils', () => {
         expect(result).toBe(content);
       });
 
+      it.each(['A', '中文', 'hello 😀', ''])(
+        'ignores an incomplete trailing UTF-16BE byte after %j',
+        async (content) => {
+          const encoded = Buffer.from(content, 'utf16le').swap16();
+          const bytes = Buffer.concat([
+            Buffer.from([0xfe, 0xff]),
+            encoded,
+            Buffer.from([0x41]),
+          ]);
+          const filePath = path.join(testDir, 'utf16be-partial.txt');
+          await fsPromises.writeFile(filePath, bytes);
+
+          expect(await readFileWithEncoding(filePath)).toBe(content);
+          expect(await fsPromises.readFile(filePath)).toEqual(bytes);
+        },
+      );
+
+      it('matches UTF-16LE trailing-byte behavior', async () => {
+        const content = 'A😀中';
+        const encoded = Buffer.from(content, 'utf16le');
+        const filePathLE = path.join(testDir, 'partial-le.txt');
+        const filePathBE = path.join(testDir, 'partial-be.txt');
+        await fsPromises.writeFile(
+          filePathLE,
+          Buffer.concat([
+            Buffer.from([0xff, 0xfe]),
+            encoded,
+            Buffer.from([0x10]),
+          ]),
+        );
+        await fsPromises.writeFile(
+          filePathBE,
+          Buffer.concat([
+            Buffer.from([0xfe, 0xff]),
+            Buffer.from(encoded).swap16(),
+            Buffer.from([0x10]),
+          ]),
+        );
+        expect(await readFileWithEncoding(filePathBE)).toBe(
+          await readFileWithEncoding(filePathLE),
+        );
+      });
+
+      it('returns UTF-16BE text through the public file-content processor', async () => {
+        const content = 'hello 😀';
+        const filePath = path.join(testDir, 'partial-processor.txt');
+        await fsPromises.writeFile(
+          filePath,
+          Buffer.concat([
+            Buffer.from([0xfe, 0xff]),
+            Buffer.from(content, 'utf16le').swap16(),
+            Buffer.from([0x10]),
+          ]),
+        );
+        mockMimeGetType.mockReturnValue('text/plain');
+        const result = await processSingleFileContent(filePath, mockConfig);
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe(content);
+      });
+
       it('should read UTF-32 LE BOM file correctly', async () => {
         const content = 'Hello, 世界! 🌍';
         const utf32leBom = Buffer.from([0xff, 0xfe, 0x00, 0x00]);
