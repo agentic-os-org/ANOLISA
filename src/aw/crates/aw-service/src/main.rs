@@ -43,6 +43,7 @@ aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
 Pi Coding Agent/Core 0.84.2: run requires a Node SDK application module.\n\
 Qoder CLI >=1.1.64: run accepts optional --native-settings; records the detected version.\n\
 OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\
+AgentScope 2.0.6: run requires Python script/-m entrypoint and explicit AwBridge.create_agent.\n\
 QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
 Hermes 952c941e: run and install require --native-profile; run requires the installed AW plugin.\n\
 Claude SDK 0.2.88: run requires a foreground Python worker using aw_claude.create_client; bundled CLI 2.1.161.\n\

@@ -2217,19 +2217,39 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
         // `nodejs`, which the detector's own runtime list already knows
         // (`is_generic_runtime`). An exact match either way, so
         // `node_exporter` is still not the runtime.
-        || info.has_node_runtime();
+        || info.has_node_runtime()
+        // mongod checks the knob itself: it warns "vm.max_map_count is too
+        // low" below twice its connection limit (MongoDB 7.0
+        // src/mongo/db/startup_warnings_mongod.cpp, 8.0
+        // src/mongo/transport/transport_layer_manager_impl.cpp; SERVER-51233),
+        // and the 64000-file limit its own service unit sets admits 51200
+        // connections (80% of the soft limit,
+        // src/mongo/transport/service_entry_point_impl.cpp), so the 65530
+        // default is already short of the 102400 it asks for.
+        || info.has_process("mongod");
     if !needs_high {
         return 1;
     }
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 262144 {
+    // Cassandra maps its SSTables and asks for four times the JVM floor: its
+    // startup check warns below 1048575 whenever a disk access mode is mmap,
+    // the default (`StartupChecks.checkMaxMapCount`, Cassandra 4.1 and 5.0),
+    // so 262144 left it short and silenced the rule on a host Cassandra still
+    // warns about.
+    let target: u64 = if info.has_process("cassandra") {
+        1048575
+    } else {
+        262144
+    };
+    if current < target {
         recs.push(Recommendation {
             param: "vm.max_map_count".to_string(),
             current_value: current.to_string(),
-            recommended_value: "262144".to_string(),
-            reason: "JVM/Node 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败".to_string(),
+            recommended_value: target.to_string(),
+            reason: "JVM/Node/MongoDB 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败"
+                .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
             writable: true,
@@ -7509,9 +7529,37 @@ fn hardlockup_panic_recommendation(
 // work); rebooting the whole server on one is too aggressive a default for the
 // beginners ktuner targets.
 
-fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_rt_runtime_us";
-    if !std::path::Path::new(path).exists() {
+fn eval_sched_rt_runtime(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_sched_rt_runtime_at(
+        info,
+        recs,
+        "/proc/sys/kernel/sched_rt_runtime_us",
+        "/proc/sys/kernel/sched_rt_period_us",
+    )
+}
+
+/// Path-injectable form of [`eval_sched_rt_runtime`] (the `eval_*_at` idiom) so
+/// both reads are assertable against synthetic files.
+///
+/// The two knobs share one hand-written handler, and it validates the pair after
+/// parsing and *undoes* the write when the pair is invalid: a runtime other than
+/// -1 that exceeds the period is rejected with -EINVAL and the previous values
+/// are restored (v6.6 kernel/sched/rt.c, `sched_rt_global_validate` and the
+/// `undo:` label in `sched_rt_handler`). The literal 950000 - 95% of the default
+/// 1000000 us period - is therefore refused outright on a host whose period was
+/// shortened: the write fails, the old value stays, and the report still counts
+/// the High-confidence security fix as available.
+///
+/// The target keeps the same 95% of whatever period the host runs. When the
+/// period cannot be read, no target can be shown to be acceptable, so the rule
+/// stays silent rather than asking for a write the kernel would refuse.
+fn eval_sched_rt_runtime_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    period_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     let current = std::fs::read_to_string(path)
@@ -7519,17 +7567,33 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
         .trim()
         .parse::<i64>()
         .unwrap_or(950000);
-    if current == -1 {
-        recs.push(Recommendation {
-            param: "kernel.sched_rt_runtime_us".to_string(),
-            current_value: "-1".to_string(),
-            recommended_value: "950000".to_string(),
-            reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
+    if current != -1 {
+        return 1;
     }
+    // A read failure parses to 0, which is not a period any host runs: only a
+    // value the kernel could have produced justifies a target.
+    let period = std::fs::read_to_string(period_path)
+        .unwrap_or_default()
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0);
+    if period <= 0 {
+        return 1;
+    }
+    let target = if period >= 950_000 {
+        950_000
+    } else {
+        period - period / 20
+    };
+    recs.push(Recommendation {
+        param: "kernel.sched_rt_runtime_us".to_string(),
+        current_value: "-1".to_string(),
+        recommended_value: target.to_string(),
+        reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    });
     1
 }
 
@@ -11138,6 +11202,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rt_runtime_target_follows_the_hosts_period() {
+        // `sched_rt_handler` rejects (and undoes) a runtime above the period, so
+        // the literal 950000 is not applicable on a host that shortened its
+        // period; the target keeps the default pair's ratio instead.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_rt_runtime_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("runtime");
+        let period = dir.join("period");
+        std::fs::write(&runtime, b"-1\n").unwrap();
+
+        let info = make_test_info();
+        let advice = |period_value: &[u8]| {
+            std::fs::write(&period, period_value).unwrap();
+            let mut recs = Vec::new();
+            eval_sched_rt_runtime_at(
+                &info,
+                &mut recs,
+                runtime.to_str().unwrap(),
+                period.to_str().unwrap(),
+            );
+            recs
+        };
+
+        // The default pair: the historical target, unchanged.
+        let recs = advice(b"1000000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "950000");
+
+        // A shortened period: 95% of it, a value the kernel accepts.
+        let recs = advice(b"500000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "475000");
+
+        // An unreadable period is not a period: no target can be shown valid.
+        let recs = advice(b"");
+        assert!(recs.is_empty(), "an unreadable period must not be guessed");
+
+        // A bounded runtime is not the finding, whatever the period says.
+        std::fs::write(&runtime, b"950000\n").unwrap();
+        assert!(advice(b"1000000\n").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn bbr_availability_requires_an_exact_algorithm_token() {
         // Plain bbr present, in any position.
         assert!(congestion_algo_available("reno cubic bbr", "bbr"));
@@ -13219,6 +13332,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// mongod warns "vm.max_map_count is too low" below twice its connection
+    /// limit (SERVER-51233), which its stock 64000-file limit puts at 102400,
+    /// above the kernel's 65530 default; the gate never counted it.
+    #[test]
+    fn max_map_count_counts_mongod() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_mongod_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        std::fs::write(&knob, "65530\n").unwrap();
+        let advice = |name: &str| {
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(&[name]),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice("mongod");
+        assert_eq!(recs.len(), 1, "mongod must get the max_map_count advice");
+        assert_eq!(recs[0].recommended_value, "262144");
+        // The shell is a client, not the daemon.
+        assert!(advice("mongosh").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cassandra's startup check (`StartupChecks.checkMaxMapCount`) warns below
+    /// 1048575 under its default mmap disk access mode, so the JVM floor of
+    /// 262144 is not enough for it: the rule stopped at 262144 on a host
+    /// Cassandra still warns about.
+    #[test]
+    fn max_map_count_sizes_cassandra_to_its_own_check() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_cassandra_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        let advice = |procs: &[&str], value: &str| {
+            std::fs::write(&knob, value).unwrap();
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(procs),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| r.recommended_value)
+                .collect::<Vec<_>>()
+        };
+
+        // The JVM marker and the resolved service name, as read_processes
+        // pushes them for a Cassandra node.
+        let cassandra = ["java", "cassandra"];
+        assert_eq!(advice(&cassandra, "65530\n"), ["1048575"]);
+        assert_eq!(advice(&cassandra, "262144\n"), ["1048575"]);
+        assert!(advice(&cassandra, "1048575\n").is_empty());
+        // Other JVMs keep the existing floor.
+        assert_eq!(advice(&["java"], "65530\n"), ["262144"]);
+        assert!(advice(&["java"], "262144\n").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_no_false_positive_when_optimal() {
         let mut info = make_test_info();
@@ -13912,9 +14096,9 @@ mod tests {
                 "kyber".to_string(),
                 "bfq".to_string(),
             ],
-            nr_requests: 256,
-            read_ahead_kb: 128,
-            rq_affinity: 1,
+            nr_requests: Some(256),
+            read_ahead_kb: Some(128),
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];
@@ -13942,9 +14126,9 @@ mod tests {
                 "kyber".to_string(),
                 "bfq".to_string(),
             ],
-            nr_requests: 256,
-            read_ahead_kb: 128,
-            rq_affinity: 1,
+            nr_requests: Some(256),
+            read_ahead_kb: Some(128),
+            rq_affinity: Some(1),
             hidden: false,
             holders: vec![],
         }];

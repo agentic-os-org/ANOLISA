@@ -43,7 +43,7 @@ fn bundle(root: &Path, names: &[&str]) -> PathBuf {
         let entries = if *name == "aw-core" {
             vec!["bin/aw".into(), "bin/aw-package".into()]
         } else if *name == "aw-provider-tokenless" {
-            ["aw-provider-tokenless", "tokenless"]
+            ["aw-provider-tokenless", "tokenless", "rtk"]
                 .iter()
                 .map(|name| format!("libexec/aw/providers/tokenless/{name}"))
                 .collect()

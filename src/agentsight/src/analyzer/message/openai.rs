@@ -349,8 +349,10 @@ impl OpenAIParser {
                         // an assistant message with `tool_calls`, and a tool
                         // message paired by `call_id`. Flattening them into a
                         // user message holding their JSON dropped the whole
-                        // tool interaction from the recorded request.
-                        "function_call" => {
+                        // tool interaction from the recorded request. A custom
+                        // (freeform) tool is replayed the same way, with its
+                        // text in `input` instead of `arguments`.
+                        "function_call" | "custom_tool_call" => {
                             messages.push(serde_json::json!({
                                 "role": "assistant",
                                 "tool_calls": [{
@@ -363,13 +365,14 @@ impl OpenAIParser {
                                             .unwrap_or_default(),
                                         "arguments": item
                                             .get("arguments")
+                                            .or_else(|| item.get("input"))
                                             .cloned()
                                             .unwrap_or(serde_json::Value::Null),
                                     },
                                 }],
                             }));
                         }
-                        "function_call_output" => {
+                        "function_call_output" | "custom_tool_call_output" => {
                             // `content` must be text: the chat content type is
                             // string-or-parts, so a structured output is carried
                             // as its JSON text and re-parsed by the consumer.
@@ -407,9 +410,16 @@ impl OpenAIParser {
         // normalized chat view must carry it into `max_tokens` so the
         // downstream consumers of the chat shape (token-limit interruption
         // rules, telemetry) see the cap.
+        // Only a value the typed field can hold is copied, as for the chat
+        // `max_completion_tokens`: anything else was an unknown key before and
+        // must not turn the whole request into a parse failure.
         if body.get("max_tokens").is_none() {
-            if let Some(max_output_tokens) = body.get("max_output_tokens") {
-                normalized["max_tokens"] = max_output_tokens.clone();
+            if let Some(cap) = body
+                .get("max_output_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                normalized["max_tokens"] = serde_json::json!(cap);
             }
         }
 
@@ -751,6 +761,13 @@ impl OpenAIParser {
         if !refusal_buf.is_empty() {
             message["refusal"] = serde_json::Value::String(refusal_buf);
         }
+        // The calls are part of the output whatever ended the stream; only
+        // the finish reason below gives way to a cut, as in the
+        // non-streaming normalizer.
+        let has_tool_calls = !tool_calls.is_empty();
+        if has_tool_calls {
+            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
         let finish_reason = if output_capped {
             // The cap ended the stream: report the truncation even when a
             // tool call was in flight (its arguments may be cut mid-JSON,
@@ -758,8 +775,7 @@ impl OpenAIParser {
             "length"
         } else if output_filtered {
             "content_filter"
-        } else if !tool_calls.is_empty() {
-            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        } else if has_tool_calls {
             "tool_calls"
         } else {
             "stop"
@@ -1514,6 +1530,50 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_request_responses_custom_tool_items() {
+        // A custom (freeform) tool call is replayed the same way as a function
+        // call, with its text in `input` instead of `arguments`: Codex sends
+        // its apply_patch edits like this. Both items used to be flattened
+        // into user messages holding their raw JSON.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "fix the typo"},
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_2",
+                    "output": "Success"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the custom_tool_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_2"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("apply_patch")
+        );
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_2"));
+    }
+
+    #[test]
     fn test_parse_request_responses_role_with_typed_content() {
         let json = serde_json::json!({
             "model": "gpt-4.1",
@@ -2043,6 +2103,56 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_responses_sse_incomplete_keeps_tool_calls() {
+        // A stream cut after the model already emitted a function call: the
+        // terminal reason outranks "tool_calls", but the call itself is part
+        // of the output and must stay on the message, as it does for the
+        // non-streaming response and the chat-completions stream.
+        for reason in ["max_output_tokens", "content_filter"] {
+            let chunks = vec![
+                serde_json::json!({"type": "response.created", "response": {"id": "resp_cut_tc", "model": "qwen-plus"}}),
+                serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_cut"}}),
+                serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+                serde_json::json!({"type": "response.incomplete", "response": {
+                    "id": "resp_cut_tc",
+                    "model": "qwen-plus",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": reason},
+                    "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+                }}),
+            ];
+
+            let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+                .expect("should aggregate");
+            let expected = if reason == "max_output_tokens" {
+                "length"
+            } else {
+                "content_filter"
+            };
+            assert_eq!(resp.choices[0].finish_reason, Some(expected.to_string()));
+            let tc = resp.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap_or_else(|| panic!("{reason}: the emitted call must be kept"));
+            assert_eq!(tc.len(), 1);
+            assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_cut");
+            assert_eq!(
+                tc[0]
+                    .get("function")
+                    .unwrap()
+                    .get("arguments")
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+                "{\"city\":\"Beijing\"}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_request_responses_max_output_tokens() {
         // The Responses API spells the output cap max_output_tokens; the
         // normalized chat view must carry it into max_tokens so downstream
@@ -2055,6 +2165,28 @@ mod tests {
         let request = OpenAIParser::parse_request(&json);
         assert!(request.is_some());
         assert_eq!(request.unwrap().max_tokens, Some(512));
+    }
+
+    /// The Responses cap is copied onto `max_tokens` like the chat
+    /// `max_completion_tokens`, so a value the typed u32 field cannot hold
+    /// must be ignored the same way rather than fail the whole request.
+    #[test]
+    fn test_parse_request_responses_ignores_an_unusable_max_output_tokens() {
+        for cap in [
+            serde_json::json!("512"),
+            serde_json::json!(4_294_967_296u64),
+            serde_json::json!(-1),
+        ] {
+            let json = serde_json::json!({
+                "model": "gpt-5",
+                "input": "Hello",
+                "max_output_tokens": cap
+            });
+            let request = OpenAIParser::parse_request(&json)
+                .unwrap_or_else(|| panic!("{cap}: the request must still parse"));
+            assert_eq!(request.max_tokens, None, "{cap}");
+            assert_eq!(request.messages.len(), 1, "{cap}");
+        }
     }
 
     #[test]

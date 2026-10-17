@@ -10,6 +10,8 @@ on:
       - 'src/agent-sec-core/packaging/systemd/**'
       - 'src/tokenless/crates/**'
       - 'src/tokenless/Cargo.*'
+      - 'src/tokenless/scripts/setup-rtk.sh'
+      - 'src/tokenless/third_party/patches/**'
       - 'src/aw/Cargo.*'
       - 'docs/user-guide/*/user-entrypoint/aw-preview.md'
       - '.github/workflows/aw-preview.yml'
@@ -66,13 +68,16 @@ jobs:
             -p aw-provider-sec-core --test health -- --ignored
       - name: Verify Tokenless PreTool and PostTool contracts
         env:
-          AW_TOKENLESS_TEST_CLI: ${{ github.workspace }}/src/tokenless/target/release/tokenless
           TOKENLESS_COMPRESSION_ENABLED: '1'
           TOKENLESS_STATS_ENABLED: '0'
           TOKENLESS_SLS_ENABLED: '0'
         run: |
+          export AW_TOKENLESS_TEST_CLI="$GITHUB_WORKSPACE/src/tokenless/target/release/tokenless"
+          export AW_TOKENLESS_TEST_RTK="$GITHUB_WORKSPACE/src/aw/target/release/rtk"
+          test -x "$AW_TOKENLESS_TEST_CLI"
+          test -x "$AW_TOKENLESS_TEST_RTK"
           cargo test --locked --manifest-path src/aw/Cargo.toml \
-            -p aw-provider-tokenless --test provider --test pretool -- --ignored
+            -p aw-provider-tokenless --test provider --test pretool --test managed_rtk -- --ignored
           cargo test --locked --manifest-path src/aw/Cargo.toml \
             -p aw-provider-tokenless --test views -- --ignored
       - name: Verify installed packages and service lifecycle
@@ -99,6 +104,11 @@ jobs:
           aw-provider-tokenless-*/aw-package install --prefix "$root/split"
           aw-all-in-one-*/aw-package install --prefix "$root/combined"
           diff -r "$root/split/.aw-packages" "$root/combined/.aw-packages"
+          AW_TOKENLESS_TEST_CLI="$root/combined/libexec/aw/providers/tokenless/tokenless" \
+          AW_TOKENLESS_TEST_RTK="$root/combined/libexec/aw/providers/tokenless/rtk" \
+          TOKENLESS_STATS_ENABLED=0 TOKENLESS_SLS_ENABLED=0 \
+            timeout 120 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \
+            -p aw-provider-tokenless --test managed_rtk -- --ignored
           umask 0002
           AW_TEST_PREFIX="$root/combined" AW_TEST_WORK_DIR="$runtime/demo" \
             timeout 180 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \

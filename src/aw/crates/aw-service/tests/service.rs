@@ -6,6 +6,9 @@ mod common;
 #[path = "service/native.rs"]
 mod native;
 
+#[path = "service/cancellation.rs"]
+mod cancellation;
+
 use aw_service::{Client, Operation, Request, Server, VERSION};
 use common::{
     audit, close, event, invoke, open, second_step, Fixture, Running, PRIVATE_MARKER, TIMEOUT,

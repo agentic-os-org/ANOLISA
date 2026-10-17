@@ -32,6 +32,7 @@ struct Instance {
     host: Arc<Host>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
+    hook_open: Arc<Mutex<()>>,
     observation: Option<Arc<evidence::Observation>>,
 }
 
@@ -160,14 +161,24 @@ impl Runtime {
                 deadline,
                 cancelled,
             ),
-            Operation::OpenEvent { instance_id, event } => {
-                self.open(instance_id, event, None, deadline)
-            }
+            Operation::OpenEvent { instance_id, event } => self.open(
+                instance_id,
+                event,
+                None,
+                deadline,
+                Arc::new(AtomicBool::new(false)),
+            ),
             Operation::OpenHookEvent {
                 instance_id,
                 event,
                 native_input,
             } => self.open_hook(instance_id, event, native_input, deadline),
+            Operation::CloseHookEvent {
+                instance_id,
+                event,
+                session_id,
+                call_id,
+            } => self.close_hook(&instance_id, &event, &session_id, &call_id, deadline),
             Operation::InvokeStep {
                 event_id,
                 instance_id,
@@ -298,6 +309,7 @@ impl Runtime {
         value: Value,
         native_input: Option<Vec<u8>>,
         deadline: Instant,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<Value> {
         let instances = self
             .instances
@@ -316,12 +328,16 @@ impl Runtime {
         }
         let metadata = event_metadata(&value)?;
         let key = self.identifier()?;
-        let cancelled = Arc::new(AtomicBool::new(false));
         let context = Arc::new(evidence::Cell::default());
         let (sender, receiver) = mpsc::sync_channel(MAX_STEPS + 1);
         let (ready, result) = mpsc::sync_channel(1);
         {
             let mut events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+            // Close checks this registry after marking the shared correlation;
+            // it must not acknowledge cleanup before a late registration.
+            if cancelled.load(Ordering::Acquire) {
+                return Err(rejected("event_cancelled"));
+            }
             if events.len() >= MAX_EVENTS {
                 return Err(rejected("event_limit"));
             }

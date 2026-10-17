@@ -49,6 +49,7 @@ running service.
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
+| `close_hook_event` | `instance_id`, event name `event`, `session_id`, normalized `call_id` | `{"closed": true}` after cancelling the correlation and draining its active event; later opens are fenced |
 | `invoke_step` | `event_id`, `instance_id`, `step_id`, optional `native_environment` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
 | `close_event` | `event_id`, `instance_id` | Cancel unfinished work, join children and acknowledge closure |
 | `start_observation` | `instance_id` | Start one optional instance observer; bounded source compatibility probe |
@@ -142,6 +143,19 @@ Adapters continue requiring their original immutable bytes.
 It retains closed and failed-open claims until instance release; they cannot
 create a new budget. Opening an independent event per step is not valid shared
 event scheduling. The current per-instance correlation limit is 1,024 events.
+
+`close_hook_event` identifies a correlation by the owning `instance_id`,
+`event` (`tool.before` or `tool.after`), nonempty `session_id` and nonempty
+`call_id` (the normalized `tool.call_id`; AgentScope uses its invocation ID).
+It needs no event handle or input snapshot. It serializes with opens under the
+instance's lease lock, records a cancelled claim even before an event opens, and
+rejects later opens of that correlation with `native_event_closed`. Repeated
+closes are idempotent. If an event exists, it cancels active Provider work and
+waits for cleanup and registry removal before returning `{"closed": true}`.
+It never creates an event, invokes a step or renews a budget. Cancelled claims
+count toward the same correlation limit and remain until instance release.
+Cleanup is bounded by the caller's RPC deadline; failure to drain in time returns
+`event_close_timeout`, retaining the cancelled claim so the event cannot reopen.
 
 The Qoder Adapter registers one callback per AW step in a shared matcher group.
 Qoder retains its native parallel or explicitly configured sequential policy.

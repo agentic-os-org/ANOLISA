@@ -26,6 +26,9 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
+            if args.flags.contains_key("--close-event") {
+                return Exit::Code(1);
+            }
             let blocked = args
                 .flags
                 .get("--event")
@@ -44,9 +47,21 @@ pub(super) fn callback(args: &Arguments) -> Exit {
 
 fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     args.check(
-        &["--adapter", "--binding", "--event", "--step", "--on-error"],
+        &[
+            "--adapter",
+            "--binding",
+            "--event",
+            "--step",
+            "--on-error",
+            "--close-event",
+        ],
         false,
     )?;
+    let close = match args.flags.get("--close-event").map(String::as_str) {
+        None => false,
+        Some("true") if args.required("--adapter")? == "agentscope" => true,
+        _ => return Err("event cleanup requires the AgentScope bridge".into()),
+    };
     let event = args.required("--event")?;
     let step = args.required("--step")?;
     let on_error = args.required("--on-error")?;
@@ -83,7 +98,8 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     {
         return Err("step or budget does not match binding".into());
     }
-    let deadline = Instant::now() + Duration::from_millis(route.budget_ms + 2000);
+    let deadline =
+        Instant::now() + Duration::from_millis(if close { 2000 } else { route.budget_ms + 2000 });
     let mut input = read_input(deadline)?;
     let mut value: Value = serde_json::from_slice(&input)?;
     let completion = if binding.adapter == "openclaw" {
@@ -125,6 +141,24 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     if client.identity() != &binding.binding.identity {
         return Err("stale hook binding".into());
     }
+    if close {
+        client.call(
+            Operation::CloseHookEvent {
+                instance_id: binding.binding.instance_id,
+                event: event.into(),
+                session_id: normalized["session_id"]
+                    .as_str()
+                    .ok_or("missing session")?
+                    .into(),
+                call_id: normalized["tool"]["call_id"]
+                    .as_str()
+                    .ok_or("missing call")?
+                    .into(),
+            },
+            deadline,
+        )?;
+        return Ok(Exit::Code(0));
+    }
     if step == adapter::OBSERVE_STEP {
         client.call(
             Operation::ObserveHookEvent {
@@ -157,7 +191,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         .map_err(Into::into)
         .and_then(|output| response(adapter, event, on_error, output, &binding.adapter, &value));
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if matches!(binding.adapter.as_str(), "pi" | "claude-sdk")
+    if matches!(binding.adapter.as_str(), "pi" | "claude-sdk" | "agentscope")
         && event == "tool.before"
         && handle.steps.last().map(String::as_str) != Some(step)
         && stops_before(&binding.adapter, &result, on_error)
@@ -177,14 +211,15 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
 }
 
 fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> bool {
-    match result {
-        Ok(output) if adapter == "claude-sdk" => {
+    match (adapter, result) {
+        ("pi", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|value| value["block"] == true),
+        ("claude-sdk" | "agentscope", Ok(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        Ok(output) => serde_json::from_slice::<Value>(&output.stdout)
-            .is_ok_and(|value| value["block"] == true),
-        Err(_) => on_error == "block",
+        ("pi" | "claude-sdk" | "agentscope", Err(_)) => on_error == "block",
+        _ => false,
     }
 }
 
@@ -440,5 +475,54 @@ mod tests {
             &json!({})
         )
         .is_err());
+    }
+
+    #[test]
+    fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
+        for adapter in ["agentscope", "claude-sdk"] {
+            for (exit, on_error, expected) in [
+                (Exit::Code(0), "block", false),
+                (Exit::Code(0), "report", false),
+                (Exit::Code(2), "block", true),
+                (Exit::Code(2), "report", true),
+                (Exit::Code(1), "block", true),
+                (Exit::Code(1), "report", false),
+                (Exit::Signal(15), "block", true),
+                (Exit::Signal(15), "report", false),
+            ] {
+                let result = Ok(HookOutput {
+                    exit,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+                assert_eq!(stops_before(adapter, &result, on_error), expected);
+            }
+            assert!(stops_before(adapter, &Err("failed".into()), "block"));
+            assert!(!stops_before(adapter, &Err("failed".into()), "report"));
+        }
+    }
+
+    #[test]
+    fn agentscope_native_output_reaches_the_bridge_without_decoding() {
+        let adapter = adapter::select("agentscope").unwrap();
+        for stdout in [
+            b"{\"action\":\"ask\"}".to_vec(),
+            b"\xef\xbb\xbf{\"action\":\"approve\"}".to_vec(),
+            b"\xff\xfe{\x00}\x00".to_vec(),
+        ] {
+            let output = json!({"status": "ok", "kind": "native", "native": {
+                "stdout": stdout, "stderr": [], "exit_code": 0, "signal": null}});
+            let reply = response(
+                adapter,
+                "tool.before",
+                "block",
+                output,
+                "agentscope",
+                &Value::Null,
+            )
+            .unwrap();
+            assert_eq!(reply.stdout, stdout);
+            assert!(matches!(reply.exit, Exit::Code(0)));
+        }
     }
 }
