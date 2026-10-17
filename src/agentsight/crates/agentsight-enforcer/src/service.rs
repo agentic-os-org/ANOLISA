@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
     Command, PROTOCOL_VERSION, ProtocolError, RemoteError, ReplaceOutcome, ReplacePolicy, Request,
-    Response, ResponseBody, read_frame, write_frame,
+    Response, ResponseBody, SecurityEvent, SecurityEventKind, read_frame, write_frame,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -402,34 +402,43 @@ fn handle_connection<B: EnforcementBackend>(
             );
         }
         Command::SubscribeSecurityEvents => {
-            let receiver = backend.subscribe_security_events();
+            let (subscriber, receiver) = backend.subscribe_security_events_tracked();
             if write_frame(
                 &mut stream,
                 &success_response(request.request_id, ResponseBody::Subscribed),
             )
             .is_err()
             {
-                // A peer that disappears before its acknowledgement can be
-                // written already received queued frames (for example the
-                // evidence-loss recovery frame); count them as lost like the
-                // per-event write failure below does.
-                let queued_events = receiver
-                    .try_iter()
-                    .fold(0_u64, |count, _| count.saturating_add(1));
-                backend.record_security_delivery_loss(queued_events);
+                // Remove the hub sender first so the receiver queue cannot grow between draining
+                // and dropping it. Recovery frames retain the number of source events they cover.
+                let pending_losses = backend.unsubscribe_security_events(subscriber);
+                let (queued_losses, queued_frames) = drain_security_events(&receiver);
+                drop(receiver);
+                backend.record_security_delivery_loss(
+                    subscriber,
+                    pending_losses.saturating_add(queued_losses),
+                    queued_frames,
+                );
                 return Ok(());
             }
             while let Ok(event) = receiver.recv() {
+                let current_losses = represented_security_losses(&event);
                 if write_frame(
                     &mut stream,
                     &success_response(request.request_id, ResponseBody::SecurityEvent(event)),
                 )
                 .is_err()
                 {
-                    let queued_events = receiver
-                        .try_iter()
-                        .fold(0_u64, |count, _| count.saturating_add(1));
-                    backend.record_security_delivery_loss(queued_events.saturating_add(1));
+                    let pending_losses = backend.unsubscribe_security_events(subscriber);
+                    let (queued_losses, queued_frames) = drain_security_events(&receiver);
+                    drop(receiver);
+                    backend.record_security_delivery_loss(
+                        subscriber,
+                        pending_losses
+                            .saturating_add(current_losses)
+                            .saturating_add(queued_losses),
+                        queued_frames.saturating_add(1),
+                    );
                     return Ok(());
                 }
             }
@@ -447,6 +456,24 @@ fn handle_connection<B: EnforcementBackend>(
             result,
         },
     )
+}
+
+fn represented_security_losses(event: &SecurityEvent) -> u64 {
+    match &event.kind {
+        SecurityEventKind::EnforcementState(state) if state.code == "evidence_loss" => {
+            state.dropped_events.unwrap_or(1).max(1)
+        }
+        _ => 1,
+    }
+}
+
+fn drain_security_events(receiver: &Receiver<SecurityEvent>) -> (u64, u64) {
+    receiver.try_iter().fold((0_u64, 0_u64), |(losses, frames), event| {
+        (
+            losses.saturating_add(represented_security_losses(&event)),
+            frames.saturating_add(1),
+        )
+    })
 }
 
 fn serve_subscription<B: EnforcementBackend>(
@@ -916,11 +943,23 @@ mod tests {
 
         fn record_required_delivery_loss(&self, _count: u64) {}
 
-        fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
-            mpsc::sync_channel(1).1
+        fn subscribe_security_events_tracked(
+            &self,
+        ) -> (crate::SecuritySubscriberId, Receiver<SecurityEvent>) {
+            crate::event_hub::SecurityEventHub::new(1).subscribe_tracked()
         }
 
-        fn record_security_delivery_loss(&self, _count: u64) {}
+        fn unsubscribe_security_events(&self, _subscriber: crate::SecuritySubscriberId) -> u64 {
+            0
+        }
+
+        fn record_security_delivery_loss(
+            &self,
+            _subscriber: crate::SecuritySubscriberId,
+            _represented_losses: u64,
+            _dropped_frames: u64,
+        ) {
+        }
     }
 
     #[test]
@@ -1154,5 +1193,16 @@ mod tests {
                 "mock backend does not enforce kernel operations; security event delivery loss: dropped_events=5"
             )
         );
+
+        let replacement = backend.subscribe_security_events();
+        let recovered = replacement
+            .try_recv()
+            .expect("replacement must receive the original four-event loss");
+        let SecurityEventKind::EnforcementState(state) = recovered.kind else {
+            panic!("recovery frame must be enforcement state");
+        };
+        assert_eq!(state.code, "evidence_loss");
+        assert_eq!(state.dropped_events, Some(4));
+        assert!(backend.health().expect("mock health should recover").ready);
     }
 }

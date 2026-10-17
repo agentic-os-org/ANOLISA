@@ -82,6 +82,10 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
 请使用 `make build-all`。
 
+标准化 security event 采用非阻塞投递。Collector 断开或消费落后时，health 会暂时变为 not ready，直到
+缺口以 `evidence_loss` 事件排入替代订阅的队列，随后 readiness 会自动恢复，无需重启 enforcer。每个订阅者
+只接收自己的缺口标记；仍在线的其他消费者不会代替断开的消费者确认丢失。
+
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
 
