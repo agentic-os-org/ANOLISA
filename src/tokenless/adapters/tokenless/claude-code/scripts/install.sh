@@ -47,11 +47,28 @@ if [ ! -f "$PLUGIN_SRC/.claude-plugin/marketplace.json" ]; then
     exit 1
 fi
 
+PLUGIN_MANIFEST="$PLUGIN_SRC/.claude-plugin/plugin.json"
+PLUGIN_TEMPLATE="$PLUGIN_SRC/.claude-plugin/plugin.json.in"
+
+if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Preview before the first write: the dev fallback below stamps the manifest
+    # into the plugin tree, so a dry run stops ahead of it and of the two CLI
+    # registrations it would follow. The stamp and the marketplace registration
+    # are conditional in the real path, so the preview says so rather than
+    # announcing work that would not happen on an already-provisioned host (the
+    # `marketplace list` probe is not run here: it would call the CLI).
+    if [ ! -f "$PLUGIN_MANIFEST" ] && [ -f "$PLUGIN_TEMPLATE" ]; then
+        echo "DRY-RUN: stamp ${PLUGIN_MANIFEST} from ${PLUGIN_TEMPLATE}"
+    fi
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin marketplace add ${PLUGIN_SRC} (only when the marketplace is not registered)"
+    echo "DRY-RUN: ${CLAUDE_BIN} plugin install ${PLUGIN_ID}"
+    exit 0
+fi
+
 # Dev-only fallback: stamp plugin.json from .in template when Makefile hasn't
 # run yet. Production installs (RPM, `make install`) ship a stamped manifest
 # inside SHARE_DIR, so this branch is a no-op in those flows.
-PLUGIN_MANIFEST="$PLUGIN_SRC/.claude-plugin/plugin.json"
-PLUGIN_TEMPLATE="$PLUGIN_SRC/.claude-plugin/plugin.json.in"
+
 if [ ! -f "$PLUGIN_MANIFEST" ] && [ -f "$PLUGIN_TEMPLATE" ]; then
     VERSION="${TOKENLESS_VERSION:-${ANOLISA_VERSION:-0.0.0-dev}}"
     sed "s/@VERSION@/${VERSION}/g" "$PLUGIN_TEMPLATE" > "$PLUGIN_MANIFEST"
