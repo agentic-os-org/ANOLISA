@@ -19,6 +19,15 @@ const execFileAsync = promisify(execFile);
 /** Allows the daemon's 180 s bounded reclamation plus RPC overhead. */
 const DEFAULT_TIMEOUT_MS = 240_000;
 
+/**
+ * Largest CLI output captured per stream. execFile's default is only
+ * 1 MiB, well below legitimate output: a single daemon response frame
+ * may be 16 MiB (`MAX_FRAME_SIZE`), and `ws-ckpt list` aggregates every
+ * page into one stdout stream when `--limit`/`--cursor` are omitted.
+ * Matches the 64 MiB response cap cosh-ng's own CkptClient applies.
+ */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
 /** The ws-ckpt CLI binary name. */
 const WS_CKPT_BIN = "ws-ckpt";
 
@@ -269,6 +278,7 @@ export class CommandExecutor {
       const { stdout, stderr } = await execFileAsync(WS_CKPT_BIN, args, {
         timeout: this.timeoutMs,
         encoding: "utf-8",
+        maxBuffer: MAX_OUTPUT_BYTES,
         env: { ...process.env, WS_CKPT_AGENT_NAME: "openclaw" },
       });
 
