@@ -448,7 +448,7 @@ output/
 │   ├── results/
 │   │   └── <instance_id>.json
 │   ├── input-manifests/
-│   │   └── <instance_id>/input_manifest.json
+│   │   └── instance-<prefix>--<id-sha256>/input_manifest.json
 │   ├── openclaw-profiles/
 │   │   └── <instance_id>/
 │   ├── openclaw-errors/
@@ -478,6 +478,11 @@ output/
 | `run/results/*.json` | 单实例运行摘要，成功失败都会写入 |
 | `run/run_metadata.json` | 本次 run 的时间、agent、worker、实例和 metadata mapping |
 | `run/input-manifests/*/input_manifest.json` | 单实例输入快照，包含数据集行、settings、prompt hash、资源文件记录和 runner 信息 |
+
+manifest 目录包含有界的可读前缀和原始实例 ID 的完整 SHA-256。不同 ID 即使规范化显示名
+相同或仅大小写不同，也保持不同路径；payload 仍保留精确 ID。应使用记录的
+`input_manifest_path` / `manifest_path` 定位文件。新写入采用此规则，旧记录路径仍有效，
+不会自动删除既有目录。
 | `run/openclaw-profiles/` | OpenClaw local 每实例 profile 和 session 产物 |
 | `run/openclaw-errors/*.log` | OpenClaw local 非零退出时的 stdout/stderr |
 | `run/openclaw-tokenless-evidence/*.json` | `--tokenless` 运行的配置和运行期证据摘要 |
