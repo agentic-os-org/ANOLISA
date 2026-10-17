@@ -205,7 +205,7 @@ impl MemoryMcpServer {
     // ---- Tier B: structured search/write API for weak models or batch use ----
 
     #[tool(
-        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid. Optional category filters results to a fact category (e.g. 'lesson', 'interest', 'working-context'). Optional agent_scope overrides [memory].agent_scope for this call; accepted values: 'shared' (no filtering), 'isolated:<id>' (only memories tagged with <id>), or 'filter:<id>' (<id>'s own memories plus unscoped ones). When agent_scope is set to isolated/filter, vector/hybrid degrade to scoped BM25 so the isolation boundary is preserved."
+        description = "Tier B: search the indexed memory store. Default BM25 keyword search. Set mode=vector for semantic (embedding) search, or mode=hybrid for combined ranking. Requires [memory.embedding] config for vector/hybrid. Optional category filters results to a fact category (e.g. 'lesson', 'interest', 'working-context'). Optional agent_scope overrides [memory].agent_scope for this call; accepted values: 'shared' (no filtering), 'isolated:<id>' (only memories tagged with <id>), or 'filter:<id>' (<id>'s own memories plus unscoped ones); any other value is rejected with InvalidArgument rather than silently falling back to unscoped search. When agent_scope is set to isolated/filter, vector/hybrid degrade to scoped BM25 so the isolation boundary is preserved."
     )]
     async fn memory_search(
         &self,
