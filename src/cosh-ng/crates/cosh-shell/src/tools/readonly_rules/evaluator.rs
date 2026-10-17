@@ -189,7 +189,7 @@ fn evaluate_runtime_subcommand(tokens: &[String], spec: &RuntimeSubcommandSpec) 
         })
 }
 
-fn evaluate_generic(args: &[String], spec: &GenericSpec) -> bool {
+pub(super) fn evaluate_generic(args: &[String], spec: &GenericSpec) -> bool {
     let mut idx = 0;
     let mut saw_path = false;
     let mut positionals_only = false;

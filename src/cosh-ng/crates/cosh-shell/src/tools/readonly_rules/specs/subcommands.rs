@@ -111,14 +111,7 @@ pub(super) const GIT: ReadonlySpec = ReadonlySpec {
             ),
             (
                 "remote",
-                Validator::Generic(GenericSpec {
-                    short_flags: "v",
-                    long_flags: &["--verbose"],
-                    value_flags: &[],
-                    deny_flags: &[],
-                    path_mode: PathMode::Optional,
-                    bare_number_max: 0,
-                }),
+                Validator::Custom(validators::is_readonly_git_remote),
             ),
             (
                 "rev-parse",

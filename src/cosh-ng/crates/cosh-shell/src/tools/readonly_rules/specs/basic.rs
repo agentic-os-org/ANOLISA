@@ -1,4 +1,5 @@
 use super::{GenericSpec, PathMode, ReadonlySpec, Validator};
+use crate::tools::readonly_rules::validators;
 
 // ── Bare commands (no args) ──
 pub(super) const PWD: ReadonlySpec = ReadonlySpec {
@@ -322,14 +323,7 @@ pub(super) const SORT: ReadonlySpec = ReadonlySpec {
 
 pub(super) const UNIQ: ReadonlySpec = ReadonlySpec {
     command: "uniq",
-    validator: Validator::Generic(GenericSpec {
-        short_flags: "cduifszw",
-        long_flags: &["--count", "--repeated", "--unique", "--ignore-case"],
-        value_flags: &[],
-        deny_flags: &[],
-        path_mode: PathMode::Optional,
-        bare_number_max: 0,
-    }),
+    validator: Validator::Custom(validators::is_readonly_uniq),
 };
 
 pub(super) const CUT: ReadonlySpec = ReadonlySpec {
