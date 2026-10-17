@@ -242,6 +242,15 @@ jobs:
       - name: Test aggregated runtime dependency preflight
         run: bash tests/test-build-all-runtime-deps.sh
 
+  check-cosh-postun-guard:
+    name: Check copilot-shell postun guard
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the lua postun scriptlet across rpm arg layouts
+        run: bash tests/test-cosh-postun-guard.sh
+
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
   # =========================================================================
