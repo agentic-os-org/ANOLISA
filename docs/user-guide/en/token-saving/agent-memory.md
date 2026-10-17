@@ -245,6 +245,14 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 
 ### Tier B — structured retrieval (6)
 
+For keyword search, pass ordinary text to `memory_search`, for example
+`{"query":"config.toml","mode":"bm25"}`. Dotted filenames, domains, and version
+numbers remain searchable terms. `AND` and `NOT` are literal words: searching
+`NOT NULL` looks for that text, not an exclusion expression. Multiple terms
+first require all terms to match; if none do, the existing fallback can return
+partial matches. Short terms, including two-character CJK words, retain their
+substring-search fallback.
+
 | Tool | Required | Optional | Returns |
 |------|------|------|------|
 | `memory_search` | `query` | `top_k` (default 5), `mode` (bm25/vector/hybrid), `category` | `{path, score, snippet, suspicious}` array |
