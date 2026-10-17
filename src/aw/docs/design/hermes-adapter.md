@@ -340,8 +340,9 @@ Post callbacks cannot undo the tool or replace its result.
 
 Both the AW event deadline and Hermes' callback timeout apply. Launch refuses
 event budgets whose native command timeout and cleanup allowance exceed
-`plugins.hook_callback_timeout`. A bounded probe uses the console script's
-interpreter and the pinned native CLI profile/dotenv loader, then queries the
+`plugins.hook_callback_timeout`. This admission includes synthesized observation-only
+callbacks as well as configured action callbacks. A bounded probe uses the console
+script's interpreter and the pinned native CLI profile/dotenv loader, then queries the
 native timeout resolver. YAML 1.1 scalars, environment expansion, the default
 and the 600-second clamp therefore match Hermes. Launch probes share the launcher's
 cancellation flag; SIGINT/SIGTERM promptly reap their process groups and retain

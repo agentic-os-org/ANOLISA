@@ -12,14 +12,14 @@ use support::{Fixture, Service};
 
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
     match adapter {
-        "qoder" | "qwenpaw" | "hermes" => output.status.code() == Some(2),
+        "qoder" | "qwenpaw" | "agentscope" | "hermes" => output.status.code() == Some(2),
         _ => serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"] == true,
     }
 }
 
 #[test]
 fn retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors() {
-    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes"] {
+    for adapter in ["qoder", "openclaw", "qwenpaw", "agentscope", "hermes"] {
         let f = Fixture::new();
         let provider = f.root.join("policy.py");
         fs::write(&provider, r#"import json, sys
@@ -76,20 +76,23 @@ print(json.dumps(reply))
             ("error", "scan-failure"),
         ] {
             let input = json!({"command":command,"cwd":"preserved"});
-            let native = match adapter {
+            let mut native = match adapter {
                 "qoder" => {
                     json!({"hook_event_name":"PreToolUse","cwd":f.root,"session_id":"session","tool_use_id":attempt,"tool_name":"Bash","tool_input":input})
                 }
                 "openclaw" => {
                     json!({"hook":"before_tool_call","event":{"toolName":"exec","params":input,"toolCallId":attempt,"runId":"run"},"context":{"sessionId":"session","runId":"run","toolCallId":attempt}})
                 }
-                "qwenpaw" => {
-                    json!({"event":"tool.before","session_id":"session","tool_call":{"name":"exec","id":attempt,"input":input.to_string()}})
+                "qwenpaw" | "agentscope" => {
+                    json!({"event":"tool.before","invocation_id":attempt,"session_id":"session","tool_call":{"name":"exec","id":attempt,"input":input.to_string()}})
                 }
                 _ => {
                     json!({"hook_event_name":"pre_tool_call","cwd":f.root,"session_id":"session","tool_name":"terminal","tool_input":input,"extra":{"tool_call_id":attempt,"api_request_id":"api"}})
                 }
             };
+            if adapter == "agentscope" {
+                native["effective_input"] = input;
+            }
             let mut outputs = Vec::new();
             for (step, on_error) in [("security", "block"), ("rewrite", "report")] {
                 let mut callback = f.command();

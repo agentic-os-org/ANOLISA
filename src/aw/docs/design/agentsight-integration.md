@@ -22,8 +22,8 @@ schemas in that dependent PR. Semantic evaluation remains phase two.
 | Public incremental audit | #7624 | #7622, #7623 | Stable export schema, enumeration, cursors and replay |
 | AgentSight audit consumption | #7625 | #7624 | Authorized idempotent derived persistence |
 
-Merge #7626 first, then update #7655 onto main so the connector disappears from its
-review diff. Neither PR changes semantic routing or independently redesigns the
+#7626 is merged. #7655 builds on that mainline connector; its review diff contains
+only the lifecycle/evidence stage. Neither stage changes semantic routing or independently redesigns the
 PostTool scheduling and completion behavior merged in #7411.
 
 ## Component ownership
@@ -168,19 +168,81 @@ AW-only baseline and distinguish installed, enabled and ready. Deployment owns
 privileged probes; `aw run` never installs packages, changes file capabilities or
 starts root workers from a Hook. Ending one AW run cannot stop a shared service.
 
-## Phase-two semantic kernel
+## Semantic evaluation contract reserved for phase 2
 
-Add a `semantic-evaluate` Provider exposing `semantic.evaluate`, backed by a
-replaceable Jev-like model. Its input contains a frozen context reference and
-revision, a versioned question set and typed answer schema under a shared deadline.
-Its output binds the same revisions and reports typed answers with evidence
-references, or a visible unavailable/invalid/timeout result.
+The proposed capability is `semantic.evaluate/v1`. Phase 1 reserves its input
+foundation only. It does not add a Jev-like backend, invoke a model or interpret
+probabilities as permission.
 
-AW validates output and applies deterministic routing policy to registered
-actions. Model output cannot supply arbitrary commands, grant permissions or
-bypass native admission. Evaluation and action results have separate audit facts;
-only verified native feedback can claim adoption. No model call, semantic score,
-question configuration or routing behavior is introduced by the current two PRs.
+| Direction | Fields and validation |
+| --- | --- |
+| Request identity | `schema_version`, `request_id`, `aw_event_ref`, verified `binding`, `stage`, `input_digest` |
+| Subject/context | `subject_ref`, `candidate_revision`, `context_revision`, authorized content projection, `evidence`, `cutoff`, remaining budget |
+| Questions | Versioned stable ASCII IDs, `boolean`/`choice`/`score`, prompt, declared options or integer grades, requiredness and material requirements |
+| Response binding | Echo request, input, candidate and context bindings; Core verifies all against the current attempt |
+| Response status | `ok`, `abstain` or `error`; actual `model_version` is required as a field and nullable when unknown |
+| Answers | Only declared question IDs, no duplicates, matching answer types, valid evidence references and bounded values; required answers must be present on `ok` |
+
+Public probabilities and confidence use integer millionths: `probability_ppm`
+and `confidence_ppm` in `0..1000000`. Choice/score distributions sum to `1000000`;
+option/grade IDs must match the question definition. The backend adapter validates
+finite raw outputs and applies a versioned deterministic quantization rule.
+Threshold calibration includes that rule. Weighted scores are calculated in code
+from declared integer grades/distributions, not accepted as a separate model fact.
+Boolean probability and classification confidence have different meanings.
+
+For `ok`, `answers` is required: Boolean supplies a proposition probability;
+Choice supplies a declared `selected` option, option distribution and confidence;
+Score supplies the declared grade distribution and confidence. Optional answers
+may be omitted. For `abstain`/`error`, omit `answers` and return a non-sensitive
+`reason_code` and affected question IDs; a partial answer cannot authorize the
+remaining policy. Selected options and evidence references must exist in the
+request, and unknown public fields are rejected by the versioned schema.
+
+Insufficient evidence produces `abstain`; backend failure or invalid output
+produces `error`. An unusable required answer makes the policy evaluation
+unusable. Timeout, stale/wrong bindings, unknown mandatory model revision and
+confidence below the configured minimum also take `on_unusable`. Existing
+Provider execution failures remain distinct from valid policy denials.
+
+Provider v1alpha1 cannot carry these answers. Phase 2 needs an explicitly
+versioned typed-result protocol plus service/configuration admission. It must not
+hide answers in `observe` reason text, change old response shapes in place or
+claim that a Provider handshake creates Core receipts. New capability schemas
+belong to the AW contract registry; native Hook and Core adapters must each be
+admitted against their actual guarantees.
+
+## Future semantic routing and audit
+
+The phase-2 sequence is: deterministic checks, select questions, acquire/freeze
+context, bounded evaluation, validate answers, select a configured route, admit
+the resulting action plan, invoke registered actions, then return a supported
+native effect. The original event deadline covers all stages.
+
+Routes refer to registered actions and controlled inputs. Model-generated
+commands, paths or new Provider identities are not executable routes. A later
+route must not mutate an executing immutable Core plan; evaluation and action
+plans need distinct, once-only stage identities under the same parent event.
+Re-evaluation cannot reset a claim, renew a deadline or repeat a prior action.
+Changed resources/candidates require fresh validation before dispatch.
+
+`no_additional_action` is not permission. A required unavailable evaluation denies
+the governed dispatch; an optional advisory evaluation records a gap. Protection
+actions must succeed before dependent execution, and can be enabled only after
+their own native/OS guarantees are accepted. Native approval, final guards and
+Stop/continue control are not implied by a schema name or this design.
+
+Semantic configuration has independent `off`/`shadow`/`enforce` modes in phase 2.
+`off` disables the whole extension, not existing AW checks. `shadow` performs only
+authorized evaluations and records proposed routes without invoking their action
+Providers. `enforce` still requires per-policy capabilities and native acceptance.
+No model weights, remote service or outbound credential is bundled implicitly.
+
+Journal metadata retains judgment values, model/question/threshold revisions,
+context digest, evidence references, selected route, action result and adoption
+state. It does not retain complete prompts, tool content or private diagnostics
+by default. Reproducing an evaluation requires a separately authorized immutable
+redacted snapshot; hashes alone cannot reconstruct its input.
 
 ## Acceptance and rollback
 

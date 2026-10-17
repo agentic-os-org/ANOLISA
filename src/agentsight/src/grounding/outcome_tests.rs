@@ -120,6 +120,32 @@ fn t6_nested_exception_annotates_without_failing() {
 }
 
 #[test]
+fn a_payload_that_opens_with_its_exception_is_a_failure() {
+    // `nested_error` reports only an exception *quoted inside* a payload and
+    // documents the leading one as this call's own failure, "handled by
+    // find_signature" — which had a rule for a leading Python traceback but
+    // none for the JVM/SQL classes its own marker list names. A tool that
+    // crashed with its exception as the payload's first line therefore graded
+    // as Ok at High confidence, and its error text stayed usable as evidence
+    // for the very values it mentions.
+    let v = classify(
+        &plain_call(),
+        "java.lang.NullPointerException: Cannot invoke \"java.util.List.size()\" because \"rows\" is null",
+    );
+    assert_eq!(
+        v.status,
+        CallStatus::Failed,
+        "the exception opens the payload, so it is this call's failure: rule={}",
+        v.matched_rule
+    );
+    assert_eq!(v.matched_rule, "R4");
+    assert!(
+        v.evidence_quote.is_some(),
+        "a verdict needs a quotable basis"
+    );
+}
+
+#[test]
 fn t7_placeholder_payload_is_unknown_not_ok() {
     let v = classify(&bash_call("make build"), "[dws-bash:pending-post-tool-use]");
     assert_eq!(v.status, CallStatus::Unknown);
@@ -193,6 +219,30 @@ fn weak_prefix_only_counts_inside_the_opening_window() {
         CallStatus::Ok,
         "an error word deep in the body is not this call's failure"
     );
+}
+
+#[test]
+fn a_lowercase_error_line_opens_a_flagless_failure() {
+    // The same flagless payload, spelled with a lowercase token, was graded
+    // `Ok`: the anchored signatures are matched case-insensitively because
+    // "the same condition is reported with different capitalisation by
+    // different tools", and the sibling scans of the same payloads read
+    // `error:` the same way (the grader's error signal, and the opt ledger's
+    // error markers). The weak prefix alone let one letter decide the verdict.
+    let lower = classify(&plain_call(), "error: cannot find value `rows`");
+    assert_eq!(
+        lower.status,
+        CallStatus::Failed,
+        "a flagless failure spelled in lowercase is still this call's: rule={}",
+        lower.matched_rule
+    );
+    assert_eq!(lower.confidence, Confidence::Medium);
+    assert_eq!(lower.matched_rule, "R5");
+
+    // The opening-window guard is unchanged: an error word deep in the body
+    // still describes something the tool merely reported.
+    let far = format!("{}\nerror: disk full", "x".repeat(WEAK_SIGNAL_WINDOW + 10));
+    assert_eq!(classify(&plain_call(), &far).status, CallStatus::Ok);
 }
 
 #[test]

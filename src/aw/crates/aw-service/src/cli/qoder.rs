@@ -292,7 +292,8 @@ pub(super) fn generate(
         .as_object_mut()
         .ok_or("Qoder hooks must be an object")?;
     for name in ["tool.before", "tool.after"] {
-        let selected: Vec<_> = steps.iter().filter(|step| step.event == name).collect();
+        let selected =
+            adapter::native_steps(steps, name, adapter::observation_enabled(document, target));
         if selected.is_empty() {
             continue;
         }
@@ -332,7 +333,7 @@ pub(super) fn generate(
                 budget_ms: budget,
                 replacement_step: selected
                     .iter()
-                    .find(|step| step.execution.replaces_result())
+                    .find(|step| step.replaces_result)
                     .map(|step| step.step_id.clone()),
                 steps: selected
                     .into_iter()

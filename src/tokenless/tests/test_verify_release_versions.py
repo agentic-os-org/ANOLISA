@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wheel-version contract of verify-release: compare PEP 440 spellings.
+"""Wheel-version contract of the QwenPaw requirements pin, both sides.
 
 The Cargo workspace version keeps its original spelling (0.9.0-rc.1) while
 wheel filenames carry the PEP 440 normalized form (0.9.0rc1) that the
@@ -20,21 +20,32 @@ pinned maturin 1.15.0 produces, and pip rejects filenames that keep the
 unnormalized spelling. The gate must accept the normalized filename, reject
 the unnormalized one, and still reject real version drift.
 
+The producer side has to emit exactly that pair: `make stamp-adapter-templates`
+stamps the release-tag path with the raw workspace version and the wheel
+filenames with the spelling packaging/raw/wheel-version.py normalizes through
+this gate's own `_normalize_pep440`. The pipeline tests below run the real
+Makefile rule over the real templates and then the real verifier, so a drift
+between the two sides fails here instead of in a prerelease publish.
+
 Runs under a bare `python3` (the Makefile's test-integration target and the
 CI job behind it call the file directly), so it is stdlib unittest -- which
-pytest collects as well.
+pytest collects as well. The pipeline tests additionally need `make`, which
+every environment that stamps templates has; they skip without it.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
-_SCRIPT = (
-    Path(__file__).resolve().parents[1] / "packaging" / "raw" / "verify-release.py"
-)
+_COMPONENT = Path(__file__).resolve().parents[1]
+_SCRIPT = _COMPONENT / "packaging" / "raw" / "verify-release.py"
 _spec = importlib.util.spec_from_file_location("verify_release", _SCRIPT)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
@@ -185,6 +196,144 @@ class TestRequirementsReferenceContract(unittest.TestCase):
 
     def test_no_wheel_url_rejected(self):
         self.assert_rejects("0.9.0-rc.1", "some other content\n", "no wheel URL")
+
+
+class TestWheelVersionHelper(unittest.TestCase):
+    """packaging/raw/wheel-version.py is what the Makefile rule asks."""
+
+    def helper(self, *argv: str) -> subprocess.CompletedProcess:
+        script = _COMPONENT / "packaging" / "raw" / "wheel-version.py"
+        return subprocess.run(
+            [sys.executable, str(script), *argv],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_prerelease_versions_normalize(self):
+        for cargo, wheel in (
+            ("0.9.0-rc.1", "0.9.0rc1"),
+            ("1.0.0-alpha.3", "1.0.0a3"),
+            ("1.0.0-beta.2", "1.0.0b2"),
+            ("1.0.0-dev.3", "1.0.0.dev3"),
+        ):
+            with self.subTest(cargo=cargo):
+                result = self.helper(cargo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), wheel)
+
+    def test_plain_release_spelling_is_unchanged(self):
+        """An ordinary release keeps one spelling in both URL positions."""
+        result = self.helper("9.8.7")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "9.8.7")
+
+    def test_missing_argument_is_a_usage_error(self):
+        """The stamping rule must never fall back to an empty filename."""
+        result = self.helper()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+
+def _stamp_templates(version: str) -> tuple:
+    """Copy the production stamping inputs to a temp root and run make over them.
+
+    The copy is the real Makefile, every real `*.in` template and the real
+    packaging/raw scripts; only Cargo.toml is synthetic, because that is where
+    the workspace version under test comes from. Returns the temp root and the
+    completed make run, whose status the caller asserts: this suite already
+    runs under python3, so a stamping failure is the defect under test and not
+    a missing-dependency condition to skip over.
+    """
+    root = Path(tempfile.mkdtemp(prefix="tokenless-wheel-version-test."))
+    shutil.copy2(_COMPONENT / "Makefile", root / "Makefile")
+    (root / "packaging" / "raw").mkdir(parents=True)
+    for script in (_COMPONENT / "packaging" / "raw").iterdir():
+        if script.is_file():
+            shutil.copy2(script, root / "packaging" / "raw" / script.name)
+    for template in _COMPONENT.rglob("*.in"):
+        relative = template.relative_to(_COMPONENT)
+        if relative.parts[0] == "target":
+            continue
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(template, target)
+    (root / "Cargo.toml").write_text(
+        "[workspace]\nmembers = []\n\n[workspace.package]\n"
+        f'version = "{version}"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["make", "-B", "stamp-adapter-templates"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    return root, result
+
+
+def _verify_stamped_tree(root: Path) -> subprocess.CompletedProcess:
+    """Run the production raw-packaging gate over a stamped tree."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "packaging/raw/verify-release.py",
+            ".",
+            ".anolisa/component.toml",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+
+
+@unittest.skipUnless(shutil.which("make"), "the stamping pipeline needs make")
+class TestStampedRequirementsPipeline(unittest.TestCase):
+    """Producer and gate agree on both spellings of one version.
+
+    Before the producer side was fixed, stamping a Cargo 0.9.0-rc.1 wrote the
+    raw spelling into the wheel filenames too and the gate rejected its own
+    component's output ("pins wheel filename version(s) ['0.9.0-rc.1'] in a
+    form pip rejects"), so no prerelease raw package could be assembled.
+    """
+
+    def assert_stamps_and_verifies(self, version: str, wheel: str) -> str:
+        root, stamped = _stamp_templates(version)
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(
+            stamped.returncode,
+            0,
+            f"make -B stamp-adapter-templates failed for {version}: "
+            f"{stamped.stdout[-400:]} {stamped.stderr[-400:]}",
+        )
+        requirements = (
+            root / "adapters" / "tokenless" / "qwenpaw" / "requirements.txt"
+        )
+        text = requirements.read_text(encoding="utf-8")
+        self.assertIn(f"/tokenless/v{version}/", text)
+        self.assertIn(f"anolisa_tokenless-{wheel}-cp311-abi3-", text)
+        # A surviving placeholder means the rule stamped only half the pair.
+        self.assertNotIn("@VERSION@", text)
+        self.assertNotIn("@WHEEL_VERSION@", text)
+        result = _verify_stamped_tree(root)
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"verify-release.py rejected the stamped tree: {result.stderr}",
+        )
+        self.assertEqual(result.stdout.strip(), version)
+        return text
+
+    def test_prerelease_stamps_both_spellings(self):
+        """A Cargo 0.9.0-rc.1 keeps its tag and normalizes its filenames."""
+        text = self.assert_stamps_and_verifies("0.9.0-rc.1", "0.9.0rc1")
+        self.assertEqual(text.count("/tokenless/v0.9.0-rc.1/"), 3)
+        self.assertEqual(text.count("anolisa_tokenless-0.9.0rc1-cp311-abi3-"), 3)
+
+    def test_plain_release_urls_are_unchanged(self):
+        """An ordinary release stamps one spelling into both positions."""
+        text = self.assert_stamps_and_verifies("9.8.7", "9.8.7")
+        self.assertEqual(text.count("/tokenless/v9.8.7/"), 3)
+        self.assertEqual(text.count("anolisa_tokenless-9.8.7-cp311-abi3-"), 3)
 
 
 if __name__ == "__main__":

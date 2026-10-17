@@ -29,7 +29,7 @@ export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-The default build produces core only; `--component all` produces four packages. `aw-core` contains `aw` and `aw-package`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge and Tokenless CLI; `aw-all-in-one` contains exactly the same three components. For split installation, extract core and Provider and run each bundle’s `aw-package install` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
+The default build produces core only; `--component all` produces four packages. `aw-core` contains `aw` and `aw-package`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge, Tokenless CLI and pinned patched RTK; `aw-all-in-one` contains exactly the same three components. For split installation, extract core and Provider and run each bundle’s `aw-package install` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
 
 The installer verifies hashes, modes, architecture, version and source commit, refuses replacements and records ownership in `.aw-packages`. Ctrl-C (SIGINT) or SIGTERM during installation rolls back this invocation’s writes so installation can be retried; forced termination (SIGKILL) is outside automatic rollback. Checksums detect corruption; they are not publisher signatures. Install parents must belong to the installer user and must not be writable by other users. Root owns the system backend installation; when connecting to an existing backend, a user-owned prefix is also supported.
 
@@ -227,6 +227,13 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
   --socket /run/aw-preview-sec/daemon.sock --skillsec-config /etc/aw-preview/skillsec.json
 ```
 
+The package also contains the authenticated `agent-sec-daemon-health` helper and
+receipt-covered official service/configuration reference assets. For a persistent
+backend, reuse the existing root system service or install the independently
+managed sec-core system package. AW install/uninstall does not change that
+service or `/etc`; do not register a root service against a user-writable prefix.
+See [backend ownership and health diagnostics](aw-sec-core.md#packaged-backend-and-explicit-health-diagnostics).
+
 ## 3. Create one AW configuration
 
 Install Qoder CLI >=1.1.64, OpenClaw **2026.9.6** and a compatible Node.js runtime separately.
@@ -328,12 +335,12 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
 
 The Rust builder compiles locked release binaries, checks native ELF architecture, and generates only the selected archives and `SHA256SUMS`. The default is `--component core`, which never builds or reads sec-core; use `--component sec-core` for the extension or `--component all` for all four packages. The extension still requires core from the same source commit and version at installation. Failed or cancelled publication removes only the links created by that run, allowing retry; cleanup failures report exact remaining paths. The installed-package CI test exercises the real sec-core scanner, both tool mappings and audit recovery with synthetic events; it does not claim native Agent coverage. Native model turns remain explicit acceptance as above. The general AW development gate retains Python test tooling outside the delivery path.
 
-Package CI runs for changes to the package crate, AW manifests, this guide and its workflow. Changes elsewhere in AW/sec-core require a manual run on the exact source commit before distribution. Successful PR artifacts are retained for three days; manual artifacts for fourteen. Failed runs retain diagnostics but do not publish packages. Archives are rebuildable but not guaranteed byte-identical; a unified release channel is future work.
+Package CI runs for changes to the package/Provider crates, sec-core V2 and systemd assets, AW manifests, this guide and its workflow. Changes elsewhere in AW require a manual run on the exact source commit before distribution. Successful PR artifacts are retained for three days; manual artifacts for fourteen. Failed runs retain diagnostics but do not publish packages. Archives are rebuildable but not guaranteed byte-identical; a unified release channel is future work.
 
 ## Optional Tokenless PostTool package
 
 `--component tokenless` builds `aw-provider-tokenless`; `--component all` also
-includes it in `aw-all-in-one`. The extension contains its bridge and Tokenless CLI,
+includes it in `aw-all-in-one`. The extension contains its bridge, Tokenless CLI and pinned patched RTK,
 requires matching core, and follows the same receipt/integrity rules as sec-core.
 Use `configure --provider tokenless` or `--provider sec-core+tokenless --socket ABS_FILE`
 to enable compression explicitly. See the [Tokenless guide](aw-tokenless.md) for

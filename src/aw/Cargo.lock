@@ -136,6 +136,7 @@ version = "0.1.0"
 dependencies = [
  "aw-exec",
  "aw-provider",
+ "jsonschema",
  "libc",
  "serde",
  "serde_json",
@@ -152,6 +153,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "shlex 1.3.0",
  "tempfile",
  "thiserror",
@@ -162,6 +164,7 @@ name = "aw-service"
 version = "0.1.0"
 dependencies = [
  "aw-config",
+ "aw-contracts",
  "aw-core",
  "aw-exec",
  "aw-host",

@@ -1,5 +1,7 @@
 //! Build a clean pinned checkout and stage matching native component archives.
 
+mod rtk;
+
 use crate::{digest, require, Component, Error, Manifest, Payload, Result};
 use flate2::{write::GzEncoder, Compression};
 use std::{
@@ -114,7 +116,7 @@ pub enum Selection {
     Core,
     /// The sec-core extension, requiring a separately installed matching core.
     SecCore,
-    /// PostTool extension using the bundled Tokenless CLI, without RTK or native plugins.
+    /// Tokenless lifecycle extension, including its pinned RTK but no native plugins.
     Tokenless,
     /// Core, both Provider extensions and their identical combined package.
     All,
@@ -207,7 +209,22 @@ pub fn build(
         fs::read_dir(output)?.next().is_none(),
         "output directory must be empty",
     )?;
-    for (directory, packages) in selection.builds(repo) {
+    let rtk = if matches!(selection, Selection::Tokenless | Selection::All) {
+        Some(rtk::prepare(repo, cancel)?)
+    } else {
+        None
+    };
+    let rtk_source = rtk.as_ref().map(|root| root.path().join("third_party/rtk"));
+    let mut builds = selection.builds(repo);
+    if let Some(directory) = &rtk_source {
+        builds.push((directory.clone(), vec!["rtk"]));
+    }
+    for (directory, packages) in builds {
+        let target = if rtk_source.as_ref() == Some(&directory) {
+            repo.join("src/aw/target")
+        } else {
+            directory.join("target")
+        };
         let mut args: Vec<String> = [
             "+1.97.1",
             "build",
@@ -219,7 +236,7 @@ pub fn build(
         .iter()
         .map(|s| s.to_string())
         .collect();
-        args.push(directory.join("target").display().to_string());
+        args.push(target.display().to_string());
         for package in packages {
             args.extend(["-p".into(), package.into()]);
         }
@@ -230,7 +247,15 @@ pub fn build(
             && String::from_utf8_lossy(&git(&["rev-parse", "HEAD"])?).trim() == source,
         "source checkout changed during the build",
     )?;
-    stage(repo, version, &source, output, cancel, selection)
+    stage(
+        repo,
+        version,
+        &source,
+        output,
+        cancel,
+        selection,
+        rtk_source.as_deref(),
+    )
 }
 
 fn add(
@@ -271,6 +296,7 @@ fn stage(
     output: &Path,
     cancel: &AtomicBool,
     selection: Selection,
+    rtk_source: Option<&Path>,
 ) -> Result<Vec<PathBuf>> {
     check_cancel(cancel)?;
     let stage = tempfile::Builder::new()
@@ -297,6 +323,7 @@ fn stage(
             for (binary, directory) in [
                 ("aw-provider-tokenless", aw.clone()),
                 ("tokenless", repo.join("src/tokenless/target/release")),
+                ("rtk", aw.clone()),
             ] {
                 add(
                     &root,
@@ -312,6 +339,7 @@ fn stage(
                 ("aw-provider-sec-core", &aw),
                 ("agent-sec-cli", &sec),
                 ("agent-sec-daemon", &sec),
+                ("agent-sec-daemon-health", &sec),
             ] {
                 add(
                     &root,
@@ -322,6 +350,31 @@ fn stage(
                     cancel,
                 )?;
             }
+        }
+        if *name == "aw-provider-sec-core" {
+            for asset in ["agent-sec-core-v2.service.in", "skillsec.json"] {
+                add(
+                    &root,
+                    &format!("share/aw/providers/sec-core/{asset}"),
+                    &repo
+                        .join("src/agent-sec-core/packaging/systemd")
+                        .join(asset),
+                    false,
+                    &mut files,
+                    cancel,
+                )?;
+            }
+        }
+        if *name == "aw-provider-tokenless" {
+            rtk::stage(
+                repo,
+                &root,
+                rtk_source
+                    .ok_or_else(|| Error::Invalid("missing pinned RTK build source".into()))?,
+                source,
+                &mut files,
+                cancel,
+            )?;
         }
         for notice in ["LICENSE", "NOTICE"] {
             add(

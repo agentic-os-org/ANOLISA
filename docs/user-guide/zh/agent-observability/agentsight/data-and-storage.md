@@ -165,6 +165,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/agent-names` | Token 时序、延迟分位、Agent 过滤项 |
 | 中断 | `GET /api/interruptions`、`/count`、`/stats`、`/session-counts`、`/conversation-counts`、`POST /api/interruptions/{id}/resolve` | 排查与关闭 |
 | Agent 健康 | `GET /api/agent-health`、`DELETE /api/agent-health/{pid}`、`POST /api/agent-health/{pid}/restart` | 实时状态与恢复动作 |
+| Tokenless 记录 | `POST /api/tokenless/refresh`、`GET /api/tokenless/records`、`GET /api/tokenless/records/{cache_id}` | 刷新已保存统计、列出元数据和读取详情；内容需显式指定 `include_content=true`。三条路由即使来自 loopback 也需要 Dashboard 凭据 |
 | Token 节省 | `GET /api/token-savings`、`GET /api/token-savings/session/{id}` | Tokenless 节省量 |
 | ATIF 导出 | `GET /api/export/atif/session/{id}`（还有 `trace`、`conversation`） | 轨迹导出 |
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
@@ -260,3 +261,7 @@ sudo systemctl start agentsight.service
 - [CLI 参考](cli-reference.md)——用命令行查同一批数据
 - [Dashboard 指南](dashboard.md)——这些数据库之上的界面
 - [配置](configuration.md)——存储与保留相关开关
+
+查询到的 Tokenless 统计数据保存在现有 GenAI store 的 `genai_events.db` 中。同一端点、
+源 ID 和原始时间戳的重复查询更新元数据，保留显式获取的完整内容与原始源会话 ID。
+这些副本遵循 `storage.genai` 的保留期限和容量清理策略，不修改 Tokenless 数据库。
