@@ -18,6 +18,7 @@ import subprocess
 import sys
 import shutil
 from pathlib import Path
+from venv_paths import python_path
 
 
 # 用户缓存目录
@@ -38,7 +39,7 @@ def check_venv() -> bool:
     if not VENV_DIR.exists():
         return False
     
-    venv_python = VENV_DIR / "bin" / "python"
+    venv_python = get_venv_python()
     if not venv_python.exists():
         return False
     
@@ -69,23 +70,23 @@ def create_venv() -> bool:
 
 def install_dependencies() -> bool:
     """安装依赖"""
-    venv_pip = VENV_DIR / "bin" / "pip"
-    
-    if not venv_pip.exists():
+    venv_python = get_venv_python()
+
+    if not venv_python.exists():
         return False
-    
+
     result = subprocess.run(
-        [str(venv_pip), "install", "--quiet", "--disable-pip-version-check"] + DEPENDENCIES,
+        [str(venv_python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check"] + DEPENDENCIES,
         capture_output=True,
         timeout=120
     )
-    
+
     return result.returncode == 0
 
 
 def get_venv_python() -> Path:
     """获取虚拟环境的 Python 路径"""
-    return VENV_DIR / "bin" / "python"
+    return python_path(VENV_DIR)
 
 
 def main():
