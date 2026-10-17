@@ -113,19 +113,54 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
             Ok(f) => f,
             Err(_) => continue,
         };
-        let reader = BufReader::new(f);
-        for (idx, line_result) in reader.lines().enumerate() {
-            let mut line = match line_result {
-                Ok(l) => l,
+        // Split lines ourselves instead of using `BufRead::lines()`: that
+        // iterator turns a non-UTF-8 line into an `Err`, and breaking out
+        // on it would silently drop every match after the first stray byte
+        // in an otherwise text file. `read_until` has already consumed the
+        // offending line by then, so skipping it cannot spin.
+        let mut reader = BufReader::new(f);
+        let mut raw: Vec<u8> = Vec::new();
+        let mut idx = 0;
+        loop {
+            raw.clear();
+            let n = match reader.read_until(b'\n', &mut raw) {
+                Ok(n) => n,
                 Err(_) => break,
             };
+            if n == 0 {
+                break;
+            }
+            idx += 1;
+            let mut line = match String::from_utf8(std::mem::take(&mut raw)) {
+                Ok(line) => line,
+                // Reclaim the bytes as the next line's buffer and skip this
+                // one, per the documented "non-UTF8 lines are skipped".
+                Err(e) => {
+                    raw = e.into_bytes();
+                    continue;
+                }
+            };
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
             if line.len() > MAX_LINE_LEN {
-                line.truncate(MAX_LINE_LEN);
+                // `String::truncate` panics unless the cut lands on a char
+                // boundary, and byte 4096 of a CJK line (3 bytes per char)
+                // almost never does — back off to the previous boundary the
+                // same way the index and context previews already do.
+                let mut end = MAX_LINE_LEN;
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                line.truncate(end);
             }
             if re.is_match(&line) {
                 hits.push(GrepHit {
                     path: rel_path.clone(),
-                    line: idx + 1,
+                    line: idx,
                     text: line,
                 });
                 if hits.len() >= max {
