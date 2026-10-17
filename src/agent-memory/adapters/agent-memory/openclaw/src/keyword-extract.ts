@@ -38,6 +38,9 @@ const MAX_KEYWORDS = 8;
  */
 export const MAX_QUERY_BYTES = 1024;
 
+/** Raw fallback limit in UTF-16 code units, backing off incomplete code points. */
+const MAX_RAW_QUERY_UNITS = 200;
+
 /**
  * Maximum number of results to inject into the prompt.  Aligns with
  * the per-candidate top_k so we never show more than 5 memories.
@@ -128,6 +131,21 @@ export function extractCjkTrigrams(text: string): string[] {
 }
 
 /**
+ * Keep a UTF-16 length limit from splitting a surrogate pair.
+ */
+function truncateToCodeUnitLimit(text: string, limit: number): string {
+  let end = Math.max(0, Math.min(text.length, limit));
+  if (end > 0 && end < text.length) {
+    const previous = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      end--;
+    }
+  }
+  return text.slice(0, end);
+}
+
+/**
  * Truncate a string so its UTF-8 encoding does not exceed maxBytes.
  */
 function truncateToByteLimit(text: string, maxBytes: number): string {
@@ -143,7 +161,7 @@ function truncateToByteLimit(text: string, maxBytes: number): string {
       hi = mid - 1;
     }
   }
-  return text.slice(0, lo);
+  return truncateToCodeUnitLimit(text, lo);
 }
 
 /**
@@ -156,7 +174,7 @@ function truncateToByteLimit(text: string, maxBytes: number): string {
  *    that have no space-separated keywords.  Each trigram is >= 3
  *    chars so the BM25 backend uses trigram matching, not LIKE AND.
  * 4. CJK trigram top-3 — shorter CJK fallback.
- * 5. Truncated raw prompt (first 200 chars, byte-safe).
+ * 5. Truncated raw prompt (up to 200 UTF-16 code units, code-point-safe).
  * 6. Full raw prompt (byte-safe, <= 1024 bytes) — last resort.
  *
  * All candidates are truncated to MAX_QUERY_BYTES (1024) UTF-8 bytes.
@@ -166,7 +184,9 @@ export function buildRecallQueries(text: string): string[] {
   const keywords = extractKeywords(text);
   const cjkTrigrams = extractCjkTrigrams(text);
 
-  const truncated = truncateToByteLimit(text.slice(0, 200), MAX_QUERY_BYTES);
+  const truncated = truncateToByteLimit(
+    truncateToCodeUnitLimit(text, MAX_RAW_QUERY_UNITS), MAX_QUERY_BYTES,
+  );
   const fullText = truncateToByteLimit(text, MAX_QUERY_BYTES);
 
   const candidates: string[] = [];
