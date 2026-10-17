@@ -15,6 +15,8 @@
 """CSV export for trace analysis results."""
 
 import csv
+from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 
 from swe_runner.trace_extraction.analysis import analyze_trace_files
@@ -80,6 +82,31 @@ def _localized_row(row: dict[str, str | int], columns: tuple[tuple[str, str], ..
     return {header: row.get(key, "") for header, key in columns}
 
 
+def _detail_file_names(instance_ids: list[str]) -> dict[str, str]:
+    stems = {instance_id: sanitize_path_component(instance_id) for instance_id in instance_ids}
+    counts = Counter(stem.casefold() for stem in stems.values())
+    names = {
+        instance_id: f"{stem}.csv"
+        for instance_id, stem in stems.items()
+        if counts[stem.casefold()] == 1
+    }
+    # Reserve ordinary filenames before assigning names to collision groups.
+    used = {name.casefold() for name in names.values()}
+    for instance_id, stem in sorted(stems.items()):
+        if instance_id in names:
+            continue
+        digest = sha256(instance_id.encode("utf-8")).hexdigest()[:12]
+        candidate_stem = f"{stem}-{digest}"
+        candidate = f"{candidate_stem}.csv"
+        suffix = 1
+        while candidate.casefold() in used:
+            candidate = f"{candidate_stem}-{suffix}.csv"
+            suffix += 1
+        names[instance_id] = candidate
+        used.add(candidate.casefold())
+    return names
+
+
 def write_trace_analysis_csvs(
     trace_root: str | Path,
     output_dir: str | Path,
@@ -104,8 +131,10 @@ def write_trace_analysis_csvs(
     for row in per_trace_rows:
         grouped_trace_rows.setdefault(str(row["instance_id"]), []).append(row)
 
+    detail_names = _detail_file_names(list(grouped_trace_rows))
+
     for instance_id, rows in grouped_trace_rows.items():
-        detail_csv = detail_dir / f"{sanitize_path_component(instance_id)}.csv"
+        detail_csv = detail_dir / detail_names[instance_id]
         with open(detail_csv, "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(
                 f,
