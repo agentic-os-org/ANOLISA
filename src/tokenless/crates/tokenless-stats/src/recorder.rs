@@ -145,6 +145,10 @@ impl StatsRecorder {
             "CREATE INDEX IF NOT EXISTS idx_session_tool ON stats(session_id, tool_use_id)",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_use_id ON stats(tool_use_id)",
+            [],
+        )?;
 
         // Acquire the writer lock before checking columns so concurrent hook
         // processes cannot both decide to add the same missing column.

@@ -272,10 +272,22 @@ pub fn extract_usage_object(
         })
         .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
 
-    // Extract model name. Gemini chunks carry it as `modelVersion`.
+    // Extract model name. Anthropic nests it under `message` in
+    // `message_start`, the Responses protocol under `response` in its
+    // terminal event, and Gemini spells it `modelVersion`; none of those
+    // events carries a top-level `model`. The SSE enrichment reads the same
+    // pointers (genai::builder::extract_sse_enrichment), so without these
+    // fallbacks a streamed call was stored with an empty model while its
+    // drained twin kept it.
     let model = full_json
         .get("model")
         .and_then(|v| v.as_str())
+        .or_else(|| full_json.pointer("/message/model").and_then(|v| v.as_str()))
+        .or_else(|| {
+            full_json
+                .pointer("/response/model")
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| full_json.get("modelVersion").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
 

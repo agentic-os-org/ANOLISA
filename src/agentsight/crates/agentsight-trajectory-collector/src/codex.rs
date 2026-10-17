@@ -297,11 +297,14 @@ pub fn extract_private_metadata(
     let mut cwd: Option<String> = None;
     let mut user_count: u64 = 0;
     let mut assistant_count: u64 = 0;
-    // `convert_codex_events` merges consecutive assistant items into one agent
-    // turn, so the count advances once per run of them: counting items made the
-    // metadata claim more turns than the trajectory it rides on (qoder's
-    // counter counts turns for the same reason).
-    let mut in_assistant_run = false;
+    // `convert_codex_events` opens one agent turn per user boundary and flushes
+    // it when it collected anything, and `AgentTurn::is_empty` counts five
+    // kinds of content: assistant text, reasoning, tool calls, tool results and
+    // token deltas. The count therefore advances once per such turn: counting
+    // items made the metadata claim more turns than the trajectory it rides on,
+    // and counting only text-bearing assistant items left a step of that
+    // trajectory unclaimed (qoder's counter counts turns for the same reason).
+    let mut in_assistant_turn = false;
 
     // Same era detection as `convert_codex_events`: newer CLIs emit
     // `event_msg/user_message` for the real user input, and role=user
@@ -309,6 +312,9 @@ pub fn extract_private_metadata(
     // predate the event, so their user messages are the role=user
     // response_items the converter's fallback turns into steps.
     let has_user_event_msg = has_user_message_event(events);
+    // A snapshot only opens a turn when the converter would charge its delta,
+    // so the counter replays the same cumulative sequence.
+    let mut previous_total_usage: Option<(u64, u64, u64)> = None;
 
     for e in events {
         let payload = e.get("payload").unwrap_or(&serde_json::Value::Null);
@@ -332,22 +338,35 @@ pub fn extract_private_metadata(
                 if !text.is_empty() {
                     user_count += 1;
                 }
-                in_assistant_run = false;
+                in_assistant_turn = false;
+            }
+            // Token deltas are content of the turn they are charged to, the
+            // condition `convert_codex_events` opens its turn with.
+            "event_msg" if payload_type(e) == "token_count" => {
+                if let Some(info) = payload.get("info") {
+                    let total = usage_triple(info.get("total_token_usage"));
+                    let incremental = incremental_usage(
+                        total,
+                        previous_total_usage,
+                        usage_triple(info.get("last_token_usage")),
+                    );
+                    previous_total_usage = total;
+                    if incremental.is_some() {
+                        count_turn(&mut assistant_count, &mut in_assistant_turn);
+                    }
+                }
             }
             "response_item" if payload_type(e) == "message" => {
                 let role = payload.get("role").and_then(|v| v.as_str());
                 match role {
                     Some("assistant") => {
                         if !joined_text(payload.get("content")).is_empty() {
-                            if !in_assistant_run {
-                                assistant_count += 1;
-                            }
-                            in_assistant_run = true;
+                            count_turn(&mut assistant_count, &mut in_assistant_turn);
                         }
                     }
-                    // A user item ends the assistant run.
+                    // A user item ends the turn.
                     Some("user") => {
-                        in_assistant_run = false;
+                        in_assistant_turn = false;
                         // Legacy fallback (no event_msg/user_message in the
                         // whole rollout): the converter derives the user steps
                         // from role=user response_items, so the count must
@@ -359,6 +378,11 @@ pub fn extract_private_metadata(
                     }
                     _ => {}
                 }
+            }
+            // Reasoning, tool calls and tool results are content of their turn
+            // too: the converter opens an agent turn for each of them.
+            "response_item" if response_item_is_turn_content(e) => {
+                count_turn(&mut assistant_count, &mut in_assistant_turn);
             }
             _ => {}
         }
@@ -537,6 +561,34 @@ fn joined_text(content: Option<&serde_json::Value>) -> String {
 /// Tool output can be a plain string or an array of `{type,text}` blocks.
 fn joined_output(output: Option<&serde_json::Value>) -> String {
     joined_text(output)
+}
+
+/// Advance `assistant_message_count` once for the turn currently open.
+///
+/// `convert_codex_events` flushes one agent step per turn that collected
+/// anything, so each content-bearing item of a turn counts that turn at most
+/// once; the caller resets `counted` at every turn boundary.
+fn count_turn(count: &mut u64, counted: &mut bool) {
+    if !*counted {
+        *count += 1;
+        *counted = true;
+    }
+}
+
+/// Whether a `response_item` that is not a message is content of its turn.
+///
+/// `AgentTurn::is_empty` counts reasoning, tool calls and tool results as
+/// content, so the converter opens a turn for each of them; the counter has to
+/// treat them the same way, or a turn that produced a step goes uncounted.
+fn response_item_is_turn_content(e: &serde_json::Value) -> bool {
+    let payload = e.get("payload").unwrap_or(&serde_json::Value::Null);
+    match payload_type(e) {
+        // Only the plaintext summary is content; `encrypted_content` is not.
+        "reasoning" => !joined_text(payload.get("summary")).is_empty(),
+        "custom_tool_call" | "function_call" | "local_shell_call" => true,
+        "custom_tool_call_output" | "function_call_output" | "local_shell_call_output" => true,
+        _ => false,
+    }
 }
 
 /// Map a Codex tool-call payload to an ATIF `ToolCall`.
@@ -886,5 +938,63 @@ mod tests {
         let events = fixture_events();
         let extra = extract_private_metadata(&events, "(default)");
         assert_eq!(extra["user_message_count"], 1);
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_a_turn_without_assistant_text() {
+        // `AgentTurn::is_empty` decides whether a turn becomes an agent step,
+        // and it counts tool calls and results as content, not only assistant
+        // text: a turn whose model only dispatched a tool is a step of the
+        // trajectory. Counting only text-bearing assistant items left that
+        // step uncounted, so the metadata disagreed with the trajectory it
+        // rides on.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-6\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"run the tests\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call-1\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-1\",\"output\":[{\"type\":\"input_text\",\"text\":\"ok\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let trajectory = convert_codex_events(&events, "codex").unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .count();
+        assert_eq!(agent_steps, 1, "the tool call is an agent step");
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(
+            extra["assistant_message_count"], agent_steps as i64,
+            "the count must describe the trajectory it rides on"
+        );
+        assert_eq!(extra["user_message_count"], 1);
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_a_turn_that_only_reported_tokens() {
+        // The same rule for the other content kind the converter keeps: a
+        // non-zero token_count delta opens a turn even when no response_item
+        // arrived for it, and that turn is an agent step of its own.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-7\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":20},\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":20}}}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let trajectory = convert_codex_events(&events, "codex").unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .count();
+        assert_eq!(agent_steps, 1, "the delta is an agent step");
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(
+            extra["assistant_message_count"], agent_steps as i64,
+            "a turn that only reported tokens still produced a step"
+        );
     }
 }

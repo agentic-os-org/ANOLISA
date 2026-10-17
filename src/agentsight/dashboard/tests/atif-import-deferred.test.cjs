@@ -359,3 +359,63 @@ test('atif viewer: a terminal read failure reports an error and releases loading
   assert.equal(ctx.driver.slots[5].value, false,
     'the failed import must release the loading state');
 });
+
+const savingsDetail = (sessionId) => ({
+  session_id: sessionId,
+  stats_available: true,
+  total_original_tokens: 1000,
+  total_actual_tokens: 400,
+  total_compounded_saved: 600,
+  savings_rate: 0.6,
+  items: [],
+});
+
+test("atif viewer: loading another trajectory clears the previous trajectory's savings", async () => {
+  const ctx = renderViewerPage();
+
+  const first = ctx.handleLoad('session', 'session-a');
+  assert.equal(ctx.calls.fetchAtifBySession.length, 1, 'the first load must issue its fetch');
+  ctx.calls.fetchAtifBySession[0].resolve(atifDoc('session-a'));
+  await first;
+  await settle();
+  assert.equal(ctx.calls.fetchSessionSavings.length, 1,
+    'a document that names a session must ask for its savings');
+  ctx.calls.fetchSessionSavings[0].resolve(savingsDetail('session-a'));
+  await settle();
+  assert.equal(ctx.driver.slots[7].value.total_compounded_saved, 600,
+    "the first trajectory's savings must reach the card");
+
+  // A document without a session has nobody to ask, so no later request can
+  // correct the card: the load itself has to drop the previous numbers.
+  const second = ctx.handleLoad('conversation', 'conversation-b');
+  assert.equal(ctx.calls.fetchAtifByConversation.length, 1, 'the second load must issue its fetch');
+  ctx.calls.fetchAtifByConversation[0].resolve({ schema_version: 'ATIF/1.0', steps: [] });
+  await second;
+  await settle();
+
+  assert.equal(ctx.calls.fetchSessionSavings.length, 1,
+    'a document without a session must not ask for savings');
+  assert.equal(ctx.driver.slots[7].value, null,
+    "the previous trajectory's savings must not stay on screen");
+});
+
+test("atif viewer: importing a document clears the previous trajectory's savings", async () => {
+  const ctx = renderViewerPage();
+
+  const network = ctx.handleLoad('session', 'session-a');
+  ctx.calls.fetchAtifBySession[0].resolve(atifDoc('session-a'));
+  await network;
+  await settle();
+  ctx.calls.fetchSessionSavings[0].resolve(savingsDetail('session-a'));
+  await settle();
+  assert.equal(ctx.driver.slots[7].value.session_id, 'session-a',
+    "the network load's savings must land first");
+
+  const reader = importFile(ctx.handleFileImport, 'local.json', JSON.stringify(atifDoc('imported-doc')));
+  completeRead(reader, JSON.stringify(atifDoc('imported-doc')));
+  await settle();
+
+  assert.equal(ctx.driver.slots[4].value.session_id, 'imported-doc', 'the import must land');
+  assert.equal(ctx.driver.slots[7].value, null,
+    "an import must not keep the previous trajectory's savings");
+});

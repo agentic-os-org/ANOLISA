@@ -9,7 +9,15 @@ trap 'rm -rf "$TMP"' EXIT
 SOURCE="$TMP/tokenless"
 ADAPTERS="$SOURCE/adapters/tokenless"
 CONTRACT="$SOURCE/.anolisa/component.toml"
-VERSION="9.8.7"
+# The version this fixture publishes. `make test-raw-package` runs the suite a
+# second time with a prerelease so the packer is exercised on the one version
+# shape whose two spellings differ (see WHEEL_VERSION below).
+VERSION="${TOKENLESS_RAW_TEST_VERSION:-9.8.7}"
+# Wheel filenames carry the PEP 440 normalized spelling of the workspace
+# version while release-tag paths keep the raw Cargo one. Ask the same helper
+# the stamping rule asks, so this fixture mirrors the producer instead of
+# restating the rule.
+WHEEL_VERSION="$(python3 "$ROOT/packaging/raw/wheel-version.py" "$VERSION")"
 
 mkdir -p \
     "$SOURCE/.anolisa" \
@@ -121,7 +129,7 @@ for action in detect install uninstall; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/opencode/scripts/$action.sh"
 done
 printf 'anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/download/tokenless/v%s/anolisa_tokenless-%s-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; sys_platform == "linux"\n' \
-    "$VERSION" "$VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
+    "$VERSION" "$WHEEL_VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
 printf '{"name":"anolisa-tokenless"}\n' \
     > "$ADAPTERS/claude-code/.claude-plugin/marketplace.json"
 printf 'version: "%s"\n' "$VERSION" > "$ADAPTERS/hermes/plugin.yaml"
@@ -262,6 +270,16 @@ tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
 cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
+
+# The archived QwenPaw pin keeps both spellings of the one version it was
+# stamped from: the raw workspace version in the release-tag path (the tag the
+# release workflow creates verbatim) and the normalized version in the wheel
+# filename (the only form pip installs from). A prerelease is the shape where
+# the two differ; verify-release.py already refuses a package that mixes them.
+ARCHIVED_REQUIREMENTS="$EXTRACTED/adapters/qwenpaw/requirements.txt"
+cmp "$ADAPTERS/qwenpaw/requirements.txt" "$ARCHIVED_REQUIREMENTS"
+grep -Fq "/tokenless/v$VERSION/" "$ARCHIVED_REQUIREMENTS"
+grep -Fq "anolisa_tokenless-$WHEEL_VERSION-cp311-abi3-" "$ARCHIVED_REQUIREMENTS"
 
 python3 - "$VERSION" "$OUT_ONE/$LINUX_ARTIFACT" \
     "$TMP/out-linux-arm64/tokenless-$VERSION-linux-aarch64.tar.gz" \

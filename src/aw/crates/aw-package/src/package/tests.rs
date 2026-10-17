@@ -85,8 +85,10 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         ("aw-provider-sec-core", "src/aw"),
         ("aw-provider-tokenless", "src/aw"),
         ("tokenless", "src/tokenless"),
+        ("rtk", "src/aw"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
+        ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
     ] {
         let binary = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
@@ -99,8 +101,17 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         .set_len(32 * 1024 * 1024)
         .unwrap();
     for name in [
+        "src/agent-sec-core/packaging/systemd/agent-sec-core-v2.service.in",
+        "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
+        "src/tokenless/third_party/rtk/LICENSE",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/crates/tokenless-stats/src/home.rs",
+        "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
+        "src/tokenless/scripts/setup-rtk.sh",
+        "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
+        "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -138,6 +149,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
             &output,
             &cancel,
             Selection::All,
+            Some(&repo.join("src/tokenless/third_party/rtk")),
         );
         watcher.join().unwrap();
         result
@@ -152,6 +164,7 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         &output,
         &cancel,
         Selection::All,
+        Some(&repo.join("src/tokenless/third_party/rtk")),
     )
     .unwrap();
     assert_eq!(archives.len(), 4);
@@ -259,6 +272,7 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
         &output,
         &AtomicBool::new(false),
         Selection::Core,
+        None,
     )
     .unwrap();
     assert_eq!(archives.len(), 1);
@@ -295,12 +309,15 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         ("aw-provider-sec-core", "src/aw"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
+        ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
     ] {
         let path = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::copy("/bin/true", path).unwrap();
     }
     for name in [
+        "src/agent-sec-core/packaging/systemd/agent-sec-core-v2.service.in",
+        "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
@@ -319,6 +336,7 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         &output,
         &AtomicBool::new(false),
         Selection::SecCore,
+        None,
     )
     .unwrap();
     assert_eq!(archives.len(), 1);
@@ -339,6 +357,28 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     );
     assert!(!package.join("payload/bin/aw").exists());
     assert!(!repo.join("src/aw/target/release/aw").exists());
+    let component = &manifest.components[0];
+    for name in [
+        "libexec/aw/providers/sec-core/agent-sec-daemon-health",
+        "share/aw/providers/sec-core/agent-sec-core-v2.service.in",
+        "share/aw/providers/sec-core/skillsec.json",
+    ] {
+        let metadata = &component.files[name];
+        assert_eq!(
+            metadata.sha256,
+            crate::digest(&package.join("payload").join(name)).unwrap()
+        );
+        assert_eq!(
+            metadata.mode,
+            if name.starts_with("libexec/") {
+                0o755
+            } else {
+                0o644
+            }
+        );
+    }
+    assert!(!package.join("payload/etc").exists());
+    assert!(!package.join("payload/usr/lib/systemd").exists());
 }
 
 #[test]
@@ -351,6 +391,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         ("aw-package", "src/aw"),
         ("aw-provider-tokenless", "src/aw"),
         ("tokenless", "src/tokenless"),
+        ("rtk", "src/aw"),
     ] {
         let path = repo.join(source).join("target/release").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -359,6 +400,13 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     for name in [
         "LICENSE",
         "NOTICE",
+        "src/tokenless/third_party/rtk/LICENSE",
+        "src/tokenless/third_party/rtk/.anolisa-rtk-commit",
+        "src/tokenless/crates/tokenless-stats/src/home.rs",
+        "src/tokenless/crates/tokenless-stats/src/path_policy.rs",
+        "src/tokenless/scripts/setup-rtk.sh",
+        "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
+        "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
         "docs/user-guide/en/user-entrypoint/aw-preview.md",
         "docs/user-guide/zh/user-entrypoint/aw-preview.md",
     ] {
@@ -375,6 +423,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         &output,
         &AtomicBool::new(false),
         Selection::Tokenless,
+        Some(&repo.join("src/tokenless/third_party/rtk")),
     )
     .unwrap();
     assert_eq!(archives.len(), 1);
@@ -390,10 +439,82 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     let manifest = crate::inspect(&package).unwrap();
     assert_eq!(manifest.components.len(), 1);
     assert_eq!(manifest.components[0].component, "aw-provider-tokenless");
+    let provenance_path = "share/doc/aw-provider-tokenless/rtk/provenance.json";
+    let provenance: serde_json::Value =
+        serde_json::from_slice(&fs::read(package.join("payload").join(provenance_path)).unwrap())
+            .unwrap();
+    assert_eq!(provenance["anolisa_source_commit"], "a".repeat(40));
+    assert!(provenance["shared_sources_reason"]
+        .as_str()
+        .unwrap()
+        .contains("relative path"));
+    for module in ["home.rs", "path_policy.rs"] {
+        let origin = format!("src/tokenless/crates/tokenless-stats/src/{module}");
+        let input = provenance["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|input| input["source"] == origin)
+            .unwrap();
+        assert_eq!(input["sha256"], digest(&repo.join(&origin)).unwrap());
+        assert_eq!(input["payload"], format!("tokenless-stats/{module}"));
+    }
+    assert_eq!(manifest.components[0].files[provenance_path].mode, 0o644);
     assert_eq!(
         manifest.components[0].requires,
         BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())])
     );
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!package.join("payload/bin/aw").exists());
+}
+
+#[test]
+fn rtk_preparation_uses_fresh_owned_source_and_preserves_cached_edits() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+    fs::create_dir_all(&target).unwrap();
+    let directory = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
+    let repo = directory.path();
+    let cached = repo.join("src/tokenless/third_party/rtk");
+    fs::create_dir_all(&cached).unwrap();
+    fs::write(cached.join("local-edit"), "preserve cached source").unwrap();
+    fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+    let modules = repo.join("src/tokenless/crates/tokenless-stats/src");
+    fs::create_dir_all(&modules).unwrap();
+    fs::write(modules.join("home.rs"), "trusted home module").unwrap();
+    fs::write(modules.join("path_policy.rs"), "shared state path module").unwrap();
+    let source = rtk::prepare_using(repo, &AtomicBool::new(false), |root| {
+        let destination = root.join("third_party/rtk");
+        assert!(!destination.exists());
+        fs::create_dir_all(destination.join("src/core"))?;
+        // Match the two relative module includes in the official RTK patch.
+        for name in ["home.rs", "path_policy.rs"] {
+            let relative = destination
+                .join("src/core/../../../../crates/tokenless-stats/src")
+                .join(name);
+            assert_eq!(digest(&relative)?, digest(&modules.join(name))?);
+        }
+        fs::write(destination.join("source-marker"), "pinned")?;
+        Ok(())
+    })
+    .unwrap();
+    let owned = source.path().to_path_buf();
+    assert!(
+        !owned.starts_with(repo),
+        "upstream source must escape the AW workspace"
+    );
+    assert_eq!(
+        fs::read_to_string(owned.join("third_party/rtk/source-marker")).unwrap(),
+        "pinned"
+    );
+    assert!(!owned.join("third_party/rtk/local-edit").exists());
+    assert_eq!(
+        fs::read_to_string(cached.join("local-edit")).unwrap(),
+        "preserve cached source"
+    );
+    drop(source);
+    assert!(!owned.exists());
+    assert_eq!(
+        fs::read_to_string(cached.join("local-edit")).unwrap(),
+        "preserve cached source"
+    );
 }

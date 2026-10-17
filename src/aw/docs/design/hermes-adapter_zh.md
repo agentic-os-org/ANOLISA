@@ -253,7 +253,8 @@ middleware 之前。值相同的新字典仍可使用；嵌套原地修改及值
 行为。Post 回调不能撤销工具或替换结果。
 
 AW 事件期限与 Hermes 回调期限共同生效。原生命令期限及清理余量超过
-`plugins.hook_callback_timeout` 时，启动会拒绝该配置。有界探测使用 console script
+`plugins.hook_callback_timeout` 时，启动会拒绝该配置。自动补入的纯观测回调与配置中的
+动作回调执行同样的准入校验。有界探测使用 console script
 解释器与固定版本原生 CLI 的 profile/dotenv 加载器，查询原生 timeout resolver，
 因此 YAML 1.1 标量、环境展开、默认值和 600 秒上限均遵循 Hermes。启动探测共用
 启动器的取消标志；SIGINT/SIGTERM 会及时回收探测进程组，并保留信号退出状态。

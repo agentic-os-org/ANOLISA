@@ -26,7 +26,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha2`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha3`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -43,10 +43,21 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
+| `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
+| `start_observation` | `instance_id` | 启动一个可选实例观测，进行有界来源兼容探测 |
+| `observe_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` | 核对纯回调并排队有界证据，不分发动作 |
+| `report_run` | `instance_id`、类型化 `outcome` | 记录 launcher 实际报告的 started/exited/failed 状态 |
+| `freeze_context` | `event_id`、`instance_id`、原始 `candidate_revision` | 一个不可变有界证据上下文，不执行步骤 |
 | `audit` | 准备阶段或事件的 `key` | 已验证的持久记录信封和 `terminal` 标志 |
 | `stop` | 无 | 确认收到停止请求；进程退出才表示清理完成 |
+
+事件句柄包含原始 `candidate_revision`。显式 `freeze_context` 只使用配置来源和
+经原生回调核对的身份，保留原始 deadline，Journal 只写元数据。详见
+[可信证据与有界上下文](evidence-context_zh.md)。升级 v1alpha3 时，client、callback
+二进制和自己管理的 daemon 须一起更新。
+
 
 `bind` 对结构化 Provider 实际执行 `describe` 和 `validate_config`，显式原生
 命令不执行该握手。能力证据来自可信的同用户
@@ -96,6 +107,15 @@ ID 是关联数据，不能证明两个回调属于同一个服务事件。`open
 结果及其他字段仍参与绑定，原生命令仍收到第一回调的原始字节。两个阶段复用同一预算
 和步骤单次执行声明。已关闭事件和失败打开的声明保留到实例释放，不能借此重新获得预算。为每个
 步骤打开独立事件不符合共享事件调度。当前每个实例最多关联 1,024 个事件。
+
+`close_hook_event` 以所属 `instance_id`、`event`（`tool.before` 或 `tool.after`）、
+非空 `session_id` 和非空 `call_id`（归一化 `tool.call_id`，AgentScope 使用调用级
+invocation ID）标识关联，不需要事件句柄或输入快照。它在实例的 lease 锁内与打开操作
+串行化，即使事件尚未打开也登记取消声明，后续打开该关联会被 `native_event_closed`
+拒绝；重复关闭具有幂等性。事件存在时，取消活跃 Provider 工作并等待清理和 registry
+移除后才返回 `{"closed": true}`。该操作不创建事件、不执行步骤，也不刷新预算。
+取消声明计入同一个关联数量上限，并保留到实例释放。清理受调用方 RPC 截止时间约束；
+未能及时完成清理会返回 `event_close_timeout`，同时保留取消声明，防止事件重新打开。
 
 OpenClaw 的 after 身份使用固定宿主的大小写/别名策略名；before 输入及原生载荷中的
 原始名称保持不变。在 middleware 压缩后，再执行原生完成观察。私有回调帧将两个阶段绑定到
@@ -221,3 +241,8 @@ launcher/adapter 的采用语义不变；零 Provider 启动仍绑定共享服�
 信号标志传给普通 `aw-exec::run`，取消时立即停止用户命令进程组，包括忽略
 SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意外 SIGKILL，以及
 后代逃离进程组，仍受执行器已声明的限制约束。
+
+实例观测由 `start_observation` 开启；有来源配置时 `aw run` 自动调用。
+`started` 携带 `pid`，`exited` 的 `code` 与 `signal` 恰有一个非空，`failed` 表示
+启动/原生就绪失败，不携带原始诊断正文。status 返回有界观测元数据。释放时等待
+观测 worker 并返回最终元数据，持久运行链使用独立审计 key，参见[证据生命周期](evidence-context_zh.md#自动运行观测)。

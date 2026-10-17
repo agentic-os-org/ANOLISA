@@ -130,3 +130,35 @@ curl -s http://127.0.0.1:7396/metrics
 - [配置](configuration.md)——为自己的 Agent 添加规则
 - [Dashboard 指南](dashboard.md#导航与页面可见性)——哪些页面在什么条件下出现
 - [数据与存储](data-and-storage.md#http-api)——API 细节
+
+### 通过 API 记录统计数据
+
+配置 `tokenless_api` 后，已认证的 `POST /api/tokenless/refresh` 接收
+`{"session_id":"source-session"}`、`{"tool_use_id":"captured-tool-id"}` 或不筛选的 `{}`（每批 100 条），以事务保存
+有界查询结果（最多 1,000 条 / 8 MiB）。超限时整体失败，不保存部分结果；请缩小过滤
+范围。即使从 loopback 访问，刷新也需要 AgentSight 凭据。`GET /api/tokenless/records`
+列出已保存的元数据，支持 `start_ns`、`end_ns`、`session_id`、`tool_use_id` 和 `limit`
+（1–100），默认查询最近 24 小时。网络或查询失败会明确返回，已保存的数据仍可查看。
+原始字段保持不变。仅当采集到的 tool-call ID 唯一对应本地会话时填充
+`agentsight_session_id`；缺失或歧义关联保持 null。
+
+已保存的列表还支持 `before_cache_id`，按本地 ID 倒序分页，返回 `next_before_cache_id`。
+`GET /api/tokenless/records/{cache_id}?include_content=true` 请求完整内容；不传此标志时
+返回元数据。配置 API 后，现有节省接口使用 API 副本，排除 DryRun 和未知模式，避免
+与本地数据库统计重复计算。
+
+不筛选的回复可包含字符串 `next_before_id`；传入 `{"before_id":"42"}` 记录下一批。这是普通查询参数，不保存 checkpoint，也不保证跨重启恢复。
+
+现有 `GET /api/token-savings` 与 `GET /api/token-savings/session/{id}` 会先按已采集的
+tool-call ID 刷新元数据，再计算结果，无需为这些视图额外调用 refresh。配置 API 后，
+这些查询复用现有 AgentSight 凭据，即使访问来自 loopback。查询会对 ID 去重，并让所有
+源请求共享 5 秒、1000 条记录/请求、8 MiB 的预算。刷新失败或超限时明确报错，不保存
+部分批次，也不将缓存行当作最新数据返回。本次源回复中不存在的记录不计入当前汇总；
+已保存的记录仍可通过记录 API 查询。未配置 `tokenless_api` 时保持现有本地数据库行为。
+
+历史调用 ID 继续参与复合节省计算。源查询每次最多批量匹配 128 个 ID，因此匹配统计较少的
+长会话可以完成查询，并保留早期压缩的节省量。所有批次及其分页共享同一个记录预算。
+已保存元数据列表即使来自 loopback 也需要现有 AgentSight 凭据。
+
+通过 API 查询节省量需要批量 POST 接口；请一起升级 AgentSight 与 Tokenless 查询服务。
+原有按单个条件筛选的 GET 查询继续可用。
