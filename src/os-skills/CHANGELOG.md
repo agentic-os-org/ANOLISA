@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-16
+
+### Added
+
+- Added the `mysql-admin` skill for MySQL/MariaDB instance administration:
+  processlist and lock-wait diagnostics, deadlock analysis, connection
+  watermark checks, slow query and index audit with read-only-first rules,
+  backup/restore governance with binlog positions, and replication and
+  tablespace health checks. (#7980)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

@@ -37,6 +37,7 @@
 ### 开发运维
 - **github** — GitHub 工作流与集成
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
+- **mysql-admin** — MySQL/MariaDB 实例管理（processlist 与锁诊断、慢查询与索引审计、备份治理、复制健康检查）
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
 
