@@ -99,6 +99,17 @@ def _json_counter_value(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _counter_from_value(value: Any) -> Counter[str]:
+    if not isinstance(value, dict):
+        return Counter()
+
+    counter: Counter[str] = Counter()
+    for raw_key, raw_value in value.items():
+        if isinstance(raw_key, str) and isinstance(raw_value, int):
+            counter[raw_key] += raw_value
+    return counter
+
+
 def _counter_from_row(row: dict[str, str | int], key: str) -> Counter[str]:
     value = row.get(key)
     if not isinstance(value, str) or not value:
@@ -107,13 +118,7 @@ def _counter_from_row(row: dict[str, str | int], key: str) -> Counter[str]:
         parsed = json.loads(value)
     except json.JSONDecodeError:
         return Counter()
-    if not isinstance(parsed, dict):
-        return Counter()
-    counter: Counter[str] = Counter()
-    for raw_key, raw_value in parsed.items():
-        if isinstance(raw_key, str) and isinstance(raw_value, int):
-            counter[raw_key] += raw_value
-    return counter
+    return _counter_from_value(parsed)
 
 
 def analyze_trace_files(
@@ -128,6 +133,7 @@ def analyze_trace_files(
 
     per_trace_rows: list[dict[str, str | int]] = []
     grouped_rows: dict[str, list[dict[str, str | int]]] = {}
+    grouped_counters: dict[str, dict[str, Counter[str]]] = {}
 
     file_iter = _iter_selected_trace_files(trace_files) if trace_files is not None else _iter_trace_files(trace_root)
 
@@ -152,10 +158,16 @@ def analyze_trace_files(
             "total_steps": total_steps,
         }
         if include_metrics:
+            instance_counters = grouped_counters.setdefault(instance_id, {})
             for field in _TRACE_NUMERIC_FIELDS:
                 row[field] = _safe_int(trace_data.get(field))
             for field in _TRACE_COUNTER_FIELDS:
-                row[field] = _json_counter_value(trace_data.get(field))
+                counter_value = trace_data.get(field)
+                row[field] = _json_counter_value(counter_value)
+                counter = instance_counters.get(field)
+                if counter is None:
+                    counter = instance_counters[field] = Counter()
+                counter.update(_counter_from_value(counter_value))
         per_trace_rows.append(row)
         grouped_rows.setdefault(instance_id, []).append(row)
 
@@ -186,9 +198,7 @@ def analyze_trace_files(
                 values = [int(row[field]) for row in rows]
                 summary_row[f"avg_{field}"] = _format_metric(_mean(values))
             for field in _TRACE_COUNTER_FIELDS:
-                counter: Counter[str] = Counter()
-                for row in rows:
-                    counter.update(_counter_from_row(row, field))
+                counter = grouped_counters[instance_id][field]
                 summary_row[field] = json.dumps(
                     dict(sorted(counter.items())),
                     sort_keys=True,
