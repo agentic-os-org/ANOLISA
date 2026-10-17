@@ -859,8 +859,7 @@ pub fn compress_response_with_store(
             json: json_config(options),
         },
         stash_store,
-    )
-    .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+    );
 
     // Legacy measurement channel (see `CompressResult::compressed_output`):
     // the candidate the adapter produced, or the original when none ran.
