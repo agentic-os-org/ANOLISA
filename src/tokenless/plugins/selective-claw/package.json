@@ -1,7 +1,7 @@
 {
   "name": "selective-claw",
   "version": "0.1.0",
-  "description": "Selective Context Injection plugin for OpenClaw — summary compression + fresh tail + expand_turn",
+  "description": "Selective Context Injection plugin for OpenClaw — summary compression + fresh tail + search_turns + expand_turn",
   "type": "module",
   "main": "dist/index.js",
   "license": "Apache-2.0",

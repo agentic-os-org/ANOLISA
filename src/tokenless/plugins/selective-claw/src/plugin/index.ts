@@ -1,11 +1,12 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { OpenClawPluginApi } from "../openclaw-bridge.js";
+import type { OpenClawPluginApi, SessionContext } from "../openclaw-bridge.js";
 import type { SelectiveClawConfig } from "../types.js";
 import { DEFAULT_CONFIG } from "../types.js";
 import { createConnection } from "../db/connection.js";
 import { SelectiveContextEngine } from "../engine.js";
 import { createSummarizer } from "../summarize.js";
+import { emptySearchResult, executeSearchTurns } from "../search-tool.js";
 
 function resolveConfig(api: OpenClawPluginApi): SelectiveClawConfig {
   const pluginConfig = api.pluginConfig ?? {};
@@ -26,7 +27,7 @@ function getRuntimeLlmComplete(api: OpenClawPluginApi) {
     : undefined;
 }
 
-function createExpandTurnTool(engine: SelectiveContextEngine, boundSessionId?: string) {
+function createExpandTurnTool(engine: SelectiveContextEngine, boundSessionId: string | null) {
   return {
     name: "expand_turn",
     label: "Expand Turn",
@@ -47,16 +48,58 @@ function createExpandTurnTool(engine: SelectiveContextEngine, boundSessionId?: s
     },
     async execute(_toolCallId: string, params: any) {
       const turnIds = Array.isArray(params?.turn_ids) ? params.turn_ids : [];
-      const sessionId = boundSessionId ?? engine.getActiveSessionId();
-      if (sessionId === null || turnIds.length === 0) {
+      if (boundSessionId === null || turnIds.length === 0) {
+        const result = boundSessionId === null
+          ? { status: "session_unresolved", found: 0, turns: [] }
+          : { found: 0, turns: [] };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ found: 0, turns: [] }) }],
-          details: { found: 0, turns: [] },
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          details: result,
         };
       }
-      const result = engine.expandTurns(sessionId, turnIds);
+      const result = engine.expandTurns(boundSessionId, turnIds);
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        details: result,
+      };
+    },
+  };
+}
+
+function createSearchTurnTool(
+  engine: SelectiveContextEngine,
+  boundSessionId: string | null,
+  onError: (error: unknown) => void,
+) {
+  return {
+    name: "search_turns",
+    label: "Search Turns",
+    description:
+      "Search all stored messages in this conversation, including recent unsummarized messages. " +
+      "All keywords must match the same message; quoted phrases also require adjacency. " +
+      "Results count messages, so several may belong to one turn. Follow nextOffset when truncated, " +
+      "then pass relevant turn numbers to expand_turn for full messages.",
+    parameters: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: { type: "string", minLength: 1, description: "Keywords or a quoted phrase to find" },
+        limit: { type: "integer", minimum: 1, maximum: 20, default: 5, description: "Maximum matching messages" },
+        offset: { type: "integer", minimum: 0, default: 0, description: "Number of matching messages to skip; use nextOffset for the next page" },
+      },
+    },
+    async execute(_toolCallId: string, params: { query?: unknown; limit?: unknown; offset?: unknown }) {
+      let result = emptySearchResult("session_unresolved");
+      if (boundSessionId !== null) {
+        try {
+          result = executeSearchTurns(engine.getStore(), boundSessionId, params?.query, params?.limit, params?.offset);
+        } catch (error) {
+          onError(error);
+          result = emptySearchResult("search_unavailable");
+        }
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
         details: result,
       };
     },
@@ -84,8 +127,16 @@ export default function activate(api: OpenClawPluginApi): void {
 
   if (typeof api.registerTool === "function") {
     (api.registerTool as any)(
-      (ctx: { sessionId?: string }) => createExpandTurnTool(engine, ctx?.sessionId),
+      (ctx: SessionContext) => createExpandTurnTool(engine, engine.resolveSessionId(ctx)),
       { name: "expand_turn" },
+    );
+    (api.registerTool as any)(
+      (ctx: SessionContext) => createSearchTurnTool(engine, engine.resolveSessionId(ctx), (error) => {
+        const message = `[selective-claw] search unavailable: ${error instanceof Error ? error.message : "unknown database error"}`;
+        if (api.logger?.warn) api.logger.warn(message);
+        else console.warn(message);
+      }),
+      { name: "search_turns" },
     );
   }
 }

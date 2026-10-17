@@ -66,10 +66,9 @@ describe("registered expand_turn tool", () => {
     expect(result.details).toEqual({ found: 0, turns: [] });
   });
 
-  it("preserves active-session fallback when the host supplies no session ID", async () => {
+  it("rejects an unresolved session instead of using another active session", async () => {
     await activateSession("session-a");
     const result = await toolFactory({}).execute("legacy-host", { turn_ids: [1] });
-    expect(result.details.found).toBe(1);
-    expect(result.details.turns[0].messages[0].content).toBe("session-a question");
+    expect(result.details).toEqual({ status: "session_unresolved", found: 0, turns: [] });
   });
 });

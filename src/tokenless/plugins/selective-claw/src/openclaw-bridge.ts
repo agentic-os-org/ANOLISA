@@ -37,6 +37,8 @@ export type IngestResult = {
   ingested: boolean;
 };
 
+export type SessionContext = { sessionId?: string; sessionKey?: string };
+
 export type ContextEngine = {
   info: ContextEngineInfo;
   bootstrap(params: {
