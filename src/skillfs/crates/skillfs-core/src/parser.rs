@@ -186,7 +186,7 @@ fn parse_frontmatter(
     dir_name: &str,
     issues: &mut Vec<String>,
 ) -> SkillMetadata {
-    if yaml_str.is_empty() {
+    if yaml_str.trim().is_empty() {
         if !dir_name.is_empty() {
             issues.push("missing frontmatter".to_string());
         }
