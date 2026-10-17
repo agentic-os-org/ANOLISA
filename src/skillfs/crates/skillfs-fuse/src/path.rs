@@ -42,6 +42,19 @@ pub enum SkillLayout {
 /// Well-known Hermes management paths that must be passthrough.
 const HERMES_MANAGEMENT_PATHS: &[&str] = &[".hub", ".bundled_manifest", ".no-bundled-skills"];
 
+/// Whether a Hermes nested manifest is eligible for store
+/// synchronization: discovery (`SkillStore::load_from_directory`) skips
+/// dot-prefixed directories at both the category and the leaf, so a
+/// hidden working copy (`.draft`, `cloud/.new`, `.hidden-parent/...`)
+/// never enters the store on a scan. The write-path re-parse sites must
+/// apply the same eligibility — `skill-discover` renders the store
+/// directly, so syncing a hidden manifest through a mount edit would
+/// advertise it as a managed skill and diverge the live store from a
+/// fresh scan.
+pub fn hermes_nested_sync_eligible(category: &str, skill_name: &str) -> bool {
+    !category.starts_with('.') && !skill_name.starts_with('.')
+}
+
 pub fn is_hermes_management_path(name: &str) -> bool {
     HERMES_MANAGEMENT_PATHS.contains(&name)
 }

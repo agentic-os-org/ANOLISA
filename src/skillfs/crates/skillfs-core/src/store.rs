@@ -223,6 +223,29 @@ impl SkillStore {
         }
     }
 
+    /// Post-load twin of the discovery insert for the write paths: the
+    /// skill-dir rename store sync, the mkdir placeholder, and the sync
+    /// worker's re-parse all land entries in an already-mounted store.
+    ///
+    /// The store keys skills by their directory leaf name, so a write that
+    /// lands a skill under a leaf another directory already owns must not
+    /// silently steal that key: `upsert` would replace the entry with zero
+    /// diagnostics, the shadowed skill would vanish from `/skills`, `sls
+    /// list`/`validate`, and skill-discover, and the live store would
+    /// diverge from what a fresh discovery scan of the same tree produces.
+    /// Apply the loaders' collision rule instead: the lexicographically
+    /// smaller `source_path` wins deterministically and the loser is
+    /// reported back for the caller to log. Re-inserting the same source
+    /// path stays an idempotent refresh.
+    ///
+    /// The comparison is by spelling: write-path callers must insert
+    /// under the canonical source-root spelling (an in-place mount's
+    /// `/proc/self/fd/<n>` alias is rewritten before the insert), so one
+    /// manifest's fd alias and real path can never collide with itself.
+    pub fn upsert_checked(&mut self, entry: SkillEntry) -> Option<LoadError> {
+        self.insert_discovered(entry, "")
+    }
+
     /// Load skills from a single category directory.
     fn load_skills_from_category(
         &mut self,
@@ -652,6 +675,58 @@ mod tests {
         assert_eq!(store.len(), 1);
         let retrieved = store.get("test-skill").unwrap();
         assert_eq!(retrieved.metadata.description, "Updated description");
+    }
+
+    #[test]
+    fn test_upsert_checked_keeps_the_discovery_winner() {
+        // The write paths (rename store sync, mkdir placeholder, sync
+        // re-parse) insert through upsert_checked so a same-leaf collision
+        // with a different source directory follows the loaders' rule: the
+        // lexicographically smaller source path keeps the key and the
+        // loser is reported, instead of a blind insert silently stealing
+        // the key.
+        let mut store = SkillStore::new();
+        let mut winner = create_test_entry("notes", "discovered skill", vec![]);
+        winner.source_path = std::path::PathBuf::from("/source/apple/notes/SKILL.md");
+        store.upsert(winner);
+
+        let mut renamed = create_test_entry("notes", "renamed skill", vec![]);
+        renamed.source_path = std::path::PathBuf::from("/source/banana/notes/SKILL.md");
+        let report = store.upsert_checked(renamed).expect("collision report");
+
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "discovered skill",
+            "the lexicographically smaller source path keeps the key"
+        );
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+
+        // A lexicographically smaller newcomer wins instead, still
+        // reporting the collision.
+        let mut smaller = create_test_entry("notes", "smaller path skill", vec![]);
+        smaller.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        let report = store.upsert_checked(smaller).expect("collision report");
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "smaller path skill"
+        );
+        assert!(report.error.contains("duplicate skill name 'notes'"));
+
+        // Re-inserting the same source path is an idempotent refresh.
+        let mut refresh = create_test_entry("notes", "refreshed skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        assert!(
+            store.upsert_checked(refresh).is_none(),
+            "re-inserting the same source path is an idempotent refresh"
+        );
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "refreshed skill"
+        );
     }
 
     #[test]
