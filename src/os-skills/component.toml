@@ -63,6 +63,10 @@ name = "kernel-dev"
 source = "{datadir}/skills/kernel-dev/"
 
 [[adapters.openclaw.skills]]
+name = "redis-admin"
+source = "{datadir}/skills/redis-admin/"
+
+[[adapters.openclaw.skills]]
 name = "sysom-agentsight"
 source = "{datadir}/skills/sysom-agentsight/"
 
@@ -181,6 +185,10 @@ source = "{datadir}/skills/github/"
 [[adapters.hermes.skills]]
 name = "kernel-dev"
 source = "{datadir}/skills/kernel-dev/"
+
+[[adapters.hermes.skills]]
+name = "redis-admin"
+source = "{datadir}/skills/redis-admin/"
 
 [[adapters.hermes.skills]]
 name = "sysom-agentsight"

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `redis-admin` skill: read-only diagnostics, memory and eviction
+  governance, persistence and fork health, and replication observation
+  for running Redis/Valkey instances
+  ([#7984](https://github.com/agentic-os-org/ANOLISA/issues/7984)).
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

@@ -37,6 +37,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### DevOps
 - **github** — GitHub workflows and integration
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
+- **redis-admin** — Redis/Valkey instance administration (runtime and latency diagnostics, memory and eviction governance, big-key hunting via bounded SCAN, persistence and fork health, read-only replication checks)
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning
 
