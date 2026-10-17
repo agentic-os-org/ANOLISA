@@ -6914,7 +6914,11 @@ fn eval_admin_reserve_kbytes_at(
     if info.memory_total_gb < 64 {
         return 1;
     }
-    if !overcommit_reserves_are_live(overcommit_path) {
+    // A host the overcommit_memory rule moves off strict mode in the same plan
+    // needs no reserve: __vm_enough_memory() returns in mode 1 before either
+    // reserve is subtracted, so the write would be inert. The ratio rule
+    // already keys on the same predicate.
+    if !overcommit_reserves_are_live(overcommit_path) || strict_overcommit_refused(info) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -8486,7 +8490,11 @@ fn eval_user_reserve_kbytes_at(
     if info.memory_total_gb < 64 {
         return 1;
     }
-    if !overcommit_reserves_are_live(overcommit_path) {
+    // A host the overcommit_memory rule moves off strict mode in the same plan
+    // needs no reserve: __vm_enough_memory() returns in mode 1 before either
+    // reserve is subtracted, so the write would be inert. The ratio rule
+    // already keys on the same predicate.
+    if !overcommit_reserves_are_live(overcommit_path) || strict_overcommit_refused(info) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -20898,6 +20906,32 @@ mod tests {
             mode_never.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "an adequate reserve stays untouched");
+
+        // A host the overcommit_memory rule moves off strict mode in the same
+        // plan: Redis/Valkey/mongod/ClickHouse refuse mode 2 and no PostgreSQL
+        // asks for it, so the plan writes vm.overcommit_memory = 1. Mode 1
+        // returns from __vm_enough_memory() before either reserve is read, so
+        // both reserve writes would be inert. The ratio rule already withholds
+        // its advice for exactly this population.
+        let mut strict_service = info_with_processes(&["redis-server"]);
+        strict_service.memory_total_gb = 128;
+        let mut recs = Vec::new();
+        eval_admin_reserve_kbytes_at(
+            &strict_service,
+            &mut recs,
+            admin.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        eval_user_reserve_kbytes_at(
+            &strict_service,
+            &mut recs,
+            user.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "the plan leaves the mode that reads either reserve: {recs:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
