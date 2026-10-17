@@ -108,6 +108,20 @@ def update_config_file(path: Path, model: dict, judge: dict,
     save_yaml(path, data)
 
 
+def validate_required_settings(model: dict, judge: dict, user_agent_model: dict) -> None:
+    """Check every role before publishing any of the selected configurations."""
+    for role, settings in (
+        ("model", model),
+        ("judge", judge),
+        ("user_agent_model", user_agent_model),
+    ):
+        for field in ("api_key", "base_url", "model_id"):
+            value = settings.get(field)
+            if not isinstance(value, str) or not value.strip():
+                print(f"Error: {role}.{field} must be a nonblank string", file=sys.stderr)
+                sys.exit(1)
+
+
 def run_interactive(config_dir: Path, api_key: str = None):
     """Run interactive configuration."""
     print("=" * 60)
@@ -153,6 +167,8 @@ def run_interactive(config_dir: Path, api_key: str = None):
     ua_base_url = prompt_input("Base URL", _DEFAULT_BASE_URL)
     ua_model = {"api_key": ua_api_key, "base_url": ua_base_url, "model_id": ua_model_id}
 
+    validate_required_settings(model, judge, ua_model)
+
     # Apply to all config files
     print(f"\nUpdating config files in {config_dir}...")
     for fname in CONFIG_FILES:
@@ -193,6 +209,8 @@ def run_cli(args):
         "base_url": args.base_url or _DEFAULT_BASE_URL,
         "model_id": args.model_id or _DEFAULT_MODEL_ID,
     }
+
+    validate_required_settings(model, judge, ua_model)
 
     # Apply
     updated = 0
