@@ -39,7 +39,15 @@ def unpack(xlsx_path: str, output_dir: str) -> None:
     if not xlsx_path.lower().endswith((".xlsx", ".xlsm")):
         print(f"WARNING: '{xlsx_path}' does not have an .xlsx/.xlsm extension", file=sys.stderr)
 
-    if os.path.exists(output_dir):
+    if os.path.lexists(output_dir):
+        # Refuse paths that are not plain directories (an existing file or
+        # a symlink makes rmtree die with a bare traceback).
+        if not os.path.isdir(output_dir) or os.path.islink(output_dir):
+            print(
+                f"ERROR: Output path exists and is not a directory: {output_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
