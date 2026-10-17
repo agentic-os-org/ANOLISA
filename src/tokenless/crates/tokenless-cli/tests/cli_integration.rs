@@ -2930,3 +2930,92 @@ fn stash_purge_warning_survives_an_unwritable_stderr() {
     );
     assert_eq!(output.stdout.as_slice(), payload.as_bytes());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// A fatal error must keep the exit code `run()` chose (fd 2 → /dev/full)
+// ─────────────────────────────────────────────────────────────────────
+// The status is the machine-readable verdict a caller reads - 2 for
+// rejected input, 1 for an operation failure - and the `Error:` line is
+// only its detail. `eprintln!` panics when stderr cannot be written, and
+// a panic on the fatal path replaced that verdict with 101.
+
+/// Run `tokenless compress` on `input` with the given extra environment
+/// and fd 2 bound to `stderr`, returning the exit code and stderr bytes.
+#[cfg(target_os = "linux")]
+fn compress_with_stderr(
+    input: &[u8],
+    env: &[(&str, &str)],
+    stderr: std::process::Stdio,
+) -> (Option<i32>, Vec<u8>) {
+    let mut command = tokenless_bin();
+    command
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .arg("compress")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(stderr);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    (output.status.code(), output.stderr)
+}
+
+/// Rejected input answers 2 whether or not the detail reaches the caller:
+/// an unsupported protocol version carries no content to echo, so `run()`
+/// rejects it before any compression work.
+#[test]
+#[cfg(target_os = "linux")]
+fn rejected_input_keeps_its_exit_code_with_an_unwritable_stderr() {
+    let input =
+        br#"{"protocol_version":1,"content":"x","agent_id":"a","seam":"post_tool"}"#.as_slice();
+
+    let (writable_code, writable_stderr) =
+        compress_with_stderr(input, &[], std::process::Stdio::piped());
+    assert_eq!(writable_code, Some(2), "documented rejected-input code");
+    assert!(
+        writable_stderr.starts_with(b"Error: "),
+        "the detail is still printed when stderr accepts it: {}",
+        String::from_utf8_lossy(&writable_stderr)
+    );
+
+    let (unwritable_code, _) =
+        compress_with_stderr(input, &[], std::process::Stdio::from(dev_full()));
+    assert_eq!(
+        unwritable_code, writable_code,
+        "an unwritable stderr must not replace the exit code with 101"
+    );
+}
+
+/// An operation failure answers 1 on the same shape: a retrieve needs the
+/// stash and a relative `TOKENLESS_DATA_DIR` is not a trusted state root.
+#[test]
+#[cfg(target_os = "linux")]
+fn operation_failure_keeps_its_exit_code_with_an_unwritable_stderr() {
+    let input = br#"{"protocol_version":2,"operation":"retrieve","attribution":{"agent_id":"a"},"input":{"hash_or_marker":"0123456789abcdef01234567","visible_markers":[]}}"#.as_slice();
+    let env = [("TOKENLESS_DATA_DIR", "relative/data")];
+
+    let (writable_code, writable_stderr) =
+        compress_with_stderr(input, &env, std::process::Stdio::piped());
+    assert_eq!(writable_code, Some(1), "documented operation-failure code");
+    assert!(
+        writable_stderr.starts_with(b"Error: "),
+        "the detail is still printed when stderr accepts it: {}",
+        String::from_utf8_lossy(&writable_stderr)
+    );
+
+    let (unwritable_code, _) =
+        compress_with_stderr(input, &env, std::process::Stdio::from(dev_full()));
+    assert_eq!(
+        unwritable_code, writable_code,
+        "an unwritable stderr must not replace the exit code with 101"
+    );
+}
