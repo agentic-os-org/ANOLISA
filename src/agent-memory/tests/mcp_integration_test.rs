@@ -243,6 +243,23 @@ async fn write_read_grep_workflow() {
     assert!(paths.contains(&"notes/hello.md"));
     assert!(paths.contains(&"README.md"));
 
+    // Grep with an explicit zero cap: the parameter reaches the tool layer
+    // unchanged, so the client gets the empty result it asked for.
+    let resp = call_tool(
+        &mut reader,
+        &mut stdin,
+        14,
+        "mem_grep",
+        json!({"pattern": "hello", "max": 0}),
+    )
+    .await;
+    let text = extract_text(&resp);
+    let hits: Value = serde_json::from_str(&text).expect("grep returns JSON array");
+    assert!(
+        hits.as_array().unwrap().is_empty(),
+        "max=0 must return zero hits, got: {text}"
+    );
+
     drop(stdin);
     let _ = child.kill().await;
 }

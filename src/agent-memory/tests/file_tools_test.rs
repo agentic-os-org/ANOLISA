@@ -282,6 +282,57 @@ fn grep_respects_glob_filter() {
     assert_eq!(hits[0].path, "notes/a.md");
 }
 
+#[test]
+fn grep_max_zero_returns_no_hits() {
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello\n", false).unwrap();
+    svc.write("b.md", "hello again\n", false).unwrap();
+
+    let hits = svc
+        .grep(
+            "hello",
+            GrepOptions {
+                max: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "max=0 must return zero hits, got {hits:?}");
+}
+
+#[test]
+fn grep_max_caps_the_hit_count() {
+    let (_t, svc) = setup();
+    svc.write("a.md", "hello\n", false).unwrap();
+    svc.write("b.md", "hello again\nhello twice\n", false)
+        .unwrap();
+
+    for max in [1usize, 2, 3] {
+        let hits = svc
+            .grep(
+                "hello",
+                GrepOptions {
+                    max: Some(max),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), max, "max={max} returned {hits:?}");
+    }
+
+    // A cap above the match count still returns every match.
+    let hits = svc
+        .grep(
+            "hello",
+            GrepOptions {
+                max: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 3, "max=100 returned {hits:?}");
+}
+
 // ---------- mem_diff ----------
 
 #[test]
