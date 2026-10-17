@@ -120,10 +120,13 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
             tar.append_path_with_name(path, rel)
                 .map_err(|e| MemoryError::Other(format!("tar append {}: {e}", rel.display())))?;
         }
-        tar.finish()
+        let gz = tar
+            .into_inner()
             .map_err(|e| MemoryError::Other(format!("tar finish: {e}")))?;
-        // GzEncoder::finish runs in Drop; explicit shutdown via `into_inner`
-        // not necessary because Builder::finish already flushed payload.
+        // Drop discards gzip finalization errors. Finish explicitly before
+        // publishing an archive that callers may rely on for recovery.
+        gz.finish()
+            .map_err(|e| MemoryError::Other(format!("gzip finish: {e}")))?;
     }
 
     let size = std::fs::metadata(&tmp_path)?.len();
