@@ -1976,10 +1976,16 @@ fn is_shell_program(program: &str) -> bool {
 /// `clickhouse` binary, so the kernel truncates the client's comm to a prefix
 /// the server binary's own name shares (`clickhouse-clie` / `clickhouse-serv`)
 /// and the name alone cannot tell the two apart. The program name can.
+///
+/// `clickhouse-copier` is the same class one step outside the multi-call
+/// symlinks: it is the separate client-side data-copy utility (its own binary
+/// through 23.8, removed in 24.3) whose only job is copying between clusters.
+/// A host running a long copier job and no server is not a database host.
 const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
     "clickhouse-benchmark",
     "clickhouse-client",
     "clickhouse-compressor",
+    "clickhouse-copier",
     "clickhouse-format",
     "clickhouse-local",
     "clickhouse-obfuscator",
@@ -4866,6 +4872,8 @@ mod tests {
             "clickhouse-benchmark",
             "clickhouse-client",
             "clickhouse-compressor",
+            // The separate client-side copier binary (through 23.8).
+            "clickhouse-copier",
             "clickhouse-format",
             "clickhouse-local",
             "clickhouse-obfuscator",
