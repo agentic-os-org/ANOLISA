@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { cwdInsideWorkspace, cwdInsideWorkspaceReason, UNAVAILABLE_MSG, pluginState } from "../state.js";
+import { handleCheckpoint } from "../handlers.js";
 
 describe("cwdInsideWorkspace", () => {
   afterEach(() => {
@@ -37,6 +41,50 @@ describe("cwdInsideWorkspace", () => {
     vi.spyOn(process, "cwd").mockReturnValue("/workspace");
     const r = cwdInsideWorkspace("/ws");
     expect(r.inside).toBe(false);
+  });
+
+  it("recognizes real directories behind a workspace symlink without matching siblings", () => {
+    const sandbox = mkdtempSync(path.join(tmpdir(), "ckpt-cwd-alias-"));
+    const managed = path.join(sandbox, "managed");
+    const workspace = path.join(sandbox, "workspace");
+    mkdirSync(path.join(managed, "subdir"), { recursive: true });
+    mkdirSync(`${managed}-sibling`);
+    symlinkSync(managed, workspace, "dir");
+    const cwd = vi.spyOn(process, "cwd");
+    try {
+      for (const directory of [managed, path.join(managed, "subdir")]) {
+        cwd.mockReturnValue(directory);
+        expect(cwdInsideWorkspace(workspace)).toEqual({ inside: true, cwd: directory });
+      }
+      cwd.mockReturnValue(`${managed}-sibling`);
+      expect(cwdInsideWorkspace(workspace).inside).toBe(false);
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a checkpoint inside a managed workspace without calling the manager", async () => {
+    const sandbox = mkdtempSync(path.join(tmpdir(), "ckpt-handler-alias-"));
+    const managed = path.join(sandbox, "managed");
+    const workspace = path.join(sandbox, "workspace");
+    mkdirSync(managed);
+    symlinkSync(managed, workspace, "dir");
+    const previousState = { ...pluginState };
+    const createCheckpoint = vi.fn().mockResolvedValue({ success: true, message: "created" });
+    pluginState.manager = { createCheckpoint } as unknown as NonNullable<typeof pluginState.manager>;
+    pluginState.environmentReady = true;
+    pluginState.resolvedConfig = { workspace } as NonNullable<typeof pluginState.resolvedConfig>;
+    vi.spyOn(process, "cwd").mockReturnValue(managed);
+    try {
+      const result = await handleCheckpoint(JSON.stringify({ id: "test-snapshot" }));
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`workspace=${workspace}`);
+      expect(createCheckpoint).not.toHaveBeenCalled();
+      expect(pluginState.resolvedConfig.workspace).toBe(workspace);
+    } finally {
+      Object.assign(pluginState, previousState);
+      rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 });
 
