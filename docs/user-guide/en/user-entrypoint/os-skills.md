@@ -84,6 +84,29 @@ confirm_destructive = true
 
 ---
 
+## Kernel build argument checks
+
+Inspect the kernel build driver's usage before choosing a build method:
+
+```bash
+bash SKILL_DIR/scripts/build-kernel.sh --help
+bash SKILL_DIR/scripts/build-kernel.sh upstream 6.12.9 4 defconfig
+```
+
+Replace `SKILL_DIR` with the installed `devops/kernel-dev` directory. Upstream
+and SRPM builds require a positive integer parallel-job count (the default is
+the number of CPU cores). Upstream configuration must be `defconfig`,
+`tinyconfig`, `menuconfig`, or `current`. Invalid methods, job counts, upstream
+configuration names, or install-method selectors are rejected before system
+checks or package installation. Install-method selectors remain `upstream`
+and `srpm`.
+
+`help`, `--help`, `-h`, and `status` run without build-architecture detection or
+dependency installation. Actual builds still require a supported Linux build
+environment and the existing permissions.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

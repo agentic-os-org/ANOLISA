@@ -31,6 +31,13 @@ lifecycle: production
 
 ---
 
+## 构建参数预检
+
+`build-kernel.sh` 在依赖安装前要求 Upstream/SRPM 的并行任务数为正整数；
+Upstream 配置仅支持 `defconfig`、`tinyconfig`、`menuconfig`、`current`。
+无效方法和安装方式选择值也会提前拒绝。`help`、`--help`、`-h`、`status`
+不检测构建架构或安装依赖，实际构建的 Linux 环境与权限要求保持不变。
+
 ## 快速开始
 
 ### 一键搭建开发环境
