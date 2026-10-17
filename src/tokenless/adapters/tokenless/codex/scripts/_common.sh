@@ -2,6 +2,10 @@
 # _common.sh — Shared helpers for codex adapter scripts.
 # Source this file from install.sh and uninstall.sh.
 
+# The manifest and listing parser must agree on the registered identity and label.
+MARKETPLACE_NAME="anolisa-tokenless"
+MARKETPLACE_DISPLAY_NAME="ANOLISA Tokenless"
+
 # Resolve the codex CLI binary.
 resolve_codex() {
     # An explicit CODEX_BIN is authoritative. Silently substituting some other

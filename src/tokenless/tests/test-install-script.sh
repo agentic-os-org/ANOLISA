@@ -528,8 +528,37 @@ case "$1 $2" in
     if [ -f "$state/status_comma" ]; then
       absent_status="not installed, disabled"
     fi
+    if [ -f "$state/status_case" ]; then
+      absent_status="Not Installed"
+    fi
+    if [ -f "$state/status_suffix" ]; then
+      absent_status="not installed-ish"
+    fi
+    print_other_plugin() {
+    if [ -f "$state/other_plugin" ]; then
+      if [ -f "$state/other_header" ]; then
+        cat "$state/other_header"
+      else
+        echo "Marketplace \`other-market\`"
+      fi
+      echo "$other_id  installed, enabled  local    $state/other_plugin"
+    fi
+    }
+    [ ! -f "$state/external_first" ] || print_other_plugin
     if [ -f "$state/marketplace" ]; then
-      echo "Marketplace \`anolisa-tokenless\`"
+      if [ ! -f "$state/no_section" ]; then
+        if [ -f "$state/own_header" ]; then
+          cat "$state/own_header"
+        elif [ -f "$state/quoted_section" ]; then
+          echo "Marketplace 'anolisa-tokenless'"
+        elif [ -f "$state/colon_section" ]; then
+          echo "Marketplace: anolisa-tokenless"
+        elif [ -f "$state/trailing_section" ]; then
+          echo "  Marketplace \`anolisa-tokenless\` (local)"
+        else
+          echo "Marketplace \`anolisa-tokenless\`"
+        fi
+      fi
       echo "PLUGIN                       STATUS              VERSION  SOURCE"
       if [ -f "$state/plugin" ]; then
         echo "$target_id  installed, enabled  local    $state/plugin"
@@ -537,10 +566,7 @@ case "$1 $2" in
         echo "$target_id  $absent_status                $state/plugin"
       fi
     fi
-    if [ -f "$state/other_plugin" ]; then
-      echo "Marketplace \`other-market\`"
-      echo "$other_id  installed, enabled  local    $state/other_plugin"
-    fi
+    [ -f "$state/external_first" ] || print_other_plugin
     exit 0 ;;
   "plugin remove")
     printf '%s\n' "$3" >> "$state/plugin_remove_calls"
@@ -548,7 +574,7 @@ case "$1 $2" in
       echo "codex: error: unexpected plugin identity: $3" >&2
       exit 2
     fi
-    if [ "${CODEX_STUB_REMOVE_FAILS:-0}" = "1" ]; then
+    if [ "${CODEX_STUB_REMOVE_FAILS:-0}" = "1" ] || [ "${CODEX_STUB_PLUGIN_REMOVE_FAILS:-0}" = "1" ]; then
       echo "codex: error: refusing to remove tokenless@anolisa-tokenless" >&2
       exit 1
     fi
@@ -2383,13 +2409,17 @@ done
 
 # (a) codex `plugin list` fails outright.
 S40_STATE="$TEST_DIR/probe-fails/home/.codex-stub"
-mkdir -p "$S40_STATE"
+S40_MARKET="$TEST_DIR/probe-fails/home/.local/share/anolisa/codex-marketplace"
+mkdir -p "$S40_STATE" "$S40_MARKET/tokenless"
 : > "$S40_STATE/plugin"
+: > "$S40_STATE/marketplace"
 run_script "$UNINSTALL_SH" probe-fails "CODEX_STUB_LIST_FAILS=1"
 assert_eq "uninstall exits non-zero when the codex query fails" "$RUN_STATUS" "1"
 assert_contains "says the registration cannot be confirmed" "$RUN_OUTPUT"   "cannot be confirmed whether the plugin is registered"
 assert_file "keeps the adapter resources" "$S40_ADAPTERS/codex/scripts/uninstall.sh"
 assert_file "keeps the receipt for the retry" "$(receipt_of probe-fails)"
+assert_file "failed plugin query keeps marketplace registration" "$S40_STATE/marketplace"
+assert_file "failed plugin query keeps marketplace directory" "$S40_MARKET"
 
 # (b) claude CLI is unusable and there is no settings.json to check against.
 run_script "$UNINSTALL_SH" probe-fails "CLAUDE_BIN=/bin/false"
@@ -3293,9 +3323,10 @@ assert_file "deregistration-only mode still keeps the component binary" \
 # =============================================================================
 # Scenario 58 — another marketplace's same-name plugin is not our registration
 # =============================================================================
-for listing_style in qualified bare comma; do
+for external_header in canonical dotted path spaced single-quoted colon indented own-prefix same-basename path-prefix alternate-id tilde-other tilde-prefix; do
+for listing_style in qualified bare comma bare-comma status-case; do
 for target_state in present absent; do
-  S58_HOME="$TEST_DIR/codex-other-${listing_style}-${target_state}/home"
+  S58_HOME="$TEST_DIR/codex-other-${external_header}-${listing_style}-${target_state}/home"
   S58_STATE="$S58_HOME/.codex-stub"
   S58_MARKET="$S58_HOME/.local/share/anolisa/codex-marketplace"
   mkdir -p "$S58_HOME/.local/bin" "$S58_STATE" "$S58_MARKET/tokenless"
@@ -3303,8 +3334,24 @@ for target_state in present absent; do
   chmod +x "$S58_HOME/.local/bin/tokenless"
   : > "$S58_STATE/marketplace"
   : > "$S58_STATE/other_plugin"
-  [ "$listing_style" != "bare" ] || : > "$S58_STATE/bare_names"
-  [ "$listing_style" != "comma" ] || : > "$S58_STATE/status_comma"
+  case "$external_header" in
+    canonical) printf 'Marketplace `other-market`\n' ;;
+    own-prefix) printf 'Marketplace `anolisa-tokenless-tools`\n' ;;
+    alternate-id) printf 'Marketplace anolisa_tokenless\n' ;;
+    tilde-other) printf 'Marketplace ~/.local/share/other/codex-marketplace\n' ;;
+    tilde-prefix) printf 'Marketplace ~/.local/share/anolisa/codex-marketplace-foreign\n' ;;
+    same-basename) printf 'Marketplace `/other/codex-marketplace`\n' ;;
+    path-prefix) printf 'Marketplace `%s-foreign`\n' "$S58_MARKET" ;;
+    dotted) printf 'Marketplace `com.example.plugins`\n' ;;
+    path) printf 'Marketplace `/home/u/marketplaces/vendor.tools`\n' ;;
+    spaced) printf 'Marketplace `Acme Plugin Hub`\n' ;;
+    single-quoted) printf "Marketplace 'Acme Plugin Hub'\n" ;;
+    colon) printf 'Marketplace: /home/u/vendor.tools\n' ;;
+    indented) printf '  Marketplace `com.example.plugins`  \n' ;;
+  esac > "$S58_STATE/other_header"
+  case "$listing_style" in bare|bare-comma) : > "$S58_STATE/bare_names" ;; esac
+  case "$listing_style" in comma|bare-comma) : > "$S58_STATE/status_comma" ;; esac
+  [ "$listing_style" != "status-case" ] || : > "$S58_STATE/status_case"
   if [ "$target_state" = "present" ]; then
     : > "$S58_STATE/plugin"
   fi
@@ -3314,17 +3361,18 @@ for target_state in present absent; do
       bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
   )" && RUN_STATUS=0 || RUN_STATUS=$?
   assert_eq "same-name plugin does not block ${target_state} target uninstall" "$RUN_STATUS" "0"
-  assert_no_file "target registration is gone (${target_state})" "$S58_STATE/plugin"
   assert_no_file "target marketplace registration is gone (${target_state})" "$S58_STATE/marketplace"
   assert_no_file "target marketplace directory is removed (${target_state})" "$S58_MARKET"
   assert_file "other marketplace's plugin is kept (${target_state})" "$S58_STATE/other_plugin"
   assert_file "deregistration-only mode keeps the binary (${target_state})" "$S58_HOME/.local/bin/tokenless"
   if [ "$target_state" = "present" ]; then
+    assert_no_file "target registration is gone (${target_state})" "$S58_STATE/plugin"
     assert_eq "only the exact target is removed" "$(cat "$S58_STATE/plugin_remove_calls")" \
       "tokenless@anolisa-tokenless"
   else
     assert_no_file "other plugin alone does not trigger removal" "$S58_STATE/plugin_remove_calls"
   fi
+done
 done
 done
 
@@ -3385,5 +3433,124 @@ for listing_style in qualified bare; do
   assert_eq "refusal still targets the full id (${listing_style})" \
     "$(cat "$S60_STATE/plugin_remove_calls")" "tokenless@anolisa-tokenless"
 done
+
+# =============================================================================
+# Scenario 61 — unknown bare-row ownership must preserve receipt and resources
+# =============================================================================
+for header in no_section quoted_section colon_section trailing_section; do
+  scenario="codex-unknown-${header}"
+  run_script "$INSTALL_SH" "$scenario" "TOKENLESS_VERSION=$FAKE_VERSION"
+  assert_eq "unknown-row fixture installs (${header})" "$RUN_STATUS" "0"
+  S61_HOME="$TEST_DIR/$scenario/home"
+  S61_ADAPTERS="$S61_HOME/.local/share/anolisa/adapters/tokenless"
+  cp -R "$TOKENLESS_ROOT/adapters/tokenless/codex" "$S61_ADAPTERS/codex"
+  S61_STATE="$S61_HOME/.codex-stub"
+  S61_MARKET="$S61_HOME/.local/share/anolisa/codex-marketplace"
+  mkdir -p "$S61_STATE" "$S61_MARKET/tokenless"
+  : > "$S61_STATE/marketplace"
+  : > "$S61_STATE/plugin"
+  : > "$S61_STATE/bare_names"
+  : > "$S61_STATE/$header"
+  run_script "$UNINSTALL_SH" "$scenario" "CODEX_STUB_PLUGIN_REMOVE_FAILS=1"
+  assert_eq "unknown active bare row cannot report success (${header})" "$RUN_STATUS" "1"
+  assert_contains "diagnostic shows the ambiguous or surviving row (${header})" "$RUN_OUTPUT" "tokenless  installed, enabled"
+  assert_contains "diagnostic asks to inspect the listing (${header})" "$RUN_OUTPUT" "codex plugin list"
+  assert_file "unknown registration survives (${header})" "$S61_STATE/plugin"
+  assert_file "unknown registration keeps receipt (${header})" "$(receipt_of "$scenario")"
+  assert_file "unknown registration keeps adapter (${header})" "$S61_ADAPTERS/codex/scripts/uninstall.sh"
+  assert_file "unknown registration keeps marketplace resources (${header})" "$S61_MARKET"
+  assert_file "unknown registration keeps marketplace registration (${header})" "$S61_STATE/marketplace"
+  assert_eq "unknown-row retry still uses qualified id (${header})" "$(cat "$S61_STATE/plugin_remove_calls")" "tokenless@anolisa-tokenless"
+  # A confirmed terminal row needs no ownership guess and may be cleaned up.
+  rm "$S61_STATE/plugin"
+  : > "$S61_STATE/status_comma"
+  run_script "$UNINSTALL_SH" "$scenario"
+  assert_eq "unknown terminal bare row can finish (${header})" "$RUN_STATUS" "0"
+  assert_no_file "terminal bare row allows receipt cleanup (${header})" "$(receipt_of "$scenario")"
+done
+
+# =============================================================================
+# Scenario 62 — a near-terminal status is still an active registration
+# =============================================================================
+S62_HOME="$TEST_DIR/codex-status-suffix/home"
+S62_STATE="$S62_HOME/.codex-stub"
+S62_MARKET="$S62_HOME/.local/share/anolisa/codex-marketplace"
+mkdir -p "$S62_STATE" "$S62_MARKET/tokenless"
+: > "$S62_STATE/marketplace"
+: > "$S62_STATE/status_suffix"
+RUN_OUTPUT="$(
+  env -i PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$S62_HOME" \
+    SHELL=/bin/bash TOKENLESS_DEREGISTER_ONLY=1 \
+    bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "installed-ish does not count as confirmed absent" "$RUN_STATUS" "1"
+assert_file "near-terminal registration keeps marketplace resources" "$S62_MARKET"
+assert_eq "near-terminal status attempts exact-id removal" "$(cat "$S62_STATE/plugin_remove_calls")" "tokenless@anolisa-tokenless"
+
+# =============================================================================
+# Scenario 63 — own heading aliases work independently of section ordering
+# =============================================================================
+# shellcheck source=../adapters/tokenless/codex/scripts/_common.sh
+source "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/_common.sh"
+for header in annotated cached display path dash uppercase plural unreadable quoted-display-annotation square-annotation dash-annotation counter-annotation home-relative home-relative-slash; do
+for order in own-first external-first; do
+for refusal in 0 1; do
+  S63_HOME="$TEST_DIR/codex-own-${header}-${order}-${refusal}/home"
+  S63_STATE="$S63_HOME/.codex-stub"
+  S63_MARKET="$S63_HOME/.local/share/anolisa/codex-marketplace"
+  mkdir -p "$S63_STATE" "$S63_MARKET/tokenless"
+  for flag in marketplace plugin other_plugin bare_names; do : > "$S63_STATE/$flag"; done
+  [ "$order" != "external-first" ] || : > "$S63_STATE/external_first"
+  case "$header" in
+    annotated) printf 'Marketplace anolisa-tokenless (local)\n' ;;
+    cached) printf 'Marketplace anolisa-tokenless (cached)\n' ;;
+    plural) printf 'Marketplaces: anolisa-tokenless\n' ;;
+    unreadable) printf 'MARKETPLACE `\n' ;;
+    display) printf 'Marketplace `%s`\n' "$MARKETPLACE_DISPLAY_NAME" ;;
+    quoted-display-annotation) printf 'Marketplace `%s (local)`\n' "$MARKETPLACE_DISPLAY_NAME" ;;
+    square-annotation) printf 'Marketplace %s [local]\n' "$MARKETPLACE_NAME" ;;
+    dash-annotation) printf 'Marketplace %s - local\n' "$MARKETPLACE_NAME" ;;
+    counter-annotation) printf 'Marketplace %s 2>/2\n' "$MARKETPLACE_NAME" ;;
+    home-relative) printf 'Marketplace ~/.local/share/anolisa/codex-marketplace\n' ;;
+    home-relative-slash) printf 'Marketplace ~/.local/share/anolisa/codex-marketplace/\n' ;;
+    path) printf 'Marketplace `%s`\n' "$S63_MARKET" ;;
+    dash) printf 'Marketplace - anolisa-tokenless\n' ;;
+    uppercase) printf 'MARKETPLACE `anolisa-tokenless`\n' ;;
+  esac > "$S63_STATE/own_header"
+  RUN_OUTPUT="$(
+    env -i PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$S63_HOME" \
+      SHELL=/bin/bash TOKENLESS_DEREGISTER_ONLY=1 CODEX_STUB_PLUGIN_REMOVE_FAILS="$refusal" \
+      bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
+  )" && RUN_STATUS=0 || RUN_STATUS=$?
+  assert_eq "own heading ${header}/${order} returns removal outcome" "$RUN_STATUS" "$refusal"
+  assert_file "own heading keeps external bare plugin" "$S63_STATE/other_plugin"
+  assert_eq "own heading uses qualified removal" "$(cat "$S63_STATE/plugin_remove_calls")" "tokenless@anolisa-tokenless"
+  if [ "$refusal" = 1 ]; then
+    assert_file "own heading refuses marketplace cleanup" "$S63_MARKET"
+    assert_file "own heading keeps marketplace registration" "$S63_STATE/marketplace"
+  else
+    assert_no_file "own heading confirms plugin removal" "$S63_STATE/plugin"
+    assert_no_file "own heading permits marketplace cleanup" "$S63_MARKET"
+  fi
+done
+done
+done
+
+# =============================================================================
+# Scenario 64 — the installed manifest uses the shared marketplace metadata
+# =============================================================================
+S64_HOME="$TEST_DIR/codex-market-metadata/home"
+mkdir -p "$S64_HOME/.local/bin"
+printf '#!/bin/sh\necho tokenless-fixture\n' > "$S64_HOME/.local/bin/tokenless"
+chmod +x "$S64_HOME/.local/bin/tokenless"
+RUN_OUTPUT="$(
+  env -i PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$S64_HOME" \
+    SHELL=/bin/bash \
+    bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/install.sh" 2>&1
+)" && RUN_STATUS=0 || RUN_STATUS=$?
+assert_eq "codex adapter metadata install succeeds" "$RUN_STATUS" "0"
+S64_MANIFEST="$(cat "$S64_HOME/.local/share/anolisa/codex-marketplace/.agents/plugins/marketplace.json")"
+assert_contains "installed marketplace has the shared registered name" "$S64_MANIFEST" "\"name\": \"$MARKETPLACE_NAME\""
+assert_contains "installed marketplace has the shared display name" "$S64_MANIFEST" "\"displayName\": \"$MARKETPLACE_DISPLAY_NAME\""
 
 echo "install-script test passed"
