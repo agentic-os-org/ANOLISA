@@ -311,6 +311,11 @@ context/project-overview.md
     └── git/                         # bare git 镜像（启用 git 后才有）
 ```
 
+恢复备份保存在 `trash/<UTC>-<snapshot id>[~N]/`，用 `~N` 后缀避免复用已有备份。
+如果 trash 不可用，每次恢复会把旧目录树分别保留在
+`.anolisa/.<snapshot id>.rollback.entries[~N]/` 中。这些恢复副本会一直保留，
+由操作者确认恢复数据后显式清理；旧版本遗留的 rollback 条目保持不变。
+
 会话目录（tmpfs，权限 0700）：
 
 ```

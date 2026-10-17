@@ -323,6 +323,13 @@ Namespace layout:
     └── git/                         # bare git mirror (when git enabled)
 ```
 
+Restore backups use `trash/<UTC>-<snapshot id>[~N]/`; a `~N` suffix avoids
+reusing an existing backup. If trash is unavailable, each restore retains its
+displaced tree in a separate `.anolisa/.<snapshot id>.rollback.entries[~N]/`
+directory. These recovery copies are kept until an operator explicitly removes
+them after verifying the restored data. Older stranded rollback entries are
+left untouched.
+
 Session dir (tmpfs, 0700):
 
 ```
