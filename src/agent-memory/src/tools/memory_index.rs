@@ -15,10 +15,14 @@
 //! and truncated when limits are reached. Run `mem_index_refresh` after
 //! bulk writes to rebuild the index.
 
+use std::os::fd::AsFd;
+use std::path::Path;
+
 use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 const INDEX_FILE: &str = "MEMORY.md";
@@ -136,6 +140,20 @@ pub fn build_index(svc: &MemoryService) -> Result<Vec<IndexEntry>> {
     Ok(entries)
 }
 
+/// Read the current MEMORY.md through the sandboxed `safe_fs` path.
+///
+/// Returns `None` when the index does not exist yet. A symlinked
+/// `MEMORY.md` is refused rather than followed, so content from outside
+/// the mount can never be pulled into the index (and, from there, echoed
+/// back into a file the agent can read).
+fn read_index(svc: &MemoryService) -> Result<Option<String>> {
+    match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), Path::new(INDEX_FILE)) {
+        Ok(content) => Ok(Some(content)),
+        Err(MemoryError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Write the index to MEMORY.md with capacity protection.
 pub fn write_index(svc: &MemoryService, entries: &[IndexEntry]) -> Result<()> {
     let mut content = String::new();
@@ -155,8 +173,25 @@ pub fn write_index(svc: &MemoryService, entries: &[IndexEntry]) -> Result<()> {
         content.push('\n');
     }
 
-    let index_path = svc.mount.root.join(INDEX_FILE);
-    std::fs::write(&index_path, &content)?;
+    // Route the write through `safe_fs` (openat2 + RESOLVE_BENEATH |
+    // RESOLVE_NO_SYMLINKS) anchored on the mount's O_PATH fd, exactly like
+    // the other memory writes. The mount root is writable by the agent, so
+    // `std::fs::write` on `<root>/MEMORY.md` would follow a planted symlink
+    // and truncate whatever it points at outside the mount — an
+    // arbitrary-file-write reachable from a plain `mem_index_refresh`.
+    // openat2 refuses the symlink instead (ELOOP → PathOutsideMount).
+    if let Err(e) = safe_fs::write(
+        svc.mount.root_fd.as_fd(),
+        Path::new(INDEX_FILE),
+        content.as_bytes(),
+    ) {
+        svc.audit_log(
+            AuditEntry::new("mem_index_refresh")
+                .path(INDEX_FILE.to_string())
+                .error(e.to_string()),
+        );
+        return Err(e);
+    }
 
     svc.audit_log(
         AuditEntry::new("mem_index_refresh")
@@ -178,13 +213,9 @@ pub fn refresh_index(svc: &MemoryService) -> Result<usize> {
 /// Update a single entry in the index (upsert).
 /// Called after memory_observe or mem_write to keep the index current.
 pub fn update_index_entry(svc: &MemoryService, entry: &IndexEntry) -> Result<()> {
-    let index_path = svc.mount.root.join(INDEX_FILE);
-
-    let mut entries = if index_path.exists() {
-        let content = std::fs::read_to_string(&index_path)?;
-        parse_index(&content)
-    } else {
-        Vec::new()
+    let mut entries = match read_index(svc)? {
+        Some(content) => parse_index(&content),
+        None => Vec::new(),
     };
 
     // Upsert: replace if path matches, otherwise append
@@ -202,13 +233,11 @@ pub fn update_index_entry(svc: &MemoryService, entry: &IndexEntry) -> Result<()>
 
 /// Remove an entry from the index by path.
 pub fn remove_index_entry(svc: &MemoryService, path: &str) -> Result<()> {
-    let index_path = svc.mount.root.join(INDEX_FILE);
+    let content = match read_index(svc)? {
+        Some(content) => content,
+        None => return Ok(()),
+    };
 
-    if !index_path.exists() {
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(&index_path)?;
     let entries: Vec<IndexEntry> = parse_index(&content)
         .into_iter()
         .filter(|e| e.path != path)
