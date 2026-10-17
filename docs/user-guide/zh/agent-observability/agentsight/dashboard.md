@@ -24,8 +24,11 @@ sudo agentsight serve --host 0.0.0.0 --port 7396
 
 | 访问方式 | 需要什么 |
 |---|---|
-| 本机访问 `http://127.0.0.1:7396` | 不需要，回环请求免认证 |
+| 本机访问 `http://127.0.0.1:7396` | 只读页面请求通常免认证；部分 API 仍需要凭据 |
 | 从其他机器访问 `http://<host>:7396` | 需要 Dashboard 令牌：URL 上带 `?token=<TOKEN>`、请求头 `Authorization: Bearer <TOKEN>`，或在登录框里输入 |
+
+已保存的 Tokenless 记录列表即使从 loopback 访问也需要 Dashboard 凭据。这项变更约束
+元数据访问；现有页面、登录流程及统计计算保持不变。
 
 ![Dashboard 登录页](../../../../images/agentsight/zh/dashboard-login.png)
 
@@ -61,7 +64,7 @@ sudo systemctl reload agentsight.service
 | 页面 | 出现条件 |
 |---|---|
 | Agent 看板、Agent 可观测、会话列表、复用标签、优化分析、Skill 指标、轨迹查看、设置 | 始终显示 |
-| Token 节省 | 装了 `tokenless`，或其统计数据库已存在 |
+| Token 节省 | 装了 `tokenless`、其统计数据库已存在，或已配置 Tokenless API |
 | 安全可观测、系统审计 | 装了 `agent-sec-core`（daemon 或 CLI 均可） |
 | 风险拦截 | 装了 `agentsight-enforcer` 或其 socket 存在 |
 
@@ -127,6 +130,11 @@ Session 资源消耗。
 
 选好时间范围后需要点**查询**；这个页面初始为空是设计如此。接入方式见
 [集成](integrations.md#tokenlesstoken-节省)。
+
+配置 `tokenless_api` 后，**查询**会先按已采集的 tool-call ID 刷新统计，再计算节省量，
+现有页面与控件保持不变。只有本次源查询返回、具有唯一关联的 `active` 记录纳入统计；
+源查询失败时显示错误，不返回旧的汇总值。即使从 loopback 访问也需要现有 AgentSight 登录。
+已保存的元数据与显式请求的完整内容仍可通过[记录 API](integrations.md#通过-api-记录统计数据)查询。
 
 **导出 CSV** 将上次成功查询后显示的会话按显示顺序下载为 `token-savings.csv`，
 包含 Session ID、Agent 名称、请求次数和 Token 指标；比例使用小数（如 `0.4` 表示 40%）。

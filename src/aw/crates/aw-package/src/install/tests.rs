@@ -43,15 +43,20 @@ fn bundle(root: &Path, names: &[&str]) -> PathBuf {
         let entries = if *name == "aw-core" {
             vec!["bin/aw".into(), "bin/aw-package".into()]
         } else if *name == "aw-provider-tokenless" {
-            ["aw-provider-tokenless", "tokenless"]
+            ["aw-provider-tokenless", "tokenless", "rtk"]
                 .iter()
                 .map(|name| format!("libexec/aw/providers/tokenless/{name}"))
                 .collect()
         } else {
-            ["aw-provider-sec-core", "agent-sec-cli", "agent-sec-daemon"]
-                .iter()
-                .map(|name| format!("libexec/aw/providers/sec-core/{name}"))
-                .collect()
+            [
+                "aw-provider-sec-core",
+                "agent-sec-cli",
+                "agent-sec-daemon",
+                "agent-sec-daemon-health",
+            ]
+            .iter()
+            .map(|name| format!("libexec/aw/providers/sec-core/{name}"))
+            .collect()
         };
         let mut files = BTreeMap::new();
         for entry in entries {
@@ -181,6 +186,7 @@ fn required_binaries_must_be_executable_but_data_may_be_read_only() {
         "libexec/aw/providers/sec-core/aw-provider-sec-core",
         "libexec/aw/providers/sec-core/agent-sec-cli",
         "libexec/aw/providers/sec-core/agent-sec-daemon",
+        "libexec/aw/providers/sec-core/agent-sec-daemon-health",
     ] {
         let f = Fixture::new();
         modify_manifest(&f.combined, |manifest| {
@@ -685,3 +691,6 @@ mod standalone;
 
 #[path = "tests/tokenless.rs"]
 mod tokenless;
+
+#[path = "tests/sec_core.rs"]
+mod sec_core;

@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn observation_only_launch_registers_two_noop_callbacks() {
+    let profile = Profile::new("unknown: keep\n");
+    let directory = profile.0.join("observe-launch");
+    fs::create_dir(&directory).unwrap();
+    let files = crate::cli::run::Artifacts(directory);
+    let mut prepared = Prepared {
+        input: LaunchInput {
+            document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":"auto"}}},
+                "execution":{"default_event_budget_ms":1000},"events":{}}}),
+            target: "hermes".into(),
+            flags: BTreeMap::new(),
+            command: aw_exec::CommandSpec {
+                program: "hermes".into(),
+                args: vec!["chat".into()],
+                cwd: profile.0.clone(),
+                environment: BTreeMap::new(),
+            },
+        },
+        profile: profile.0.clone(),
+        python: "/usr/bin/python3".into(),
+        callback_timeout: 30.0,
+    };
+    let plan = prepared
+        .configure(&LaunchContext {
+            files: &files,
+            binding_path: &profile.0.join("binding"),
+            executable: std::path::Path::new("/usr/bin/aw"),
+            steps: &[],
+        })
+        .unwrap();
+    assert_eq!(plan.readiness.unwrap().hooks, 2);
+    let launch: Value =
+        serde_json::from_slice(&fs::read(files.0.join("hermes-launch.json")).unwrap()).unwrap();
+    assert_eq!(launch["hooks"].as_array().unwrap().len(), 2);
+    for hook in launch["hooks"].as_array().unwrap() {
+        assert_eq!(hook["step"], adapter::OBSERVE_STEP);
+        assert_eq!(hook["on_error"], "report");
+        assert_eq!(hook["replace_result"], false);
+    }
+}
+
+#[test]
 fn installation_uses_the_adapter_selection_snapshot() {
     let profile = Profile::new("unknown: keep\n");
     let validator = aw_config::Validator::new().unwrap();

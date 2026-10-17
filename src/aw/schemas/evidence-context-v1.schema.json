@@ -1,0 +1,172 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subject",
+    "candidate_revision",
+    "context_revision",
+    "constraints_ref",
+    "projection_version",
+    "redaction_version",
+    "original_deadline_ns",
+    "cutoff_at_ms",
+    "limits",
+    "source_status",
+    "source_revision",
+    "gaps",
+    "evidence",
+    "contents",
+    "execution_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "aw.evidence-context/v1"
+    },
+    "subject": {
+      "$ref": "https://agentic-os.sh/schemas/aw/evidence/v1#/$defs/subject"
+    },
+    "candidate_revision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "context_revision": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "constraints_ref": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "projection_version": {
+      "const": "aw.evidence-projection/v1"
+    },
+    "redaction_version": {
+      "const": "selected-fields-no-redaction/v1"
+    },
+    "original_deadline_ns": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^[0-9]+$"
+    },
+    "cutoff_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_items",
+        "max_bytes",
+        "query_bytes",
+        "query_timeout_ms"
+      ],
+      "properties": {
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "maximum": 2097152
+        },
+        "query_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "query_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      }
+    },
+    "source_status": {
+      "enum": [
+        "not_configured",
+        "not_queried",
+        "available",
+        "unknown",
+        "unavailable"
+      ]
+    },
+    "source_revision": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gaps": {
+      "$ref": "https://agentic-os.sh/schemas/aw/evidence/v1#/$defs/gaps"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://agentic-os.sh/schemas/aw/evidence/v1"
+      },
+      "minItems": 1,
+      "maxItems": 128
+    },
+    "contents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "encoding",
+          "digest",
+          "text"
+        ],
+        "properties": {
+          "encoding": {
+            "const": "json-utf8"
+          },
+          "digest": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]+$"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 2097152
+          }
+        }
+      },
+      "minItems": 2,
+      "maxItems": 130
+    },
+    "execution_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-f]+$"
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/evidence-context/v1"
+}

@@ -74,7 +74,7 @@ print(json.dumps({{'protocol_version':2,'operation':r['operation'], 'attribution
 
 #[test]
 fn adapters_block_original_and_carry_retry_ownership_into_after() {
-    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi"] {
+    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi", "agentscope"] {
         let f = Fixture::new("suggest");
         let before = f.request(adapter);
         let reply = f.run(before.clone());

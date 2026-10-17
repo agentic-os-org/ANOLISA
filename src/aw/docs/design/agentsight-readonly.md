@@ -2,6 +2,10 @@
 
 [中文版](agentsight-readonly_zh.md)
 
+The subsequent [evidence/context layer](evidence-context.md) composes this
+connector with admitted native identity; the diagnostic command remains
+unassociated and independent.
+
 ## Scope and sequence
 
 This implements [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621),

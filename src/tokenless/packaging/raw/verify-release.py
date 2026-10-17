@@ -161,10 +161,18 @@ def _verify_requirements_references(relative: str, expected: str, text: str) -> 
     version verbatim, so a normalized tag path would point installers at a
     tag the workflow never creates, while a wheel filename that keeps the
     unnormalized spelling is a form pip refuses to install and would break
-    `qwenpaw plugin install` on every host.
+    `qwenpaw plugin install` on every host. The producer side of the pair is
+    the Makefile rule that stamps adapters/tokenless/qwenpaw/requirements.txt
+    through packaging/raw/wheel-version.py.
     """
-    if "@VERSION@" in text:
-        raise SystemExit(f"ERROR: {relative} is not stamped: @VERSION@ remains")
+    # The template carries two placeholders -- @VERSION@ for the tag path and
+    # @WHEEL_VERSION@ for the filenames -- so report any surviving stamp
+    # marker instead of only the one this gate used to know about.
+    placeholders = sorted(set(re.findall(r"@[A-Z0-9_]+@", text)))
+    if placeholders:
+        raise SystemExit(
+            f"ERROR: {relative} is not stamped: {', '.join(placeholders)} remains"
+        )
     path_versions = set(re.findall(r"/tokenless/v([^/]+)/", text))
     wheel_versions = _referenced_wheel_versions(text)
     normalized = _normalize_pep440(expected)

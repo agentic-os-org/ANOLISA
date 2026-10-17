@@ -104,6 +104,12 @@ impl LoopDetector {
     /// `recent_calls` should be ordered oldest-first (ascending by timestamp).
     /// The current call being processed should already be included as the last element.
     ///
+    /// `None` means the caller could not read the window at all, which is not
+    /// the same as an empty one: every rule below treats a short window as "too
+    /// few repetitions to be a loop", so judging an unreadable window would
+    /// answer "no loop" for a conversation that may well have one. A failed
+    /// read never fires.
+    ///
     /// A rule whose repeat threshold is `0` is disabled and never fires.
     ///
     /// Returns `Some(InterruptionEvent)` if a loop is detected.
@@ -114,8 +120,9 @@ impl LoopDetector {
         agent_name: Option<&str>,
         pid: Option<i32>,
         occurred_at_ns: i64,
-        recent_calls: &[RecentCallSummary],
+        recent_calls: Option<&[RecentCallSummary]>,
     ) -> Option<InterruptionEvent> {
+        let recent_calls = recent_calls?;
         let min_threshold = self
             .config
             .tool_sequence_repeat_threshold
@@ -458,7 +465,7 @@ mod tests {
             make_call(vec!["read_file"], "some output", 100),
             make_call(vec!["read_file"], "some output", 200),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_none());
     }
 
@@ -478,7 +485,7 @@ mod tests {
             Some("agent"),
             Some(123),
             1000,
-            &calls,
+            Some(&calls),
         );
         assert!(result.is_some());
         let event = result.unwrap();
@@ -498,7 +505,7 @@ mod tests {
             make_call(vec!["write_file"], "output b", 200),
             make_call(vec!["read_file", "search"], "output c", 300),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         // Rule 1 won't trigger (sequences differ), Rule 2/3 also won't trigger
         assert!(result.is_none());
     }
@@ -526,7 +533,7 @@ mod tests {
                 )
             })
             .collect();
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(
             result.is_none(),
             "different arguments must not count as repetition"
@@ -547,7 +554,7 @@ mod tests {
                 )
             })
             .collect();
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_some());
         let event = result.unwrap();
         let detail: serde_json::Value =
@@ -575,7 +582,7 @@ mod tests {
                 }
             })
             .collect();
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_none());
     }
 
@@ -616,7 +623,7 @@ mod tests {
             Some("agent"),
             Some(123),
             1000,
-            &calls,
+            Some(&calls),
         );
         // Rule 1 should trigger: 5 tool-bearing calls all have ["read_file"]
         assert!(result.is_some());
@@ -647,7 +654,7 @@ mod tests {
                 300,
             ),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_some());
         let event = result.unwrap();
         let detail: serde_json::Value =
@@ -663,7 +670,7 @@ mod tests {
             make_call(vec![], "totally unrelated text beta gamma", 200),
             make_call(vec![], "yet another unique response delta", 300),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_none());
     }
 
@@ -679,7 +686,7 @@ mod tests {
             make_call(vec![], output, 2000),
             make_call(vec![], output, 3000),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_some());
         let event = result.unwrap();
         let detail: serde_json::Value =
@@ -704,7 +711,7 @@ mod tests {
             make_call(vec![], output, 2000), // decreasing
             make_call(vec![], output, 1000), // decreasing
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         // Neither rule fires: thresholds raised, tokens not increasing
         assert!(result.is_none());
     }
@@ -733,7 +740,7 @@ mod tests {
             Some("agent"),
             Some(123),
             1000,
-            &calls,
+            Some(&calls),
         );
         assert!(result.is_some());
         let event = result.unwrap();
@@ -760,7 +767,7 @@ mod tests {
             make_call(vec!["read_file"], "", 18200),
             make_call(vec!["read_file"], "", 18400),
         ];
-        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         // No text output → Rule 3 can't trigger, Rule 1 threshold raised → nothing fires
         assert!(result.is_none());
     }
@@ -780,7 +787,7 @@ mod tests {
         });
         assert!(
             detector
-                .detect("conv-1", None, None, None, 1000, &calls)
+                .detect("conv-1", None, None, None, 1000, Some(&calls))
                 .is_none(),
             "zero tool-sequence threshold must disable rule 1"
         );
@@ -791,7 +798,7 @@ mod tests {
         });
         assert!(
             detector
-                .detect("conv-1", None, None, None, 1000, &calls)
+                .detect("conv-1", None, None, None, 1000, Some(&calls))
                 .is_none(),
             "zero output-repeat threshold must disable rules 2 and 3"
         );
@@ -873,5 +880,32 @@ mod tests {
 
         // A budget smaller than the marker keeps the bound.
         assert_eq!(truncate_str("abcdef", 2).chars().count(), 2);
+    }
+
+    /// A window the caller could not read must not be judged: every rule above
+    /// reads a short window as "too few repetitions to be a loop", so `None`
+    /// would answer "no loop" for a conversation that may well have one
+    /// (#7145). The same window that fires when it was read must stay silent
+    /// when it was not.
+    #[test]
+    fn test_unreadable_window_is_not_judged() {
+        let detector = LoopDetector::default();
+        let calls = vec![
+            make_call(vec!["read_file", "search"], "output a", 100),
+            make_call(vec!["read_file", "search"], "output b", 200),
+            make_call(vec!["read_file", "search"], "output c", 300),
+            make_call(vec!["read_file", "search"], "output d", 400),
+            make_call(vec!["read_file", "search"], "output e", 500),
+        ];
+        assert!(
+            detector
+                .detect("conv-1", None, None, None, 1000, Some(&calls))
+                .is_some()
+        );
+        assert!(
+            detector
+                .detect("conv-1", None, None, None, 1000, None)
+                .is_none()
+        );
     }
 }

@@ -121,9 +121,17 @@ pub struct SysomRequest {
 /// A single tool-use item in the SysOM response (array format, differs from OpenAI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomToolUseItem {
+    /// Provider-assigned position. Providers may omit it entirely — the array
+    /// position is then the index — and the aggregation below keeps the calls
+    /// in array order, so an absent index must not fail the frame.
+    #[serde(default)]
     pub index: u32,
+    #[serde(default)]
     pub id: String,
-    #[serde(rename = "type")]
+    /// Item kind. Providers may leave it out and nothing here reads it; the
+    /// call is identified by its function, so an absent kind must not fail the
+    /// frame.
+    #[serde(default, rename = "type")]
     pub item_type: String,
     pub function: SysomFunction,
 }
@@ -134,11 +142,24 @@ pub struct SysomResponseChoice {
     pub message: SysomResponseMessage,
 }
 
+/// Read a string field the provider may send as an explicit `null`.
+///
+/// Absent, `null` and empty all mean "this frame carries no snapshot" in the
+/// cumulative SysOM frames: the provider stops repeating the text once the
+/// answer switches to tool calls. A `null` must not fail the frame that
+/// carries the call, the way it does not fail the SysOM client's own reader.
+fn null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// The message part of a SysOM response choice
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponseMessage {
     /// Text content of the response
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub content: String,
 
     /// Tool calls in the response (`tool_use` array, NOT `tool_calls`)
@@ -437,5 +458,107 @@ mod tests {
     fn test_parse_response_data_envelope_with_invalid_inner_json_is_none() {
         let body = serde_json::json!({ "data": "not json" });
         assert!(SysomParser::parse_response(&body).is_none());
+    }
+
+    /// A provider may stop repeating the text snapshot once a frame carries
+    /// streaming tool calls, so the frame that first shows a call can send
+    /// `content: null`. Failing that frame used to drop the call it carried
+    /// while keeping the older text snapshot.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_call_from_a_null_content_frame() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "Let me check.", "tool_use": null}}]},
+            {"choices": [{"message": {"content": null, "tool_use": [{
+                "index": 0,
+                "id": "call_abc123",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        assert_eq!(resp.choices[0].message.content, "Let me check.");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("the frame's tool call must be kept");
+        assert_eq!(tool_use[0].id, "call_abc123");
+        assert_eq!(tool_use[0].function.name, "read_file");
+    }
+
+    /// The same frame shape reaches the non-streaming paths (a direct
+    /// `choices` object or the `data` envelope), where a null content used to
+    /// lose the whole response.
+    #[test]
+    fn test_parse_response_keeps_a_call_from_a_null_content_message() {
+        let inner = serde_json::json!({
+            "id": "chatcmpl-ns-2",
+            "choices": [{"message": {"content": null, "tool_use": [{
+                "index": 0,
+                "id": "call_abc123",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]
+        });
+
+        for body in [
+            inner.clone(),
+            serde_json::json!({ "data": inner.to_string() }),
+        ] {
+            let resp = SysomParser::parse_response(&body)
+                .unwrap_or_else(|| panic!("{body}: the response must parse"));
+            let tool_use = resp.choices[0]
+                .message
+                .tool_use
+                .as_ref()
+                .unwrap_or_else(|| panic!("{body}: the tool call must be kept"));
+            assert_eq!(tool_use[0].id, "call_abc123");
+        }
+    }
+
+    /// A provider may omit `index` from its tool_use entries entirely, in
+    /// which case the array position is the index. The frame used to fail to
+    /// parse, so a provider that never sends the key recorded no call at all.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_an_index() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "id": "call_no_index",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an index must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_index");
+        assert_eq!(tool_use[0].function.name, "read_file");
+    }
+
+    /// A tool_use entry may leave out the item `type`: the SysOM client reads
+    /// only index, id and function from an entry. Requiring it dropped the
+    /// call the frame carried.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_a_type() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "index": 0,
+                "id": "call_no_type",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an item type must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_type");
     }
 }

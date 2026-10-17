@@ -2,6 +2,9 @@
 
 [English](agentsight-readonly.md)
 
+后续[证据/上下文层](evidence-context_zh.md) 将连接器与已准入原生身份组合；
+诊断命令仍独立运行，关联状态保持 unassociated。
+
 ## 范围与交付顺序
 
 本文对应 [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621)，是
