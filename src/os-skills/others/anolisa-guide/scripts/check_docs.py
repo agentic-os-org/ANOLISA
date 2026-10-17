@@ -24,6 +24,8 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from env_probe import dependencies_ready
+
 
 # 配置
 MAX_DAYS = 7  # 最大允许天数
@@ -107,19 +109,7 @@ def get_venv_python() -> Path:
 
 def check_venv() -> bool:
     """检查虚拟环境是否存在且依赖已安装"""
-    venv_python = get_venv_python()
-    if not venv_python.exists():
-        return False
-    
-    try:
-        result = subprocess.run(
-            [str(venv_python), "-c", "import requests, bs4, markdownify"],
-            capture_output=True,
-            timeout=5
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return dependencies_ready(get_venv_python())
 
 
 def ensure_venv() -> Path | None:
