@@ -220,11 +220,11 @@
       "mode": "automated",
       "versions": {
         "qwenpaw": "2.2.2b4",
-        "agentscope": "2.0.8"
+        "agentscope": "2.0.9"
       },
       "requirements": [
         "qwenpaw==2.2.2b4",
-        "agentscope==2.0.8"
+        "agentscope==2.0.9"
       ],
       "boundary": "Pinned native AgentScope middleware and plugin registration; QwenPaw App/API startup and model turns remain manual.",
       "cases": [

@@ -44,7 +44,7 @@ in the sec-core guide; `aw inspect` remains unchanged and does not probe the bac
 | Qoder CLI | Native command Hook contract; detected version recorded | Interactive or print |
 | OpenClaw | 2026.9.6 | A new Gateway |
 | AgentScope SDK | 2.0.6 | Explicit public factory in one foreground Python worker |
-| QwenPaw / AgentScope | 2.2.2b4 / 2.0.8 | App/API |
+| QwenPaw / AgentScope | 2.2.2b4 / 2.0.9 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | Public SDK factory in an AW-owned foreground Node worker |
 | Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | Foreground Python worker using its public AW client factory |
