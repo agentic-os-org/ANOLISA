@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(target_os = "linux")]
-use crate::support::terminal_screen::TerminalSession;
+use crate::support::terminal_screen::{zsh_available_in_screen_path, TerminalSession};
 use ratatui::text::Span;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -414,7 +414,7 @@ fn raw_cli_upgrade_notice_skips_the_session_after_custom_accept_line_typeahead()
 fn raw_cli_upgrade_notice_skips_the_zsh_session_after_typed_input() {
     // Ordinary zsh keystrokes typed before Enter are zero-count writes, which
     // byte counting cannot tell apart from a custom accept-line widget.
-    if Command::new("zsh").arg("--version").output().is_err() {
+    if !zsh_available_in_screen_path() {
         return;
     }
     let mut session = spawn_with_gated_upgrade_probe_for_shell("zsh", &[]);
@@ -443,7 +443,7 @@ fn raw_cli_upgrade_notice_skips_the_zsh_session_after_typed_input() {
 fn raw_cli_upgrade_notice_skips_the_session_after_zsh_bindkey_typeahead() {
     // ZLE `bindkey` submissions are as invisible to byte counting as Readline
     // `bind` ones. `^T` is no ZLE prefix, so every queued command runs.
-    if Command::new("zsh").arg("--version").output().is_err() {
+    if !zsh_available_in_screen_path() {
         return;
     }
     let zshrc = "PROMPT='screen$ '\nRPROMPT=''\nbindkey -e\nbindkey '^T' accept-line\n";
