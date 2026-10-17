@@ -81,8 +81,9 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 # -- manifests (osbase) --
 # NOTE: data files under %{_datadir_anolisa} are intentionally NOT installed.
 # Component manifests are downloaded from the distribution backend at install
-# time and the CLI fetches + caches the distribution index from the mirror at
-# runtime, so a datadir copy of either would never be read. Re-enable the
+# time and the raw backend re-fetches the distribution index from the mirror
+# on every resolve, so a datadir copy of either would never be read. Re-enable
+# the
 # block below if you need to bundle the osbase manifests into the RPM.
 #install -d %{buildroot}%{_datadir_anolisa}/manifests/osbase
 #cp -pR manifests/osbase/. %{buildroot}%{_datadir_anolisa}/manifests/osbase/
