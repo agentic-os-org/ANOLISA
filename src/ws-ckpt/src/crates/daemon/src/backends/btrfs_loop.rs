@@ -172,6 +172,8 @@ impl StorageBackend for BtrfsLoopBackend {
         let subvol_path = self.mount_path.join(ws_id);
         let snap_dir = self.snapshots_dir.join(ws_id);
 
+        // Admit before any init side effect (#7234).
+        btrfs_common::ensure_create_allowed(&self.mount_path).await?;
         let mut backup_owned = false;
         if let Err(e) = self
             .do_init_storage(
@@ -206,6 +208,7 @@ impl StorageBackend for BtrfsLoopBackend {
         btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let ws_subvol = self.mount_path.join(ws_id);
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
+        btrfs_common::ensure_create_allowed(&self.mount_path).await?;
         btrfs_common::create_snapshot(&ws_subvol, &snap_path, true).await
     }
 
@@ -225,6 +228,9 @@ impl StorageBackend for BtrfsLoopBackend {
 
         // Warmup snapshot metadata cache
         btrfs_common::warmup_snapshot_metadata(&snap_path).await;
+
+        // Admit the writable snapshot before moving the workspace aside (#7234).
+        btrfs_common::ensure_create_allowed(&self.mount_path).await?;
 
         // Move current workspace aside
         tokio::fs::rename(&ws_path, &tmp_path).await?;
@@ -418,6 +424,7 @@ impl StorageBackend for BtrfsLoopBackend {
         btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         let new_ws_path = self.mount_path.join(new_ws_id);
+        btrfs_common::ensure_create_allowed(&self.mount_path).await?;
         btrfs_common::create_snapshot(&snap_path, &new_ws_path, false).await
     }
 

@@ -466,10 +466,15 @@ struct FilesystemUsage {
 }
 
 impl FilesystemUsage {
-    fn deletion_risk(&self) -> SpaceRisk {
-        if self.malformed_usage
+    fn is_unreadable(&self) -> bool {
+        self.total == 0
+            || self.malformed_usage
             || self.malformed_metadata_profile
             || self.metadata_profiles.is_empty()
+    }
+
+    fn deletion_risk(&self) -> SpaceRisk {
+        if self.is_unreadable()
             || self
                 .metadata_profiles
                 .iter()
@@ -529,6 +534,41 @@ pub async fn assess_space_risk(fs_root: &Path) -> SpaceRisk {
             SpaceRisk::High
         }
     }
+}
+
+/// Admit one subvolume creation on `fs_root` (#7234). Refuses when deletion
+/// would already be guarded (High) or usage cannot be read: new subvolumes
+/// there feed the metadata pressure the guarded delete is trying to relieve.
+pub async fn ensure_create_allowed(fs_root: &Path) -> Result<()> {
+    let usage = get_filesystem_usage_details(fs_root)
+        .await
+        .with_context(|| {
+            format!(
+                "refusing to create subvolume: cannot assess backend usage at {}",
+                fs_root.display()
+            )
+        })?;
+    ensure_usage_allows_create(fs_root, &usage)
+}
+
+fn ensure_usage_allows_create(fs_root: &Path, usage: &FilesystemUsage) -> Result<()> {
+    if usage.is_unreadable() {
+        bail!(
+            "refusing to create subvolume: backend usage at {} is unreadable; check the output of \
+             `btrfs filesystem usage -b {}` and retry",
+            fs_root.display(),
+            fs_root.display()
+        );
+    }
+    if usage.deletion_risk() == SpaceRisk::High {
+        bail!(
+            "refusing to create subvolume: backend {} data or metadata usage is at/above {:.0}%; \
+             delete old checkpoints and retry once space is reclaimed",
+            fs_root.display(),
+            FS_DELETE_GUARD_THRESHOLD_PERCENT
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the btrfs subvolume (root) id of `path` via
@@ -2953,6 +2993,12 @@ Metadata,DUP: Size: 1000, Used: 949
         let usage = parse_filesystem_usage_details(output).unwrap();
         assert!(usage.metadata_profiles.is_empty());
         assert_eq!(usage.deletion_risk(), SpaceRisk::High);
+        let error = ensure_usage_allows_create(Path::new("/mnt/test"), &usage)
+            .expect_err("unreadable usage must refuse creation");
+        let message = format!("{error:#}");
+        assert!(message.contains("backend usage at /mnt/test is unreadable"));
+        assert!(message.contains("btrfs filesystem usage -b /mnt/test"));
+        assert!(!message.contains("at/above"));
     }
 
     #[test]
@@ -2964,6 +3010,11 @@ Metadata,DUP: Size: 1000, Used: 950
 "#;
         let usage = parse_filesystem_usage_details(output).unwrap();
         assert_eq!(usage.deletion_risk(), SpaceRisk::High);
+        let error = ensure_usage_allows_create(Path::new("/mnt/test"), &usage)
+            .expect_err("high usage must refuse creation");
+        let message = format!("{error:#}");
+        assert!(message.contains("data or metadata usage is at/above 95%"));
+        assert!(!message.contains("unreadable"));
     }
 
     #[test]
@@ -4017,7 +4068,8 @@ proc /proc proc rw 0 0
             .expect("write change");
 
         let shim = BtrfsShim::install(None, false);
-        diff_against_live(&snap, &src, &mount, &mount)
+        let tmp_dir = mount.join(DIFF_TMP_DIR_NAME).join("test-diff-risk-src");
+        diff_against_live(&snap, &src, &tmp_dir, &mount)
             .await
             .expect("diff against live");
         let calls = shim.calls();
@@ -4073,6 +4125,24 @@ proc /proc proc rw 0 0
         );
         drop(shim);
         assert!(wait_clean_baseline(&mount).await, "baseline not restored");
+    }
+
+    /// #7234: a FAILED usage probe must refuse creation, like it guards deletion.
+    #[tokio::test]
+    #[ignore = "requires root + btrfs filesystem"]
+    async fn create_admission_refuses_when_usage_probe_fails() {
+        let _test_guard = lock_real_btrfs_test().await;
+        let mount = PathBuf::from("/mnt/btrfs-workspace");
+        ensure_create_allowed(&mount)
+            .await
+            .expect("baseline admits creation");
+
+        let shim = BtrfsShim::install(None, true);
+        let err = ensure_create_allowed(&mount)
+            .await
+            .expect_err("usage probe failure must refuse creation");
+        assert!(format!("{err:#}").contains("refusing to create subvolume"));
+        drop(shim);
     }
 
     /// Review P1-2: a FAILED usage probe must fail CLOSED — the delete goes
