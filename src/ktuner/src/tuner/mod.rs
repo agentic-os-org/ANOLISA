@@ -1699,8 +1699,14 @@ fn render_persistence(
             // A slash as the first separator makes sysctl.d preserve literal
             // dots. Derive dotted-interface keys from the recorded proc path,
             // or systemd would interpret Br0.100 as two directories.
-            let key = entry
-                .path
+            // A record written under the pre-5448 blanket translation of a
+            // dotted interface keeps a path with no literal dot, which this
+            // derivation cannot tell from a dot-free interface: it would fall
+            // back to the dotted spelling and systemd would split the
+            // interface at its dot. Read the path the name resolves to now,
+            // as the merge, the preview and the restore already do.
+            let resolved = resolved_entry_path(param, entry);
+            let key = resolved
                 .strip_prefix("/proc/sys/")
                 .filter(|path| net_iface_path(param).is_some() && path.contains('.'))
                 .map(str::to_string)
@@ -3590,6 +3596,39 @@ mod tests {
                 assert!(script.is_none());
             }
         }
+    }
+
+    #[test]
+    fn persistence_renders_a_stale_record_under_its_current_spelling() {
+        // A pre-5448 ledger records the blanket dot-to-slash translation of a
+        // dotted interface, so the recorded path carries no dot at all. The
+        // sysctl.d key reads the literal dot a dotted interface needs from
+        // that recorded proc path, so a stale record fell through to the
+        // dotted spelling -- the form systemd splits at every dot, addressing
+        // .../conf/Br0/100/forwarding -- and the boot replay never matched the
+        // file the name resolves to. The merge, the preview and the restore
+        // already adopt the current path.
+        let param = "net.ipv4.conf.Br0.100.forwarding";
+        let entries = BTreeMap::from([(
+            param.to_string(),
+            RollbackEntry {
+                previous: "0".into(),
+                applied: "1".into(),
+                path: "/proc/sys/net/ipv4/conf/Br0/100/forwarding".into(),
+                category: None,
+            },
+        )]);
+        let (config, script) = render_persistence(&entries);
+        let config = config.unwrap();
+        assert!(
+            config.contains("net/ipv4/conf/Br0.100/forwarding = 1"),
+            "the boot replay must keep the interface's literal dot: {config}"
+        );
+        assert!(
+            !config.contains("net.ipv4.conf.Br0.100.forwarding"),
+            "the dotted spelling addresses a different path: {config}"
+        );
+        assert!(script.is_none());
     }
 
     #[test]
