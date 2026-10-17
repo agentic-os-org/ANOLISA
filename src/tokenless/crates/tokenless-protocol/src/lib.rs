@@ -509,7 +509,7 @@ pub enum AppliedOperation {
     TabularCompaction,
     /// CSV/TSV rows were omitted behind a reference to the original text.
     TabularRowReduction,
-    /// Consecutive search records share a full path without removing source text.
+    /// Search listings share full paths or directory prefixes without dropping records.
     SearchPathSharing,
     /// Unmodified Git diff context was reduced with the original available in Stash.
     DiffReduction,
