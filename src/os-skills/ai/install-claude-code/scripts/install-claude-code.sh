@@ -10,6 +10,7 @@
 #   --config    Also write DashScope/Qwen configuration to ~/.claude/settings.json
 #               (will prompt for API key interactively, or use CLAUDE_API_KEY env var)
 #   --skip-tokenless  Skip tokenless plugin auto-installation
+#   -h, --help   Show usage without installing or configuring anything
 #
 # Installation priority:
 #   1. Native installer (curl from claude.ai)
@@ -34,15 +35,39 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # --- Flags ---
+usage() {
+  cat <<'EOF'
+Usage: bash install-claude-code.sh [--config] [--skip-tokenless] [-h|--help]
+
+Install Claude Code on Alinux 4 using the native installer, npm, or nvm.
+
+Options:
+  --config          Also write DashScope/Qwen API configuration
+  --skip-tokenless  Skip tokenless plugin auto-installation
+  -h, --help        Show this help and exit
+EOF
+}
+
 WRITE_CONFIG=false
 SKIP_TOKENLESS=false
+SHOW_HELP=false
 for arg in "$@"; do
   case "$arg" in
     --config) WRITE_CONFIG=true ;;
     --skip-tokenless) SKIP_TOKENLESS=true ;;
-    *) warn "Unknown argument: $arg" ;;
+    -h|--help) SHOW_HELP=true ;;
+    *)
+      printf 'ERROR: Unknown argument: %s\n' "$arg" >&2
+      usage >&2
+      exit 2
+      ;;
   esac
 done
+
+if [[ "$SHOW_HELP" == true ]]; then
+  usage
+  exit 0
+fi
 
 # --- Helpers ---
 command_exists() { command -v "$1" &>/dev/null; }

@@ -46,6 +46,12 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## Claude Code 安装脚本
+
+使用 `bash SKILL_DIR/scripts/install-claude-code.sh --help` 查看选项；将 `SKILL_DIR`
+替换为已安装的 `install-claude-code` 技能目录。帮助模式和无效参数会在开始安装前退出。
+详见 [安装脚本参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#claude-code-安装脚本)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

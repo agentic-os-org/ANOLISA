@@ -84,6 +84,27 @@ confirm_destructive = true
 
 ---
 
+## Claude Code Installer
+
+The `install-claude-code` skill includes a Bash installer for Alinux 4. Replace
+`SKILL_DIR` with its installed directory to inspect the supported options:
+
+```bash
+bash SKILL_DIR/scripts/install-claude-code.sh --help
+```
+
+| Option | Behavior |
+|--------|----------|
+| `-h`, `--help` | Print usage and exit 0 before installation or configuration |
+| `--config` | Also write DashScope/Qwen API configuration after installation |
+| `--skip-tokenless` | Skip tokenless plugin auto-installation |
+
+Unsupported arguments print an error and usage to stderr and exit 2 before
+installation begins, including when combined with `--help`. Valid installation
+invocations retain the native installer, npm and nvm fallback sequence.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

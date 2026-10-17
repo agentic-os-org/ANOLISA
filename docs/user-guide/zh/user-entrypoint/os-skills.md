@@ -84,6 +84,27 @@ confirm_destructive = true
 
 ---
 
+## Claude Code 安装脚本
+
+`install-claude-code` 技能提供面向 Alinux 4 的 Bash 安装脚本。将 `SKILL_DIR`
+替换为已安装的技能目录，查看支持的选项：
+
+```bash
+bash SKILL_DIR/scripts/install-claude-code.sh --help
+```
+
+| 选项 | 行为 |
+|------|------|
+| `-h`、`--help` | 显示用法，并在安装或配置前以状态码 0 退出 |
+| `--config` | 安装完成后写入 DashScope/Qwen API 配置 |
+| `--skip-tokenless` | 跳过 tokenless 插件自动安装 |
+
+不支持的参数会向 stderr 输出错误和用法，并在开始安装前以状态码 2 退出，
+与 `--help` 同时使用时也遵循此规则。有效的安装调用仍按原生安装器、npm、nvm
+的顺序尝试安装。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
