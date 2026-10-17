@@ -30,11 +30,35 @@ Sets:
 
 import json
 import os
+import stat
+import tempfile
 from pathlib import Path
 
 OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 
 _ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
+
+def write_config_atomically(config: dict, config_path: Path) -> None:
+    """Publish a complete config without truncating the current file first."""
+    target = config_path.resolve()
+    mode = stat.S_IMODE(target.stat().st_mode)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            json.dump(config, temporary_file, indent=2, ensure_ascii=False)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, target)
+    except BaseException:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
 
 
 def main() -> None:
@@ -132,9 +156,9 @@ def main() -> None:
     else:
         changes.append(f"  gateway.port: {old_port} (already configured)")
 
-    # Write back
-    with open(OPENCLAW_CONFIG, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    # Publish only after the full serialization succeeds; OpenClaw may read
+    # this file while the gateway is running.
+    write_config_atomically(config, OPENCLAW_CONFIG)
 
     print(f"Updated {OPENCLAW_CONFIG}:")
     for c in changes:
