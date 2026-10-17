@@ -258,11 +258,17 @@ write_config() {
     info "Existing settings backed up to $backup"
   fi
 
+  # Escape the key for JSON: a double quote breaks the document and a
+  # backslash forms an invalid escape. ($ and ` in the value are inserted
+  # literally by the heredoc and need no escaping.)
+  local escaped_key
+  escaped_key=$(printf '%s' "$api_key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+
   cat > "$settings_file" <<JSONEOF
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "${api_key}",
+    "ANTHROPIC_AUTH_TOKEN": "${escaped_key}",
     "ANTHROPIC_MODEL": "qwen3-coder-plus",
     "ANTHROPIC_SMALL_FAST_MODEL": "qwen3-coder-plus"
   }
