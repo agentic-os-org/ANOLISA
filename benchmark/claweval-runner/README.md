@@ -193,6 +193,7 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |
+| `scripts/compare_session_trace_tokens.py` | Compare session/trace token totals, streaming large JSONL logs without buffering whole files |
 | `scripts/generate_trial_reports.py` | Generate per-trial detailed reports |
 | `scripts/prompt_task.py` | Display the system prompt for a given task |
 | `scripts/check_api_key.py` | Test API key connectivity |
