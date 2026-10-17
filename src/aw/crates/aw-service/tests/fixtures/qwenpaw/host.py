@@ -50,7 +50,7 @@ for name, values in {
 spec = importlib.util.spec_from_file_location("fixture_plugin", plugin_path)
 plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)
-plugin.version = lambda name: "2.2.2b4" if name == "qwenpaw" else "2.0.8"
+plugin.version = lambda name: "2.2.2b4" if name == "qwenpaw" else "2.0.9"
 factories, startup = [], []
 plugin.plugin.register(SimpleNamespace(
     config={},

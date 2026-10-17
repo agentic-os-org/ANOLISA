@@ -117,18 +117,7 @@ impl Adapter for Pi {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            adapter: "pi".into(),
-            version: VERSION.into(),
-            entrypoint: "sdk".into(),
-            events: BTreeMap::from([
-                ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                (
-                    "tool.after".into(),
-                    vec!["observe".into(), "replace_result".into()],
-                ),
-            ]),
-        }
+        super::super::adapter::catalog::PI.capabilities(VERSION, "sdk")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, steps).map(|_| ())

@@ -4,7 +4,13 @@
 
 只安装 AW core 即可运行已有的 Qoder 或 OpenClaw，无需 Provider。按需添加 sec-core 或自定义布尔判断脚本，使用同一份 AW 配置。AW 和 sec-core 的构建、安装及运行使用 Rust 二进制，不依赖 Python；用户脚本自行承担其运行依赖。OpenClaw 仍需 Node.js，各 Agent 的模型账户由其原生配置管理。
 
-此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请下载已评审提交上手动运行成功的 **CI / AW Packages** 产物。PR 自动产物带 `-validation` 后缀，仅用于合并候选验收，不作为发布包分发。
+此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请从运行成功的
+**CI / AW Integration** 下载 `aw-preview-linux-x86_64-<candidate_sha>`。
+该流程每天北京时间 03:23 在 `main` 上运行；验收已评审提交或发布候选时，
+手动运行并传入该提交完整的 40 位 `candidate_sha`。使用包前，须等待包括
+**AW / Integration result** 在内的整个流程通过。日常 PR 检查不生成 Preview 包。
+手动触发方式和原生验收边界见
+[集成验收说明](../../../../src/aw/CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
 
 从源码到组件接入的连续步骤及无需后端的策略示例见
 [组件教程](../../../developer-guide/zh/aw/integration.md)。需要 QwenPaw 或 Hermes 共用

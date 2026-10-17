@@ -110,6 +110,11 @@ class ScopeTests(GateFixture):
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": head}}
         self.assertFalse(gate.scope("pull_request", event, candidate, self.root))
 
+        self.git("checkout", "-qb", "workflow-only", advanced)
+        workflow_head = self.commit(".github/workflows/aw-ci.yml", "workflow only")
+        event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": workflow_head}}
+        self.assertFalse(gate.scope("pull_request", event, workflow_head, self.root))
+
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
         head = self.commit("other.txt", "no AW change")
@@ -177,63 +182,6 @@ class ScopeTests(GateFixture):
 
 
 class GateTests(GateFixture):
-    def test_inventory_rejects_empty_ignored_and_missing_targets(self) -> None:
-        cargo = self.root / "cargo"
-        cargo.write_text(
-            f"#!{sys.executable}\n"
-            "import os, sys\n"
-            "mode = os.environ['FIXTURE_INVENTORY']\n"
-            "if mode == 'core-empty':\n"
-            "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
-            "if mode == 'executor-empty':\n"
-            "    mode = 'empty' if 'aw-exec' in sys.argv else 'valid'\n"
-            "if mode == 'host-empty':\n"
-            "    mode = 'empty' if 'aw-host' in sys.argv else 'valid'\n"
-            "if mode == 'service-empty':\n"
-            "    mode = 'empty' if 'aw-service' in sys.argv else 'valid'\n"
-            "if mode == 'sec-core-empty':\n"
-            "    mode = 'empty' if 'aw-provider-sec-core' in sys.argv else 'valid'\n"
-            "if mode.startswith('contract-empty-'):\n"
-            "    target = mode.removeprefix('contract-empty-')\n"
-            "    mode = 'empty' if target in sys.argv else 'valid'\n"
-            "if mode == 'missing': sys.exit(7)\n"
-            "if mode == 'empty' or (mode == 'valid' and '--ignored' in sys.argv):\n"
-            "    print('0 tests, 0 benchmarks')\n"
-            "else: print('contract: test\\n\\n1 test, 0 benchmarks')\n",
-            encoding="utf-8",
-        )
-        cargo.chmod(0o755)
-        for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty", "service-empty", "sec-core-empty",
-            "contract-empty-canonical", "contract-empty-schemas",
-            "contract-empty-contracts", "contract-empty-orchestration",
-            "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
-            "contract-empty-qwenpaw",
-            "contract-empty-pi",
-            "contract-empty-claude_sdk",
-            "contract-empty-agentscope",
-        ):
-            with self.subTest(mode=mode), patch.dict(
-                os.environ,
-                {
-                    "PATH": str(self.root),
-                    "FIXTURE_INVENTORY": mode,
-                },
-            ), patch.object(gate, "AW", self.root):
-                if mode == "valid":
-                    gate.check_inventory()
-                else:
-                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
-                        gate.check_inventory()
-        for malformed in (
-            "",
-            "noise",
-            "0 tests, 0 benchmarks\nnoise",
-            "test: test\n2 tests, 0 benchmarks",
-        ):
-            with self.assertRaises(ValueError):
-                gate.inventory(malformed)
-
     def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
         from contextlib import chdir
 

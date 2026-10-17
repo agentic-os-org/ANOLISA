@@ -261,8 +261,10 @@ class RegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=output) as temporary:
             root = Path(temporary)
             config = {
-                "executable": "/aw", "binding": "/binding.json",
-                "ready_path": str(root / "ready.json"), "ready_token": "token",
+                "executable": "/aw",
+                "binding": "/binding.json",
+                "ready_path": str(root / "ready.json"),
+                "ready_token": "token",
                 "hooks": [hook("tool.after", "after"), hook("tool.before", "before")],
             }
             path = root / "config.json"
@@ -310,6 +312,10 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "ready.json").read_text())["hooks"], 0)
 
     def test_wrong_runtime_or_disabled_plugin_never_registers(self):
+        incompatible = {"qwenpaw": "2.2.2b4", "agentscope": "2.0.8"}
+        with patch.object(MODULE, "version", side_effect=incompatible.__getitem__):
+            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.9"):
+                MODULE.AwPlugin().register(SimpleNamespace())
         with patch.object(MODULE, "version", return_value="wrong"), self.assertRaisesRegex(RuntimeError, "requires"):
             MODULE.AwPlugin().register(SimpleNamespace())
         with self.assertRaisesRegex(RuntimeError, "disables"):

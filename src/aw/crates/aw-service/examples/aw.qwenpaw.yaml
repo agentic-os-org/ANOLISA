@@ -1,4 +1,4 @@
-# Run with QwenPaw 2.2.2b4 and AgentScope 2.0.8.
+# Run with QwenPaw 2.2.2b4 and AgentScope 2.0.9.
 # Set QWENPAW_WORKING_DIR to an initialized native directory before launch.
 # This neutral command demonstrates hook execution, not a security policy.
 apiVersion: aw/v1alpha1

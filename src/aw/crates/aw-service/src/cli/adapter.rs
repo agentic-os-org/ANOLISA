@@ -1,5 +1,7 @@
 //! Native dialects own registration and response semantics; the launcher owns lifetimes.
 
+pub(super) mod catalog;
+
 use super::{read_file, run::Artifacts, Arguments, Exit, Result};
 use aw_exec::CommandSpec;
 use aw_provider::admission::AdmittedStep;
@@ -112,16 +114,11 @@ pub(super) trait Adapter: Sync {
 }
 
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
-    match name {
-        "pi" => Ok(&super::adapters::pi::Pi),
-        "claude-sdk" => Ok(&super::adapters::claude_sdk::ClaudeSdk),
-        "qoder" => Ok(&super::qoder::Qoder),
-        "agentscope" => Ok(&super::adapters::agentscope::AgentScope),
-        "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
-        "hermes" => Ok(&super::adapters::hermes::Hermes),
-        "openclaw" => Ok(&super::adapters::openclaw::OpenClaw),
-        _ => Err(format!("unsupported launcher adapter: {name}").into()),
-    }
+    catalog::PROFILES
+        .iter()
+        .find(|profile| profile.name == name)
+        .map(|profile| profile.adapter)
+        .ok_or_else(|| format!("unsupported launcher adapter: {name}").into())
 }
 
 pub(super) fn install(args: &Arguments) -> Result<Exit> {

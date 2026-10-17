@@ -4,7 +4,15 @@
 
 Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec-core or your own boolean policy command when needed, using one AW configuration. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
 
-This Preview is not yet published through `anolisa install` or RPM. Download artifacts from a successful manual **CI / AW Packages** run of the reviewed source commit. PR artifacts ending in `-validation` are merge-candidate checks, not distributable releases.
+This Preview is not yet published through `anolisa install` or RPM. Download
+`aw-preview-linux-x86_64-<candidate_sha>` from a successful **CI / AW Integration**
+run. The workflow runs nightly on `main` at 03:23 Asia/Shanghai; for a reviewed
+source commit or release candidate, run it manually with that commit's full
+40-character `candidate_sha`. Wait for the entire workflow, including
+**AW / Integration result**, to pass before using its packages. Daily PR checks
+do not produce Preview packages. See the
+[integration validation instructions](../../../../src/aw/CONTRIBUTING.md#daily-ci-and-nightly-integration)
+for manual dispatch and native acceptance boundaries.
 
 For source-to-integration steps, including a backend-free policy, see the
 [component walkthrough](../../../developer-guide/en/aw/integration.md). To use

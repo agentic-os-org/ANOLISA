@@ -8,7 +8,7 @@ starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
 The current Linux source build supports Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88 workers with bundled CLI 2.1.161, plus Pi Coding Agent/Core SDK 0.84.2 workers
 and AgentScope SDK 2.0.6 through explicitly wired public factories in a foreground Python worker.
 Other first-release adapters are delivered separately. AW does not install an
@@ -76,7 +76,7 @@ native permissions. Test one target at a time initially.
 | --- | --- | --- |
 | Qoder | CLI >=1.1.64 with native command Hooks, completed login | Interactive or print; optional `--native-settings` |
 | OpenClaw | 2026.9.6, configured JSON and existing state directory; stop any Gateway using that profile | AW starts a new `gateway run`; pass both native paths |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.8, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
+| QwenPaw | 2.2.2b4 / AgentScope 2.0.9, initialized App working directory and model | Set `QWENPAW_WORKING_DIR`; use App/API, not ACP/TUI |
 | Hermes | Clean official revision `952c941e`, installed Python console script and initialized local chat profile | Install the AW plugin once into that profile; pass the same profile when running |
 
 Launch Qoder:
@@ -263,7 +263,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## Start AgentScope SDK
 
 Use a Python environment with `agentscope==2.0.6`; the SDK is separate from
-QwenPaw's verified AgentScope 2.0.8 runtime. `argv` selects the SDK environment's
+QwenPaw's verified AgentScope 2.0.9 runtime. `argv` selects the SDK environment's
 Python and a `.py` application or `-m MODULE`. AW verifies that exact SDK version,
 supplies `aw_agentscope` and a protected runtime configuration, and awaits a
 receipt after the real public factory has installed middleware.
@@ -317,7 +317,7 @@ final-response replacement directives report failure and retain the original res
 
 ## Start QwenPaw
 
-Install QwenPaw 2.2.2b4 with AgentScope 2.0.8 and initialize its model configuration
+Install QwenPaw 2.2.2b4 with AgentScope 2.0.9 and initialize its model configuration
 through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
 its owned temporary plugin, preserves existing plugins and native configuration,
@@ -698,7 +698,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
-QwenPaw 2.2.2b4 / AgentScope 2.0.8, Hermes revision `952c941e` and explicit
+QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
 Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw install`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and

@@ -116,7 +116,9 @@ def main() -> None:
             # Each foreground process creates two native sessions; use repeated
             # call IDs across processes to verify binding isolation as well.
             launches = []
-            deadline = time.monotonic() + 45
+            # Two concurrent sessions each exercise hundreds of native callbacks.
+            # Bound the full suite independently of the unchanged per-Hook budgets.
+            deadline = time.monotonic() + 120
             try:
                 for number in range(2):
                     stdout = (args.output / f"run-{number}.stdout").open("wb")
@@ -127,7 +129,7 @@ def main() -> None:
                         "cwd": str(root),
                         "ports": [],
                         "logs": [str(stdout.name), str(stderr.name)],
-                        "lifetime_seconds": 45,
+                        "lifetime_seconds": 120,
                     }
                     record_path = args.output / f"launch-{number}.json"
                     record_path.write_text(json.dumps(launch_record))

@@ -7,7 +7,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 会话结束后继续保存执行记录。
 
 当前 Linux 源码版本支持 Qoder CLI >=1.1.64、OpenClaw 2026.9.6、
-QwenPaw 2.2.2b4 / AgentScope 2.0.8、Hermes 官方提交 `952c941e`，以及显式接入的
+QwenPaw 2.2.2b4 / AgentScope 2.0.9、Hermes 官方提交 `952c941e`，以及显式接入的
 Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core SDK 0.84.2 worker，
 以及在前台 Python worker 中通过显式公共工厂接线的 AgentScope SDK 2.0.6。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
@@ -67,7 +67,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | --- | --- | --- |
 | Qoder | 支持原生命令 Hook 的 CLI >=1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
 | OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
-| QwenPaw | 2.2.2b4 / AgentScope 2.0.8，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
+| QwenPaw | 2.2.2b4 / AgentScope 2.0.9，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
 | Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
 
 启动 Qoder：
@@ -235,7 +235,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ## 启动 AgentScope SDK
 
 使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的
-AgentScope 2.0.8 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
+AgentScope 2.0.9 运行时分开。`argv` 指定 SDK 环境的 Python 和 `.py` 应用或
 `-m MODULE`。AW 校验该 SDK 版本，提供 `aw_agentscope` 与受保护的运行配置，
 等待真实公共工厂安装 middleware 后生成的回执。
 
@@ -280,7 +280,7 @@ RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配�
 
 ## 启动 QwenPaw
 
-安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.8，通过 QwenPaw 初始化模型配置。示例
+安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.9，通过 QwenPaw 初始化模型配置。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
 AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
 
@@ -593,7 +593,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.8
+当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.9
 和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
 与 AgentScope SDK 2.0.6 worker。
 `aw install` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，

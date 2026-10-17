@@ -6,31 +6,37 @@
 mod support;
 
 use aw_service::{Binding, Capabilities, Operation};
+#[path = "regression/native.rs"]
+mod native;
+
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, time::Instant};
 use support::{Fixture, Service};
 
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
     match adapter {
-        "qoder" | "qwenpaw" | "agentscope" | "hermes" => output.status.code() == Some(2),
+        "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
+            output.status.code() == Some(2)
+        }
         _ => serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"] == true,
     }
 }
 
 #[test]
 fn retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors() {
-    for adapter in ["qoder", "openclaw", "qwenpaw", "agentscope", "hermes"] {
+    for agent in native::agents() {
+        let adapter = agent.as_str();
         let f = Fixture::new();
         let provider = f.root.join("policy.py");
         fs::write(&provider, r#"import json, sys
 r = json.load(sys.stdin)
 reply = {'api_version':r['api_version'],'request_id':r['request_id'],'status':'ok'}
 if r['method'] == 'describe':
-    reply['operations'] = [{'name':name,'events':['tool.before'],'effects':['block']} for name in ['scan','pre_tool']]
+    reply['operations'] = [{'name':name,'events':['tool.before'],'effects':['observe','block']} for name in ['scan','pre_tool']]
 elif r['method'] == 'invoke':
     command = r['event']['tool']['input']['command']
     reply['input_digest'] = r['input_digest']
-    reply['effects'] = []
+    reply['effects'] = [{'type':'observe','reason_code':'scanned'}] if r['operation'] == 'scan' else []
     if r['operation'] == 'pre_tool' and command == 'original':
         reply['effects'] = [{'type':'block','reason_code':'tokenless_retry','text':'Retry with arguments: {"command":"rtk candidate"}'}]
     if r['operation'] == 'scan' and command == 'rtk candidate':
@@ -43,7 +49,7 @@ print(json.dumps(reply))
         document["spec"]["agents"] = json!({"agent":{"adapter":adapter,"argv":["/bin/true"]}});
         document["spec"]["providers"] = json!({"policy":{"protocol":"aw-provider/v1alpha1","transport":{"type":"stdio","location":"agent","argv":[f.python,provider]},"timeout_ms":2000,"max_output_bytes":4096,"config":{}}});
         document["spec"]["events"] = json!({"tool.before":{"enabled":true,"steps":[
-            {"id":"security","provider":"policy","operation":"scan","effects":["block"],"on_error":"block"},
+            {"id":"security","provider":"policy","operation":"scan","effects":["observe","block"],"on_error":"block"},
             {"id":"rewrite","provider":"policy","operation":"pre_tool","effects":["block"],"on_error":"report"}]}});
         let service = Service::start(&f, &document);
         let deadline = || Instant::now() + support::TIMEOUT;
@@ -57,7 +63,10 @@ print(json.dumps(reply))
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),
-                            events: BTreeMap::from([("tool.before".into(), vec!["block".into()])]),
+                            events: BTreeMap::from([(
+                                "tool.before".into(),
+                                vec!["observe".into(), "block".into()],
+                            )]),
                         },
                         cwd: f.root.to_str().unwrap().into(),
                         environment: BTreeMap::new(),
@@ -74,25 +83,19 @@ print(json.dumps(reply))
             ("first", "original"),
             ("retry", "rtk candidate"),
             ("error", "scan-failure"),
+            ("allow", "allowed"),
         ] {
             let input = json!({"command":command,"cwd":"preserved"});
-            let mut native = match adapter {
-                "qoder" => {
-                    json!({"hook_event_name":"PreToolUse","cwd":f.root,"session_id":"session","tool_use_id":attempt,"tool_name":"Bash","tool_input":input})
+            let call = format!(
+                "00000000-0000-4000-8000-{:012}",
+                match attempt {
+                    "first" => 1,
+                    "retry" => 2,
+                    "error" => 3,
+                    _ => 4,
                 }
-                "openclaw" => {
-                    json!({"hook":"before_tool_call","event":{"toolName":"exec","params":input,"toolCallId":attempt,"runId":"run"},"context":{"sessionId":"session","runId":"run","toolCallId":attempt}})
-                }
-                "qwenpaw" | "agentscope" => {
-                    json!({"event":"tool.before","invocation_id":attempt,"session_id":"session","tool_call":{"name":"exec","id":attempt,"input":input.to_string()}})
-                }
-                _ => {
-                    json!({"hook_event_name":"pre_tool_call","cwd":f.root,"session_id":"session","tool_name":"terminal","tool_input":input,"extra":{"tool_call_id":attempt,"api_request_id":"api"}})
-                }
-            };
-            if adapter == "agentscope" {
-                native["effective_input"] = input;
-            }
+            );
+            let native = native::callback(adapter, "tool.before", &call, input, &f.root);
             let mut outputs = Vec::new();
             for (step, on_error) in [("security", "block"), ("rewrite", "report")] {
                 let mut callback = f.command();
@@ -108,13 +111,33 @@ print(json.dumps(reply))
                         on_error,
                     ]);
                 outputs.push(f.run_input(callback, Some(&serde_json::to_vec(&native).unwrap())));
+                // SDK chains stop at a veto; the service must close unvisited steps.
+                if matches!(adapter, "pi" | "claude-sdk" | "agentscope")
+                    && blocked(adapter, outputs.last().unwrap())
+                {
+                    break;
+                }
             }
-            assert!(
+            assert_eq!(
                 outputs.iter().any(|out| blocked(adapter, out)),
+                attempt != "allow",
                 "{adapter}/{attempt}"
             );
-            assert_eq!(blocked(adapter, &outputs[1]), attempt == "first");
+            assert_eq!(
+                blocked(adapter, &outputs[0]),
+                matches!(attempt, "retry" | "error")
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&outputs[0].stderr).contains("aw hook failed"),
+                attempt == "error",
+                "{adapter}/{attempt}: {:?}",
+                outputs[0]
+            );
+            if outputs.len() == 2 {
+                assert_eq!(blocked(adapter, &outputs[1]), attempt == "first");
+            }
             if attempt == "first" {
+                assert_eq!(outputs.len(), 2, "{adapter}: {outputs:?}");
                 let all = format!(
                     "{}{}",
                     String::from_utf8_lossy(&outputs[1].stdout),

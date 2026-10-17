@@ -161,18 +161,7 @@ impl Adapter for OpenClaw {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            adapter: "openclaw".into(),
-            version: VERSION.into(),
-            entrypoint: "gateway".into(),
-            events: BTreeMap::from([
-                ("tool.before".into(), vec!["observe".into(), "block".into()]),
-                (
-                    "tool.after".into(),
-                    vec!["observe".into(), "replace_result".into()],
-                ),
-            ]),
-        }
+        super::super::adapter::catalog::OPENCLAW.capabilities(VERSION, "gateway")
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
