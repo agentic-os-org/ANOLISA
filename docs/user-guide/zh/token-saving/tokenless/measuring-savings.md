@@ -69,7 +69,7 @@ tokenless stats summary --json
 tokenless stats summary --limit 1000
 ```
 
-`--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats diff --limit` 一致。
+`--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats list --limit`、`stats diff --limit` 一致。
 
 ## 节省率字段定义
 
@@ -98,6 +98,8 @@ Tokenless 的节省率统一遵循“节省量 ÷ 原始未压缩量”的定义
 tokenless stats list
 tokenless stats list --limit 50
 ```
+
+`--limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝，而不是输出空列表。
 
 输出中的 `[ID:<n>]` 是记录 ID。查看某次压缩的完整前后文本：
 
