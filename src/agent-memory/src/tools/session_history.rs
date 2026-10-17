@@ -4,10 +4,14 @@
 //! - `memory_sessions`: list historical session summaries from facts/summary/
 //! - `memory_timeline`: show tool call log from a specific session
 
+use std::os::fd::AsFd;
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// Summary of a historical session.
@@ -40,9 +44,14 @@ pub struct TimelineEntry {
     pub error: Option<String>,
 }
 
+/// Mount-relative directory holding the session summaries. Reads are
+/// resolved against the mount's `root_fd`, so the relative form is what
+/// the sandboxed open takes.
+const SUMMARY_DIR: &str = "facts/summary";
+
 /// List historical session summaries from `facts/summary/` directory.
 pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
-    let summary_dir = svc.mount.root.join("facts").join("summary");
+    let summary_dir = svc.mount.root.join(SUMMARY_DIR);
     let mut sessions: Vec<SessionSummary> = Vec::new();
 
     if !summary_dir.exists() {
@@ -58,8 +67,27 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        // The summary dir is writable through the mount, so an entry may be
+        // a symlink planted to point outside it. `file_type()` is
+        // lstat-based and never follows the link, so anything that is not a
+        // regular file is skipped here — the same guard
+        // `memory_session_context` applies to its `facts/` walk.
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {}
+            _ => continue,
+        }
+        // That dirent check races a concurrent swap, so the read itself goes
+        // through safe_fs (openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
+        // against the mount's root_fd). A refused entry is skipped rather
+        // than followed: an outside file's body can never reach the
+        // model-visible `description` assembled below.
+        let rel_path = Path::new(SUMMARY_DIR).join(entry.file_name());
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel_path) {
             Ok(c) => c,
+            Err(MemoryError::PathOutsideMount(refused)) => {
+                tracing::warn!("memory_sessions: refusing summary entry {refused}");
+                continue;
+            }
             Err(_) => continue,
         };
 
