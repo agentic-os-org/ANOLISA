@@ -9638,28 +9638,69 @@ fn eval_tcp_retrans_collapse_at(
 }
 
 fn eval_tcp_app_win(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_app_win";
+    eval_tcp_app_win_at(info, recs, "/proc/sys/net/ipv4/tcp_app_win")
+}
+
+/// Path-injectable form of [`eval_tcp_app_win`] (the `eval_*_at` idiom) so
+/// the read is assertable against synthetic files.
+///
+/// The rule fires above 31, and `read_sysctl_u64` maps an unreadable or
+/// unparseable file to 0, which is below every ceiling. Only a value the
+/// reader could produce is evidence of a too-large reserve.
+fn eval_tcp_app_win_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 31 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_app_win".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "31".to_string(),
-            reason: format!(
-                "TCP 应用窗口保留比例 1/{current} 过高，减小可让更多缓冲区用于实际传输"
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_app_win_recommendation(read_sysctl_u64(path), &info.kernel_version) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_app_win` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// The knob reserves `max(window/2^tcp_app_win, mss)` of the window for the
+/// application buffer (`Documentation/networking/ip-sysctl.rst`: "Reserve
+/// max(window/2^tcp_app_win, mss) of window for application buffer. Value 0
+/// is special, it means that nothing is reserved. ... Default: 31"), which
+/// `tcp_init_buffer_space()` applies as
+/// `window_clamp = max(maxwin - (maxwin >> tcp_app_win), 4*advmss)`
+/// (v6.6 net/ipv4/tcp_input.c:572-578). A LARGER exponent holds back a
+/// SMALLER share, so the recommended 31 is the most generous reserve the
+/// range offers, not a reduction of one: from `1/{current}` ("reserve one
+/// {current}th") the old reason drew the opposite conclusion, and on a host
+/// it had just written, the reserve would have grown rather than shrunk.
+///
+/// There is nothing above 31 to reduce anyway. Linux 6.3 bounded the entry
+/// with `extra1 = SYSCTL_ZERO` and `extra2 = &tcp_app_win_max`, where
+/// `tcp_app_win_max` is 31, registered as a u8
+/// (`net/ipv4/sysctl_net_ipv4.c`, "tcp: restrict net.ipv4.tcp_app_win",
+/// which fixed a shift-out-of-bounds in `tcp_init_buffer_space()`): a write
+/// above 31 is rejected, and since v5.13 the slot is a u8 that cannot carry
+/// one. Reading a file that still holds a larger value is possible only on
+/// a kernel that accepted it — 6.2 and older, where the entry was a plain
+/// `proc_dointvec` int with no bounds — and there the advice is wrong for
+/// the reason above. Keep the rule only where the kernel could hold such a
+/// value and the reserve really is excessive.
+fn tcp_app_win_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 6, 3) || current <= 31 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_app_win".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "31".to_string(),
+        reason: format!(
+            "TCP 应用缓冲区保留按窗口 >> tcp_app_win 计算，取值 {current} 超出内核支持的 [0, 31]；范围内 31 保留得最少，写入可把保留压到最小"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_ip_default_ttl(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -21213,6 +21254,34 @@ mod tests {
         // Unparseable strings keep the caller's legacy behavior.
         assert!(!kernel_at_least("", 4, 15));
         assert!(!kernel_at_least("custom-kernel", 4, 15));
+    }
+
+    /// The knob's ceiling has been 31 since 6.3, and 31 is the value that
+    /// reserves the LEAST of the window, so above it there is neither a value
+    /// to fire on nor a direction that shrinks the reserve.
+    #[test]
+    fn tcp_app_win_advice_stops_where_the_ceiling_landed() {
+        // 6.3 bounded the entry to [0, 31] ("tcp: restrict net.ipv4.tcp_app_win"),
+        // so a larger value cannot be written there, and since 5.13 the u8 slot
+        // cannot even hold one.
+        assert!(tcp_app_win_recommendation(64, "6.3.0").is_none());
+        assert!(tcp_app_win_recommendation(64, "6.6.87.2").is_none());
+        assert!(tcp_app_win_recommendation(64, "6.2.16").is_some());
+        assert!(tcp_app_win_recommendation(64, "5.4.0-150").is_some());
+        // An unparseable version keeps the legacy behaviour.
+        assert!(tcp_app_win_recommendation(64, "").is_some());
+        // The value gate is unchanged: 31 is the top of the range.
+        assert!(tcp_app_win_recommendation(31, "5.4.0").is_none());
+        assert!(tcp_app_win_recommendation(0, "5.4.0").is_none());
+        // Where it does fire, the reason must describe the reserve the kernel
+        // computes (window >> tcp_app_win) rather than one over the value.
+        let rec = tcp_app_win_recommendation(64, "5.4.0").expect("pre-6.3 kernels accept it");
+        assert_eq!(rec.recommended_value, "31");
+        assert!(
+            !rec.reason.contains("1/64"),
+            "the divisor is 2^tcp_app_win, not the value itself: {}",
+            rec.reason
+        );
     }
 
     #[test]
