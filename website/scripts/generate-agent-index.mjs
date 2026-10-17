@@ -28,20 +28,6 @@ function git(...args) {
   }).trim();
 }
 
-function repositoryUrl() {
-  for (const remote of ['origin', 'up']) {
-    try {
-      const raw = git('remote', 'get-url', remote);
-      return raw
-        .replace(/^git@github\.com:/, 'https://github.com/')
-        .replace(/\.git$/, '');
-    } catch {
-      // Try the next repository remote.
-    }
-  }
-  return overrides.repository;
-}
-
 function parseOverview(agentsMarkdown) {
   const components = [];
   const rowPattern = /^\|\s*\*\*([^*]+)\*\*(?:\s*\(`([^`]+)`\))?\s*\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|$/gm;
@@ -278,7 +264,7 @@ const index = {
     name: 'ANOLISA',
     description: 'A server-side operating layer for AI agent workloads.',
   },
-  repository: repositoryUrl(),
+  repository: overrides.repository,
   default_branch: 'main',
   source_commit: sourceCommit,
   license: overrides.license,

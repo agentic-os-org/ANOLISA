@@ -167,3 +167,22 @@ test('index schema accepts component roots without allowing arbitrary paths', as
     assert.equal(pattern.test(source), false, source);
   }
 });
+
+
+test('fork checkout retains the canonical repository in generated endpoints', async (t) => {
+  const {root} = await createFixture(t, true);
+  for (const args of [['init'], ['remote', 'add', 'origin', 'https://github.com/contributor/fork.git']]) {
+    const result = spawnSync('git', args, {cwd: root, encoding: 'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const result = generate(root);
+  assert.equal(result.status, 0, result.stderr);
+  const output = path.join(root, 'website/.generated/static');
+  const index = JSON.parse(await readFile(path.join(output, 'agents/repo-index.json'), 'utf8'));
+  assert.equal(index.repository, 'https://example.com/repository');
+  for (const file of ['agents/repo-index.txt', 'llms.txt', 'llms-full.txt']) {
+    const text = await readFile(path.join(output, file), 'utf8');
+    assert.ok(text.includes('https://example.com/repository'), file);
+    assert.ok(!text.includes('contributor/fork'), file);
+  }
+});
