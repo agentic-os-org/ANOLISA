@@ -187,8 +187,12 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
 
     for e in entries {
         if e.tool == "memory_search" || e.tool == "mem_grep" {
-            // Extract the query from the path field (format: "mode:query" or "bm25:query")
-            let query = extract_search_query(&e.path);
+            // Extract the query from the path field (format: "mode:query" or "bm25:query").
+            // Sanitized `len=<N>` markers carry no query text, so they yield
+            // nothing and must not become facts.
+            let Some(query) = extract_search_query(&e.path) else {
+                continue;
+            };
             if query.len() > 3 {
                 let title = format!("搜索: {query}");
                 let content = format!("Agent 通过 `{}` 搜索了 `{}`。", e.tool, query);
@@ -212,12 +216,20 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
 
 /// Extract the actual search query from the path field.
 /// Path format is like "bm25:hello world" or "hybrid:rust ownership".
-fn extract_search_query(path: &str) -> String {
-    if let Some(pos) = path.find(':') {
-        path[pos + 1..].trim().to_string()
-    } else {
-        path.trim().to_string()
+///
+/// Returns `None` for the sanitized markers `memory_search` writes today
+/// (`bm25:len=14`, `bm25(fallback from hybrid):len=14`, `embed:len=9`, ...):
+/// the query text never reached the log, so there is nothing to extract, and
+/// feeding the marker itself downstream persists `搜索: len=14` interest facts
+/// that `memory_search`/`memory_about` then serve back forever.
+fn extract_search_query(path: &str) -> Option<String> {
+    if crate::audit::is_sanitized_query_path(path) {
+        return None;
     }
+    Some(match path.find(':') {
+        Some(pos) => path[pos + 1..].trim().to_string(),
+        None => path.trim().to_string(),
+    })
 }
 
 // ── Rule 3: Change ──────────────────────────────────────────────
@@ -639,5 +651,50 @@ mod tests {
                 f.content
             );
         }
+    }
+
+    #[test]
+    fn interest_rule_skips_sanitized_search_markers() {
+        // `memory_search` logs `<mode>:len=<bytes>` instead of the raw query,
+        // so the marker itself must never be persisted as an interest.
+        let entries = vec![
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("bm25", "quantum lattice"),
+                true,
+                None,
+            ),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("bm25(fallback from hybrid)", "kernel"),
+                true,
+                None,
+            ),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path("vector", "lifecycle hooks"),
+                true,
+                None,
+            ),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert!(
+            facts.is_empty(),
+            "sanitized search markers must not become interest facts: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn interest_rule_keeps_recorded_queries() {
+        // Legacy rows that still carry the raw query, and mem_grep rows whose
+        // path is a directory, keep producing facts exactly as before.
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust ownership", true, None),
+            make_entry("mem_grep", "notes/", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["搜索: rust ownership", "搜索: notes/"]);
     }
 }

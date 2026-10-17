@@ -1,4 +1,4 @@
-use crate::audit::AuditEntry;
+use crate::audit::{AuditEntry, sanitized_query_path};
 use crate::error::{MemoryError, Result};
 use crate::index::SearchHit;
 use crate::service::MemoryService;
@@ -81,7 +81,7 @@ pub fn memory_search(
                 .sum();
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("bm25:len={}", query.len()))
+                    .path(sanitized_query_path("bm25", query))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );
@@ -119,7 +119,10 @@ pub fn memory_search(
                     let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
-                            .path(format!("bm25(fallback from {mode}):len={}", query.len()))
+                            .path(sanitized_query_path(
+                                &format!("bm25(fallback from {mode})"),
+                                query,
+                            ))
                             .bytes(hits.len() as u64),
                     );
                     return Ok(hits);
@@ -147,7 +150,7 @@ pub fn memory_search(
             .map_err(|e| {
                 svc.audit_log(
                     AuditEntry::new(TOOL)
-                        .path(format!("embed:len={}", query.len()))
+                        .path(sanitized_query_path("embed", query))
                         .error(e.to_string()),
                 );
                 MemoryError::Other(format!("embedding failed: {e}"))
@@ -166,7 +169,7 @@ pub fn memory_search(
 
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("{mode}:len={}", query.len()))
+                    .path(sanitized_query_path(mode, query))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );

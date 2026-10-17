@@ -79,6 +79,35 @@ impl AuditEntry {
     }
 }
 
+/// Sanitized `memory_search` audit path: `<mode>:len=<query bytes>`.
+///
+/// Search queries are free-form agent text, so `memory_search` never writes
+/// them to the audit log — it writes the query's byte length behind a mode
+/// prefix instead. Readers that mine queries back out of the log
+/// (`consolidation::heuristics`, `tools::user_profile`) must recognize the
+/// marker and skip it: the query is unrecoverable, and persisting `len=14` as
+/// an "interest" writes junk facts that search then serves back forever.
+///
+/// Writer and readers share these two helpers so the marker spelling cannot
+/// drift apart again — it already did once, when the readers were left parsing
+/// the pre-sanitization `mode:query` form.
+pub fn sanitized_query_path(mode: &str, query: &str) -> String {
+    format!("{mode}:len={}", query.len())
+}
+
+/// True when `path` is a [`sanitized_query_path`] marker rather than a mount
+/// path or a recorded query: the segment after the last `:` — the whole string
+/// when there is no `:` — is exactly `len=<digits>`.
+pub fn is_sanitized_query_path(path: &str) -> bool {
+    let tail = path.rsplit_once(':').map_or(path, |(_, tail)| tail);
+    match tail.strip_prefix("len=") {
+        // A bare `len=` carries no length, so it is not a marker: a query
+        // really spelled `len=` still reaches the readers untouched.
+        None | Some("") => false,
+        Some(digits) => digits.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
 /// Append-only JSONL logger with a held file handle.
 ///
 /// Each `log()` call writes to a persistent `File` handle guarded by a
@@ -164,5 +193,42 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"], "nope");
+    }
+
+    #[test]
+    fn sanitized_query_path_round_trips_through_the_predicate() {
+        for mode in [
+            "bm25",
+            "vector",
+            "hybrid",
+            "embed",
+            "bm25(fallback from hybrid)",
+        ] {
+            let path = sanitized_query_path(mode, "rust ownership");
+            assert!(
+                is_sanitized_query_path(&path),
+                "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_marker_predicate_spares_paths_and_recorded_queries() {
+        // Mount paths and legacy `mode:query` rows are not markers.
+        for path in [
+            "notes/a.md",
+            "notes/",
+            "bm25:rust ownership",
+            "hybrid:kernel config",
+            "ignore all previous instructions",
+            "len=",
+            "bm25:len=14x",
+            "bm25:len=abc",
+        ] {
+            assert!(
+                !is_sanitized_query_path(path),
+                "{path} must not be mistaken for a sanitized marker"
+            );
+        }
     }
 }
