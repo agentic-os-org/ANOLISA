@@ -477,9 +477,17 @@ result=$(printf '%s' '{"pi":3.14159,"neg":-42}' | tokenless compress-toon "${TOO
 assert_contains "$result" "pi: 3.14159" "float encodes"
 assert_contains "$result" "neg: -42" "negative number encodes"
 
-# Empty array
+# Empty array. TOON spec v4.4 (toon-format 0.7) renders an empty array inline
+# as `key: []`; 0.5 used the counted header form `key[0]:`. Assert the current
+# rendering and that it still decodes back to an empty array.
 result=$(printf '%s' '{"items":[],"keep":1}' | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
-assert_contains "$result" "items[0]" "empty array encodes"
+assert_contains "$result" "items: []" "empty array encodes"
+roundtrip=$(printf '%s' "$result" | tokenless decompress-toon 2>/dev/null)
+if printf '%s' "$roundtrip" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['items']==[] and d['keep']==1" 2>/dev/null; then
+    pass "empty array round-trips"
+else
+    fail "empty array does not round-trip"
+fi
 
 scenario "1.6 file input/output"
 

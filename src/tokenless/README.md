@@ -46,7 +46,7 @@ retrieval, and attribution.
 | HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
 | CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
-| TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
+| TOON context compression | 17.6% on reference response | Encodes JSON to TOON format for LLMs; since TOON spec v4.4 this also covers nested record arrays and objects keyed by ID, which previously encoded larger than compact JSON |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | RTK ✅, lossless live PostTool ✅, Schema/Retrieve unavailable in the host |
@@ -1115,7 +1115,7 @@ layout and single-target interface.
 
 ## Prerequisites
 
-- **Rust** toolchain >= 1.89 — required by rtk (edition 2024) and toon-format (is_multiple_of). Install via [rustup](https://rustup.rs)
+- **Rust** toolchain >= 1.89 — required by rtk (edition 2024). Install via [rustup](https://rustup.rs)
 - **just** — build runner for rtk setup (clone + patch orchestration)
 - **Git** — for rtk source download via justfile
 - **CPython 3.11+ development environment and uv** — only for the Python wheel
