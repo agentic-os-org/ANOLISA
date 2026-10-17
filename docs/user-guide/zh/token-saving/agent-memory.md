@@ -223,7 +223,7 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_write` | `path`、`content` | `overwrite` | `wrote N bytes to <path>` |
 | `mem_append` | `path`、`content` | — | `appended N bytes to <path>` |
 | `mem_edit` | `path`、`old_str`、`new_str` | — | `edited <path>`（`old_str` 须唯一命中） |
-| `mem_list` | — | `dir`、`recursive`、`glob` | `{name, type, size, mtime}` 数组 |
+| `mem_list` | — | `dir`、`recursive`、`glob` | `{name, type, size, mtime}` 数组，上限 5000 条（截断时在日志中告警） |
 | `mem_grep` | `pattern` | `dir`、`type`、`max`、`case_insensitive` | `{path, line, text}` 数组 |
 | `mem_diff` | `path1`、`path2` | — | unified diff |
 | `mem_mkdir` | `path` | — | `created <path>` |
