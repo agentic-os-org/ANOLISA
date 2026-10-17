@@ -130,12 +130,7 @@ pub(super) fn run(
             command: BATCH_COMMAND.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
-    let names: Vec<String> = store
-        .installations
-        .iter()
-        .filter(|installation| installation.kind == ObjectKind::Component)
-        .map(|installation| installation.name.clone())
-        .collect();
+    let names = distinct_component_names(&store);
     drop(store);
 
     if names.is_empty() {
@@ -238,9 +233,13 @@ pub(super) fn run(
     let items = names
         .into_iter()
         .map(|name| {
-            results
-                .remove(&name)
-                .expect("every recorded component receives one batch outcome")
+            results.remove(&name).unwrap_or_else(|| BatchMemberOutcome {
+                component: name.clone(),
+                status: BatchMemberStatus::Failed,
+                reason: Some("no batch outcome was recorded for this component".to_string()),
+                plan: None,
+                adapter_actions: Vec::new(),
+            })
         })
         .collect();
 
@@ -249,6 +248,22 @@ pub(super) fn run(
         merged_transaction,
         items,
     })
+}
+
+/// Component names in state order, deduplicated. `installed.toml` is
+/// user-editable and `StateStore::load` validates schema, install mode and
+/// scope but not the store's documented one-row-per-(kind, name) invariant,
+/// so a duplicate row must not plan the same component twice — and, because
+/// batch outcomes are keyed by name, must not leave the final projection
+/// without a result to remove.
+fn distinct_component_names(store: &StateStore) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for installation in &store.installations {
+        if installation.kind == ObjectKind::Component && !names.contains(&installation.name) {
+            names.push(installation.name.clone());
+        }
+    }
+    names
 }
 
 fn project_member_application(
@@ -331,8 +346,47 @@ pub(super) fn batch_status(outcome: UpdateOutcome, intent: ExecutionIntent) -> B
 #[cfg(test)]
 mod tests {
     use anolisa_core::execution::{CommandOutcome, CommandOutcomeStatus};
+    use anolisa_core::state::{InstallMode, InstalledState, ObjectStatus, Ownership};
 
     use super::*;
+
+    #[test]
+    fn duplicate_component_rows_collapse_to_one_planned_name() {
+        // installed.toml is user-editable and load does not enforce name
+        // uniqueness: a duplicate component row must be planned exactly
+        // once. Before deduplication the second `results.remove` for the
+        // repeated name found nothing and the batch panicked.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_path = tmp.path().join("installed.toml");
+        let mut state = InstalledState {
+            install_mode: InstallMode::System,
+            prefix: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        state
+            .objects
+            .push(crate::commands::tier1::update::tests::rpm_object(
+                "tokenless",
+                "anolisa-tokenless",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ));
+        crate::test_support::write_legacy_state(&state, &state_path).expect("seed state");
+
+        let mut store = StateStore::load(&state_path, 0).expect("load state");
+        let duplicate = store
+            .installations
+            .first()
+            .expect("migrated component row")
+            .clone();
+        store.installations.push(duplicate);
+
+        assert_eq!(
+            distinct_component_names(&store),
+            vec!["tokenless".to_string()]
+        );
+    }
 
     #[test]
     fn batch_status_is_driven_by_execution_intent() {
