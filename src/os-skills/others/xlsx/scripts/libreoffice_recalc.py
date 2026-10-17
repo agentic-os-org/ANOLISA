@@ -21,15 +21,15 @@ Exit codes:
     1 — LibreOffice found but recalculation failed (timeout, crash, bad file)
 """
 
+import argparse
+import os
+import shutil
 import subprocess
 import sys
-import shutil
-import os
 import tempfile
-import argparse
-
 
 # ── LibreOffice discovery ───────────────────────────────────────────────────
+
 
 def find_soffice() -> str | None:
     """
@@ -39,12 +39,21 @@ def find_soffice() -> str | None:
       1. macOS application bundle (default install location)
       2. PATH lookup for 'soffice'
       3. PATH lookup for 'libreoffice' (common on Linux)
+      4. Windows Program Files installations (console launcher preferred)
     """
+
     candidates = [
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",  # macOS
-        "soffice",     # Linux / macOS if on PATH
-        "libreoffice", # alternative Linux name
+        "soffice",  # Linux / macOS if on PATH
+        "libreoffice",  # alternative Linux name
     ]
+    if sys.platform == "win32":
+        # ProgramW6432 locates the native installation even from 32-bit Python.
+        for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+            directory = os.environ.get(variable)
+            if directory:
+                for launcher in ("soffice.com", "soffice.exe"):
+                    candidates.append(os.path.join(directory, "LibreOffice", "program", launcher))
     for c in candidates:
         # shutil.which handles PATH lookup; also check absolute paths directly
         found = shutil.which(c)

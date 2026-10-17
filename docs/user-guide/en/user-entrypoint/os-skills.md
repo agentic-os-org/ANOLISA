@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## XLSX Dynamic Validation
+
+The `xlsx` skill uses LibreOffice for dynamic formula recalculation. Set
+`SKILL_DIR` to the installed `xlsx` skill directory and check availability:
+
+```bash
+python SKILL_DIR/scripts/libreoffice_recalc.py --check
+```
+
+Discovery checks the macOS application bundle and PATH first. On Windows it then
+checks `LibreOffice/program/` under `ProgramW6432`, `ProgramFiles` and
+`ProgramFiles(x86)`, in that order, preferring `soffice.com` over `soffice.exe`
+within each installation. Standard Windows installations do not need a PATH
+change. Custom installations can expose their launcher through PATH.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
