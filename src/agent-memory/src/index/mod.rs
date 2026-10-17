@@ -33,7 +33,9 @@ pub struct SearchHit {
     /// to ~0), while `search_vec` scales a cosine in `[-1, 1]` and can
     /// legitimately return zero or less — so compare hits within one result
     /// set, never across queries or paths, and never against an absolute
-    /// threshold.
+    /// threshold. The separate conflict-detection API retains a configurable
+    /// raw BM25 heuristic for compatibility; that cutoff is likewise corpus/query
+    /// dependent and is not a calibrated similarity guarantee.
     pub score: f64,
     /// Whether the snippet contains prompt-injection patterns.  Callers
     /// in the adapter layer can use this flag to decide whether to
