@@ -45,7 +45,7 @@ fn consolidation_retires_the_conflicting_fact_but_preserves_journals_and_notes()
             .upsert(path, 1, body.len() as u64, &body, None)
             .unwrap();
     }
-    let conflicts = store.detect_conflicts("walrus walrus", -100.0).unwrap();
+    let conflicts = store.detect_conflicts("walrus walrus", 0.0).unwrap();
     let candidates: std::collections::BTreeSet<_> =
         conflicts.iter().map(|(path, _)| path.as_str()).collect();
     let expected: std::collections::BTreeSet<_> = std::iter::once(old_path.as_str())
@@ -58,7 +58,7 @@ fn consolidation_retires_the_conflicting_fact_but_preserves_journals_and_notes()
     let index = Arc::new(Mutex::new(store));
     let new = fact();
     FactWriter::new(tmp.path())
-        .with_index(index.clone(), -100.0)
+        .with_index(index.clone(), 0.0)
         .write(&new)
         .unwrap();
 
@@ -115,7 +115,7 @@ fn non_facts_cannot_exhaust_fact_conflict_candidates() {
         let query = format!("{term} {term}");
         assert!(
             store
-                .detect_conflicts(&query, -100.0)
+                .detect_conflicts(&query, 0.0)
                 .unwrap()
                 .iter()
                 .all(|(p, _)| p != &old_path),
@@ -126,7 +126,7 @@ fn non_facts_cannot_exhaust_fact_conflict_candidates() {
         new.title = term.into();
         new.content = term.into();
         FactWriter::new(tmp.path())
-            .with_index(index.clone(), -100.0)
+            .with_index(index.clone(), 0.0)
             .write(&new)
             .unwrap();
         let hits = index.lock().unwrap().search(term, 100, true).unwrap();
@@ -146,4 +146,120 @@ fn non_facts_cannot_exhaust_fact_conflict_candidates() {
                 .contains(&format!("superseded_by: {}", new.id))
         );
     }
+}
+
+#[test]
+fn default_threshold_retires_a_strong_conflicting_fact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = fact();
+    FactWriter::new(tmp.path()).write(&old).unwrap();
+    let path = format!("facts/working-context/{}.md", old.id);
+    let dir = tmp.path().join(".anolisa/index");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut store = BM25Store::open(&dir.join("bm25.db"), 0.0, 0.0, true).unwrap();
+    let body = std::fs::read_to_string(tmp.path().join(&path)).unwrap();
+    store
+        .upsert(&path, 1, body.len() as u64, &body, None)
+        .unwrap();
+    for i in 0..10 {
+        store
+            .upsert(
+                &format!("notes/noise{i}.md"),
+                1,
+                10,
+                "unrelated corpus material",
+                None,
+            )
+            .unwrap();
+    }
+    let threshold = agent_memory::config::ConsolidationConfig::default().conflict_bm25_threshold;
+    let hits = store.search("walrus walrus", 1, true).unwrap();
+    assert_eq!(hits[0].path, path);
+    assert!(
+        -hits[0].score < threshold,
+        "fixture must exceed the shipped BM25 strength cutoff"
+    );
+    println!("default raw BM25={}, cutoff={threshold}", -hits[0].score);
+    let index = Arc::new(Mutex::new(store));
+    let new = fact();
+    FactWriter::new(tmp.path())
+        .with_index(index.clone(), threshold)
+        .write(&new)
+        .unwrap();
+    assert!(
+        index
+            .lock()
+            .unwrap()
+            .search("walrus", 20, true)
+            .unwrap()
+            .iter()
+            .all(|h| h.path != path)
+    );
+    assert!(
+        std::fs::read_to_string(tmp.path().join(path))
+            .unwrap()
+            .contains(&format!("superseded_by: {}", new.id))
+    );
+}
+
+#[test]
+fn default_threshold_can_miss_an_exact_fact_in_a_term_dense_corpus() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = fact();
+    FactWriter::new(tmp.path()).write(&old).unwrap();
+    let path = format!("facts/working-context/{}.md", old.id);
+    let dir = tmp.path().join(".anolisa/index");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut store = BM25Store::open(&dir.join("bm25.db"), 0.0, 0.0, true).unwrap();
+    let body = std::fs::read_to_string(tmp.path().join(&path)).unwrap();
+    store
+        .upsert(&path, 1, body.len() as u64, &body, None)
+        .unwrap();
+    for i in 0..10 {
+        store
+            .upsert(
+                &format!("notes/dense{i}.md"),
+                1,
+                10,
+                &format!("walrus {}", "padding ".repeat(200)),
+                None,
+            )
+            .unwrap();
+    }
+    let threshold = agent_memory::config::ConsolidationConfig::default().conflict_bm25_threshold;
+    let query = format!("{} {}", old.title, old.content);
+    let all = store.detect_conflicts(&query, 0.0).unwrap();
+    assert!(
+        all.iter()
+            .any(|(p, score)| p == &path && *score > threshold)
+    );
+    assert!(
+        store
+            .detect_conflicts(&query, threshold)
+            .unwrap()
+            .is_empty()
+    );
+    let index = Arc::new(Mutex::new(store));
+    let mut duplicate = old.clone();
+    duplicate.id = ulid::Ulid::new().to_string();
+    FactWriter::new(tmp.path())
+        .with_index(index.clone(), threshold)
+        .write(&duplicate)
+        .unwrap();
+    // Pins the documented limitation; calibration/semantics remain tracked at
+    // https://github.com/agentic-os-org/ANOLISA/issues/4157.
+    assert!(
+        index
+            .lock()
+            .unwrap()
+            .search("walrus", 20, true)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.path == path)
+    );
+    assert!(
+        !std::fs::read_to_string(tmp.path().join(path))
+            .unwrap()
+            .contains("superseded_by:")
+    );
 }

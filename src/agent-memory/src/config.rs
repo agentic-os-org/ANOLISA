@@ -147,7 +147,15 @@ pub struct ConsolidationConfig {
     /// Enable conflict detection during fact write. Default: true.
     #[serde(default = "default_true")]
     pub conflict_detection: bool,
-    /// BM25 score threshold for conflict detection. Default: -2.0.
+    /// Inclusive raw BM25 ceiling; lower values require stronger matches. Default: -2.0.
+    /// Corpus/query dependent: the retained default is not a calibrated similarity
+    /// cutoff and can miss duplicates in term-dense corpora. Tune per workload.
+    /// Any query token shorter than 3 characters selects LIKE, regardless of
+    /// threshold sign; a 100-character writer truncation can produce such a token.
+    /// LIKE requires every token as a substring and uses a frequency-plus-decay
+    /// floor. With finite nonnegative time-decay parameters, nonpositive thresholds
+    /// admit every substring candidate. Nonnegative thresholds admit every FTS candidate.
+    /// Consolidation can supersede up to five older facts per write.
     #[serde(default = "default_conflict_threshold")]
     pub conflict_bm25_threshold: f64,
     /// Trigger incremental consolidation every N tool calls (0 = disabled).
@@ -172,7 +180,7 @@ impl Default for ConsolidationConfig {
     }
 }
 
-fn default_conflict_threshold() -> f64 {
+pub(crate) fn default_conflict_threshold() -> f64 {
     -2.0
 }
 

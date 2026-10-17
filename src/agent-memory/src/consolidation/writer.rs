@@ -43,7 +43,7 @@ impl FactWriter {
             root_fd: None,
             jsonl_file: Mutex::new(None),
             index: None,
-            conflict_threshold: -2.0,
+            conflict_threshold: crate::config::default_conflict_threshold(),
         }
     }
 
@@ -87,7 +87,7 @@ impl FactWriter {
                         // Search also indexes journals and source notes; only fact
                         // records participate in the replacement lifecycle.
                         if !crate::index::store::is_fact_record(old_path) {
-                            tracing::debug!(path = %old_path, "skipping non-fact conflict candidate");
+                            tracing::warn!(path = %old_path, "skipping non-fact conflict candidate");
                             continue;
                         }
                         tracing::info!(

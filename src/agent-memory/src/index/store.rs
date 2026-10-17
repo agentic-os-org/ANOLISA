@@ -32,7 +32,9 @@ pub struct BM25Store {
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
 
+// SQLite GLOB `*` crosses `/`, so nested fact categories are included.
 const FACT_RECORD_GLOB: &str = "facts/*.md";
+const EMPTY_FACT_STEM_GLOB: &str = "*/.md";
 
 /// Recognize mount-relative Markdown fact paths eligible for replacement.
 pub(crate) fn is_fact_record(path: &str) -> bool {
@@ -711,9 +713,14 @@ impl BM25Store {
     }
 
     /// Detect potential conflicts: search for files similar to the given
-    /// text and return those with BM25 score above the threshold.
-    /// Results include journals and source notes; consolidation must use
-    /// `detect_fact_conflicts` to restrict replacement eligibility.
+    /// text whose raw BM25 score is at most the threshold (smaller is stronger).
+    /// The raw cutoff is corpus/query dependent, not a calibrated similarity score.
+    /// Any token under 3 characters selects the substring fallback for the whole
+    /// query. It requires every token as a substring and uses a frequency-plus-decay
+    /// floor. With finite nonnegative time-decay parameters, nonpositive thresholds
+    /// admit every substring candidate. Results include journals and source notes;
+    /// callers must restrict replacement eligibility before calling `supersede`.
+    /// Internal consolidation uses a separate fact-only query.
     pub fn detect_conflicts(&self, text: &str, threshold: f64) -> Result<Vec<(String, f64)>> {
         self.detect_conflicts_inner(text, threshold, false)
     }
@@ -757,18 +764,20 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 AND f.is_cold = 0 AND f.is_superseded = 0
-              AND (?2 = 0 OR (f.path GLOB ?3 AND f.path NOT GLOB '*/.md'))
-            ORDER BY rank
+              AND (?2 = 0 OR (f.path GLOB ?3 AND f.path NOT GLOB ?4))
+            ORDER BY bm25(files_fts)
             LIMIT 5
         "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![fts_q, facts_only, FACT_RECORD_GLOB], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![fts_q, facts_only, FACT_RECORD_GLOB, EMPTY_FACT_STEM_GLOB],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+        )?;
 
         let results: Vec<(String, f64)> = rows
             .flatten()
-            .filter(|(_, score)| *score >= threshold)
+            // FTS5 BM25 ranks stronger matches with smaller (more negative) values.
+            .filter(|(_, score)| *score <= threshold)
             .collect();
 
         Ok(results)
@@ -776,8 +785,9 @@ impl BM25Store {
 
     /// LIKE-based conflict detection fallback for short-CJK queries (any term
     /// < 3 chars). No BM25 is available off the MATCH path, so the score is a
-    /// term-frequency sum plus time decay — always ≥ 0, hence ≥ the
-    /// typically-negative BM25 `threshold`. This is deliberately
+    /// term-frequency sum plus time decay. With finite nonnegative time-decay
+    /// parameters, matching rows have score ≥ 1, so nonpositive thresholds admit
+    /// every substring candidate. This is deliberately
     /// recall-oriented: when we can't rank, flag every substring match as a
     /// potential conflict rather than silently miss a duplicate/contradiction.
     /// The caller still reviews flagged conflicts before superseding.
@@ -805,7 +815,7 @@ impl BM25Store {
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
-              AND (? = 0 OR (f.path GLOB ? AND f.path NOT GLOB '*/.md'))
+              AND (? = 0 OR (f.path GLOB ? AND f.path NOT GLOB ?))
             LIMIT 50
             "#
         );
@@ -816,6 +826,9 @@ impl BM25Store {
             .collect();
         bind.push(rusqlite::types::Value::Integer(i64::from(facts_only)));
         bind.push(rusqlite::types::Value::Text(FACT_RECORD_GLOB.to_owned()));
+        bind.push(rusqlite::types::Value::Text(
+            EMPTY_FACT_STEM_GLOB.to_owned(),
+        ));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
             Ok((
@@ -850,6 +863,11 @@ impl BM25Store {
 
     /// Mark a file as superseded by another file. The superseded file
     /// remains on disk but is excluded from normal search.
+    ///
+    /// The caller must establish replacement eligibility: this general lifecycle
+    /// operation accepts any indexed path, including non-facts. Eligibility is
+    /// the caller's application policy, not necessarily consolidation's fact-path
+    /// rule. Search similarity alone is not proof that one document may replace another.
     pub fn supersede(&mut self, old_path: &str, new_id: &str) -> Result<()> {
         // Update the database flag.
         self.conn.execute(
@@ -1895,7 +1913,7 @@ mod tests {
             for term in ["walrus", "海狸"] {
                 let mut store = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
                 store.upsert(path, 1, 10, term, None).unwrap();
-                let hits = store.detect_fact_conflicts(term, -100.0).unwrap();
+                let hits = store.detect_fact_conflicts(term, 0.0).unwrap();
                 assert_eq!(
                     !hits.is_empty(),
                     eligible,
@@ -1906,13 +1924,103 @@ mod tests {
     }
 
     #[test]
+    fn bm25_conflicts_keep_stronger_matches_and_include_threshold_equality() {
+        let mut store = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
+        store
+            .upsert("facts/strong.md", 1, 10, &"walrus ".repeat(20), None)
+            .unwrap();
+        store
+            .upsert(
+                "facts/weak.md",
+                1,
+                10,
+                &format!("walrus {}", "padding ".repeat(200)),
+                None,
+            )
+            .unwrap();
+        for i in 0..10 {
+            store
+                .upsert(
+                    &format!("notes/{i}.md"),
+                    1,
+                    10,
+                    "unrelated corpus material",
+                    None,
+                )
+                .unwrap();
+        }
+        let mut stmt = store.conn.prepare("SELECT path, bm25(files_fts) FROM files_fts WHERE files_fts MATCH 'walrus' ORDER BY bm25(files_fts)").unwrap();
+        let ranks: Vec<(String, f64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(ranks.len(), 2);
+        assert_eq!(ranks[0].0, "facts/strong.md");
+        let (strong, weak) = (ranks[0].1, ranks[1].1);
+        assert!(strong < weak && weak < 0.0);
+        println!("raw BM25 strong={strong}, weak={weak}");
+        for facts_only in [false, true] {
+            for threshold in [strong, (strong + weak) / 2.0] {
+                let hits = store
+                    .detect_conflicts_inner("walrus", threshold, facts_only)
+                    .unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].0, "facts/strong.md");
+            }
+            assert_eq!(
+                store
+                    .detect_conflicts_inner("walrus", weak, facts_only)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn short_query_conflicts_apply_positive_floors_and_admit_default_matches() {
+        let mut store = BM25Store::open_in_memory_with(0.0, 0.0, true).unwrap();
+        store
+            .upsert("facts/strong.md", 1, 10, "海狸海狸海狸", None)
+            .unwrap();
+        store.upsert("facts/weak.md", 1, 10, "海狸", None).unwrap();
+        for facts_only in [false, true] {
+            for threshold in [crate::config::default_conflict_threshold(), 0.0] {
+                assert_eq!(
+                    store
+                        .detect_conflicts_inner("海狸", threshold, facts_only)
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            }
+            for threshold in [2.0, 3.0] {
+                let hits = store
+                    .detect_conflicts_inner("海狸", threshold, facts_only)
+                    .unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].0, "facts/strong.md");
+            }
+            assert!(
+                store
+                    .detect_conflicts_inner("海狸", 4.0, facts_only)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn detect_conflicts_finds_similar_files() {
         let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
         s.upsert("user-pref.md", 100, 50, "用户偏好 rust 系统编程", None)
             .unwrap();
 
-        // Search for similar content (shares key terms).
-        let conflicts = s.detect_conflicts("用户偏好 rust", -2.0).unwrap();
+        // This tests matching, not default calibration: single-document IDF is
+        // clamped near zero. The real-writer dense-corpus limitation regression
+        // in fact_conflict_scope_test covers under-detection at the default.
+        let conflicts = s.detect_conflicts("用户偏好 rust", 0.0).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0, "user-pref.md");
     }
