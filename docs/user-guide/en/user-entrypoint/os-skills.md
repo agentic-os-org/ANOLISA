@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## OpenClaw Model Selection
+
+The OpenClaw installer accepts optional provider prefixes in `--model-id` and
+repeatable `--extra-model` values. It strips that prefix before deduplicating
+the primary, extra and billing-plan catalog selections, preserving first-seen
+order. Both `vendor/custom` and `custom` select one provider model named `custom`;
+agent references use the selected `--provider-id`, such as `bailian/custom`.
+This also avoids duplicate models when a prefixed extra selects a catalog model.
+
+```bash
+python3 src/os-skills/ai/install-openclaw/scripts/install_openclaw.py --api-key-env BAILIAN_API_KEY --extra-model vendor/custom --extra-model custom --dry-run
+```
+
+The installer still performs the model preflight during `--dry-run` unless
+`--skip-preflight` is supplied. Prefix normalization does not select a second provider.
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

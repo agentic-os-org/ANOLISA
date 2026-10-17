@@ -84,6 +84,21 @@ confirm_destructive = true
 
 ---
 
+## OpenClaw 模型选择
+
+OpenClaw 安装脚本允许在 `--model-id` 和可重复的 `--extra-model` 参数中使用可选的
+provider 前缀。它先移除该前缀，再对主模型、额外模型和计费计划目录中的选择去重，
+保留首次出现的顺序。`vendor/custom` 与 `custom` 只生成一个名为 `custom` 的 provider
+模型；Agent 引用使用选定的 `--provider-id`，例如 `bailian/custom`。
+带前缀的额外模型命中目录已有模型时，也不会生成重复条目。
+
+```bash
+python3 src/os-skills/ai/install-openclaw/scripts/install_openclaw.py --api-key-env BAILIAN_API_KEY --extra-model vendor/custom --extra-model custom --dry-run
+```
+
+除非指定 `--skip-preflight`，安装脚本在 `--dry-run` 中仍会执行模型预检。
+前缀规范化不会选择第二个 provider。
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

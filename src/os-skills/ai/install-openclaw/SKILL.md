@@ -64,6 +64,9 @@ The authoritative implementation is `scripts/install_openclaw.py`.
 The normal parameters are `--billing`, `--api-key`, `--api-key-env`, `--region`,
 `--base-url`, `--model-id`, `--npm-registry`, `--dry-run`, `--precheck-only`,
 `--skip-preflight`, `--skip-tokenless`, and DingTalk-specific flags.
+`--model-id` and repeatable `--extra-model` selections accept optional provider
+prefixes. Prefixes are normalized before deduplication; agent references use
+the selected provider ID and the normalized model ID.
 
 ## Examples
 

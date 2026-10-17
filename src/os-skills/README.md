@@ -49,6 +49,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## OpenClaw Model Selection
+
+The OpenClaw installer normalizes optional provider prefixes on `--model-id`
+and `--extra-model` selections before deduplication, keeping configured model
+references consistent. See the [user guide](../../docs/user-guide/en/user-entrypoint/os-skills.md).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
