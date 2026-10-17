@@ -158,7 +158,7 @@ fn status_version_fences_aba_and_late_enqueue_failure() {
 }
 
 #[test]
-fn old_apply_observation_survives_new_delete_without_overwriting_it() {
+fn new_delete_rejects_the_entire_old_apply_result() {
     each(|repo| {
         let initial = seed(repo);
         let applying = transition(repo, &initial, BindingStatus::Applying);
@@ -188,30 +188,24 @@ fn old_apply_observation_survives_new_delete_without_overwriting_it() {
         let write = BindingStateWrite::patch(ReconciliationPatch {
             status: Some(BindingStatus::Ready.into()),
             deployments: Some(deployments),
-            preserve_observations_on_conflict: true,
         });
         assert_eq!(
             repo.compare_exchange_binding_state(&registered, &write)
                 .unwrap(),
-            WriteResult::Applied(WriteReceipt {
-                status_version: Some(3),
-                status_applied: false
-            })
+            WriteResult::Conflict
         );
         assert_eq!(
             repo.compare_exchange_binding_state(&registered, &write)
                 .unwrap(),
-            WriteResult::AlreadyApplied(WriteReceipt {
-                status_version: Some(3),
-                status_applied: false
-            })
+            WriteResult::Conflict
         );
         let current = repo
             .get_binding_state(&initial.binding.spec.binding_id)
             .unwrap()
             .unwrap();
         assert_eq!(current.binding.status, BindingStatus::PendingDelete);
-        assert_eq!(current.deployments[0].presence, Presence::Present);
+        assert_eq!(current.status_version, 3);
+        assert_eq!(current.deployments, registered.deployments);
     });
 }
 

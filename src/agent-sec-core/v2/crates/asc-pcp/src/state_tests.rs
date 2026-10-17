@@ -132,7 +132,9 @@ fn bounded_cas_contention_is_distinct_from_storage_failure_and_preserves_state()
                     &mut None,
                 )
             } else {
-                state.finish(&result, &mut completion)
+                state
+                    .finish(&result, &mut completion)
+                    .map(|receipt| receipt.is_some())
             }
         };
         assert_eq!(attempt(), Err(StoreError::Contended));
@@ -422,6 +424,7 @@ impl TestRepository {
     fn finish(&self, outcome: &AttemptOutcome) -> Result<bool, StoreError> {
         self.state
             .finish(outcome, &mut self.completion.lock().unwrap())
+            .map(|receipt| receipt.is_some())
     }
 }
 

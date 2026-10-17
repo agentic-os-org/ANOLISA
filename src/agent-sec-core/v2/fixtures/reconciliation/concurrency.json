@@ -139,8 +139,6 @@
       "create:return",
       "admit",
       "read",
-      "finish",
-      "finish:matched",
       "read",
       "claim",
       "claim:matched",

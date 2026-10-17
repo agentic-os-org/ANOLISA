@@ -5,7 +5,7 @@
 
 持久化实施以 [Policy SQLite 持久化与崩溃恢复设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)
 为准：新建 `asc-policy-repository-sqlite`，Deployment 首版保存在 Binding 行内，内部
-`status_version` 保护生命周期 CAS，部署观察独立合并。daemon 已使用该后端；
+`status_version` 保护生命周期 CAS，状态和部署观察仅在原 claim 匹配时整笔提交。daemon 已使用该后端；
 关闭重开、存储故障和 SIGKILL 恢复证据见该文档第 9 节，真实 PEP 与物理断电另验。
 
 SCOPE-CR-002 已接入实现，并由 SQLite 保存：不可变 Scope 快照、系统 Binding 准入、停止发现后
@@ -240,8 +240,8 @@ Policy 更新/删除不改变 Scope 内的快照，Scope 本身不可更新。no
 | Running | Repository=PENDING_DELETE，entries[B].dirty=true | 等当前 Client 真正退出并完成本次提交/收尾，再重新排队 |
 | WaitingRetry | Repository=PENDING_DELETE，清除旧 Apply 退避并初始化删除预算 | WaitingRetry→Queued，无需等待旧 deadline |
 
-旧 Apply 的有效观察仍可保存，但不允许把新 PENDING_DELETE 改回 READY/PENDING_APPLY/
-APPLY_FAILED。Delete 清理全部仍可能存在的目标，包含旧 revision 和不确定的新目标。
+旧 Apply 的 claim 已过期时，整笔拒绝其结果，不更新 status 或 Deployment；丢弃旧结果写入重试。
+Delete 按已有 UNKNOWN/旧目标责任清理，不继承旧 Apply 的业务或队列重试预算。
 抢占发生在本地尝试之间，不代表超时的远端 Apply 已停止，也不解决远端晚完成覆盖 Delete 的时序。
 
 ## 6. 持久化模型与局部更新
@@ -254,7 +254,7 @@ JSON 数组，phase/error/status_version 和写回执单独保存；精确 DDL �
 
 PAP 写管理意图但保留 deployments 与 reconcile 回执；核心的窄 patch 不携带 spec。
 事务内读取最新聚合，status 比较原 expected_version，目标观察验证已有登记及原部署集合。
-同 Binding 的单执行者拥有观察合并权限；比较部署集合只用于检测意外并发写，不能替代所有权。
+同 Binding 的单执行者只可在原 claim 仍匹配时提交观察；比较部署集合不能替代版本检查或执行所有权。
 目标身份含 route、ID 与 cleanup，旧 revision 的清理责任不能被过滤。AgentSight cleanup 的
 endpoint 必须与当前 Client 配置一致，不能把旧责任发给另一服务。
 
@@ -268,15 +268,16 @@ endpoint 必须与当前 Client 配置一致，不能把旧责任发给另一服
 | PAP 写意图 | 检查当前 Binding，按准入规则更新 spec/status 并清除旧错误；保留 deployments |
 | 条件认领 | 调用方先检查内存到期时间及预算；事务检查 ID/revision/status_version/Pending，更新 running 并清除 error；不写 spec |
 | `register_targets` | 检查执行仍被允许，登记本次将操作的目标及 UNKNOWN；提交后才允许目标修改 |
-| `record_observations` | 只合并已登记且归属有效的目标记录；不修改 spec；可单独调用 |
-| `commit_attempt` | 显式事务：合并目标观察；仅在认领的 revision/status_version/status 仍匹配时更新状态和错误 |
+| `record_observations` | 原 claim 匹配才更新已登记目标；不修改 spec；过期结果不能单独更新观察 |
+| `commit_attempt` | 原 revision/status_version/status 匹配才原子提交状态、错误与目标观察；冲突整笔拒绝 |
 | `finalize_delete` | 同一事务检查删除意图、所有目标均确认不存在，再移除 Binding 和关联记录；若是最后一条 Binding，且父 Scope 已进入 Deleting 并停止 discovery，同时删除 Scope |
 
 实现使用 `BEGIN IMMEDIATE` 事务，在 Rust 中检查原 ID/revision/status_version/status，
 再写入最新聚合；不是把事务外旧快照无条件写回。真实 phase/error 变化递增 status_version，
 no-op 和仅 deployment 观察不增版。条件不匹配不表示远端失败。
-旧 Apply 与新 Delete 相遇时，`commit_attempt` 可以成功保存目标观察，同时返回 lifecycle
-未匹配；不能因为状态条件不匹配而回滚掉合法观察，也不能为了保存观察而覆盖新意图。
+旧 Apply 与新 Delete 相遇时，`commit_attempt` 整笔拒绝旧结果并返回 Superseded；
+预先登记的 UNKNOWN 保留清理责任。成功提交从回执取得实际 status_version，不能推算
+旧版本加一；被取代的 attempt 保持原版本归属，不能终结新的删除意图。
 
 同 Binding 的本地执行串行、PAP 既有准入规则、数据库短事务与字段条件检查共同保证顺序。
 不新增全局 resourceVersion，也不把 spec revision 当成状态计数器。这个方案依赖单 host
@@ -342,7 +343,8 @@ create/update 的选择也根据最新目标集合及具体 Client 契约重新�
 - BUSY、FULL、只读或 I/O 故障暂停新的目标修改；退避释放 worker，保留 Binding 逻辑所有权。
 - 存储重试不消耗远端或自动重试预算；已发出的远端尝试仍计数。
 - 原写入已提交则通过 AlreadyApplied 确认；尚未提交则按原条件写入或报告冲突。
-- 旧结果合法观察可独立合并；新的 Delete/status_version 不会被旧 Ready 或失败覆盖。
+- 原 claim 已失效则取消整笔旧结果及其重写，不更新 status 或 Deployment；保留已有清理责任。
+- Worker 发现没有通知的新版本时，重新开始队列预算；核心按新意图重新开始业务预算。
 - 损坏与不兼容关闭该 Repository 的写入和目标 I/O，需要人工修复及重新启动。
 - 真正进程崩溃时 slot 丢失；恢复 UNKNOWN/旧目标责任后按 Client 契约安全重放。
 
@@ -512,11 +514,11 @@ Client 初始化边界由 `asc-pcp/tests/client_initialization.rs` 和
 | RRT-002 | Running 中通知与 finish 双向竞争不丢失，dirty 导致重新排队并读取最新 Binding | Queue 竞争测试 | — |
 | RRT-003 | RetryAt 释放 worker，到期一次入队，通知不重置预算 | 组件测试、虚拟时间 | — |
 | RRT-004 | WaitingRetry 接受 Delete 立即排队，旧 deadline 失效，下一轮读取删除意图 | 组件/调度竞争测试 | — |
-| RRT-005 | Apply 中接受 Delete，调用不重叠、观察保存、旧状态不覆盖 Delete | PAP/Runtime/核心组件测试 | — |
+| RRT-005 | Apply 中接受 Delete，调用不重叠、UNKNOWN 责任保留、旧观察及状态整笔拒绝 | PAP/Runtime/核心组件测试 | — |
 | RRT-006 | 未到期的 Skipped 恢复等待，缺失/终态不反复排队 | 组件测试 | — |
 | RRT-007 | 容量、补扫发现未通知意图、扫描与通知竞争、分页覆盖 | 有界队列与扫描组件测试 | 提交后通知丢失等系统性注入 |
 | RRT-008 | deployment 局部写不改 spec；spec 更新保留 deployment | SQLite Repository 契约测试 | SQL 局部写/事务验证 |
-| RRT-009 | 旧 revision/status 不推进新生命周期，合法观察可独立提交 | SQLite Repository/核心竞争测试 | SQL 事务竞争验证 |
+| RRT-009 | 旧 revision/status 的结果整笔拒绝，保留已有清理责任 | SQLite Repository/核心竞争测试 | SQL 事务竞争验证 |
 | RRT-010 | 登记先于 Client；确认全部目标不存在后原子删除；登记失败不调用远端 | 正常路径的顺序/删除原子性组件测试 | 登记失败、事务失败注入 |
 | RRT-011 | 无 dirty 的自动重试也重新读取并执行 translate/prepare，不复用上次对象；本次准备结果原样交给 Client | 重算次数、完整输入、身份校验、安全重放和调用顺序的组件测试 | — |
 | RRT-012 | SQL 无 plan/prepared/body/outcome；新远端尝试与新进程均重新计算，存储等待保留原 write/outcome | 数据模型、单次生命周期和内存写接口测试 | SQL schema 与真实新进程验证 |
@@ -524,7 +526,7 @@ Client 初始化边界由 `asc-pcp/tests/client_initialization.rs` 和
 | RRT-014 | 重建队列重置次数和 deadline；Failed 不自动重试 | BQA-011 及已有终态跳过测试 | 持久化状态与部署责任恢复另验 |
 | RRT-015 | 远端成功但观察未提交保留 UNKNOWN，重新准备及身份变化按 Client 恢复契约处理 | 不作 Runtime 集成阶段系统性注入门禁 | 提交窗口注入、PID/boot/route 变化及 Client 恢复契约 |
 | RRT-016 | 取消/停机及异常保留 ownership 至真实退出，health 正确 | 正常取消、drain/join、生命周期组件测试 | worker panic、存储故障、强制退出等注入 |
-| RRT-017 | dirty/新通知及自动重试均走从头执行路径；读取新 spec 时 Client 只收到新请求；Delete 不调用 Adapter | Queue/核心/Runtime 组件与竞争测试 | — |
+| RRT-017 | dirty/新通知及自动重试触发的新远端尝试从头执行；存储续写先确认原写入；读取新 spec 时 Client 只收到新请求；Delete 不调用 Adapter | Queue/核心/Runtime 组件与竞争测试 | — |
 | RRT-018 | 结果提交失败保留原 write/outcome；先核实原回执，不覆盖新 Delete、不消耗存储等待预算、不重复已确认完成的远端调用 | 恢复交接契约与按新语义更新的相关回归 | 模糊提交、dirty 竞争及 UNKNOWN 安全重放注入 |
 
 Queue 竞争使用 barrier/虚拟时间，不用真实 sleep 猜时序。组件测试可用 scripted
@@ -556,7 +558,7 @@ Client 返回 RetryAt 所需结果，不引入完整进程链路的系统性 err
 
 | PR / 阶段 | 交付与验收 |
 |---|---|
-| Runtime 集成 PR | 局部写接口、单次执行及跨调用缓存移除、Queue/worker/到期/补偿、daemon 接线；通过第 10.2 节分配的单元、组件、调度竞争及既有相关回归 |
+| Runtime 集成 PR | 局部写接口、单次执行及跨调用 plan/prepared 缓存移除、Queue/worker/到期/补偿、daemon 接线；通过第 10.2 节分配的单元、组件、调度竞争及既有相关回归 |
 | 独立完整 E2E PR | 第 10.3 节的 CLI→daemon→Reconciler→mock AgentSight 完整链路；使用 SQLite Repository |
 | persistent Repository 工作包 | SQLite schema、耐久事务、启动恢复及其存储契约验证 |
 | 持久化就绪后的 error injection / 恢复测试 | 第 10.2 节后续列：远端/存储故障、部分完成、提交窗口、worker 异常、进程崩溃与重启；完成 Client 跨重启重新准备安全门禁 |

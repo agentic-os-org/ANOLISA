@@ -22,6 +22,21 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "fault-injection")]
+#[path = "crash_recovery/fault_points.rs"]
+mod fault_points;
+
+// Child creation inherits every parent thread's open lease FD until exec.
+// Serialize entire parent scenarios, including repository setup and teardown.
+static SCENARIO: Mutex<()> = Mutex::new(());
+
+fn serial_scenario() -> std::sync::MutexGuard<'static, ()> {
+    // Each scenario owns its resources; a failed assertion must not suppress later cases.
+    SCENARIO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn fixture() -> PreparedBinding {
     serde_json::from_str(include_str!(
         "../../asc-policy-types/tests/fixtures/prepared-binding.json"
@@ -53,6 +68,8 @@ impl BindingStateRepository for FaultBoundary {
         expected: &BindingStateSnapshot,
         write: &BindingStateWrite,
     ) -> Result<WriteResult, StoreError> {
+        #[cfg(feature = "fault-injection")]
+        fault_points::before_cas(write);
         let result = self.0.compare_exchange_binding_state(expected, write)?;
         if result != WriteResult::Conflict {
             match &write.next {
@@ -65,13 +82,7 @@ impl BindingStateRepository for FaultBoundary {
                             BindingStatus::PendingApply => gate("recovery_saved"),
                             _ => {}
                         }
-                    } else if let Some(deployments) = &patch.deployments {
-                        if deployments
-                            .iter()
-                            .any(|deployment| deployment.presence == Presence::Present)
-                        {
-                            gate("compound_observation_saved");
-                        }
+                    } else if patch.deployments.is_some() {
                         gate(
                             if expected.binding.status.phase == BindingStatus::Deleting {
                                 "delete_unknown_saved"
@@ -212,11 +223,15 @@ fn converge(repo: &Arc<SqlitePolicyRepository>, remote: &str) {
             return;
         }
         for candidate in pending {
-            core.reconcile(
-                &candidate.id,
-                schedules.entry(candidate.id.clone()).or_default(),
-            )
-            .unwrap();
+            let disposition = core
+                .reconcile(
+                    &candidate.id,
+                    schedules.entry(candidate.id.clone()).or_default(),
+                )
+                .unwrap();
+            if disposition == asc_pcp::Disposition::Superseded {
+                gate("compound_result_superseded");
+            }
         }
     }
     panic!("recovery did not converge");
@@ -227,11 +242,17 @@ fn crash_child() {
     let Ok(root) = std::env::var("ASC_POLICY_CRASH_DIR") else {
         return;
     };
+    #[cfg(feature = "fault-injection")]
+    let _faults = fail::FailScenario::setup();
     let repo =
         Arc::new(SqlitePolicyRepository::open(&Path::new(&root).join("policy-state.db")).unwrap());
     let input = fixture();
     let scope_id = &input.scope.scope_id;
     let remote = std::env::var("ASC_POLICY_CRASH_REMOTE").unwrap();
+    #[cfg(feature = "fault-injection")]
+    if fault_points::run_child(&repo, &remote) {
+        return;
+    }
     if std::env::var("ASC_POLICY_CRASH_INIT").as_deref() == Ok("1") {
         repo.put_policy(&input.policy).unwrap();
         repo.put_scope(&PreparedScope {
@@ -278,6 +299,7 @@ fn child(root: &Path, remote: &str, stage: &str, initialize: bool, delete: bool)
             .env("ASC_POLICY_CRASH_STAGE", stage)
             .env("ASC_POLICY_CRASH_INIT", if initialize { "1" } else { "0" })
             .env("ASC_POLICY_CRASH_DELETE", if delete { "1" } else { "0" })
+            .env_remove("FAILPOINTS")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -381,6 +403,7 @@ impl Drop for Mock {
 }
 #[test]
 fn sigkill_at_confirmed_windows_recovers_and_cleans_external_ledger() {
+    let _scenario = serial_scenario();
     for stage in [
         "scope_saved",
         "binding_saved",
@@ -474,10 +497,11 @@ fn sigkill_at_confirmed_windows_recovers_and_cleans_external_ledger() {
 
 #[test]
 fn sigkill_during_apply_and_scope_deletion_preserves_cleanup_intent() {
+    let _scenario = serial_scenario();
     for stage in [
         "compound_delete_intent",
         "compound_pending_delete",
-        "compound_observation_saved",
+        "compound_result_superseded",
     ] {
         let root = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -504,15 +528,7 @@ fn sigkill_during_apply_and_scope_deletion_preserves_cleanup_intent() {
             "an old Apply overwrote deletion at {stage}"
         );
         assert_eq!(saved.deployments.len(), 1, "{stage}");
-        assert_eq!(
-            saved.deployments[0].presence,
-            if stage == "compound_observation_saved" {
-                Presence::Present
-            } else {
-                Presence::Unknown
-            },
-            "{stage}"
-        );
+        assert_eq!(saved.deployments[0].presence, Presence::Unknown, "{stage}");
         assert_eq!(mock.present(), BTreeSet::from([id.to_string()]), "{stage}");
         drop(before);
         child(root.path(), &mock.address, "none", false, false);

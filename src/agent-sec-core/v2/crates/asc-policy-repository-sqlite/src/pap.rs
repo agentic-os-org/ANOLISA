@@ -145,6 +145,8 @@ impl PapRepository for SqlitePolicyRepository {
                 return Err(PapError::Unavailable.into());
             }
             insert_scope(tx, scope)?;
+            #[cfg(feature = "fault-injection")]
+            fail::fail_point!("policy.sqlite.scope.inserted");
             Ok(scope.clone())
         })
         .map_err(RepositoryError::pap)
@@ -245,11 +247,15 @@ impl PapRepository for SqlitePolicyRepository {
                 "UPDATE scopes SET discovery_stopped=1 WHERE scope_id=?1",
                 [key.as_str()],
             )?;
+            #[cfg(feature = "fault-injection")]
+            fail::fail_point!("policy.sqlite.discovery.stopped");
             let mut changed = Vec::new();
             for key in binding_ids(tx, key)? {
                 let mut binding = read_binding(tx, &key)?.ok_or(StoreError::Corrupt)?;
                 if retire(&mut binding)? {
                     save_binding(tx, &binding)?;
+                    #[cfg(feature = "fault-injection")]
+                    fail::fail_point!("policy.sqlite.discovery.binding_retired");
                     changed.push(receipt(&binding));
                 }
             }
@@ -281,6 +287,8 @@ impl PapRepository for SqlitePolicyRepository {
                             "UPDATE scopes SET pinned_process_json=?2 WHERE scope_id=?1",
                             params![key.as_str(), encode(instance)?],
                         )?;
+                        #[cfg(feature = "fault-injection")]
+                        fail::fail_point!("policy.sqlite.instances.pinned");
                     }
                 }
             }
@@ -326,6 +334,8 @@ impl PapRepository for SqlitePolicyRepository {
                         .validate()
                         .map_err(PapError::InvalidBinding)?;
                     save_binding(tx, &snapshot)?;
+                    #[cfg(feature = "fault-injection")]
+                    fail::fail_point!("policy.sqlite.instances.binding_inserted");
                     changed.push(receipt(&snapshot));
                 }
             }

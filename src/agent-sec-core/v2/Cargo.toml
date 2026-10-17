@@ -91,6 +91,7 @@ signal-hook = { version = "0.3", default-features = false }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 dirs = "6"
 fancy-regex = "0.16"
+fail = { version = "0.5.1", default-features = false }
 log = "0.4"
 nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
 regex = "1.10"

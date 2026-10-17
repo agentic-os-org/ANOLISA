@@ -29,7 +29,7 @@ Policy、Scope、Binding 意图，以及仍需确认或清理的远端目标；�
 | Scope 删除 | 停止 discovery 并完成全部 Binding 清理后删除 Scope；最后一条 Binding 与 Scope 同事务删除 |
 | Discovery | 保存恢复所必需的 pin 和停止屏障；线程、扫描缓存不落库 |
 | 重试 | WorkQueue 的次数、单调时钟 deadline 不落库，重启重置自动重试预算 |
-| CAS | status 单独计数；Deployment 观察合并不能被 status 冲突抹掉 |
+| CAS | status 单独计数；旧结果遇到版本冲突时整笔拒绝，保留已有 UNKNOWN 清理责任 |
 | 存储故障 | Repository 分类并核实提交，Runtime 暂停/恢复调度；存储重试不消耗远端重试预算 |
 | route | 保留单个 `agentsight` route；cleanup 保存非敏感 endpoint，调用前与当前配置校验 |
 
@@ -357,21 +357,23 @@ RETURNING status_version;
 version 不加入 CLI 输入或公共 JSON；通知队列仍只把 Binding ID 当 wakeup，执行前重读。
 内部 PAP 返回回执是为了失败收尾，不让队列中的版本代替 Repository 当前事实。
 
-### 5.3 独立合并观察与状态
+### 5.3 观察与状态整笔条件提交
 
-条件写接口需区分以下三类事务，不能继续把“status 没变”作为整个结果事务的成功前提：
+以下事务均检查原 revision、status_version 和生命周期；结果过期时不允许单独更新 Deployment：
 
 | 操作 | 条件与结果 |
 |---|---|
 | claim / 状态推进 | ID、binding revision、expected status_version 和合法 phase 匹配才推进；返回新版本 |
 | 新目标 UNKNOWN 登记 | 检查认领仍有效，并将完整 TargetRef/cleanup 合并入最新 deployments，提交后才允许 mutating I/O |
-| 执行结果提交 | 验证目标来自已登记责任，合并此执行者的观察；status 仅在原 claim 仍匹配时更新，返回两个独立结果 |
-| 最终清理删除 | Delete claim 的版本匹配且本次有效观察证明全部目标 ABSENT，原子删除整个 Binding；有冲突则保留/合并责任 |
+| 执行结果提交 | 原 claim 仍匹配时，原子保存状态与已登记目标的观察；否则整笔返回 Conflict，取消旧结果写入重试 |
+| 最终清理删除 | Delete claim 的版本匹配且本次有效观察证明全部目标 ABSENT，原子删除整个 Binding；有冲突则保留原有责任 |
 
 结果事务由 Repository 在写锁内读取最新行；PCP 提供可验证的目标观察和状态建议。
 它不是无条件覆盖整个旧 Snapshot，也不能让任意观察更新未登记目标。
 部署观察必须保留对应 target 和 binding revision 的来源，不能把旧 revision 的 PRESENT
-归给新 spec。修改状态失败时，合法的部署观察仍能提交，返回 `status_applied=false`。
+归给新 spec。版本不匹配时，status 与 Deployment 均不更新；下发前已登记的 UNKNOWN
+继续承担清理责任。成功写入使用实际回执版本，不推算“旧版本 + 1”。存储错误保留原写入，
+生命周期冲突则取消旧 attempt；新删除意图拥有独立的业务和队列重试预算，即使通知丢失。
 
 最终删除可以把最后的 ABSENT 观察与行删除放在同一个事务：不能要求数据库里在进入事务前
 就已是空 deployments，否则最后一次 cleanup 永远无法提交。反之，仅“收到删除意图”不允许删行。
@@ -648,7 +650,7 @@ SQLite、procfs、Adapter 和 Client 贯穿同一用例；Scope 建立后先更�
 
 | 覆盖 | 可执行证据及范围 |
 |---|---|
-| PSQL-01～05 | [Repository 契约](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs) 使用 SQLite 验证 ABA、迟到入队失败、旧 Apply 观察合并、no-op 版本、去重/排序/分页、并发模板更新/删除与 Scope 准入、32 Scope 上限；PAP/PCP 的既有完整 fixtures 同步版本并回归 |
+| PSQL-01～05 | [Repository 契约](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs) 使用 SQLite 验证 ABA、迟到入队失败、旧 Apply 结果整笔拒绝、no-op 版本、去重/排序/分页、并发模板更新/删除与 Scope 准入、32 Scope 上限；PAP/PCP 的既有完整 fixtures 同步版本并回归 |
 | PSQL-06～08 | 同一契约覆盖版本溢出事务回滚、部署数量/字节限制、坏 JSON/投影/外键/回执、未知 schema、关闭重开和 write_id 重放/碰撞；[存储故障测试](../../v2/crates/asc-policy-repository-sqlite/src/tests.rs) 使用 query_only、max_page_count 产生真实 READONLY/FULL，另用独立 SQL 写锁产生 BUSY；IOERR/提交回执丢失在写边界注入，没有定制 VFS 或硬件掉盘实验 |
 | PSQL-09～11 | 私有权限、symlink/hardlink、独占 lease、lease 比 repository 活得更久；keyset 扫描中删行、停止屏障、最后 Binding/Scope 回收、Active 空 Scope、PID pin 关闭重开；[discovery seed](../../v2/crates/asc-daemon-core/src/scope_discovery.rs) 覆盖部分扫描不误退休和 PID reuse。外层 drain 持锁由 daemon 所有权结构保证，未新增卡死内核 I/O 的宿主演练 |
 | PSQL-12/17 | [Runtime 测试](../../v2/crates/asc-policy-runtime/src/reconciliation/tests.rs) 注入 BUSY/FULL/READONLY/IOERR/OutcomeUnknown，分别覆盖远端前及实际结果已返回后的写入；连续失败超过自动预算，仍保留原 write_id/结果，释放 worker 给其他 Binding，恢复后不重复已完成调用。原有终态、补扫、panic 和预算测试均回归 |
@@ -727,7 +729,7 @@ cleanup 编码的二进制。不能删除 policy-state.db 或把 WAL 当缓存�
 审视后明确约束了以下容易漏掉的问题：
 
 1. 单 reconcile 执行者不排除 PAP/异常收尾写 status；所有入口必须传播真实 expected_version。
-2. stale completion 的 status CAS 失败不能回滚合法 Deployment 观察；最后 ABSENT 与删除可同事务。
+2. stale completion 的 CAS 冲突整笔拒绝旧结果，保留原有 UNKNOWN；最后 ABSENT 与删除同事务。
 3. PID pin 不能只存在 worker 或 Binding 中；Scope 还活着时必须保留，避免重启后换绑。
 4. 恢复时边删 Scope 边 OFFSET 分页会漏项，必须用稳定 ID cursor。
 5. socket singleton 不能保护同库不同 socket，需单独 DB lease，且覆盖退出 drain。

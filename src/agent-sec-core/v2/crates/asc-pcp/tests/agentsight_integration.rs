@@ -356,7 +356,7 @@ fn same_revision_delete_during_real_http_apply_preserves_target_for_cleanup() {
                 spec: spec(7),
                 status: BindingStatus::PendingDelete.into()
             },
-            deployments: vec![deployment(7, Presence::Present, Some(Presence::Present))]
+            deployments: vec![deployment(7, Presence::Unknown, None)]
         })
     );
     assert_eq!(

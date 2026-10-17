@@ -133,6 +133,12 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
       - name: Run E2E tests
         run: make -C src/agent-sec-core test-e2e-source-build
+      - name: Run V2 policy crash consistency tests
+        working-directory: src/agent-sec-core/v2
+        run: >-
+          cargo test --locked -p asc-policy-repository-sqlite
+          --features fault-injection --test crash_recovery
+          --target-dir target/fault-injection -- --nocapture
       - name: Restore system Node.js
         if: always()
         run: |

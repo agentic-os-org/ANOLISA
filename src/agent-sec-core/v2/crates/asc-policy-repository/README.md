@@ -14,16 +14,17 @@ and deployments fields. It cannot carry or write spec. `None` removes
 the Binding and its related records atomically. The `new(snapshot)` convenience
 constructor selects only reconciliation fields; spec remains owned by PAP.
 
-A write compares Binding revision/phase and only the status explanation/deployments
-it updates. Thus a deployment-only write preserves a concurrent diagnostic update;
-it does not require a global resourceVersion. Aggregate removal compares all
-reconciliation fields. Reads and writes share the authoritative SQLite Binding state.
+Every write compares Binding revision, status version and lifecycle. A lifecycle
+conflict rejects the entire patch, including deployment observations; previously
+registered UNKNOWN targets retain cleanup responsibility. No global resourceVersion
+is required. Aggregate removal compares all reconciliation fields. Reads and
+writes share the authoritative SQLite Binding state.
 
 The latest write receipt acknowledges an exact replay within a call, including
 a post-commit panic. Reusing its ID with different contents is invalid. Missing
 IDs acknowledge removal but never allow replacement to recreate a Binding. No
-permanent tombstones or historical receipts are retained. The core re-reads and
-recalculates conflicts; it does not retain a pending write across calls.
+permanent tombstones or historical receipts are retained. The core retains exact uncertain writes across storage retries. On lifecycle
+conflict it discards the old result instead of merging observations into a newer intent.
 
 `BindingView.status` contains `phase` and an optional bounded `error` (kind/code).
 There is no RuntimeState: attempt count and retry deadline belong to WorkQueue,

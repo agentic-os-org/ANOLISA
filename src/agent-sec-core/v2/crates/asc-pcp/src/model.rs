@@ -33,7 +33,7 @@ impl ExpectedBinding {
     }
 }
 
-/// Temporary completion data owned by one reconcile call.
+/// Completion evidence retained in the caller's schedule until confirmed or superseded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AttemptOutcome {
@@ -75,7 +75,6 @@ pub enum Disposition {
 pub(crate) struct PendingWrite {
     pub expected: BindingStateSnapshot,
     pub write: BindingStateWrite,
-    pub matched: bool,
 }
 /// Runtime-owned storage continuation; never contains credentials or prepared requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
