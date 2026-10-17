@@ -2015,8 +2015,15 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// the database/cache program (swappiness, the dirty limits,
 /// `vm.vfs_cache_pressure`, `kernel.shmmni`, `vm.nr_hugepages`, the busy-poll
 /// pair), while the real database binary is the process named `oracle`.
+/// `consul-dataplane` is the same shape for Consul: it is the Kubernetes
+/// data-plane sidecar that talks to Consul servers running elsewhere, not the
+/// in-memory KV server, but its comm truncates to `consul-dataplan` and its
+/// first name run is `consul`. A node that only runs the sidecar reported
+/// Consul and took the cache program (swappiness, the dirty limits, THP off,
+/// `vm.vfs_cache_pressure`, the busy-poll pair).
 const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "consul-template",
+    "consul-dataplane",
     "consul-esm",
     "grafana-agent",
     "clickhouse-keeper",
@@ -4734,6 +4741,9 @@ mod tests {
 
         for (name, service, label) in [
             ("consul-template", "consul", "Consul"),
+            // The Kubernetes data-plane sidecar: a separate client-side
+            // program that talks to Consul servers, not the KV server itself.
+            ("consul-dataplane", "consul", "Consul"),
             ("grafana-agent", "grafana", "Grafana"),
             // ClickHouse's coordination daemon: `has_process("clickhouse")` is
             // satisfied by its first name run, and the whole database program
