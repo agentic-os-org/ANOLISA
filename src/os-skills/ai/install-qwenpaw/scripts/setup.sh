@@ -189,14 +189,25 @@ nohup qwenpaw app --host 0.0.0.0 --port 8088 > "$QWENPAW_DIR/qwenpaw.log" 2>&1 &
 QWENPAW_PID=$!
 echo "  QwenPaw 已启动 (PID: $QWENPAW_PID)"
 echo "  等待服务就绪..."
-sleep 5
-
-# 验证服务是否正常
-if curl -s -o /dev/null -w "%{http_code}" "http://localhost:8088/" 2>/dev/null | grep -q "200\|404"; then
-  echo "  服务已就绪"
-else
-  echo "  警告: 服务可能未就绪，请查看日志: tail -f $QWENPAW_DIR/qwenpaw.log"
+# Probe attempts and each connection are bounded; a dead process cannot become ready.
+QWENPAW_READY=false
+for readiness_attempt in {1..30}; do
+  if ! kill -0 "$QWENPAW_PID" 2>/dev/null; then
+    echo "  错误: QwenPaw 进程已退出，请查看日志: $QWENPAW_DIR/qwenpaw.log"
+    exit 1
+  fi
+  readiness_status=$(curl -s --connect-timeout 2 --max-time 2 -o /dev/null \
+    -w "%{http_code}" "http://localhost:8088/" 2>/dev/null) || readiness_status=""
+  case "$readiness_status" in
+    200|404) QWENPAW_READY=true; break ;;
+  esac
+  sleep 1
+done
+if [ "$QWENPAW_READY" != true ]; then
+  echo "  错误: QwenPaw 服务未就绪，请查看日志: $QWENPAW_DIR/qwenpaw.log"
+  exit 1
 fi
+echo "  服务已就绪"
 
 echo ""
 echo "=============================="
