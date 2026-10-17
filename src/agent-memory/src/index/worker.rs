@@ -255,19 +255,39 @@ fn flush(
     // the full subtree is still O(new files) because only directories
     // that received events are expanded, not the entire mount tree.
     let mut expanded: HashSet<PathBuf> = HashSet::new();
+    // Directories whose complete current file set was walked. A directory
+    // moved away and replaced within one debounce window (snapshot restore,
+    // `mv dir aside && mv new dir`) coalesces into a single event for a path
+    // that exists again, so no Remove ever names the old children.
+    let mut walked_dirs: HashSet<String> = HashSet::new();
     for path in pending_modify.iter() {
         if path.is_dir() {
+            let mut complete = true;
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|e| !is_under_meta(mount, e.path()))
-                .flatten()
-                .filter(|e| e.file_type().is_file())
             {
-                expanded.insert(entry.path().to_path_buf());
+                match entry {
+                    Ok(entry) if entry.file_type().is_file() => {
+                        expanded.insert(entry.path().to_path_buf());
+                    }
+                    Ok(_) => {}
+                    // An unreadable subtree must not read as deleted.
+                    Err(_) => complete = false,
+                }
+            }
+            if complete {
+                if let Some(rel) = relative(mount, path) {
+                    walked_dirs.insert(rel);
+                }
             }
         }
     }
+    // Include non-indexable files too: a conservative superset prevents
+    // pruning a row merely because extraction policy skipped its file.
+    let walked_files: HashSet<String> =
+        expanded.iter().filter_map(|p| relative(mount, p)).collect();
     pending_modify.extend(expanded);
 
     // Phase 2 (lock-free): I/O — stat + extract text. Walking the FS and
@@ -329,6 +349,33 @@ fn flush(
     // entire walk+extract pass.
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+    if !walked_dirs.is_empty() {
+        let known_paths = match store.known_paths() {
+            Ok(paths) => paths,
+            Err(error) => {
+                // A transient read error must not terminate the watcher or
+                // discard the normal upserts/removals from this window.
+                tracing::warn!("index prune skipped; known_paths failed: {error}");
+                Vec::new()
+            }
+        };
+        for known in known_paths {
+            if is_under_walked(&walked_dirs, &known)
+                && !walked_files.contains(&known)
+                // reindex_file can publish a newly written file after the
+                // walk. Recheck absence under the store lock so pruning
+                // does not undo that synchronous visibility guarantee.
+                && matches!(
+                    crate::safe_fs::metadata(mount.root_fd.as_fd(), Path::new(&known)),
+                    Err(MemoryError::NotFound(_))
+                )
+            {
+                to_remove.push(known);
+            }
+        }
+    }
+    to_remove.sort_unstable();
+    to_remove.dedup();
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
@@ -346,6 +393,15 @@ fn flush(
     }
 
     Ok(())
+}
+
+fn is_under_walked(walked_dirs: &HashSet<String>, known: &str) -> bool {
+    // Probe literal ancestors rather than scanning every walked directory:
+    // cost depends on path depth, and `_`/`%` never act as SQL wildcards.
+    Path::new(known)
+        .ancestors()
+        .skip(1)
+        .any(|parent| parent.to_str().is_some_and(|dir| walked_dirs.contains(dir)))
 }
 
 fn full_scan(
@@ -535,5 +591,77 @@ fn is_overflow(e: &notify::Error) -> bool {
         }
         notify::ErrorKind::MaxFilesWatch => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walked_directories_match_only_literal_descendants() {
+        let dirs = HashSet::from(["notes".into(), "special_%".into()]);
+        assert!(is_under_walked(&dirs, "notes/a.md"));
+        assert!(is_under_walked(&dirs, "notes/nested/a.md"));
+        assert!(is_under_walked(&dirs, "special_%/a.md"));
+        assert!(!is_under_walked(&dirs, "notes"));
+        assert!(!is_under_walked(&dirs, "notes_x/a.md"));
+        assert!(!is_under_walked(&dirs, "special_x/a.md"));
+        let root = HashSet::from([String::new()]);
+        assert!(is_under_walked(&root, "a.md"));
+        assert!(is_under_walked(&root, "notes/a.md"));
+    }
+
+    #[test]
+    fn failed_prune_read_does_not_abort_future_flushes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let meta_dir = root.join(".anolisa");
+        std::fs::create_dir(&meta_dir).unwrap();
+        std::fs::create_dir(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/new.md"), "fresh unicorn").unwrap();
+        let mount = MountPointLite {
+            root_fd: Arc::new(crate::safe_fs::open_root(&root).unwrap()),
+            root,
+            meta_dir: meta_dir.clone(),
+            meta_dir_name: ".anolisa".into(),
+        };
+        let db_path = meta_dir.join("test.db");
+        let store = Arc::new(Mutex::new(
+            BM25Store::open(&db_path, 0.0, 0.0, false).unwrap(),
+        ));
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        // Deterministic database read failure without relying on busy-timeout
+        // timing. Restore the temporary schema before the next event batch.
+        connection
+            .execute("ALTER TABLE files RENAME TO unavailable_files", [])
+            .unwrap();
+        let mut modified = HashSet::from([mount.root.join("notes")]);
+        flush(
+            &mount,
+            &store,
+            None,
+            None,
+            &mut modified,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        connection
+            .execute("ALTER TABLE unavailable_files RENAME TO files", [])
+            .unwrap();
+        modified.insert(mount.root.join("notes"));
+        flush(
+            &mount,
+            &store,
+            None,
+            None,
+            &mut modified,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.lock().unwrap().known_paths().unwrap(),
+            vec!["notes/new.md"]
+        );
     }
 }
