@@ -2930,3 +2930,312 @@ fn stash_purge_warning_survives_an_unwritable_stderr() {
     );
     assert_eq!(output.stdout.as_slice(), payload.as_bytes());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Success-path stdout writes must not panic when the write fails
+// ─────────────────────────────────────────────────────────────────────
+// `println!`/`print!` panic on a write error, so a command whose work was
+// already done answered 101 with a panic message on stderr instead of the
+// status it had earned - a full filesystem behind a redirect, or a consumer
+// that stopped reading (`tokenless stats list | head -1`). The policy is the
+// one ktuner settled for the same shape: a broken pipe means the consumer
+// left while the work was finished, so the command ends gracefully and keeps
+// its exit code; any other write error is an operation failure (code 1)
+// reported through the CLI's normal error channel.
+
+/// A child's stdout whose read end is already closed: every write answers
+/// EPIPE, the deterministic shape of a consumer that stopped reading.
+#[cfg(target_os = "linux")]
+fn closed_pipe_stdout() -> std::process::Stdio {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    assert_eq!(unsafe { libc::close(fds[0]) }, 0, "close the read end");
+    unsafe { std::process::Stdio::from_raw_fd(fds[1]) }
+}
+
+/// The listing command: a success path whose whole job is one stdout write.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_list_ends_gracefully_when_the_consumer_stopped_reading() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "list"])
+        .stdout(closed_pipe_stdout())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a broken pipe is a pipeline condition, not a failure: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A full filesystem behind a redirect is not a pipeline condition: the
+/// command reports an operation failure through the normal error channel.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "list"])
+        .stdout(std::process::Stdio::from(dev_full()))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// The payload path: a healthy run keeps the bytes `println!` wrote (the
+/// compressed output plus one LF), and an unwritable stdout becomes an
+/// operation error instead of a panic.
+#[test]
+#[cfg(target_os = "linux")]
+fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let run = |stdout: std::process::Stdio| {
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .arg("compress-response")
+            .stdin(std::process::Stdio::piped())
+            .stdout(stdout)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(COMPRESSIBLE_RESPONSE.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap()
+    };
+
+    let healthy = run(std::process::Stdio::piped());
+    assert!(healthy.status.success(), "{healthy:?}");
+    assert!(
+        healthy.stdout.ends_with(b"\n"),
+        "the payload still carries the single trailing LF println! added"
+    );
+
+    let full = run(std::process::Stdio::from(dev_full()));
+    let stderr = String::from_utf8_lossy(&full.stderr);
+    assert_eq!(full.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A prompt is a stdout write too: it must reach the terminal ahead of the
+/// stdin read that follows it, and its failure must not leave the command
+/// blocked on input nobody will answer.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_clear_prompt_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "clear"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(dev_full()))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A response above the 500-character TOON minimum, so `compress-toon`
+/// actually encodes it instead of taking the passthrough branch.
+fn toon_encodable_response() -> String {
+    let rows: Vec<String> = (0..24)
+        .map(|index| format!(r#"{{"id":{index},"name":"row-{index}","note":"padding-{index}"}}"#))
+        .collect();
+    format!(r#"{{"rows":[{}]}}"#, rows.join(","))
+}
+
+/// The byte-exact writers share the policy: `compress-toon` reproduces its
+/// payload verbatim, and by the time it is written the encoding is done, so a
+/// consumer that left is a pipeline condition rather than a failed command.
+#[test]
+#[cfg(target_os = "linux")]
+fn compress_toon_ends_gracefully_when_the_consumer_stopped_reading() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let payload = toon_encodable_response();
+    let run = |stdout: std::process::Stdio| {
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .arg("compress-toon")
+            .stdin(std::process::Stdio::piped())
+            .stdout(stdout)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(payload.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap()
+    };
+
+    // Control: the healthy run still emits the byte-exact body, with no LF the
+    // detection contract does not expect.
+    let healthy = run(std::process::Stdio::piped());
+    let stderr = String::from_utf8_lossy(&healthy.stderr);
+    assert!(healthy.status.success(), "{stderr}");
+    assert!(!healthy.stdout.is_empty(), "no body was written");
+
+    let closed = run(closed_pipe_stdout());
+    let stderr = String::from_utf8_lossy(&closed.stderr);
+    assert_eq!(
+        closed.status.code(),
+        Some(0),
+        "a broken pipe is a pipeline condition, not a failure: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A full filesystem behind a redirect stays an operation failure for the
+/// byte-exact writer too - the bytes never reached the consumer.
+#[test]
+#[cfg(target_os = "linux")]
+fn compress_toon_maps_an_unwritable_stdout_to_an_operation_error() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let payload = toon_encodable_response();
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .arg("compress-toon")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(dev_full()))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(payload.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    // Not `starts_with`: compress-toon may note a passthrough or no-savings
+    // disposition on stderr before the write error lands.
+    assert!(
+        stderr.contains("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// `retrieve` had already read the payload out of the stash when the write
+/// fails, so a consumer that left must not turn a completed restore into an
+/// operation error.
+#[test]
+#[cfg(target_os = "linux")]
+fn retrieve_ends_gracefully_when_the_consumer_stopped_reading() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    let stashed_string = format!("HELLO_RETRIEVE_PIPE_{}", "X".repeat(200));
+    let original = format!("{{\"s\":\"{stashed_string}\"}}");
+
+    let compressed = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .args([
+            "compress-response",
+            "--truncate-strings-at",
+            "120",
+            "--stash-db",
+        ])
+        .arg(&stash_db)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(original.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "compress-response failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    let compressed_text = String::from_utf8_lossy(&compressed.stdout);
+    let marker = tokenless_ccr::extract_hash(&compressed_text)
+        .expect("compressed output should contain a recovery instruction");
+
+    let run = |stdout: std::process::Stdio| {
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .args(["retrieve", marker, "--stash-db"])
+            .arg(&stash_db)
+            .stdout(stdout)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap()
+    };
+
+    // Control: the healthy restore is still byte-exact.
+    let healthy = run(std::process::Stdio::piped());
+    assert!(
+        healthy.status.success(),
+        "retrieve failed: {}",
+        String::from_utf8_lossy(&healthy.stderr)
+    );
+    assert_eq!(healthy.stdout.as_slice(), stashed_string.as_bytes());
+
+    let closed = run(closed_pipe_stdout());
+    let stderr = String::from_utf8_lossy(&closed.stderr);
+    assert_eq!(
+        closed.status.code(),
+        Some(0),
+        "a broken pipe is a pipeline condition, not a failure: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
