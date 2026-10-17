@@ -316,6 +316,22 @@ impl BM25Store {
         exclude_cold: bool,
         agent_scope: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
+        self.search_scoped_inner(query, top_k, exclude_cold, agent_scope, true)
+    }
+
+    /// Shared BM25/LIKE query implementation.
+    ///
+    /// `record_access` is true for caller-facing searches. Hybrid search
+    /// passes false for its two candidate queries and records one access
+    /// against the merged hits it actually returns.
+    fn search_scoped_inner(
+        &self,
+        query: &str,
+        top_k: usize,
+        exclude_cold: bool,
+        agent_scope: Option<&str>,
+        record_access: bool,
+    ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() {
             return Err(MemoryError::InvalidArgument("empty search query".into()));
         }
@@ -343,7 +359,11 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+            let hits = self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope)?;
+            if record_access {
+                self.record_access_hits(&hits);
+            }
+            return Ok(hits);
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
@@ -494,6 +514,9 @@ impl BM25Store {
         // Best match first — `score` is "higher is better" on every path.
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
 
+        if record_access {
+            self.record_access_hits(&out);
+        }
         Ok(out)
     }
 
@@ -651,11 +674,58 @@ impl BM25Store {
         self.search(query, top_k, false)
     }
 
-    /// Compact the index: mark old, never-accessed files as cold and
-    /// remove them from the FTS index. Returns the number of files compacted.
+    /// Record that search hits were surfaced to the caller.
     ///
-    /// Cold criteria: `access_count == 0 AND age > cold_after_days`.
-    /// Files with `access_count > 0` are never compacted (warm protection).
+    /// These are the only writers of `access_count` / `last_accessed_ms`.
+    /// A hit also re-warms its row, so a deep search that surfaces an
+    /// archived memory makes it visible to normal search again. The
+    /// bookkeeping is best-effort: a failed update must not fail the
+    /// search that produced the hits.
+    fn record_access_hits(&self, hits: &[SearchHit]) {
+        self.record_access_paths(hits.iter().map(|hit| hit.path.as_str()));
+    }
+
+    fn record_access_paths<'a, I>(&self, paths: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut paths = paths.into_iter().peekable();
+        if paths.peek().is_none() {
+            return;
+        }
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let mut stmt = match self.conn.prepare(
+            "UPDATE files \
+             SET access_count = access_count + 1, \
+                 last_accessed_ms = ?1, \
+                 is_cold = 0 \
+             WHERE path = ?2",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                tracing::debug!("cannot prepare search-access update: {e}");
+                return;
+            }
+        };
+        for path in paths {
+            if let Err(e) = stmt.execute(params![now_ms, path]) {
+                tracing::debug!("cannot record search access for {path}: {e}");
+            }
+        }
+    }
+
+    /// Compact the index: mark stale files as cold so normal search filters
+    /// them out. Cold rows remain in the FTS index for deep search. Returns
+    /// the number of files compacted.
+    ///
+    /// Cold criteria: neither `mtime_ms` nor `last_accessed_ms` is within
+    /// `cold_after_days`. A recently searched file therefore stays warm even
+    /// when its mtime is old, while a one-time search cannot protect it
+    /// forever.
     pub fn compact(&mut self, cold_after_days: u64) -> Result<usize> {
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -668,8 +738,10 @@ impl BM25Store {
         // Find files eligible for cold marking.
         let cold_paths: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT path FROM files WHERE access_count = 0 \
-                 AND mtime_ms < ?1 AND is_cold = 0",
+                "SELECT path FROM files \
+                 WHERE is_cold = 0 \
+                   AND mtime_ms < ?1 \
+                   AND COALESCE(last_accessed_ms, 0) < ?1",
             )?;
             let rows = stmt.query_map(params![cutoff_ms], |r| r.get::<_, String>(0))?;
             rows.flatten().collect()
@@ -850,6 +922,15 @@ impl BM25Store {
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_inner(query_vec, top_k, true)
+    }
+
+    fn search_vec_inner(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        record_access: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
@@ -890,6 +971,9 @@ impl BM25Store {
         // edge-case values (subnormals, -0.0).
         scores.sort_by(|a, b| b.1.total_cmp(&a.1));
         scores.truncate(top_k);
+        if record_access {
+            self.record_access_paths(scores.iter().map(|(path, _)| path.as_str()));
+        }
         Ok(scores)
     }
 
@@ -925,9 +1009,11 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        // Run both search strategies.
-        let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        // Run both candidate search strategies. Neither records an access
+        // yet: hybrid search charges one access to the merged hits it
+        // actually returns, not to every candidate used to rank them.
+        let bm25_hits = self.search_scoped_inner(query, top_k * 2, exclude_cold, None, false);
+        let vec_hits = self.search_vec_inner(query_vec, top_k * 2, false);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
@@ -952,11 +1038,13 @@ impl BM25Store {
             return Ok(Vec::new());
         }
         if vec_hits.is_empty() {
-            return Ok(bm25_hits.into_iter().take(top_k).collect());
+            let hits: Vec<SearchHit> = bm25_hits.into_iter().take(top_k).collect();
+            self.record_access_hits(&hits);
+            return Ok(hits);
         }
         if bm25_hits.is_empty() {
             // Reconstruct SearchHit from vector-only results.
-            return Ok(vec_hits
+            let hits: Vec<SearchHit> = vec_hits
                 .into_iter()
                 .take(top_k)
                 .map(|(path, score)| SearchHit {
@@ -965,7 +1053,9 @@ impl BM25Store {
                     score,
                     suspicious: false,
                 })
-                .collect());
+                .collect();
+            self.record_access_hits(&hits);
+            return Ok(hits);
         }
 
         // RRF: score = Σ 1/(k + rank_i) for each result set.
@@ -1008,7 +1098,7 @@ impl BM25Store {
         merged.sort_by(|a, b| b.1.total_cmp(&a.1));
         merged.truncate(top_k);
 
-        Ok(merged
+        let hits: Vec<SearchHit> = merged
             .into_iter()
             .map(|(path, score)| {
                 let (snippet, suspicious) = snippets.remove(&path).unwrap_or_default();
@@ -1019,7 +1109,9 @@ impl BM25Store {
                     suspicious,
                 }
             })
-            .collect())
+            .collect();
+        self.record_access_hits(&hits);
+        Ok(hits)
     }
 
     pub fn count(&self) -> Result<usize> {
@@ -1730,6 +1822,172 @@ mod tests {
         assert_eq!(hits2[0].path, "new.md");
     }
 
+    fn access_stats(s: &BM25Store, path: &str) -> (i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT access_count, COALESCE(last_accessed_ms, 0) FROM files WHERE path = ?1",
+                params![path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn search_records_access_statistics() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("alpha.md", 1_000, 16, "alpha memory", None)
+            .unwrap();
+        s.upsert("beta.md", 1_000, 16, "beta memory", None).unwrap();
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert_eq!(s.search("alpha", 5, true).unwrap().len(), 1);
+        assert_eq!(s.search("alpha", 5, true).unwrap().len(), 1);
+        assert_eq!(s.search("beta", 5, true).unwrap().len(), 1);
+
+        let (alpha_count, alpha_last) = access_stats(&s, "alpha.md");
+        let (beta_count, beta_last) = access_stats(&s, "beta.md");
+        assert_eq!(alpha_count, 2);
+        assert_eq!(beta_count, 1);
+        assert!(alpha_last >= before);
+        assert!(beta_last >= before);
+    }
+
+    #[test]
+    fn search_vec_records_access() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("vector.md", 1_000, 16, "vector memory", None)
+            .unwrap();
+        s.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+
+        let hits = s.search_vec(&[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "vector.md");
+        assert_eq!(access_stats(&s, "vector.md").0, 1);
+    }
+
+    #[test]
+    fn search_hybrid_records_merged_hit_once() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("hybrid.md", 1_000, 16, "hybrid memory", None)
+            .unwrap();
+        s.upsert_vec("hybrid.md", &[1.0, 0.0]).unwrap();
+
+        let hits = s.search_hybrid("hybrid", &[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "hybrid.md");
+        assert_eq!(access_stats(&s, "hybrid.md").0, 1);
+    }
+
+    #[test]
+    fn compact_keeps_searched_files_warm() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old_ms = now_ms - 100 * 86_400_000;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("searched.md", old_ms, 24, "walrus unique knowledge", None)
+            .unwrap();
+        s.upsert("untouched.md", old_ms, 24, "other unique knowledge", None)
+            .unwrap();
+
+        // The agent searches `searched.md` and gets it back — once through
+        // the MATCH path (3+ char term) and once through the LIKE fallback
+        // (2-char term).
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+        let hits = s.search("wa", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+
+        let compacted = s.compact(30).unwrap();
+        assert_eq!(compacted, 1, "only the never-searched file may go cold");
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a searched memory must stay searchable after compact"
+        );
+        assert_eq!(hits[0].path, "searched.md");
+        let hits = s.search("other", 5, true).unwrap();
+        assert!(hits.is_empty(), "the untouched file is cold");
+    }
+
+    #[test]
+    fn compact_cools_after_search_warmth_expires() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let day_ms = 86_400_000;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "searched.md",
+            now_ms - 50 * day_ms,
+            24,
+            "walrus unique knowledge",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.search("walrus", 5, true).unwrap().len(), 1);
+        assert_eq!(
+            s.compact(30).unwrap(),
+            0,
+            "a recent search keeps the file warm"
+        );
+
+        // Age only the recorded access; the file mtime stays old.
+        s.conn
+            .execute(
+                "UPDATE files SET last_accessed_ms = ?1 WHERE path = 'searched.md'",
+                params![now_ms - 40 * day_ms],
+            )
+            .unwrap();
+
+        assert_eq!(
+            s.compact(30).unwrap(),
+            1,
+            "an expired search no longer protects the file"
+        );
+        assert!(s.search("walrus", 5, true).unwrap().is_empty());
+        assert_eq!(s.search_deep("walrus", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compact_deep_search_rewarms_cold_file() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "gamma unique knowledge",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.compact(30).unwrap(), 1);
+        assert!(s.search("gamma", 5, true).unwrap().is_empty());
+
+        let hits = s.search_deep("gamma", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "old.md");
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
+        assert_eq!(s.search("gamma", 5, true).unwrap().len(), 1);
+    }
+
     #[test]
     fn compact_marks_old_files_cold() {
         let now_ms = std::time::SystemTime::now()
@@ -1821,9 +2079,10 @@ mod tests {
         )
         .unwrap();
 
-        // Before compact: visible in search.
-        let hits = s.search("unique", 5, true).unwrap();
-        assert_eq!(hits.len(), 1);
+        // Before compact: present and warm. Probe the counts rather than
+        // searching, because a caller-facing search records an access and
+        // would legitimately protect the file from compaction.
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
 
         // Compact.
         s.compact(30).unwrap();

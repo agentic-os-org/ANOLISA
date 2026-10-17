@@ -394,7 +394,7 @@ impl MemoryMcpServer {
     // ---- Index compaction (cold archival) ----
 
     #[tool(
-        description = "Compact the memory index: mark old, never-searched files as cold. Cold files are excluded from normal search but still available via deep search. Returns the number of files compacted."
+        description = "Compact the memory index: mark files that have neither been modified nor searched within the configured cold_after_days as cold. Cold files are excluded from normal search but still available via deep search. Returns the number of files compacted."
     )]
     async fn mem_compact(&self) -> ToolResult {
         self.svc
