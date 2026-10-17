@@ -343,7 +343,10 @@ impl MemoryService {
         let session_id = session.sid().as_str();
 
         // Check consent before running consolidation.
-        if !crate::tools::memory_sovereignty::is_source_allowed(self, "auto-consolidation") {
+        if !crate::tools::memory_sovereignty::is_source_allowed(
+            self,
+            crate::consolidation::fact::AUTO_CONSOLIDATION_SOURCE,
+        ) {
             tracing::info!("consolidation skipped: auto-consolidation denied by consent config");
             return 0;
         }
