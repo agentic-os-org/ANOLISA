@@ -307,9 +307,13 @@ def build_report(results: dict) -> dict:
 
     errors = results.get("errors", [])
     error_types = [e.get("error", e.get("type", "unknown")) for e in errors]
+    # Same contract as the human-readable path: heuristic unknown_name_ref
+    # warnings do not block delivery, so a warning-only file is "success"
+    # here too — otherwise --report disagrees with the text mode's verdict.
+    hard_errors = [e for e in errors if e.get("type") != "unknown_name_ref"]
 
     return {
-        "status": "success" if results["error_count"] == 0 else "errors_found",
+        "status": "success" if not hard_errors else "errors_found",
         "file": results["file"],
         "sheets_checked": results["sheets_checked"],
         "total_formulas": results["formula_count"],
@@ -349,6 +353,13 @@ def main() -> None:
 
     results = check(args_clean[0], sheet_filter=sheet_filter)
 
+    # Same contract as the human-readable path below: heuristic
+    # unknown_name_ref warnings do not block delivery (exit 0); only hard
+    # errors fail the run. Otherwise --json/--report exit 1 for files the
+    # text mode passes ("PASS with WARN"), and agents keying on the exit
+    # code ("exit code 0 = safe" per SKILL.md) see false failures.
+    hard_errors = [e for e in results["errors"] if e.get("type") != "unknown_name_ref"]
+
     if use_report:
         report = build_report(results)
         output = json.dumps(report, indent=2, ensure_ascii=False)
@@ -357,11 +368,11 @@ def main() -> None:
                 f.write(output + "\n")
         else:
             print(output)
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_errors else 0)
 
     if use_json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_errors else 0)
 
     # Human-readable output
     sheets = ", ".join(results["sheets_checked"]) or "(none)"
