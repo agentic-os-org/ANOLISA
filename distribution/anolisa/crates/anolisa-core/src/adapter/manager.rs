@@ -46,8 +46,9 @@ use super::driver::{
 };
 use super::managed_files::{
     ManagedInventory, ManagedMatch, cleanup_replaced_materialized_files,
-    inventory_for_installation, materialized_files, plan_replaced_materialized_files,
-    source_revision, verify_managed_bundle, verify_materialized_bundle,
+    foreign_materialized_roots, inventory_for_installation, materialized_files,
+    plan_replaced_materialized_files, source_revision, verify_managed_bundle,
+    verify_materialized_bundle,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -1178,6 +1179,24 @@ impl AdapterManager {
                         reason,
                     }
                 })?;
+        }
+        if !driver.owns_preexisting_materialized_roots() {
+            let foreign = foreign_materialized_roots(&claim, prior.as_ref());
+            if !foreign.is_empty() {
+                let paths = foreign
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(AdapterError::InvalidAdapterInput {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason: format!(
+                        "refusing to write into existing {framework} content ANOLISA does not own: \
+                         {paths}; move or rename it, then re-run enable"
+                    ),
+                });
+            }
         }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.

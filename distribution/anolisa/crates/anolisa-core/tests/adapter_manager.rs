@@ -961,6 +961,180 @@ fn reenable_prunes_removed_managed_skill_files_but_keeps_runtime_extras() {
 }
 
 #[test]
+fn enable_refuses_a_same_named_skill_dir_anolisa_does_not_own() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    // The user already keeps their own skill under the same name.
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    std::fs::create_dir_all(&destination).expect("user skill dir");
+    std::fs::write(destination.join("SKILL.md"), b"user skill").expect("user SKILL.md");
+    std::fs::write(destination.join("notes.md"), b"user notes").expect("user notes");
+
+    let err = world
+        .manager()
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("a foreign skill dir must not be overwritten");
+    assert!(err.to_string().contains("does not own"), "{err}");
+    assert_eq!(
+        std::fs::read(destination.join("SKILL.md")).unwrap(),
+        b"user skill"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("notes.md")).unwrap(),
+        b"user notes"
+    );
+    assert!(!destination.join("marker.txt").exists());
+    assert!(
+        !world.has_claim(),
+        "a refused enable must not leave a receipt"
+    );
+}
+
+#[test]
+fn disable_keeps_skill_files_anolisa_did_not_write_or_that_were_edited() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::write(source.join("SKILL.md"), b"managed skill").expect("managed SKILL.md");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable skill");
+
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    std::fs::write(destination.join("runtime.log"), b"runtime").expect("runtime extra");
+    std::fs::write(destination.join("SKILL.md"), b"edited by the user").expect("user edit");
+
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    assert!(
+        disabled.report.cleanup_complete,
+        "{:?}",
+        disabled.report.messages
+    );
+    assert!(disabled.claim_removed);
+    assert!(
+        !destination.join("marker.txt").exists(),
+        "an unmodified managed file is removed"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("runtime.log")).unwrap(),
+        b"runtime"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("SKILL.md")).unwrap(),
+        b"edited by the user"
+    );
+    assert!(
+        disabled
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("kept the directory")),
+        "{:?}",
+        disabled.report.messages
+    );
+}
+
+#[test]
+fn disable_removes_an_untouched_skill_dir_completely() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    std::fs::create_dir_all(world.resource_root.join("skills/sec-audit/scripts"))
+        .expect("nested source dir");
+    std::fs::write(
+        world.resource_root.join("skills/sec-audit/scripts/run.sh"),
+        b"echo",
+    )
+    .expect("nested managed file");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable skill");
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    assert!(destination.join("scripts/run.sh").is_file());
+
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        !destination.exists(),
+        "an untouched skill dir is removed whole"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn disable_preserves_skill_targets_when_a_parent_is_replaced_by_a_symlink() {
+    for (relative, has_file) in [
+        ("run.sh", true),
+        ("nested/run.sh", true),
+        ("nested/run.sh", false),
+    ] {
+        let guard = OpenClawEnvGuard::acquire();
+        let world = stage();
+        configure_plugin_with_skill(&world, "sec-audit");
+        let source = world.resource_root.join("skills/sec-audit/scripts");
+        let managed = source.join(relative);
+        std::fs::create_dir_all(managed.parent().unwrap()).expect("nested source");
+        std::fs::write(&managed, b"managed script").expect("managed source");
+        record_owned_adapter_files(&world.layout, &world.resource_root);
+        world.apply_env(&guard, None);
+        let manager = world.manager();
+        manager
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("enable skill");
+
+        let destination = world.openclaw_home.join("skills/sec-audit");
+        let target = world.openclaw_home.join("skills/user-owned");
+        let target_file = target.join(relative);
+        std::fs::create_dir_all(target_file.parent().unwrap()).expect("user target directory");
+        if has_file {
+            std::fs::write(&target_file, b"managed script").expect("identical user file");
+        }
+        std::fs::rename(
+            destination.join("scripts"),
+            world._root.path().join("original-scripts"),
+        )
+        .expect("move recorded parent");
+        std::os::unix::fs::symlink(&target, destination.join("scripts"))
+            .expect("replacement parent link");
+
+        let disabled = manager
+            .disable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("disable");
+        assert!(disabled.report.cleanup_complete);
+        assert_eq!(
+            std::fs::read_link(destination.join("scripts")).unwrap(),
+            target
+        );
+        assert!(target_file.parent().unwrap().is_dir());
+        if has_file {
+            assert_eq!(std::fs::read(&target_file).unwrap(), b"managed script");
+        }
+        assert!(
+            disabled
+                .report
+                .messages
+                .iter()
+                .any(|message| message.contains("kept the directory")),
+            "{:?}",
+            disabled.report.messages
+        );
+    }
+}
+
+#[test]
 fn reenable_prunes_empty_ancestors_before_directory_to_file_change() {
     let guard = OpenClawEnvGuard::acquire();
     let world = stage();
@@ -987,6 +1161,111 @@ fn reenable_prunes_empty_ancestors_before_directory_to_file_change() {
         std::fs::read(destination).expect("new file-shaped output"),
         b"v2"
     );
+}
+
+#[test]
+fn disable_keeps_receipt_when_shared_skills_parent_is_redirected() {
+    for framework in ["openclaw", "hermes"] {
+        for target_exists in [true, false] {
+            let guard = OpenClawEnvGuard::acquire();
+            let world = stage();
+            let source_root = world
+                .layout
+                .datadir
+                .join("adapters")
+                .join(COMPONENT)
+                .join(framework);
+            let source = source_root.join("skills/sec-audit");
+            std::fs::create_dir_all(&source).expect("skill source");
+            std::fs::write(source.join("marker.txt"), b"skill-v1").expect("managed marker");
+            write_openclaw_manifest(
+                &world.layout,
+                &format!(
+                    r#"[[adapters]]
+framework = "{framework}"
+adapter_type = "skill_bundle"
+source = "adapters/{COMPONENT}/{framework}"
+dest = "{{datadir}}/adapters/{{component}}/{framework}/"
+
+[adapters.{framework}]
+skills = ["sec-audit"]
+"#
+                ),
+            );
+            record_owned_adapter_files(&world.layout, &source_root);
+            let home = world._root.path().join(format!("{framework}-home"));
+            world.apply_env(&guard, None);
+            guard.set("HERMES_BIN", &world.fake_bin);
+            guard.set("HERMES_HOME", &home);
+            let manager = AdapterManager::new(
+                world.layout.clone(),
+                Some(world.user_home.clone()),
+                "tester".to_string(),
+            );
+            manager
+                .enable(COMPONENT, Some(framework), false)
+                .expect("enable skill");
+
+            let skills = home.join("skills");
+            let original = home.join("original-skills");
+            let target = home.join("user-skills");
+            let user_skill = target.join("sec-audit");
+            if target_exists {
+                std::fs::create_dir_all(&user_skill).expect("independent user skill");
+                std::fs::write(user_skill.join("marker.txt"), b"skill-v1")
+                    .expect("identical user file");
+                std::fs::write(user_skill.join("notes.md"), b"user notes").expect("user notes");
+            }
+            std::fs::rename(&skills, &original).expect("move installed skills");
+            std::os::unix::fs::symlink(&target, &skills).expect("redirect shared ancestor");
+
+            let disabled = manager
+                .disable(COMPONENT, Some(framework), false)
+                .expect("disable");
+            assert!(
+                !disabled.report.cleanup_complete,
+                "{:?}",
+                disabled.report.messages
+            );
+            assert!(!disabled.claim_removed);
+            assert!(
+                world
+                    .load_state()
+                    .find_adapter_claim(COMPONENT, framework)
+                    .is_some()
+            );
+            assert_eq!(std::fs::read_link(&skills).unwrap(), target);
+            assert_eq!(
+                std::fs::read(original.join("sec-audit/marker.txt")).unwrap(),
+                b"skill-v1"
+            );
+            if target_exists {
+                assert_eq!(
+                    std::fs::read(user_skill.join("marker.txt")).unwrap(),
+                    b"skill-v1"
+                );
+                assert_eq!(
+                    std::fs::read(user_skill.join("notes.md")).unwrap(),
+                    b"user notes"
+                );
+            } else {
+                assert!(!target.exists());
+            }
+
+            std::fs::remove_file(&skills).expect("remove replacement link");
+            std::fs::rename(&original, &skills).expect("restore installed directory");
+            let retried = manager
+                .disable(COMPONENT, Some(framework), false)
+                .expect("retry disable");
+            assert!(
+                retried.report.cleanup_complete,
+                "{:?}",
+                retried.report.messages
+            );
+            assert!(retried.claim_removed);
+            assert!(!skills.join("sec-audit").exists());
+        }
+    }
 }
 
 #[test]
@@ -1043,6 +1322,63 @@ skills = ["sec-audit"]
     assert!(!destination.join("marker.txt").exists());
     let status = manager.status(Some(COMPONENT)).expect("Hermes status");
     assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn hermes_disable_keeps_runtime_files_in_a_skill_dir() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    let hermes_root = world
+        .layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("hermes");
+    let source = hermes_root.join("skills/sec-audit");
+    std::fs::create_dir_all(&source).expect("Hermes skill source");
+    std::fs::write(source.join("marker.txt"), b"skill-v1").expect("Hermes skill marker");
+    write_openclaw_manifest(
+        &world.layout,
+        &format!(
+            r#"[[adapters]]
+framework = "hermes"
+adapter_type = "skill_bundle"
+source = "adapters/{COMPONENT}/hermes"
+dest = "{{datadir}}/adapters/{{component}}/hermes/"
+
+[adapters.hermes]
+skills = ["sec-audit"]
+"#
+        ),
+    );
+    record_owned_adapter_files(&world.layout, &hermes_root);
+    let hermes_home = world._root.path().join("hermes-home");
+    guard.set("HERMES_BIN", &world.fake_bin);
+    guard.set("HERMES_HOME", &hermes_home);
+    let manager = AdapterManager::new(
+        world.layout.clone(),
+        Some(world.user_home.clone()),
+        "tester".to_string(),
+    );
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable Hermes skill");
+    let destination = hermes_home.join("skills/sec-audit");
+    std::fs::write(destination.join("memory.json"), b"{}").expect("runtime extra");
+
+    let disabled = manager
+        .disable(COMPONENT, Some("hermes"), false)
+        .expect("disable Hermes");
+    assert!(
+        disabled.report.cleanup_complete,
+        "{:?}",
+        disabled.report.messages
+    );
+    assert!(!destination.join("marker.txt").exists());
+    assert_eq!(
+        std::fs::read(destination.join("memory.json")).unwrap(),
+        b"{}"
+    );
 }
 
 #[test]
@@ -3619,12 +3955,14 @@ fn invalid_config_first_install_does_not_remove_declared_but_unmaterialized_skil
     let skill_dir = world.openclaw_home.join("skills/sec-audit");
     std::fs::create_dir_all(&skill_dir).expect("create unrelated pre-existing skill directory");
     let user_file = skill_dir.join("user-owned.txt");
-    std::fs::write(&user_file, b"leave this file alone").expect("write existing user file");
     let manager = world.manager();
 
     manager
         .enable(COMPONENT, Some(FRAMEWORK), false)
         .expect_err("config preflight rejects install before skill materialization");
+    // The collision guard rejects occupied foreign roots before install. Add
+    // user content after the rejected preflight to exercise receipt cleanup.
+    std::fs::write(&user_file, b"leave this file alone").expect("write user file");
     let state = world.load_state();
     let claim = state
         .find_adapter_claim(COMPONENT, FRAMEWORK)
