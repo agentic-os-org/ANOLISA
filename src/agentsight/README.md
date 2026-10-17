@@ -561,3 +561,5 @@ This project is derived from [https://github.com/eunomia-bpf/agentsight.git](htt
 ## License
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
+
+Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#tokenless-statistics-api).

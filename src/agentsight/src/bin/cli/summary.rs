@@ -39,6 +39,15 @@ pub struct SummaryCommand {
     /// matching the default on-disk layout.
     #[structopt(long)]
     pub db: Option<String>,
+
+    /// Override the tokenless stats database path
+    ///
+    /// The tokenless store lives outside the AgentSight databases, so `--db`
+    /// does not move it: a report over a copy still reads the running host's
+    /// own `stats.db`. Point this at a copy to keep the whole report free of
+    /// live data.
+    #[structopt(long)]
+    pub tokenless_db: Option<String>,
 }
 
 /// Sessions + token totals from genai_events.db.
@@ -76,6 +85,16 @@ impl SummaryCommand {
             .unwrap_or_else(GenAISqliteStore::default_path)
     }
 
+    /// Resolve the tokenless stats database path: `--tokenless-db` reads a
+    /// copy instead of the running host's own store; without it the default
+    /// location is used.
+    fn tokenless_db_path(&self) -> std::path::PathBuf {
+        self.tokenless_db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(default_stats_path)
+    }
+
     pub fn execute(&self) {
         let (start_ns, end_ns) = time_range_ns(self.last);
 
@@ -84,7 +103,7 @@ impl SummaryCommand {
         let interruptions =
             gather_interruptions(&interruption_db_path(&genai_db), start_ns, end_ns);
         let (tokenless, tokenless_available) =
-            gather_tokenless(&default_stats_path(), start_ns, end_ns);
+            gather_tokenless(&self.tokenless_db_path(), start_ns, end_ns);
 
         if self.json {
             self.print_json(&sessions, &interruptions, &tokenless, tokenless_available);
@@ -383,6 +402,7 @@ mod tests {
             last: 24,
             json: false,
             db: None,
+            tokenless_db: None,
         };
         assert_eq!(plain.db_path(), GenAISqliteStore::default_path());
 
@@ -390,6 +410,7 @@ mod tests {
             last: 24,
             json: false,
             db: Some("/tmp/agentsight_summary_copy/genai_events.db".into()),
+            tokenless_db: None,
         };
         let genai = copied.db_path();
         assert_eq!(
@@ -399,6 +420,32 @@ mod tests {
         assert_eq!(
             interruption_db_path(&genai),
             std::path::PathBuf::from("/tmp/agentsight_summary_copy/interruption_events.db")
+        );
+    }
+
+    #[test]
+    fn tokenless_db_path_honours_the_override_and_falls_back_to_the_default() {
+        // `--tokenless-db` must reach the gather call: reverting the wiring
+        // (returning the default unconditionally) makes this fail. The
+        // tokenless store is the one source `--db` cannot move, so without
+        // this flag a report over a copy still reads the local host's stats.db.
+        let plain = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: None,
+        };
+        assert_eq!(plain.tokenless_db_path(), default_stats_path());
+
+        let copied = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: Some("/tmp/agentsight_summary_copy/stats.db".into()),
+        };
+        assert_eq!(
+            copied.tokenless_db_path(),
+            std::path::PathBuf::from("/tmp/agentsight_summary_copy/stats.db")
         );
     }
 
@@ -483,12 +530,14 @@ mod tests {
             last: 24,
             json: false,
             db: None,
+            tokenless_db: None,
         }
         .execute();
         SummaryCommand {
             last: 1,
             json: true,
             db: None,
+            tokenless_db: None,
         }
         .execute();
     }
@@ -523,6 +572,7 @@ mod tests {
             last: 24,
             json: false,
             db: None,
+            tokenless_db: None,
         };
         // Saved-activity + non-zero sessions/interruptions branches.
         text_cmd.print_text(&populated_sessions, &populated_ints, &populated_tl, true);
@@ -545,6 +595,7 @@ mod tests {
             last: 24,
             json: true,
             db: None,
+            tokenless_db: None,
         }
         .print_json(&populated_sessions, &populated_ints, &populated_tl, true);
     }

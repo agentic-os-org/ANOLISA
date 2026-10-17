@@ -162,6 +162,29 @@ fn replies(value: Value) -> Vec<Reply> {
 }
 
 #[test]
+fn startup_probe_checks_only_the_auth_contract_within_its_original_budget() {
+    let fixture = Fixture::new(vec![Reply::json(json!({"auth_enabled":true}))]);
+    let client = fixture.client();
+    let source = client
+        .probe_until(Instant::now() + Duration::from_secs(1), 4096)
+        .unwrap();
+    assert!(source.version.is_none());
+    assert_eq!(source.authentication, "loopback_unauthenticated");
+    assert!(matches!(
+        client.probe_until(Instant::now(), 4096),
+        Err(Error::Deadline)
+    ));
+    assert!(matches!(
+        client.probe_until(Instant::now() + Duration::from_secs(1), 0),
+        Err(Error::Configuration(_))
+    ));
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /api/auth/status "));
+    assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+}
+
+#[test]
 fn selected_query_is_read_only_scoped_and_explicitly_unassociated() {
     let session = "qoder:session /?#%中文";
     let fixture = Fixture::new(replies(trajectory(session, 2)));

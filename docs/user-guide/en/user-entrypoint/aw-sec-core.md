@@ -50,6 +50,59 @@ existing daemon. Both paths are required and absolute. `--help` prints usage.
 The process reads one EOF-terminated AW Provider JSON request on stdin and writes
 one response on stdout. It is normally launched by the Host, not interactively.
 
+## Packaged backend and explicit health diagnostics
+
+The Preview sec-core Provider package includes `agent-sec-cli`,
+`agent-sec-daemon`, and `agent-sec-daemon-health` from the same source build.
+Their hashes and executable modes are covered by the component receipt in both
+split and all-in-one installations. Official systemd/configuration templates are
+included under `share/aw/providers/sec-core/` as reference assets; installing the
+AW package does not register a service or modify `/etc`.
+
+Reuse an existing root `agent-sec-core.service` and its socket. For a new system
+backend, use the [sec-core installation guide](../agent-security/agent-sec-core/QUICKSTART.md)
+and the official system package's service lifecycle. Its current component
+manifest advertises Linux x86_64; a locally built AW ARM64 package does not imply
+an official sec-core ARM64 release. The source `make install-core-v2` target can
+consume the packaged binaries through `V2_BIN_BUILD_DIR`, but overwrites its
+system binary/unit destinations and must not be run over an existing managed
+installation. Do not point a root service at a user-writable AW prefix.
+
+An installer or diagnostic consumer can explicitly query the installed helper:
+
+```bash
+AW_SEC_PROVIDER="$AW_PREVIEW_PREFIX/libexec/aw/providers/sec-core"
+"$AW_SEC_PROVIDER/aw-provider-sec-core" --health \
+  --helper "$AW_SEC_PROVIDER/agent-sec-daemon-health" \
+  --socket /run/agent-sec-core/daemon.sock
+```
+
+This is an optional component diagnostic, not an additional Agent startup step.
+Continue starting Agents with `aw run`. The command invokes only the existing
+`daemon.health` probe, with a one-second process deadline and 4 KiB stream
+limits. It never starts a daemon, scans code, or performs target admission.
+The helper authenticates the daemon's root peer credentials; AW strips the
+sec-core testing bypass environment variable. Nonzero helper exits, invalid or
+unhealthy replies, a non-root peer, missing components and deadlines remain
+unavailable. Private helper output is not returned.
+
+The separate `aw-sec-core-health/v1alpha1` JSON schema is published at
+`src/aw/crates/aw-provider-sec-core/schemas/health-v1alpha1.schema.json` with
+reachable/unavailable fixtures in `tests/fixtures/`. `helper_installed` means
+only that the helper file exists; `socket_configured` means an absolute socket
+path was supplied. Only successful authenticated health yields
+`backend: authenticated_reachable`. `admission` and `check_result` remain
+`unknown`: neither health nor a recent execution's `status=ok` proves that a
+target admitted a Provider or that a scanner found no risk. This does not change
+`aw inspect`, the existing Provider view protocol, or their `unknown` fields.
+Diagnostic success/failure does not replace each invocation's configured
+`on_error` behavior; backend loss still blocks when `on_error: block` applies.
+
+AW uninstall removes its receipt-owned helper/templates but retains the
+independently managed system service, `/etc` configuration and backend data.
+Upgrade or remove that backend through its owning system package. AW currently
+has no automatic service installation, upgrade or removal bridge.
+
 ## Configure a Provider
 
 Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-sec-core/examples/aw.yaml)
