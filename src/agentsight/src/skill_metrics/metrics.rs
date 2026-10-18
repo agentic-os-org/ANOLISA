@@ -143,8 +143,11 @@ fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
                 .insert(record.session_id.clone());
         }
 
-        // Keep the earliest record as "first seen" — the input is not
-        // guaranteed to be sorted, so first-insert would be whichever
+        // Keep the earliest record that can name a session as "first seen":
+        // an id-less row is not a session (see the set above), so it may
+        // report the earliest sighting of a skill no attributed row has seen,
+        // but it never becomes the first-seen session itself. The input is
+        // not guaranteed to be sorted, so first-insert would be whichever
         // record the caller happened to pass first.
         let entry = downloads
             .entry(record.skill_name.clone())
@@ -153,8 +156,13 @@ fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
                 first_seen_timestamp_ns: record.timestamp_ns,
                 total_sessions: 0,
             });
-        if record.timestamp_ns < entry.first_seen_timestamp_ns {
-            entry.first_seen_session_id = record.session_id.clone();
+        let earlier = record.timestamp_ns < entry.first_seen_timestamp_ns;
+        if !record.session_id.is_empty() {
+            if earlier || entry.first_seen_session_id.is_empty() {
+                entry.first_seen_session_id = record.session_id.clone();
+                entry.first_seen_timestamp_ns = record.timestamp_ns;
+            }
+        } else if earlier && entry.first_seen_session_id.is_empty() {
             entry.first_seen_timestamp_ns = record.timestamp_ns;
         }
     }
@@ -716,6 +724,44 @@ mod tests {
         let seen = downloads.downloads.get("test-skill").unwrap();
         assert_eq!(seen.first_seen_timestamp_ns, 10_000);
         assert_eq!(seen.first_seen_session_id, "session-early");
+    }
+
+    #[test]
+    fn an_id_less_download_does_not_become_the_first_seen_session() {
+        // A row with neither id carries no session: the phantom "" session
+        // this metric already drops from its per-session sets must not name
+        // the first-seen session either. The earliest record that can name
+        // one does, in either input order.
+        let id_less_event = |id: i64| {
+            let mut event = skill_event(id, 10_000, "unused");
+            event.trace_id = None;
+            event.conversation_id = None;
+            event
+        };
+        for events in [
+            [id_less_event(1), skill_event(2, 30_000, "session-real")],
+            [skill_event(3, 30_000, "session-real"), id_less_event(4)],
+        ] {
+            let report = compute_skill_metrics(&events, &MetricOptions::all());
+            let downloads = report.downloads.unwrap();
+            let seen = downloads.downloads.get("test-skill").unwrap();
+            assert_eq!(
+                seen.first_seen_session_id, "session-real",
+                "an id-less row is not a session and cannot be the first-seen one"
+            );
+            assert_eq!(
+                seen.first_seen_timestamp_ns, 30_000,
+                "the first-seen pair belongs to the earliest record naming a session"
+            );
+        }
+
+        // A skill seen only in id-less rows keeps its earliest sighting;
+        // there is no session to name with it.
+        let report = compute_skill_metrics(&[id_less_event(5)], &MetricOptions::all());
+        let downloads = report.downloads.unwrap();
+        let seen = downloads.downloads.get("test-skill").unwrap();
+        assert_eq!(seen.first_seen_session_id, "");
+        assert_eq!(seen.first_seen_timestamp_ns, 10_000);
     }
 
     #[test]

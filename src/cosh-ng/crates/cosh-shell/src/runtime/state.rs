@@ -163,7 +163,6 @@ pub(crate) struct InlineState {
     pub(crate) startup_upgrade: StartupUpgradeState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
-    pub(crate) approval_slice: crate::runtime::approval_ui::ApprovalSliceState,
 }
 
 #[derive(Clone)]

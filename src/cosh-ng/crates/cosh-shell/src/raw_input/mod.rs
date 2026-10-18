@@ -8,7 +8,6 @@ mod event_sender;
 
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
-mod input_router;
 mod mode;
 mod path_prompt_candidate;
 mod prompt_epoch;
@@ -20,10 +19,6 @@ mod spawn;
 
 pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use generation::UserPtyInputGeneration;
-pub(crate) use input_router::{
-    CaptureAuthority, CaptureError, CardAction, HostInputAction, InputRouteSnapshot,
-    InputRouteTracker, InputRouter, InputSequence, PublishGuard, PublishedCaptureToken,
-};
 pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use prompt_epoch::PromptEpochExchange;
