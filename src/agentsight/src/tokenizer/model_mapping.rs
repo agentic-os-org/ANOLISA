@@ -46,6 +46,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o1", "Xenova/gpt-4o");
     m.insert("o1-mini", "Xenova/gpt-4o");
     m.insert("o1-preview", "Xenova/gpt-4o");
+    // The rest of the reasoning family. OpenAI publishes no tokenizer repo
+    // for any of these names either, and tiktoken maps the whole family to
+    // o200k_base — the encoding `Xenova/gpt-4o` carries — so they take that
+    // repo instead of the unrelated Qwen fallback.
+    m.insert("o1-pro", "Xenova/gpt-4o");
+    m.insert("o3", "Xenova/gpt-4o");
+    m.insert("o3-mini", "Xenova/gpt-4o");
+    m.insert("o4-mini", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
     // No Claude model has a repo on the Hub, so `anthropic/<model>` never
@@ -484,6 +492,30 @@ mod tests {
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
+    }
+
+    /// The o-series names after `o1-preview`. OpenAI publishes no tokenizer
+    /// repo for any of them, so an unmapped name took the unrelated Qwen
+    /// fallback. tiktoken maps `o1-`, `o3-` and `o4-mini-` to `o200k_base`,
+    /// the encoding `Xenova/gpt-4o` carries, so each one takes that repo.
+    /// The bare `o4` is not a model — the mini variant is the only o4 name.
+    #[test]
+    fn test_o_series_names_take_the_o200k_tokenizer() {
+        // Collect every name before asserting so one run reports all four,
+        // not just the first one that still falls through.
+        let resolved: Vec<(&str, &str)> = ["o1-pro", "o3", "o3-mini", "o4-mini"]
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        assert_eq!(
+            resolved,
+            [
+                ("o1-pro", "Xenova/gpt-4o"),
+                ("o3", "Xenova/gpt-4o"),
+                ("o3-mini", "Xenova/gpt-4o"),
+                ("o4-mini", "Xenova/gpt-4o"),
+            ]
+        );
     }
 
     #[test]
