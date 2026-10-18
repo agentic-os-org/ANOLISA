@@ -364,15 +364,18 @@ pub fn extract_private_metadata(
                             count_turn(&mut assistant_count, &mut in_assistant_turn);
                         }
                     }
-                    // A user item ends the turn.
-                    Some("user") => {
+                    // Legacy fallback (no event_msg/user_message in the whole
+                    // rollout): the converter derives the user steps from
+                    // role=user response_items, so this item is the real user
+                    // boundary and the count must follow the same fallback;
+                    // message-less items produce no step and are not counted.
+                    // In a modern rollout the item is injected context:
+                    // `convert_codex_events` ignores it and keeps accumulating
+                    // the open agent turn, so it must not close the counted
+                    // turn either.
+                    Some("user") if !has_user_event_msg => {
                         in_assistant_turn = false;
-                        // Legacy fallback (no event_msg/user_message in the
-                        // whole rollout): the converter derives the user steps
-                        // from role=user response_items, so the count must
-                        // follow the same fallback; message-less items produce
-                        // no step and are not counted.
-                        if !has_user_event_msg && !joined_text(payload.get("content")).is_empty() {
+                        if !joined_text(payload.get("content")).is_empty() {
                             user_count += 1;
                         }
                     }
@@ -996,5 +999,36 @@ mod tests {
             extra["assistant_message_count"], agent_steps as i64,
             "a turn that only reported tokens still produced a step"
         );
+    }
+
+    #[test]
+    fn test_injected_user_item_between_assistant_items_keeps_one_turn() {
+        // In a modern rollout a role=user response_item is injected context,
+        // not a turn boundary: `convert_codex_events` ignores it and keeps
+        // the open agent turn. The metadata counter closed its turn there, so
+        // the assistant item after the injection was counted as a second turn
+        // although the trajectory contains only one agent step.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-8\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>injected</environment_context>\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"second\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let trajectory = convert_codex_events(&events, "codex").unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .count();
+        assert_eq!(agent_steps, 1, "the injected item does not split the turn");
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(
+            extra["assistant_message_count"], agent_steps as i64,
+            "the count must describe the trajectory it rides on"
+        );
+        assert_eq!(extra["user_message_count"], 1);
     }
 }
