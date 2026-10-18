@@ -213,11 +213,34 @@ fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> b
     match (adapter, result) {
         ("pi", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
             .is_ok_and(|value| value["block"] == true),
+        ("openclaw", Ok(output)) => {
+            if !matches!(output.exit, Exit::Code(0)) {
+                return on_error == "block";
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = stdout.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+            if stdout.is_empty() {
+                return false;
+            }
+            // The bridge returns native objects unchanged; its runner tests block truthiness.
+            match serde_json::from_str::<Value>(stdout) {
+                Ok(Value::Object(value)) => value.get("block").is_some_and(|block| match block {
+                    Value::Null => false,
+                    Value::Bool(value) => *value,
+                    Value::Number(value) => value.as_f64() != Some(0.0),
+                    Value::String(value) => !value.is_empty(),
+                    Value::Array(_) | Value::Object(_) => true,
+                }),
+                _ => on_error == "block",
+            }
+        }
         ("claude-sdk" | "agentscope" | "qwenpaw", Ok(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "claude-sdk" | "agentscope" | "qwenpaw", Err(_)) => on_error == "block",
+        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw", Err(_)) => {
+            on_error == "block"
+        }
         _ => false,
     }
 }
@@ -438,6 +461,48 @@ mod tests {
         assert!(!stops_before("pi", &Ok(adapter.reply(false)), "block"));
         assert!(stops_before("pi", &Err("failure".into()), "block"));
         assert!(!stops_before("pi", &Err("failure".into()), "report"));
+    }
+
+    #[test]
+    fn openclaw_early_close_matches_native_terminal_and_failure_results() {
+        for on_error in ["block", "report"] {
+            for (stdout, expected) in [
+                ("", false),
+                (" \u{feff} ", false),
+                ("{}", false),
+                (r#"{"block":false}"#, false),
+                (r#"{"block":true}"#, true),
+                (r#"{"block":0}"#, false),
+                (r#"{"block":""}"#, false),
+                (r#"{"block":"native veto"}"#, true),
+                (r#"{"block":[]}"#, true),
+                ("invalid", on_error == "block"),
+                ("null", on_error == "block"),
+                ("[]", on_error == "block"),
+            ] {
+                let output = Ok(HookOutput {
+                    exit: Exit::Code(0),
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                });
+                assert_eq!(stops_before("openclaw", &output, on_error), expected);
+            }
+            for exit in [Exit::Code(1), Exit::Code(2), Exit::Signal(15)] {
+                let output = Ok(HookOutput {
+                    exit,
+                    stdout: br#"{"block":true}"#.to_vec(),
+                    stderr: Vec::new(),
+                });
+                assert_eq!(
+                    stops_before("openclaw", &output, on_error),
+                    on_error == "block"
+                );
+            }
+            assert_eq!(
+                stops_before("openclaw", &Err("failed".into()), on_error),
+                on_error == "block"
+            );
+        }
     }
 
     #[test]

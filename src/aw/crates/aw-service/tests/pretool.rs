@@ -127,8 +127,10 @@ print(json.dumps(reply))
                     ]);
                 outputs.push(f.run_input(callback, Some(&serde_json::to_vec(&native).unwrap())));
                 // SDK chains stop at a veto; the service must close unvisited steps.
-                if matches!(adapter, "pi" | "claude-sdk" | "agentscope" | "qwenpaw")
-                    && blocked(adapter, outputs.last().unwrap())
+                if matches!(
+                    adapter,
+                    "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
+                ) && blocked(adapter, outputs.last().unwrap())
                 {
                     break;
                 }
