@@ -191,8 +191,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
         .map_err(Into::into)
         .and_then(|output| response(adapter, event, on_error, output, &binding.adapter, &value));
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if matches!(binding.adapter.as_str(), "pi" | "claude-sdk" | "agentscope")
-        && event == "tool.before"
+    if event == "tool.before"
         && handle.steps.last().map(String::as_str) != Some(step)
         && stops_before(&binding.adapter, &result, on_error)
     {
@@ -214,11 +213,11 @@ fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> b
     match (adapter, result) {
         ("pi", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
             .is_ok_and(|value| value["block"] == true),
-        ("claude-sdk" | "agentscope", Ok(output)) => {
+        ("claude-sdk" | "agentscope" | "qwenpaw", Ok(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "claude-sdk" | "agentscope", Err(_)) => on_error == "block",
+        ("pi" | "claude-sdk" | "agentscope" | "qwenpaw", Err(_)) => on_error == "block",
         _ => false,
     }
 }
@@ -479,7 +478,7 @@ mod tests {
 
     #[test]
     fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
-        for adapter in ["agentscope", "claude-sdk"] {
+        for adapter in ["agentscope", "claude-sdk", "qwenpaw"] {
             for (exit, on_error, expected) in [
                 (Exit::Code(0), "block", false),
                 (Exit::Code(0), "report", false),

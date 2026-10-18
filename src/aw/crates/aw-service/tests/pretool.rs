@@ -10,7 +10,13 @@ use aw_service::{Binding, Capabilities, Operation};
 mod native;
 
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, time::Instant};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::PermissionsExt,
+    thread,
+    time::{Duration, Instant},
+};
 use support::{Fixture, Service};
 
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
@@ -85,6 +91,15 @@ print(json.dumps(reply))
             ("error", "scan-failure"),
             ("allow", "allowed"),
         ] {
+            // Fully visited events finish asynchronously; isolate each call's event count.
+            let drained = deadline();
+            while service.status()["events"] != 0 {
+                assert!(
+                    Instant::now() < drained,
+                    "{adapter}: previous event did not close"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
             let input = json!({"command":command,"cwd":"preserved"});
             let call = format!(
                 "00000000-0000-4000-8000-{:012}",
@@ -112,11 +127,18 @@ print(json.dumps(reply))
                     ]);
                 outputs.push(f.run_input(callback, Some(&serde_json::to_vec(&native).unwrap())));
                 // SDK chains stop at a veto; the service must close unvisited steps.
-                if matches!(adapter, "pi" | "claude-sdk" | "agentscope")
+                if matches!(adapter, "pi" | "claude-sdk" | "agentscope" | "qwenpaw")
                     && blocked(adapter, outputs.last().unwrap())
                 {
                     break;
                 }
+            }
+            if outputs.len() == 1 {
+                assert_eq!(
+                    service.status()["events"],
+                    0,
+                    "{adapter}/{attempt}: denied event must close before the next tool call"
+                );
             }
             assert_eq!(
                 outputs.iter().any(|out| blocked(adapter, out)),
