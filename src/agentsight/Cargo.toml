@@ -41,6 +41,7 @@ rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
+tempfile = "3"
 thiserror = "1.0.63"
 tokio = "1"
 tracing = "0.1"
@@ -113,6 +114,7 @@ sysinfo = "0.33"
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]

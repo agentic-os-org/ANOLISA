@@ -465,7 +465,6 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
 #[test]
 fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -509,7 +508,6 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
 fn approval_panel_styles_selected_actions_by_decision_kind() {
     let mut deny_output = Vec::new();
     RatatuiInlineRenderer {
-        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -542,7 +540,6 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
 
     let mut details_output = Vec::new();
     RatatuiInlineRenderer {
-        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -688,7 +685,6 @@ fn approval_receipt_panel_uses_zh_fallback_labels() {
 #[test]
 fn approval_receipt_panel_uses_negative_state_not_localized_title_for_style() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1159,7 +1155,6 @@ fn approval_details_panel_keeps_borders_aligned_with_uuid_audit_reference() {
 #[test]
 fn styled_approval_details_write_keeps_audit_reference_inside_panel() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 70,
         plain: false,
         styled: true,
@@ -1512,7 +1507,6 @@ fn approval_journal_panel_scopes_audit_reference_to_owning_entry() {
 #[test]
 fn styled_approval_journal_write_scopes_audit_reference_to_owning_entry() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 88,
         plain: false,
         styled: true,

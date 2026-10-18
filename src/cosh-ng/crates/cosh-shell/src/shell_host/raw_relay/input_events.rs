@@ -2,15 +2,16 @@
 
 use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::raw_input::RawInputEvent;
+use super::super::prompt_replay::prompt_replay_bytes;
+use super::ShellEventView;
+use crate::raw_input::{update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction};
+use crate::types::ShellEvent;
 
-use super::{
-    clear_prompt_ghost_line, OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR,
-    SAVE_CURSOR,
-};
+use super::{OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR};
 
 /// Publishes a prompt snapshot only after the current PTY batch is drained.
 pub(super) fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
@@ -125,7 +126,6 @@ fn write_inline_hint<W: Write>(output: &mut W, hint: &str) -> io::Result<()> {
     write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m {hint}"))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_raw_input_events<W: Write>(
     input_events: &Receiver<RawInputEvent>,
     parser: &mut OscParser,
@@ -134,341 +134,371 @@ pub(super) fn drain_raw_input_events<W: Write>(
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
     prompt_presentation: &PromptPresentation,
-    reset: Option<&super::CaptureRepresentationReset>,
-    input_mode: Option<&std::sync::Arc<std::sync::Mutex<crate::raw_input::RawInputMode>>>,
 ) -> io::Result<bool> {
-    let mut physical = super::degraded::PhysicalDisplayWriter(output);
-    let output = &mut physical;
     let native_mode = prompt.is_empty();
     let mut eof_shutdown_requested = false;
     while let Ok(event) = input_events.try_recv() {
-        let event_result = (|| -> io::Result<()> {
-            match event {
-                RawInputEvent::ShellInputActivity { empty } => {
-                    parser.push_shell_input_activity_event(empty)
-                }
-                RawInputEvent::PtyUserWrite {
-                    generation,
-                    line_submits,
-                } => {
-                    // Any user bytes reaching the PTY invalidate the
-                    // prompt-cwd report: submit-detection is a documented
-                    // heuristic (CR/LF/Ctrl-O only), so a custom
-                    // `accept-line` binding must not slip past either
-                    // evidence barrier. Repeated writes may collapse, so prompt
-                    // occupancy remains closed until the shell proves it is idle.
-                    parser.push_shell_pty_input_events();
-                    parser.push_shell_prompt_submits(line_submits);
-                    prompt_replay.observe_user_write(generation, line_submits);
-                }
-                RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
-                RawInputEvent::Esc => parser.push_control_event("esc"),
-                RawInputEvent::SoftNewlineShortcutObserved => {
-                    parser.push_soft_newline_shortcut_event()
-                }
-                RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
-                RawInputEvent::EofShutdownRequested => eof_shutdown_requested = true,
-                RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
-                RawInputEvent::PromptDraftOpen { text } => {
-                    let payload = serde_json::json!({ "text": text }).to_string();
-                    parser.push_prompt_draft_event("open", Some(&payload));
-                }
-                RawInputEvent::PromptDraftChanged {
-                    id,
-                    text,
-                    viewport,
-                    line_count,
-                    selected_completion,
-                } => {
-                    let payload = serde_json::json!({
-                        "id": id,
-                        "text": text,
-                        "line_count": line_count,
-                        "selected_completion": selected_completion,
-                        "first_row": viewport.first_row,
-                        "hidden_above": viewport.hidden_above,
-                        "hidden_below": viewport.hidden_below,
-                        "rows": viewport.rows,
-                        "cursor_row": viewport.cursor.0,
-                        "cursor_col": viewport.cursor.1,
-                    })
-                    .to_string();
-                    parser.push_prompt_draft_event("changed", Some(&payload));
-                }
-                RawInputEvent::PromptDraftSubmit {
-                    id,
-                    text,
-                    slash,
-                    workspace_cwd,
-                } => {
-                    let payload =
-                        serde_json::json!({ "id": id, "text": text, "slash": slash }).to_string();
-                    parser.push_prompt_draft_event("submit", Some(&payload));
-                    // Preserve the owning capture's decision: controls use the same
-                    // consumers as shell slash commands; other drafts stay Agent input.
-                    let session_id = parser.session_id.clone();
-                    let reason = if slash {
-                        "slash"
-                    } else if text.trim_start().starts_with("??") {
-                        "agent_marker"
-                    } else {
-                        "natural_language"
-                    };
-                    let text = if slash { text.trim().to_string() } else { text };
-                    let cwd = if slash { workspace_cwd } else { None };
-                    parser.push_intercept_event(&session_id, text, cwd, reason);
-                }
-                RawInputEvent::PromptDraftCancel { id } => {
-                    let payload = serde_json::json!({ "id": id }).to_string();
-                    parser.push_prompt_draft_event("cancel", Some(&payload));
-                }
-                RawInputEvent::CandidateRedraw { input, hint } => {
-                    if native_mode {
-                        // Erase by display columns and rewrite the whole draft:
-                        // byte-offset math breaks on CJK and marker bytes (#1721).
-                        // Erase-to-EOL clears any stale inline hint residue.
-                        erase_native_columns(output, *native_candidate_echoed_len)?;
-                        write!(output, "\x1b[K")?;
-                        output.write_all(&input)?;
-                        if let Some(hint) = hint {
-                            write_inline_hint(output, &hint)?;
-                        }
-                        *native_candidate_echoed_len = candidate_display_columns(&input);
-                    } else {
-                        write!(output, "\r\x1b[2K")?;
-                        prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                        output.write_all(&input)?;
-                        if let Some(hint) = hint {
-                            write_inline_hint(output, &hint)?;
-                        }
+        match event {
+            RawInputEvent::ShellInputActivity { empty } => {
+                parser.push_shell_input_activity_event(empty)
+            }
+            RawInputEvent::PtyUserWrite {
+                generation,
+                line_submits,
+            } => {
+                // Any user bytes reaching the PTY invalidate the
+                // prompt-cwd report: submit-detection is a documented
+                // heuristic (CR/LF/Ctrl-O only), so a custom
+                // `accept-line` binding must not slip past either
+                // evidence barrier. Repeated writes may collapse, so prompt
+                // occupancy remains closed until the shell proves it is idle.
+                parser.push_shell_pty_input_events();
+                parser.push_shell_prompt_submits(line_submits);
+                prompt_replay.observe_user_write(generation, line_submits);
+            }
+            RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
+            RawInputEvent::Esc => parser.push_control_event("esc"),
+            RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
+            RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
+            RawInputEvent::EofShutdownRequested => eof_shutdown_requested = true,
+            RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
+            RawInputEvent::PromptDraftOpen { text } => {
+                let payload = serde_json::json!({ "text": text }).to_string();
+                parser.push_prompt_draft_event("open", Some(&payload));
+            }
+            RawInputEvent::PromptDraftChanged {
+                id,
+                text,
+                viewport,
+                line_count,
+                selected_completion,
+            } => {
+                let payload = serde_json::json!({
+                    "id": id,
+                    "text": text,
+                    "line_count": line_count,
+                    "selected_completion": selected_completion,
+                    "first_row": viewport.first_row,
+                    "hidden_above": viewport.hidden_above,
+                    "hidden_below": viewport.hidden_below,
+                    "rows": viewport.rows,
+                    "cursor_row": viewport.cursor.0,
+                    "cursor_col": viewport.cursor.1,
+                })
+                .to_string();
+                parser.push_prompt_draft_event("changed", Some(&payload));
+            }
+            RawInputEvent::PromptDraftSubmit {
+                id,
+                text,
+                slash,
+                workspace_cwd,
+            } => {
+                let payload =
+                    serde_json::json!({ "id": id, "text": text, "slash": slash }).to_string();
+                parser.push_prompt_draft_event("submit", Some(&payload));
+                // Preserve the owning capture's decision: controls use the same
+                // consumers as shell slash commands; other drafts stay Agent input.
+                let session_id = parser.session_id.clone();
+                let reason = if slash {
+                    "slash"
+                } else if text.trim_start().starts_with("??") {
+                    "agent_marker"
+                } else {
+                    "natural_language"
+                };
+                let text = if slash { text.trim().to_string() } else { text };
+                let cwd = if slash { workspace_cwd } else { None };
+                parser.push_intercept_event(&session_id, text, cwd, reason);
+            }
+            RawInputEvent::PromptDraftCancel { id } => {
+                let payload = serde_json::json!({ "id": id }).to_string();
+                parser.push_prompt_draft_event("cancel", Some(&payload));
+            }
+            RawInputEvent::CandidateRedraw { input, hint } => {
+                if native_mode {
+                    // Erase by display columns and rewrite the whole draft:
+                    // byte-offset math breaks on CJK and marker bytes (#1721).
+                    // Erase-to-EOL clears any stale inline hint residue.
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
+                    output.write_all(&input)?;
+                    if let Some(hint) = hint {
+                        write_inline_hint(output, &hint)?;
                     }
-                    output.flush()?;
-                }
-                RawInputEvent::CandidateCommit(input) => {
-                    if native_mode {
-                        erase_native_columns(output, *native_candidate_echoed_len)?;
-                        write!(output, "\x1b[K")?;
-                        output.write_all(&input)?;
-                        *native_candidate_echoed_len = 0;
-                    } else {
-                        write!(output, "\r\x1b[2K")?;
-                        prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                        output.write_all(&input)?;
-                    }
-                    writeln!(output)?;
-                    output.flush()?;
-                }
-                RawInputEvent::PromptGhostClear => {
-                    clear_prompt_ghost_line(
-                        parser,
-                        output,
-                        prompt,
-                        native_candidate_echoed_len,
-                        prompt_presentation,
-                    )?;
-                }
-                RawInputEvent::PromptGhostAccepted { suggestion_id } => {
-                    parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
-                }
-                RawInputEvent::PromptGhostCycle { text } => {
-                    clear_prompt_ghost_line(
-                        parser,
-                        output,
-                        prompt,
-                        native_candidate_echoed_len,
-                        prompt_presentation,
-                    )?;
-                    super::write_prompt_ghost(output, &text, true)?;
-                    output.flush()?;
-                }
-                RawInputEvent::PromptGhostDismissed => {
-                    parser.push_prompt_ghost_event("dismissed", None)
-                }
-                RawInputEvent::AssistanceToggled => {
+                    *native_candidate_echoed_len = candidate_display_columns(&input);
+                } else {
                     write!(output, "\r\x1b[2K")?;
-                    prompt_presentation
-                        .write_restored_prompt(output, parser.last_prompt_display())?;
-                    output.flush()?;
-                }
-                RawInputEvent::PromptGhostIntercept {
-                    input,
-                    suggestion_id,
-                } => {
-                    let session_id = parser.session_id.clone();
-                    let component = suggestion_id
-                        .map(|id| format!("prompt_ghost:{id}"))
-                        .unwrap_or_else(|| "prompt_ghost".to_string());
-                    parser.push_intercept_event(&session_id, input, None, &component);
-                }
-                RawInputEvent::CandidateClearLine => {
-                    if native_mode {
-                        erase_native_columns(output, *native_candidate_echoed_len)?;
-                        write!(output, "\x1b[K")?;
-                        *native_candidate_echoed_len = 0;
-                    } else {
-                        write!(output, "\r\x1b[2K")?;
-                        prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                    }
-                    output.flush()?;
-                }
-                RawInputEvent::UserIntercept(input, reason) => {
-                    let session_id = parser.session_id.clone();
-                    parser.push_intercept_event(&session_id, input, None, reason.as_str())
-                }
-                RawInputEvent::UserInterceptWithRouting {
-                    input,
-                    reason,
-                    cwd,
-                    sensitive,
-                } => {
-                    let session_id = parser.session_id.clone();
-                    parser.push_intercept_event_with_routing(
-                        &session_id,
-                        input,
-                        Some(cwd),
-                        reason.as_str(),
-                        None,
-                        false,
-                        sensitive,
-                    )
-                }
-                RawInputEvent::NativePathPromptIntercept {
-                    input,
-                    cwd,
-                    sensitive,
-                } => {
-                    let session_id = parser.session_id.clone();
-                    parser.push_intercept_event_with_routing(
-                        &session_id,
-                        input,
-                        Some(cwd),
-                        "path_prompt",
-                        None,
-                        false,
-                        sensitive,
-                    )
-                }
-                RawInputEvent::UserInterceptAtPrompt {
-                    input,
-                    reason,
-                    pending_submits,
-                } => parser.push_intercept_event_at_prompt(input, reason.as_str(), pending_submits),
-                RawInputEvent::CaptureSubmitted {
-                    kind,
-                    target_id,
-                    generation,
-                } => parser.push_capture_event(
-                    crate::types::ShellCaptureLifecycle::Submitted,
-                    generation,
-                    Some(kind),
-                    Some(&target_id),
-                ),
-                RawInputEvent::CaptureDrained { generation } => parser.push_capture_event(
-                    crate::types::ShellCaptureLifecycle::Drained,
-                    generation,
-                    None,
-                    None,
-                ),
-                RawInputEvent::CaptureExpired { generation } => parser.push_capture_event(
-                    crate::types::ShellCaptureLifecycle::Expired,
-                    generation,
-                    None,
-                    None,
-                ),
-                RawInputEvent::CaptureOverflow { generation } => parser.push_capture_event(
-                    crate::types::ShellCaptureLifecycle::Overflow,
-                    generation,
-                    None,
-                    None,
-                ),
-                RawInputEvent::CaptureInputRejected { generation, .. } => parser
-                    .push_capture_event(
-                        crate::types::ShellCaptureLifecycle::InputRejected,
-                        generation,
-                        None,
-                        None,
-                    ),
-                RawInputEvent::CardFocus(id, selected) => {
-                    parser.push_card_event("focus", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::CardToggle(id, selected) => {
-                    parser.push_card_event("toggle", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::CardInput(id, text) => {
-                    parser.push_card_event("input", &format!("{id}:{text}"))
-                }
-                RawInputEvent::CardSecretInput(id, text) => {
-                    parser.push_secret_card_event("input", &format!("{id}:{text}"))
-                }
-                RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
-                RawInputEvent::CardApproveTurn(id) => parser.push_card_event("approve_turn", &id),
-                RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
-                RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
-                RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
-                RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
-                RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
-                RawInputEvent::QuestionSubmitAttempt(id) => {
-                    parser.push_card_event("question_submit_empty", &id)
-                }
-                RawInputEvent::CardSecretAnswer(answer) => {
-                    parser.push_secret_card_event("answer", &answer)
-                }
-                RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
-                RawInputEvent::QuestionAbort(id) => parser.push_card_event("question_abort", &id),
-                RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
-                RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),
-                RawInputEvent::EvidenceCancel(id) => parser.push_card_event("evidence_cancel", &id),
-                RawInputEvent::ModeFocus(id, selected) => {
-                    parser.push_card_event("mode_focus", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::ModeSet(id, selected) => {
-                    parser.push_card_event("mode_set", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::ModeCancel(id) => parser.push_card_event("mode_cancel", &id),
-                RawInputEvent::ConfigFocus(id, selected) => {
-                    parser.push_card_event("config_focus", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::ConfigSave(id) => parser.push_card_event("config_save", &id),
-                RawInputEvent::ConfigCancel(id) => parser.push_card_event("config_cancel", &id),
-                RawInputEvent::ConfigLanguageFocus(id, selected) => {
-                    parser.push_card_event("config_language_focus", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::ConfigLanguageSet(id, selected) => {
-                    parser.push_card_event("config_language_set", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::ConfigLanguageCancel(id) => {
-                    parser.push_card_event("config_language_cancel", &id)
-                }
-                RawInputEvent::SessionFocus(id, selected) => {
-                    parser.push_card_event("session_focus", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::SessionToggle(id, selected) => {
-                    parser.push_card_event("session_toggle", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::SessionResume(id, selected) => {
-                    parser.push_card_event("session_resume", &format!("{id}:{selected}"))
-                }
-                RawInputEvent::SessionDelete(id) => parser.push_card_event("session_delete", &id),
-                RawInputEvent::SessionClearConfirm(id) => {
-                    parser.push_card_event("session_clear_confirm", &id)
-                }
-                RawInputEvent::SessionCancel(id) => parser.push_card_event("session_cancel", &id),
-            }
-            Ok(())
-        })();
-        if let Err(error) = event_result {
-            match reset {
-                Some(reset) => {
-                    reset.defer_physical_error(error)?;
-                    if let Some(mode) = input_mode {
-                        if let Ok(mut mode) = mode.lock() {
-                            *mode = crate::raw_input::RawInputMode::Hold;
-                        }
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+                    output.write_all(&input)?;
+                    if let Some(hint) = hint {
+                        write_inline_hint(output, &hint)?;
                     }
                 }
-                None => return Err(error),
+                output.flush()?;
             }
+            RawInputEvent::CandidateCommit(input) => {
+                if native_mode {
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
+                    output.write_all(&input)?;
+                    *native_candidate_echoed_len = 0;
+                } else {
+                    write!(output, "\r\x1b[2K")?;
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+                    output.write_all(&input)?;
+                }
+                writeln!(output)?;
+                output.flush()?;
+            }
+            RawInputEvent::PromptGhostClear => {
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    prompt_presentation,
+                )?;
+            }
+            RawInputEvent::PromptGhostAccepted { suggestion_id } => {
+                parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
+            }
+            RawInputEvent::PromptGhostCycle { text } => {
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    prompt_presentation,
+                )?;
+                super::write_prompt_ghost(output, &text, true)?;
+                output.flush()?;
+            }
+            RawInputEvent::PromptGhostDismissed => {
+                parser.push_prompt_ghost_event("dismissed", None)
+            }
+            RawInputEvent::AssistanceToggled => {
+                write!(output, "\r\x1b[2K")?;
+                prompt_presentation.write_restored_prompt(output, parser.last_prompt_display())?;
+                output.flush()?;
+            }
+            RawInputEvent::PromptGhostIntercept {
+                input,
+                suggestion_id,
+            } => {
+                let session_id = parser.session_id.clone();
+                let component = suggestion_id
+                    .map(|id| format!("prompt_ghost:{id}"))
+                    .unwrap_or_else(|| "prompt_ghost".to_string());
+                parser.push_intercept_event(&session_id, input, None, &component);
+            }
+            RawInputEvent::CandidateClearLine => {
+                if native_mode {
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
+                    *native_candidate_echoed_len = 0;
+                } else {
+                    write!(output, "\r\x1b[2K")?;
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+                }
+                output.flush()?;
+            }
+            RawInputEvent::UserIntercept(input, reason) => {
+                let session_id = parser.session_id.clone();
+                parser.push_intercept_event(&session_id, input, None, reason.as_str())
+            }
+            RawInputEvent::UserInterceptWithRouting {
+                input,
+                reason,
+                cwd,
+                sensitive,
+            } => {
+                let session_id = parser.session_id.clone();
+                parser.push_intercept_event_with_routing(
+                    &session_id,
+                    input,
+                    Some(cwd),
+                    reason.as_str(),
+                    None,
+                    false,
+                    sensitive,
+                )
+            }
+            RawInputEvent::NativePathPromptIntercept {
+                input,
+                cwd,
+                sensitive,
+            } => {
+                let session_id = parser.session_id.clone();
+                parser.push_intercept_event_with_routing(
+                    &session_id,
+                    input,
+                    Some(cwd),
+                    "path_prompt",
+                    None,
+                    false,
+                    sensitive,
+                )
+            }
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason,
+                pending_submits,
+            } => parser.push_intercept_event_at_prompt(input, reason.as_str(), pending_submits),
+            RawInputEvent::CaptureSubmitted {
+                kind,
+                target_id,
+                generation,
+            } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Submitted,
+                generation,
+                Some(kind),
+                Some(&target_id),
+            ),
+            RawInputEvent::CaptureDrained { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Drained,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureExpired { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Expired,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureOverflow { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Overflow,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureInputRejected { generation, .. } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::InputRejected,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CardFocus(id, selected) => {
+                parser.push_card_event("focus", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::CardToggle(id, selected) => {
+                parser.push_card_event("toggle", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::CardInput(id, text) => {
+                parser.push_card_event("input", &format!("{id}:{text}"))
+            }
+            RawInputEvent::CardSecretInput(id, text) => {
+                parser.push_secret_card_event("input", &format!("{id}:{text}"))
+            }
+            RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
+            RawInputEvent::CardApproveTurn(id) => parser.push_card_event("approve_turn", &id),
+            RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
+            RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
+            RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
+            RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
+            RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
+            RawInputEvent::QuestionSubmitAttempt(id) => {
+                parser.push_card_event("question_submit_empty", &id)
+            }
+            RawInputEvent::CardSecretAnswer(answer) => {
+                parser.push_secret_card_event("answer", &answer)
+            }
+            RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
+            RawInputEvent::QuestionAbort(id) => parser.push_card_event("question_abort", &id),
+            RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
+            RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),
+            RawInputEvent::EvidenceCancel(id) => parser.push_card_event("evidence_cancel", &id),
+            RawInputEvent::ModeFocus(id, selected) => {
+                parser.push_card_event("mode_focus", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::ModeSet(id, selected) => {
+                parser.push_card_event("mode_set", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::ModeCancel(id) => parser.push_card_event("mode_cancel", &id),
+            RawInputEvent::ConfigFocus(id, selected) => {
+                parser.push_card_event("config_focus", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::ConfigSave(id) => parser.push_card_event("config_save", &id),
+            RawInputEvent::ConfigCancel(id) => parser.push_card_event("config_cancel", &id),
+            RawInputEvent::ConfigLanguageFocus(id, selected) => {
+                parser.push_card_event("config_language_focus", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::ConfigLanguageSet(id, selected) => {
+                parser.push_card_event("config_language_set", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::ConfigLanguageCancel(id) => {
+                parser.push_card_event("config_language_cancel", &id)
+            }
+            RawInputEvent::SessionFocus(id, selected) => {
+                parser.push_card_event("session_focus", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::SessionToggle(id, selected) => {
+                parser.push_card_event("session_toggle", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::SessionResume(id, selected) => {
+                parser.push_card_event("session_resume", &format!("{id}:{selected}"))
+            }
+            RawInputEvent::SessionDelete(id) => parser.push_card_event("session_delete", &id),
+            RawInputEvent::SessionClearConfirm(id) => {
+                parser.push_card_event("session_clear_confirm", &id)
+            }
+            RawInputEvent::SessionCancel(id) => parser.push_card_event("session_cancel", &id),
         }
     }
     Ok(eof_shutdown_requested)
+}
+
+pub(super) fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
+    for event in events.iter().rev() {
+        let Some(capture) = event.capture.as_ref() else {
+            continue;
+        };
+        match capture.lifecycle {
+            crate::types::ShellCaptureLifecycle::Submitted => return Some(capture.generation),
+            crate::types::ShellCaptureLifecycle::Drained
+            | crate::types::ShellCaptureLifecycle::Expired
+            | crate::types::ShellCaptureLifecycle::Overflow
+            | crate::types::ShellCaptureLifecycle::InputRejected => return None,
+        }
+    }
+    None
+}
+pub(super) fn observe_with_input_mode_lock<W: Write, F, B>(
+    event_observer: &mut F,
+    parser: &mut OscParser,
+    output: &mut W,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    before_observe: &mut B,
+) -> io::Result<RawObserverAction>
+where
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
+    B: FnMut(&mut OscParser, &mut W) -> io::Result<()>,
+{
+    let mut mode = input_mode
+        .lock()
+        .map_err(|_| io::Error::other("raw input mode lock poisoned"))?;
+    before_observe(parser, output)?;
+    let action = parser.observe_events(output, event_observer)?;
+    let acknowledged = latest_capture_submission_generation(&parser.events);
+    update_locked_input_mode(&mut mode, &action, acknowledged);
+    Ok(action)
+}
+
+fn clear_prompt_ghost_line<W: Write>(
+    parser: &OscParser,
+    output: &mut W,
+    fallback_prompt: &str,
+    native_candidate_echoed_len: &mut usize,
+    prompt_presentation: &PromptPresentation,
+) -> io::Result<()> {
+    write!(output, "\r\x1b[2K")?;
+    let replay = prompt_replay_bytes(parser.last_prompt_display());
+    if replay.is_empty() {
+        prompt_presentation.write_replayed_prompt(output, fallback_prompt.as_bytes())?;
+    } else {
+        prompt_presentation.write_replayed_prompt(output, replay)?;
+    }
+    *native_candidate_echoed_len = 0;
+    output.flush()
 }

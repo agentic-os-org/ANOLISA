@@ -29,93 +29,12 @@ fn render_raw_inline_event_view<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
-    inline_state
-        .approval_slice
-        .capture_representation_reset
-        .take_committed_emit();
     let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
-    inline_state.approval_slice.observer_event_end = snapshot.cursor().position();
-    inline_state.approval_slice.observed_focus = snapshot
-        .batch_since(inline_state.control.event_cursor())
-        .events
-        .iter()
-        .filter_map(|event| {
-            crate::approval::panel::approval_focus_from_event(
-                event,
-                &inline_state.approvals.requests,
-            )
-            .or_else(|| {
-                let command = approval_command_from_event(event)?;
-                (event.component.as_deref() == Some("card")
-                    && command.kind == ApprovalCommandKind::Details)
-                    .then_some((command.id, ApprovalPanelAction::Details))
-            })
-        })
-        .rfind(|(id, _)| crate::approval::panel::approval_is_pending(inline_state, id));
     if let Some(audit) = inline_state.audit.as_mut() {
-        let batch = snapshot.batch_since(inline_state.approval_slice.audit_event_cursor);
+        let batch = snapshot.batch_since(inline_state.control.event_cursor());
         audit.observe_shell_event_batch(batch.events);
-        inline_state.approval_slice.audit_event_cursor = batch.to;
     }
-    let reset = inline_state
-        .approval_slice
-        .capture_representation_reset
-        .clone();
-    if let Some(token) = reset.display_handoff_token() {
-        if inline_state
-            .control
-            .shell_handoff()
-            .pending_front()
-            .is_some_and(|handoff| handoff.request().token == token)
-        {
-            inline_state
-                .control
-                .observe_shell_command_activity(view.events());
-            let ledger = build_command_blocks(view.events());
-            crate::activity::runtime::record_approved_shell_handoff_blocks(
-                inline_state,
-                &ledger.blocks,
-            );
-            crate::activity::runtime::close_untracked_shell_handoffs_with_history_base(
-                inline_state,
-                view.events(),
-                view.base(),
-            );
-        }
-        if reset.display_is_failed() {
-            crate::approval::slice_present::invalidate_representation(inline_state);
-            if let Some(session) = inline_state.approval_slice.session.as_mut() {
-                session.relinquish_untrusted();
-            }
-            inline_state.approval_slice.session = None;
-            inline_state.approval_slice.disabled = true;
-            let mut physical = crate::shell_host::PhysicalDisplayWriter(output);
-            if inline_state.control.shell_busy()
-                || inline_state
-                    .control
-                    .shell_handoff()
-                    .pending_front()
-                    .is_some()
-            {
-                if let Some(action) = shell_handoff_timeout_recovery_action(
-                    inline_state,
-                    inline_state.control.shell_busy(),
-                    &mut physical,
-                )? {
-                    return Ok(action);
-                }
-            }
-            return Ok(RawObserverAction::HoldShellOutput);
-        }
-    }
-    let mut physical = crate::shell_host::PhysicalDisplayWriter(output);
-    let mut terminal_output = CrLfWriter::new(&mut physical);
-    // A recovered worker must not publish at coordinates invalidated by resize.
-    crate::approval::slice_present::repaint_worker_slice_if_viewport_changed(
-        inline_state,
-        &mut terminal_output,
-    )?;
-    crate::approval::slice_present::pump_worker_slice(inline_state, &mut terminal_output)?;
+    let mut terminal_output = CrLfWriter::new(output);
     if inline_state.questions.active_panel_id.is_some() {
         redraw_active_question_if_width_changed(
             inline_state,
@@ -123,45 +42,19 @@ fn render_raw_inline_event_view<W: Write>(
             RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
         )?;
     }
-    let dispatch_result = RuntimeDispatcher::dispatch_inline_batch(
+    let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
         adapter,
         shell_label,
         inline_state,
         &mut terminal_output,
-    );
-    match dispatch_result {
-        Ok(actions) => RuntimeDispatcher::apply_actions(actions, inline_state),
-        Err(error) => {
-            let committed = inline_state
-                .control
-                .shell_handoff()
-                .ready_front()
-                .is_some_and(|request| committed_slice_handoff(inline_state, request));
-            if !committed || !crate::shell_host::physical_error(&error) {
-                return Err(error);
-            }
-            reset.mark_committed_display_failure();
-            tracing::warn!(error = ?error, "committed approval presentation failed");
-            crate::approval::slice_present::invalidate_representation(inline_state);
-            if let Some(session) = inline_state.approval_slice.session.as_mut() {
-                session.relinquish_untrusted();
-            }
-            inline_state.approval_slice.session = None;
-            inline_state.approval_slice.disabled = true;
-        }
-    }
+    )?;
+    RuntimeDispatcher::apply_actions(actions, inline_state);
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
         .emit_next_approved(snapshot.cursor().position())
     {
-        if committed_slice_handoff(inline_state, &request) {
-            inline_state
-                .approval_slice
-                .capture_representation_reset
-                .permit_committed_emit();
-        }
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;
@@ -170,15 +63,6 @@ fn render_raw_inline_event_view<W: Write>(
             return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
         }
         return Ok(RawObserverAction::EmitToPty(request));
-    }
-    if reset.display_handoff_token().is_some()
-        && inline_state
-            .control
-            .shell_handoff()
-            .pending_front()
-            .is_none()
-    {
-        reset.end_display_handoff();
     }
     if let Some(capture) = pending_card_capture(inline_state) {
         return Ok(RawObserverAction::CaptureInput(capture));
@@ -220,17 +104,8 @@ fn render_raw_inline_event_view<W: Write>(
     }
 }
 
-fn committed_slice_handoff(state: &InlineState, request: &ShellHandoffRequest) -> bool {
-    state.approval_slice.activation.is_some()
-        && state.approvals.requests.iter().any(|approval| {
-            approval.id == request.approval_id
-                && approval.run_id == request.run_id
-                && approval.status == ApprovalRequestStatus::Approved
-        })
-}
-
 #[cfg(test)]
-pub(crate) fn render_raw_inline_events<W: Write>(
+fn render_raw_inline_events<W: Write>(
     events: &[ShellEvent],
     output: &mut W,
     adapter: &AdapterInstance,

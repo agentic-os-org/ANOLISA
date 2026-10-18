@@ -921,7 +921,7 @@ impl Drop for RawCliRunGuard {
     }
 }
 
-pub(crate) fn configure_raw_cli_command(command: &mut Command) {
+fn configure_raw_cli_command(command: &mut Command) {
     let home = temp_shell_home("default-home");
     let git_work_tree = raw_cli_git_fixture();
     command

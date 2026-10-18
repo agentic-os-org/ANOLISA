@@ -235,38 +235,6 @@ pub(crate) fn run_raw(
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
-    #[cfg(debug_assertions)]
-    {
-        // A refused activation is a configuration error, not a reason to stop the
-        // shell: log the origin once and keep the inline path.
-        match crate::runtime::approval_ui::ApprovalSliceActivation::from_lookup(&|key| {
-            std::env::var(key).ok()
-        }) {
-            Ok(Some(_)) if !crate::runtime::logging::file_sink_is_ready() => {
-                tracing::warn!(
-                    "approval slice requires a file logging sink, keeping the inline approval path"
-                );
-            }
-            Ok(Some(activation)) => {
-                match std::env::current_exe().map(|shell| shell.with_file_name("cosh-ui-worker")) {
-                    Ok(sibling) if activation.worker_path == sibling => {
-                        inline_state.approval_slice.activation = Some(activation);
-                    }
-                    Ok(sibling) => {
-                        tracing::warn!(worker = %activation.worker_path.display(), expected = %sibling.display(), "approval slice worker is outside the shell profile, keeping the inline approval path")
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = ?error, "approval slice shell profile unavailable, keeping the inline approval path")
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                error = ?error,
-                "approval slice activation refused, keeping the inline approval path"
-            ),
-        }
-    }
     inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
     let zsh = matches!(&shell_kind, RawShellKind::Zsh);
@@ -278,8 +246,6 @@ pub(crate) fn run_raw(
     ));
     // #2161: share the relay-side input-wait clock and productized timeout.
     inline_state.input_wait_status = config.input_wait_status.clone();
-    inline_state.approval_slice.capture_representation_reset =
-        config.capture_representation_reset.clone();
     inline_state.input_wait_timeout = (cosh_config.input_wait_timeout_secs > 0)
         .then(|| std::time::Duration::from_secs(cosh_config.input_wait_timeout_secs));
     config.input_wait_timeout_secs = cosh_config.input_wait_timeout_secs;
@@ -673,4 +639,59 @@ fn load_hook_engine(cosh_config: &CoshConfig) -> HookEngine {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
+
+    #[test]
+    fn managed_shell_phase_depends_only_on_managed_shell_effect() {
+        let effects = LoginEffectGuard::new();
+        assert!(!managed_shell_started(&effects));
+
+        effects.mark_possible(LoginEffectSource::PathBootstrapProbe);
+        effects.mark_possible(LoginEffectSource::R2CapabilityProbe);
+        assert!(!managed_shell_started(&effects));
+
+        effects.mark_possible(LoginEffectSource::ManagedShell);
+        assert!(managed_shell_started(&effects));
+    }
+
+    #[test]
+    fn temp_session_dir_guard_removes_session_directory_on_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-temp-session-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+
+        {
+            let _cleanup = TempSessionDir::new(dir.clone());
+            fs::create_dir_all(dir.join("output-refs")).expect("create output refs");
+            fs::write(dir.join("history"), "echo ok\n").expect("write history");
+            fs::write(dir.join("output-refs/cmd-1.txt"), "ok\n").expect("write output ref");
+        }
+
+        assert!(!dir.exists(), "temp session dir should be removed on drop");
+    }
+
+    #[test]
+    fn resume_forces_enhanced_marker_path_for_r2() {
+        // #R2 A11: a resume under a Native default must be upgraded to Enhanced,
+        // and Enhanced must carry markers (the R2 branch is gated on marker_path
+        // being Some). If the override regresses to `configured`, the first
+        // assert fails; if Enhanced ever stopped emitting markers, the second.
+        assert_eq!(
+            integration_for_launch(true, ShellIntegration::Native),
+            ShellIntegration::Enhanced,
+        );
+        assert!(integration_for_launch(true, ShellIntegration::Native).uses_markers());
+        assert_eq!(
+            integration_for_launch(false, ShellIntegration::Native),
+            ShellIntegration::Native,
+        );
+        assert_eq!(
+            integration_for_launch(false, ShellIntegration::Enhanced),
+            ShellIntegration::Enhanced,
+        );
+    }
+}
