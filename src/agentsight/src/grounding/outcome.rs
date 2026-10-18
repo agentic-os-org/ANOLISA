@@ -65,6 +65,10 @@ const WEAK_SIGNAL_WINDOW: usize = 200;
 
 /// Markers of a user or policy stop. Matching any means the call never ran to
 /// completion by the agent's choice (spec R2 / B1).
+///
+/// Compared case-insensitively like the failure signatures: the casing is the
+/// tool's choice, not the protocol's, and a prompt reported as
+/// `user denied permission` is the same stop as `User denied permission`.
 const INTERCEPTION_MARKERS: &[&str] = &[
     "The user doesn't want to proceed",
     "User denied permission",
@@ -320,8 +324,29 @@ fn quote_from(text: &str, byte_idx: usize) -> Option<String> {
     Some(text[start..].chars().take(QUOTE_LIMIT).collect())
 }
 
+/// First byte offset at which any marker occurs, compared ASCII
+/// case-insensitively.
+///
+/// Every marker is ASCII, so matching over the payload's bytes cannot fold a
+/// non-ASCII character into an ASCII one: a hit always starts on a char
+/// boundary of `text` and can be quoted from directly. Lowercasing the whole
+/// payload first, as `find_signature` does, would shift the offsets whenever
+/// non-ASCII input changes length, so that route still needs the char-boundary
+/// fallback and can quote from a different place than the marker.
 fn find_any(text: &str, markers: &[&str]) -> Option<usize> {
-    markers.iter().filter_map(|m| text.find(m)).min()
+    let haystack = text.as_bytes();
+    markers
+        .iter()
+        .filter_map(|marker| {
+            let needle = marker.as_bytes();
+            if needle.is_empty() {
+                return None;
+            }
+            haystack
+                .windows(needle.len())
+                .position(|window| window.eq_ignore_ascii_case(needle))
+        })
+        .min()
 }
 
 fn find_signature(text: &str) -> Option<usize> {

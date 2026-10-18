@@ -730,3 +730,54 @@ fn denied_permission_respects_the_rules_above_it() {
     assert_eq!(v.status, CallStatus::OkProbe);
     assert_eq!(v.matched_rule, "B3");
 }
+
+/// The interception wordings are the tool's wording, so their casing varies
+/// just like the failure signatures'. An all-lowercase prompt used to match no
+/// R2 marker, fall through to the case-insensitive R4 signature
+/// `permission denied`, and be charged to the agent as a certain failure.
+#[test]
+fn lowercase_interception_marker_is_blocked() {
+    for payload in [
+        "user denied permission",
+        "USER DENIED PERMISSION",
+        "User Denied Permission",
+        "permission denied: user denied",
+        "the user doesn't want to proceed with this tool use",
+        "claude requested permissions, but you haven't granted it yet.",
+    ] {
+        let v = classify(&plain_call(), payload);
+        assert_eq!(v.status, CallStatus::Blocked, "{payload}");
+        assert_eq!(v.matched_rule, "R2", "{payload}");
+        assert_eq!(v.confidence, Confidence::High, "{payload}");
+        assert!(v.evidence_quote.is_some(), "{payload}");
+    }
+}
+
+/// Case folding the interception markers must not turn an operating-system
+/// refusal into a user stop: with no interception wording present, the same
+/// `permission denied` text stays a failure, as the R4 signatures added for
+/// operating-system refusals decide it.
+#[test]
+fn case_folding_keeps_os_refusals_failed() {
+    for (call, payload, rule) in [
+        (
+            plain_call(),
+            "cp: cannot create regular file '/etc/app.conf': Permission denied",
+            "R4",
+        ),
+        (
+            plain_call(),
+            "open('/root/.ssh/id_ed25519') failed: EACCES",
+            "R4",
+        ),
+        (
+            bash_call("ls /root/.qoder-server"),
+            "ls: cannot open directory '/root/.qoder-server': Permission denied",
+            "B3",
+        ),
+    ] {
+        let v = classify(&call, payload);
+        assert_ne!(v.status, CallStatus::Blocked, "{payload}");
+        assert_eq!(v.matched_rule, rule, "{payload}");
+    }
+}
