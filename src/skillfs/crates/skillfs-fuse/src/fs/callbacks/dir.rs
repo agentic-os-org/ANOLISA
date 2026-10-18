@@ -629,24 +629,18 @@ impl SkillFs {
                         entries
                     }
                     None => {
-                        let nested_id = Self::hermes_skill_id(category, skill_name);
-                        if !self.is_staging_skill_root(&nested_id)
-                            && !self.is_pending_install(&nested_id)
-                            && matches!(
-                                self.resolve_hermes_nested_read(category, skill_name),
-                                ReadResolution::Hidden
-                            )
-                        {
-                            reply.error(libc::ENOENT);
-                            return;
-                        }
-                        let phys_dir = match self.resolve_hermes_nested_read(category, skill_name) {
-                            ReadResolution::Snapshot { dir, .. } => dir.join(relative_path),
-                            _ => self
-                                .source_base()
-                                .join(category)
-                                .join(skill_name)
-                                .join(relative_path),
+                        // I4: shared nested read resolver so grace, staging,
+                        // and pending paths agree with access()/lookup().
+                        let phys_dir = match self.nested_access_read_path(
+                            category,
+                            skill_name,
+                            Some(relative_path.as_path()),
+                        ) {
+                            Some(p) => p,
+                            None => {
+                                reply.error(libc::ENOENT);
+                                return;
+                            }
                         };
                         let parent_ino = {
                             let parent_path = Path::new(&path)
@@ -1336,23 +1330,17 @@ impl SkillFs {
                         (entries, dir_file)
                     }
                     None => {
-                        let nested_id = Self::hermes_skill_id(category, skill_name);
-                        if !self.is_staging_skill_root(&nested_id)
-                            && !self.is_pending_install(&nested_id)
-                            && matches!(
-                                self.resolve_hermes_nested_read(category, skill_name),
-                                ReadResolution::Hidden
-                            )
-                        {
-                            return reply.error(libc::ENOENT);
-                        }
-                        let phys_dir = match self.resolve_hermes_nested_read(category, skill_name) {
-                            ReadResolution::Snapshot { dir, .. } => dir.join(relative_path),
-                            _ => self
-                                .source_base()
-                                .join(category)
-                                .join(skill_name)
-                                .join(relative_path),
+                        // I4: shared nested read resolver so grace, staging,
+                        // and pending paths agree with access()/lookup().
+                        let phys_dir = match self.nested_access_read_path(
+                            category,
+                            skill_name,
+                            Some(relative_path.as_path()),
+                        ) {
+                            Some(p) => p,
+                            None => {
+                                return reply.error(libc::ENOENT);
+                            }
                         };
                         let parent_ino = {
                             let parent_path = Path::new(&path)

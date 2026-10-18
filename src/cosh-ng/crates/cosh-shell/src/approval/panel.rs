@@ -66,15 +66,6 @@ pub(crate) fn render_current_approval_request<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if state.approval_slice.fresh_region_required {
-        return crate::approval::slice_present::relinquish_untrusted_and_render_inline(
-            state, output,
-        );
-    }
-    // The slice renders its own fallback; false leaves an ineligible card to us.
-    if crate::approval::slice_present::present_via_worker_slice(state, output)? {
-        return Ok(());
-    }
     let Some((index, request)) = state
         .approvals
         .requests
@@ -93,13 +84,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
     // leaves the cursor mid-line; clear it before drawing the panel so the
     // card border starts at column 0 instead of wrapping past the row end.
     if let Some(active_run) = state.agent_run.active.as_mut() {
-        if let Err(error) = active_run.status_animation.clear(output) {
-            if state.approval_slice.geometry_required {
-                state.approval_slice.fresh_region_required = true;
-                crate::approval::slice_present::invalidate_representation(state);
-            }
-            return Err(error);
-        }
+        active_run.status_animation.clear(output)?;
     }
 
     let pending_total = state
@@ -170,41 +155,9 @@ pub(crate) fn render_current_approval_request<W: Write>(
             crate::ui::card_reason_phrase(request.risk, assessment.primary_reason, state.i18n())
         })
     });
-    let geometry = if state.approval_slice.disabled
-        && (state.approval_slice.geometry_required
-            || state.approval_slice.activation.is_some()
-            || state.approval_slice.inline_geometry.is_some())
-    {
-        match crate::approval::slice_present::current_viewport() {
-            Ok(size) => {
-                if state
-                    .approval_slice
-                    .inline_geometry
-                    .is_some_and(|fresh| fresh != size)
-                {
-                    crate::approval::slice_present::invalidate_representation(state);
-                    return Err(std::io::Error::other("fresh approval viewport changed"));
-                }
-                Some(size)
-            }
-            Err(error) => {
-                crate::approval::slice_present::invalidate_representation(state);
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    let renderer = match geometry {
-        Some((_, columns)) => renderer.within_columns(columns),
-        None => renderer,
-    };
-    if geometry.is_some() {
-        state.approval_slice.fresh_region_required = true;
-    }
-    let publication = (|| {
-        let height = renderer.write_approval_panel(
+    let height = RatatuiInlineRenderer::for_terminal()
+        .with_language(state.language)
+        .write_approval_panel(
             output,
             ApprovalPanelModel {
                 id: &request.id,
@@ -234,32 +187,6 @@ pub(crate) fn render_current_approval_request<W: Write>(
                     .collect(),
             },
         )?;
-        if let Some((rows, columns)) = geometry {
-            output.flush()?;
-            if height >= usize::from(rows) {
-                return Err(std::io::Error::other(
-                    "approval card does not fit terminal height",
-                ));
-            }
-            if crate::approval::slice_present::current_viewport()? != (rows, columns) {
-                return Err(std::io::Error::other(
-                    "approval viewport changed during publication",
-                ));
-            }
-        }
-        Ok(height)
-    })();
-    let height = match publication {
-        Ok(height) => height,
-        Err(error) => {
-            if geometry.is_some() {
-                crate::approval::slice_present::invalidate_representation(state);
-            }
-            return Err(error);
-        }
-    };
-    state.approval_slice.fresh_region_required = false;
-    state.approval_slice.inline_geometry = geometry;
     state.approvals.active_panel_id = Some(request.id.clone());
     state.approvals.active_panel_height = height;
     Ok(())
@@ -269,13 +196,6 @@ pub(crate) fn redraw_current_approval_request<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    crate::approval::slice_present::repaint_worker_slice_if_viewport_changed(state, output)?;
-    // A live slice surface repaints in place. Clearing it first would release the
-    // rectangle, and re-acquiring scrolls `height` rows of the user's history off
-    // screen on every focus change.
-    if crate::approval::slice_present::repaint_worker_slice(state, output)? {
-        return Ok(());
-    }
     clear_active_approval_panel(state, output)?;
     render_current_approval_request(state, output)
 }
@@ -284,43 +204,25 @@ pub(crate) fn clear_active_approval_panel<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    crate::approval::slice_present::repaint_worker_slice_if_viewport_changed(state, output)?;
-    // The slice records no inline height, so without this branch the erase below
-    // would either do nothing and leave the card painted, or move the cursor by a
-    // height the gate never used.
-    if crate::approval::slice_present::release_worker_slice(state, output)? {
-        return Ok(());
-    }
     let height = state.approvals.active_panel_height;
     if height == 0 {
         state.approvals.active_panel_id = None;
         return Ok(());
     }
 
-    let erase = (|| {
-        write!(output, "\x1b[{height}A")?;
-        for row in 0..height {
-            write!(output, "\r\x1b[2K")?;
-            if row + 1 < height {
-                write!(output, "\x1b[1B")?;
-            }
+    write!(output, "\x1b[{height}A")?;
+    for row in 0..height {
+        write!(output, "\r\x1b[2K")?;
+        if row + 1 < height {
+            write!(output, "\x1b[1B")?;
         }
-        if height > 1 {
-            write!(output, "\x1b[{}A", height - 1)?;
-        }
-        write!(output, "\r")
-    })();
-    if erase.is_err()
-        && (state.approval_slice.geometry_required
-            || state.approval_slice.activation.is_some()
-            || state.approval_slice.inline_geometry.is_some())
-    {
-        crate::approval::slice_present::invalidate_representation(state);
     }
-    erase?;
+    if height > 1 {
+        write!(output, "\x1b[{}A", height - 1)?;
+    }
+    write!(output, "\r")?;
     state.approvals.active_panel_id = None;
     state.approvals.active_panel_height = 0;
-    state.approval_slice.inline_geometry = None;
     Ok(())
 }
 

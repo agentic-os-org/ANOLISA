@@ -770,37 +770,11 @@ fn approval_capture_new_card_resets_selection() {
     let mut state = CardInputState::default();
     state.apply_capture(&first);
     state.consume(&first, b"\x1b[C\x1b[C\x1b[C");
-    state.finish_submission(&first);
-    state.apply_capture(&first);
-    assert_eq!(
-        state.consume(&first, b"\n"),
-        vec![RawInputEvent::CardDeny("req-1".to_string())]
-    );
-    for text in ["approve", "yes"] {
-        assert_eq!(
-            state.consume(&first, format!("{text}\x1b").as_bytes()),
-            vec![RawInputEvent::CardCancel("req-1".to_string())]
-        );
-        assert_eq!(state.free_text, text);
-        state.finish_submission(&first);
-        state.apply_capture(&first);
-        assert_eq!(
-            state.consume(&first, b"\n"),
-            vec![RawInputEvent::CardDeny("req-1".to_string())]
-        );
-    }
 
     let second = RawInputCapture::Approval {
         id: "req-2".to_string(),
         action_set: crate::ui::ApprovalActionSet::Standard,
     };
-    state.apply_capture(&second);
-    assert_eq!(
-        state.consume(&second, b"\n"),
-        vec![RawInputEvent::CardApprove("req-2".to_string())]
-    );
-    state.consume(&second, b"\x1b[C\x1b[C");
-    state.reset();
     state.apply_capture(&second);
     assert_eq!(
         state.consume(&second, b"\n"),
@@ -1071,69 +1045,6 @@ fn draft_tab_accepts_the_runtime_completion() {
     assert_eq!(text, Some("review @src/"));
 }
 
-#[test]
-fn composer_capture_generation_refresh_preserves_selected_command() {
-    let hooks_index = crate::input::composer::slash_completions("/", 0, 1)
-        .iter()
-        .position(|command| *command == "/hooks")
-        .expect("public /hooks completion");
-    let capture = RawInputCapture::PromptDraft {
-        id: "composer-1".to_string(),
-        initial_text: "/".into(),
-        completion: Some(Box::new(("/help ".into(), (0, 1)))),
-        agent_composer: true,
-        workspace_cwd: None,
-    };
-    let mut state = CardInputState::default();
-    state.apply_capture_generation(&capture, 2);
-    let events = state.consume(&capture, &b"\x1b[B".repeat(hooks_index));
-    assert!(matches!(
-        events.last(),
-        Some(RawInputEvent::PromptDraftChanged {
-            selected_completion,
-            ..
-        }) if *selected_completion == hooks_index
-    ));
-    let mut refreshed = capture.clone();
-    if let RawInputCapture::PromptDraft { completion, .. } = &mut refreshed {
-        *completion = Some(Box::new(("/hooks ".into(), (0, 1))));
-    }
-    state.apply_capture_generation(&refreshed, 3);
-    let (events, remainder) = state.consume_split(&refreshed, b"\r");
-    assert!(remainder.is_empty());
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            RawInputEvent::PromptDraftSubmit { text, slash: true, .. } if text == "/hooks "
-        )),
-        "expected selected /hooks submission, got {events:?}"
-    );
-    let mut state = CardInputState::default();
-    state.apply_capture_generation(&capture, 4);
-    let events = state.consume(&capture, &b"\x1b[B".repeat(hooks_index));
-    assert!(matches!(
-        events.last(),
-        Some(RawInputEvent::PromptDraftChanged {
-            selected_completion,
-            ..
-        }) if *selected_completion == hooks_index
-    ));
-    let mut different = capture;
-    if let RawInputCapture::PromptDraft { id, .. } = &mut different {
-        *id = "composer-2".to_string();
-    }
-    state.apply_capture_generation(&different, 5);
-    let (events, remainder) = state.consume_split(&different, b"\r");
-    assert!(remainder.is_empty());
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            RawInputEvent::PromptDraftSubmit { text, slash: true, .. } if text == "/help "
-        )),
-        "a different composer must submit its default /help, got {events:?}"
-    );
-}
-
 // Split legacy Alt+Enter (#1721): a trailing bare ESC is held (possible split legacy Alt+Enter);
 // a following CR resolves to a soft newline instead of a cancel.
 #[test]
@@ -1280,4 +1191,48 @@ fn draft_split_csi_u_backspace_reassembles_before_editing() {
         })
         .expect("joined CSI-u backspace must delete one char");
     assert_eq!(changed, "第一");
+}
+
+#[test]
+fn composer_request_refresh_preserves_only_same_request_selection() {
+    let hooks_index = crate::input::composer::slash_completions("/", 0, 1)
+        .iter()
+        .position(|command| *command == "/hooks")
+        .expect("public /hooks completion");
+    for same_request in [true, false] {
+        let capture = RawInputCapture::PromptDraft {
+            id: "composer-first".to_string(),
+            initial_text: "/".into(),
+            completion: Some(Box::new(("/help ".into(), (0, 1)))),
+            agent_composer: true,
+            workspace_cwd: None,
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+        let events = state.consume(&capture, &b"\x1b[B".repeat(hooks_index));
+        assert!(matches!(
+            events.last(),
+            Some(RawInputEvent::PromptDraftChanged { selected_completion, .. })
+                if *selected_completion == hooks_index
+        ));
+        let mut refreshed = capture;
+        if let RawInputCapture::PromptDraft { id, completion, .. } = &mut refreshed {
+            if same_request {
+                *completion = Some(Box::new(("/hooks ".into(), (0, 1))));
+            } else {
+                *id = "composer-next".to_string();
+            }
+        }
+        state.apply_capture(&refreshed);
+        let (events, remainder) = state.consume_split(&refreshed, b"\r");
+        let expected = if same_request { "/hooks " } else { "/help " };
+        assert!(remainder.is_empty());
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::PromptDraftSubmit { text, slash: true, .. } if text == expected
+            )),
+            "same request {same_request}: expected {expected:?}, got {events:?}"
+        );
+    }
 }
