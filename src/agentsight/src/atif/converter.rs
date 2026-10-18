@@ -710,10 +710,24 @@ fn collect_tool_responses(
         for part in &msg.parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
                 // Providers report tool failure out of band: Anthropic wraps a
-                // failed result as `{"content": …, "is_error": true}`. Keep the
-                // flag as structured data so consumers never have to re-derive
-                // failure from the flattened text.
-                let is_error = response.get(EXTRA_IS_ERROR).and_then(|v| v.as_bool());
+                // failed result as `{"content": …, "is_error": true}`, real
+                // agent traces carry the camelCase `isError`, and some tools
+                // report an `error` status instead. Keep the flag as structured
+                // data so consumers never have to re-derive failure from the
+                // flattened text — the interruption detector and the grader
+                // read the same three spellings and this was the only reader
+                // that knew just the first.
+                let is_error = response
+                    .get(EXTRA_IS_ERROR)
+                    .or_else(|| response.get("isError"))
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| {
+                        response
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .filter(|status| status.eq_ignore_ascii_case("error"))
+                            .map(|_| true)
+                    });
                 let extra = is_error.map(|flag| {
                     HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(flag))])
                 });
@@ -1293,6 +1307,75 @@ pub(crate) mod tests {
             assert_eq!(
                 index.has_deterministic_finding(),
                 expected == CallStatus::Failed
+            );
+        }
+    }
+
+    /// A tool result can spell its failure flag `isError` (the camelCase real
+    /// agent traces carry) or report an `error` status instead. The ATIF
+    /// converter read only `is_error`, so such a result reached the grounding
+    /// classifier with no flag at all: a `{"isError": false}` result whose
+    /// free-form body mentions a missing path or a traceback was judged a
+    /// certain failure, and — the worse direction — an `{"isError": true}`
+    /// result with a clean body was read as a success and stayed in the
+    /// evidence pool as grounding evidence, while the interruption detector
+    /// and the grader both honour the flag.
+    #[test]
+    fn a_tool_result_flag_spelled_iserror_reaches_the_classifier() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        for (response, flag, expected) in [
+            (
+                serde_json::json!({"content": "grep: /root/.ssh: no such file or directory", "isError": false}),
+                Some(false),
+                CallStatus::Ok,
+            ),
+            (
+                serde_json::json!({"content": "done", "isError": true}),
+                Some(true),
+                CallStatus::Failed,
+            ),
+            (
+                serde_json::json!({"content": "done", "status": "error"}),
+                Some(true),
+                CallStatus::Failed,
+            ),
+        ] {
+            let output = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("tc-flag".into()),
+                    name: "Grep".into(),
+                    arguments: Some(serde_json::json!({"pattern": "token"})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let input = vec![InputMessage {
+                role: "user".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tc-flag".into()),
+                    response: response.clone(),
+                }],
+                name: None,
+            }];
+            let doc = convert_trace_to_atif(
+                "synthetic-flag-spelling",
+                vec![
+                    call_event(1, 1_000_000_000, Some(output), None, Some("search")),
+                    call_event(2, 3_000_000_000, None, Some(input), None),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                doc.steps[2].observation.as_ref().unwrap().results[0].is_error(),
+                flag,
+                "{response}"
+            );
+            let index = build_index(&doc, 0..doc.steps.len());
+            assert_eq!(
+                index.call_verdicts[0].verdict.status, expected,
+                "{response}"
             );
         }
     }
