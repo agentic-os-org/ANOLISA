@@ -146,15 +146,27 @@ impl AnalyzeChatmlCommand {
                     }
                 }
                 "http.response" => {
-                    // Extract response data from SSE events
+                    // The writer stores a stream under `sse_events` and a
+                    // non-streaming answer under `body`. Both are the same
+                    // provider payload the extractor aggregates, so a body is
+                    // offered as the single frame of a synthetic stream.
                     if let Some(ref args) = event.args {
-                        if let Some(sse_events) = args.get("sse_events").and_then(|v| v.as_array())
-                        {
-                            let response = Self::extract_response_from_sse(sse_events);
-                            Some(classify_document(&[], Some(response)))
-                        } else {
-                            None
-                        }
+                        let response = args
+                            .get("sse_events")
+                            .and_then(|v| v.as_array())
+                            .map(|events| Self::extract_response_from_sse(events))
+                            .or_else(|| {
+                                args.get("body").map(|body| {
+                                    let payload = match body {
+                                        serde_json::Value::String(text) => text.clone(),
+                                        other => other.to_string(),
+                                    };
+                                    Self::extract_response_from_sse(&[serde_json::json!({
+                                        "data": payload
+                                    })])
+                                })
+                            });
+                        response.map(|response| classify_document(&[], Some(response)))
                     } else {
                         None
                     }
@@ -1084,6 +1096,41 @@ mod tests {
             err.to_string()
                 .contains("No valid http.request or http.response events found"),
             "unexpected error: {err}"
+        );
+    }
+
+    fn response_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
+        let mut event = ChromeTraceEvent::instant("200 OK", "http.response", 1, 1, ts);
+        event.args = Some(json!({ "body": body }));
+        event
+    }
+
+    /// The trace writer stores a non-streaming response under `body`, but the
+    /// analyzer only read `sse_events`. A `stream: false` call therefore
+    /// contributed no output side at all: with a request event present the
+    /// response silently vanished, and a response-only trace failed with
+    /// "No valid http.request or http.response events found".
+    #[test]
+    fn a_non_sse_response_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![response_event(
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello there"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            1,
+        )];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a non-SSE response must still break down");
+        assert_eq!(breakdowns.len(), 1);
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
         );
     }
 
