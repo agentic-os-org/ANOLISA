@@ -1087,6 +1087,107 @@ mod tests {
         );
     }
 
+    /// An agentic Gemini trace rides its tool interaction as `functionCall` /
+    /// `functionResponse` parts of `contents`. The shared view used to return
+    /// the raw contents, whose messages carry no `content` key — the chat
+    /// template's concatenation failed and `count_request_tokens` answered a
+    /// zero-input record while the same call's output side was counted.
+    #[test]
+    fn gemini_tool_turns_reach_the_token_counts() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hello"}]},
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}]
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": "list_dir",
+                            "response": {"entries": ["a", "b"]}
+                        }
+                    }]
+                }
+            ]
+        });
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("the request is counted");
+        assert!(
+            count.total_tokens > 0,
+            "the tool turns must reach the count, got {:?}",
+            count
+        );
+        // The roles are the canonical ones: the assistant turn is `assistant`
+        // (Gemini spells it `model`) and the tool result is `tool`.
+        assert!(
+            count.by_role.contains_key("assistant"),
+            "roles: {:?}",
+            count.by_role
+        );
+        assert!(
+            count.by_role.contains_key("tool"),
+            "roles: {:?}",
+            count.by_role
+        );
+        assert!(
+            !count.by_role.contains_key("model"),
+            "roles: {:?}",
+            count.by_role
+        );
+    }
+
+    /// The analyze-chatml pipeline for the same shape: on main the Gemini
+    /// request event was skipped with a template warning, so a Gemini-only
+    /// trace answered "No valid http.request or http.response events found".
+    #[test]
+    fn gemini_requests_reach_the_breakdown() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![request_event(
+            json!({
+                "contents": [
+                    {"role": "user", "parts": [{"text": "hello"}]},
+                    {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}]
+                    },
+                    {
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": "list_dir",
+                                "response": {"entries": ["a", "b"]}
+                            }
+                        }]
+                    }
+                ]
+            }),
+            1,
+        )];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a Gemini request event must render");
+        assert_eq!(breakdowns.len(), 1);
+        let request_event = &breakdowns[0].events[0];
+        assert!(
+            request_event.tokens > 0,
+            "request tokens: {request_event:?}"
+        );
+        // system_prompt + the three mapped messages.
+        assert_eq!(
+            request_event.children.len(),
+            4,
+            "children: {:?}",
+            request_event
+                .children
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn sse(payload: &str) -> serde_json::Value {
         json!({ "data": payload })
     }

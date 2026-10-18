@@ -105,6 +105,15 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
     // a `role` and a `parts` array) and their system prompt as
     // `systemInstruction.parts[].text`. Without this arm a drained Gemini
     // call's `input_tokens` stays NULL because no other shape matches.
+    //
+    // The contents are mapped onto the canonical `{role, content}` shape (see
+    // [`gemini_content_to_message`]) instead of being returned verbatim: every
+    // consumer of the view — the chat-template renderers behind
+    // `count_request_tokens`, `drain_request_input_tokens` and the
+    // analyze-chatml CLI, and the semantic layer's `content`/`tool_calls`
+    // readers — reads the canonical shape, and a raw Gemini content carries
+    // its text in `parts` with the assistant role spelled `model`, so a
+    // verbatim return made the whole request render or parse as empty.
     if let Some(arr) = body.get("contents").and_then(|c| c.as_array()) {
         let system_text = body
             .get("systemInstruction")
@@ -118,7 +127,10 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
                     .join("\n")
             })
             .filter(|s| !s.is_empty());
-        return Some((arr.clone(), system_text));
+        return Some((
+            arr.iter().filter_map(gemini_content_to_message).collect(),
+            system_text,
+        ));
     }
     if let Some(input) = body.get("input") {
         if let Some(arr) = input.as_array() {
@@ -148,6 +160,108 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
         }
     }
     None
+}
+
+/// Map one Gemini `contents` entry onto the canonical `{role, content}`
+/// message shape every consumer of the view reads.
+///
+/// Gemini carries the text in a `parts` array, spells the assistant role
+/// `model`, and rides tool interactions as `functionCall` / `functionResponse`
+/// parts instead of `tool_calls` / tool-role messages:
+///
+/// - text parts are joined with `"\n"` into `content` (the same join the
+///   Responses string-shorthand arm performs), so chat-template renderers see
+///   a string and the semantic layer's text readers see the conversation;
+/// - `role: "model"` becomes `assistant` (any other role is passed through,
+///   with the legacy `function` role covered by the mapping below);
+/// - a `functionCall` part becomes a `tool_calls` entry whose `arguments`
+///   carry the call's `args` object — the arguments-in-place decoding the
+///   template counters run only touches string arguments, so an object passes
+///   through untouched;
+/// - a `functionResponse` part turns the content into a `role: "tool"`
+///   message whose content is the serialized response — the shape the semantic
+///   layer and the chat templates read OpenAI tool results in;
+/// - binary parts (`inlineData` / `fileData`) carry no text any tokenizer in
+///   this pipeline can count and are dropped.
+///
+/// A content with no part this mapping recognizes contributes no message, so
+/// an all-binary `contents` array yields an empty view rather than a list of
+/// empty messages.
+fn gemini_content_to_message(content: &Value) -> Option<Value> {
+    let parts = content.get("parts").and_then(|p| p.as_array())?;
+    let mut text_parts: Vec<&str> = Vec::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut function_response: Option<(&str, &Value)> = None;
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+            if !text.is_empty() {
+                text_parts.push(text);
+            }
+        }
+        if let Some(call) = part.get("functionCall").filter(|c| c.is_object()) {
+            tool_calls.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": call.get("name").and_then(|n| n.as_str()).unwrap_or_default(),
+                    "arguments": call.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
+                },
+            }));
+        }
+        if let Some(response) = part.get("functionResponse").filter(|r| r.is_object()) {
+            function_response = Some((
+                response
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default(),
+                response.get("response").unwrap_or(&Value::Null),
+            ));
+        }
+    }
+
+    if let Some((name, response)) = function_response {
+        // A tool result is its own turn in the canonical shape. Text riding in
+        // the same content is rare (a function response carries the tool
+        // output); it is prepended so it is not silently lost.
+        let mut content_text = text_parts.join("\n");
+        match serde_json::to_string(response) {
+            Ok(serialized) => {
+                if !content_text.is_empty() {
+                    content_text.push('\n');
+                }
+                content_text.push_str(&serialized);
+            }
+            Err(_) => {
+                // `Value` always serializes; the arm only exists so the
+                // mapping cannot fail on a malformed part.
+            }
+        }
+        return Some(serde_json::json!({
+            "role": "tool",
+            "name": name,
+            "content": content_text,
+        }));
+    }
+
+    if text_parts.is_empty() && tool_calls.is_empty() {
+        return None;
+    }
+
+    let role = match content.get("role").and_then(|r| r.as_str()) {
+        Some("model") => "assistant",
+        Some(role) => role,
+        None => "user",
+    };
+    let mut message = serde_json::json!({
+        "role": role,
+        // An empty string, not null: the strict chat templates concatenate
+        // `message['content']` and a null breaks the render exactly like a
+        // missing key does.
+        "content": text_parts.join("\n"),
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+    Some(message)
 }
 
 /// Normalize the tool definitions from a parsed request body.
@@ -559,5 +673,103 @@ mod tests {
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(instructions, None);
+    }
+
+    /// The contents arm must return the canonical shape, not the raw Gemini
+    /// content: text parts joined into `content` (the chat templates
+    /// concatenate `message['content']`, which is undefined on a raw content),
+    /// and the assistant role spelled `assistant`, not `model`.
+    #[test]
+    fn test_extract_messages_view_gemini_contents_map_onto_the_canonical_shape() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "Hello"}, {"text": "again"}]},
+                {"role": "model", "parts": [{"text": "Hi there"}]}
+            ]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Hello\nagain");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "Hi there");
+    }
+
+    /// An agentic Gemini trace rides its tool interaction as `functionCall` /
+    /// `functionResponse` parts. Returned verbatim, the assistant turn has no
+    /// `content` and no `tool_calls`, and the tool result has neither — every
+    /// consumer sees an empty conversation. The canonical mapping turns the
+    /// call into `tool_calls` on the assistant message and the result into a
+    /// `role: "tool"` message whose content is the serialized response.
+    #[test]
+    fn test_extract_messages_view_gemini_tool_parts_map_onto_tool_calls_and_tool_messages() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "list the files"}]},
+                {
+                    "role": "model",
+                    "parts": [
+                        {"text": "let me check"},
+                        {"functionCall": {"name": "list_dir", "args": {"path": "/tmp"}}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": "list_dir",
+                            "response": {"entries": ["a", "b"]}
+                        }
+                    }]
+                }
+            ]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        // The assistant turn keeps its text and gains the tool call.
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "let me check");
+        let calls = msgs[1]["tool_calls"].as_array().expect("tool_calls exist");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "list_dir");
+        assert_eq!(calls[0]["function"]["arguments"]["path"], "/tmp");
+
+        // The tool result is its own tool-role message.
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["name"], "list_dir");
+        let response: serde_json::Value =
+            serde_json::from_str(msgs[2]["content"].as_str().expect("content is a string"))
+                .expect("content is the serialized response");
+        assert_eq!(response["entries"][0], "a");
+    }
+
+    /// A tool-call-only assistant turn carries no text: its `content` must be
+    /// an empty string (a null breaks the strict templates' concatenation the
+    /// same way a missing key does), and binary parts contribute nothing.
+    #[test]
+    fn test_extract_messages_view_gemini_binary_only_content_is_dropped() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "look"}]},
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "snap", "args": {}}}]
+                },
+                {
+                    "role": "user",
+                    "parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk="}}]
+                }
+            ]
+        });
+        let (msgs, _) = extract_messages_view(&body).unwrap();
+        assert_eq!(
+            msgs.len(),
+            2,
+            "the binary-only content contributes no message"
+        );
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "");
+        assert!(msgs[1]["tool_calls"].is_array());
     }
 }
