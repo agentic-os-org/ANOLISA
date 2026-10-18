@@ -3572,4 +3572,34 @@ assert_contains "installed plugin record has the shared relative path" "$S64_PLU
 assert_eq "adapter installs the shared qualified identity" "$(cat "$S64_HOME/.codex-stub/plugin_add_calls")" "$PLUGIN_ID"
 
 # =============================================================================
+# Scenario 65 — direct uninstall preserves the binary until deregistration succeeds
+# =============================================================================
+source "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/_common.sh"
+for refusal in 0 1; do
+  S65_HOME="$TEST_DIR/codex-direct-binary-${refusal}/home"
+  S65_STATE="$S65_HOME/.codex-stub"
+  S65_MARKET="$S65_HOME/.local/share/anolisa/codex-marketplace"
+  S65_BINARY="$S65_HOME/.local/bin/tokenless"
+  mkdir -p "$S65_STATE" "$S65_MARKET/tokenless" "$S65_HOME/.local/bin"
+  printf '#!/bin/sh\necho fixture\n' > "$S65_BINARY"
+  chmod +x "$S65_BINARY"
+  for flag in marketplace plugin bare_names no_section; do : > "$S65_STATE/$flag"; done
+  RUN_OUTPUT="$(
+    env -i PATH="$STUB_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$S65_HOME" \
+      SHELL=/bin/bash CODEX_STUB_PLUGIN_REMOVE_FAILS="$refusal" \
+      bash "$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/uninstall.sh" --non-interactive 2>&1
+  )" && RUN_STATUS=0 || RUN_STATUS=$?
+  assert_eq "direct uninstall returns the deregistration outcome" "$RUN_STATUS" "$refusal"
+  assert_eq "direct uninstall targets only the qualified identity" "$(cat "$S65_STATE/plugin_remove_calls")" "$PLUGIN_ID"
+  if [ "$refusal" = 1 ]; then
+    assert_file "direct failed uninstall keeps the binary" "$S65_BINARY"
+    assert_file "direct failed uninstall keeps marketplace registration" "$S65_STATE/marketplace"
+    assert_file "direct failed uninstall keeps marketplace resources" "$S65_MARKET"
+  else
+    assert_no_file "direct successful uninstall removes the binary" "$S65_BINARY"
+    assert_no_file "direct successful uninstall removes marketplace registration" "$S65_STATE/marketplace"
+    assert_no_file "direct successful uninstall removes marketplace resources" "$S65_MARKET"
+  fi
+done
+
 echo "install-script test passed"

@@ -237,6 +237,8 @@ fi
 # 3. Remove binary
 if [[ $DEREGISTER_ONLY -eq 1 ]]; then
     echo "[tokenless] Deregistration only: keeping $BINDIR/tokenless (its owner decides)."
+elif [[ $DEREGISTER_FAILED -eq 1 ]]; then
+    echo "[tokenless] Deregistration unconfirmed: keeping $BINDIR/tokenless for the surviving registration."
 elif [[ -f "$BINDIR/tokenless" ]]; then
     if [[ $INTERACTIVE -eq 1 ]]; then
         answer=""
