@@ -113,7 +113,6 @@ collect_message_ids!([
     enhanced_routing_mode_ids,
     managed_task_ids,
     composer_control_submit_ids,
-    approval_presentation_reset_ids,
     auth_ecs_ids,
     startup_upgrade_ids,
     bug_report_ids,

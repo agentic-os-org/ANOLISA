@@ -11904,11 +11904,23 @@ mod tests {
     /// was told to go to 1, which TiKV still warns about.
     #[test]
     fn swappiness_meets_tikvs_own_check() {
+        let (swap_on, _) = swappiness_swap_tables();
+        let demotion_off = std::path::Path::new(&swap_on)
+            .parent()
+            .unwrap()
+            .join("demotion_off");
+        std::fs::write(&demotion_off, "false\n").unwrap();
         let advice = |procs: &[&str], current: u64| {
             let mut info = info_with_processes(procs);
             info.sysctl.swappiness = current;
             let mut recs = Vec::new();
-            eval_swappiness(&info, &WorkloadType::IoLatency, &mut recs);
+            eval_swappiness_at(
+                &info,
+                &WorkloadType::IoLatency,
+                &mut recs,
+                &swap_on,
+                demotion_off.to_str().unwrap(),
+            );
             recs.into_iter()
                 .map(|r| r.recommended_value)
                 .collect::<Vec<_>>()

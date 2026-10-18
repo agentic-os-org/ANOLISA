@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 const SOCKET_ENV: &str = "AGENT_SEC_DAEMON_SOCKET";
+const SYSTEM_RUNTIME_DIR: &str = "/run";
 const RUNTIME_SUBDIR: &str = "agent-sec-core";
 const SOCKET_FILENAME: &str = "daemon.sock";
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -189,28 +190,27 @@ fn resolve_socket_path(socket_path: Option<PathBuf>) -> Result<PathBuf, AgentSec
         return Ok(path);
     }
 
-    if let Some(path) = env::var_os(SOCKET_ENV) {
+    Ok(default_socket_path(env::var_os(SOCKET_ENV)))
+}
+
+/// Resolve the daemon socket when no explicit path was passed: a non-empty
+/// `$AGENT_SEC_DAEMON_SOCKET` wins, otherwise the SecCore V2 system-service
+/// socket at `/run/agent-sec-core/daemon.sock`.
+///
+/// V1 resolved the default under the caller's runtime dir
+/// (`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`, falling back to
+/// `/run/user/<uid>/...`), but V2 runs the daemon as a root system service,
+/// so neither `XDG_RUNTIME_DIR` nor the process UID participates anymore.
+fn default_socket_path(daemon_socket_env: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(path) = daemon_socket_env {
         if !path.is_empty() {
-            return Ok(PathBuf::from(path));
+            return PathBuf::from(path);
         }
     }
 
-    Ok(resolve_socket_path_with_runtime_dir(
-        env::var_os("XDG_RUNTIME_DIR"),
-        unsafe { libc::getuid() },
-    ))
-}
-
-fn resolve_socket_path_with_runtime_dir(
-    xdg_runtime_dir: Option<std::ffi::OsString>,
-    uid: libc::uid_t,
-) -> PathBuf {
-    let runtime_dir = xdg_runtime_dir
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/user").join(uid.to_string()));
-
-    runtime_dir.join(RUNTIME_SUBDIR).join(SOCKET_FILENAME)
+    PathBuf::from(SYSTEM_RUNTIME_DIR)
+        .join(RUNTIME_SUBDIR)
+        .join(SOCKET_FILENAME)
 }
 
 fn classify_io_error(action: &str, err: std::io::Error) -> AgentSecClientError {
@@ -292,25 +292,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_socket_path_falls_back_to_run_user_uid_when_xdg_runtime_dir_missing() {
-        let path = super::resolve_socket_path_with_runtime_dir(None, 1000);
-
+    fn default_socket_path_uses_system_daemon_socket_without_env() {
         assert_eq!(
-            path,
-            std::path::PathBuf::from("/run/user/1000/agent-sec-core/daemon.sock")
+            super::default_socket_path(None),
+            std::path::PathBuf::from("/run/agent-sec-core/daemon.sock")
         );
     }
 
     #[test]
-    fn resolve_socket_path_uses_xdg_runtime_dir_when_present() {
-        let path = super::resolve_socket_path_with_runtime_dir(
-            Some(std::ffi::OsString::from("/tmp/runtime")),
-            1000,
-        );
-
+    fn default_socket_path_prefers_nonempty_env() {
         assert_eq!(
-            path,
-            std::path::PathBuf::from("/tmp/runtime/agent-sec-core/daemon.sock")
+            super::default_socket_path(Some(std::ffi::OsString::from("/tmp/env-daemon.sock"))),
+            std::path::PathBuf::from("/tmp/env-daemon.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_when_env_empty() {
+        assert_eq!(
+            super::default_socket_path(Some(std::ffi::OsString::new())),
+            std::path::PathBuf::from("/run/agent-sec-core/daemon.sock")
         );
     }
 

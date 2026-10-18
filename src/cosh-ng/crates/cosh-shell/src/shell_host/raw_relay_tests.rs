@@ -180,8 +180,6 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("draw queued candidate");
 
@@ -189,7 +187,7 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
 }
 
 #[test]
-fn capture_submission_and_representation_reset_retire_old_generations() {
+fn capture_ack_generation_expires_at_terminal_event() {
     let mut parser = parser_for_test("capture-ack-lifecycle");
     parser.push_capture_event(
         crate::types::ShellCaptureLifecycle::Submitted,
@@ -204,389 +202,10 @@ fn capture_submission_and_representation_reset_retire_old_generations() {
 
     parser.push_capture_event(crate::types::ShellCaptureLifecycle::Drained, 7, None, None);
     assert_eq!(latest_capture_submission_generation(&parser.events), None);
-    for (observer_fails, already_submitted, focused_deny) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (true, true, false),
-        (false, true, true),
-        (false, false, true),
-    ] {
-        assert_representation_reset_rejects_inflight_read(
-            observer_fails,
-            already_submitted,
-            focused_deny,
-        );
-    }
-    assert_split_capture_batch_is_drained_before_observer_invalidation();
-}
-
-fn assert_split_capture_batch_is_drained_before_observer_invalidation() {
-    use crate::raw_input::RawInputCapture;
-    use std::sync::mpsc;
-
-    let capture = RawInputCapture::Approval {
-        id: "split-approval".to_string(),
-        action_set: crate::ui::ApprovalActionSet::Standard,
-    };
-    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
-    update_input_mode(
-        &mode,
-        &RawObserverAction::CaptureInput(capture.clone()),
-        None,
-    );
-    let old_generation = match &*mode.lock().expect("initial split capture") {
-        RawInputMode::Capture { generation, .. } => *generation,
-        mode => panic!("expected initial capture, got {mode:?}"),
-    };
-    let (sender, receiver) = mpsc::channel();
-    let (submitted_tx, submitted_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let producer = thread::spawn({
-        let mode = mode.clone();
-        let capture = capture.clone();
-        move || {
-            let mut locked = mode.lock().expect("producer mode lock");
-            *locked = RawInputMode::Submitted {
-                capture,
-                generation: old_generation,
-            };
-            sender
-                .send(RawInputEvent::CaptureSubmitted {
-                    kind: "approval",
-                    target_id: "split-approval".to_string(),
-                    generation: old_generation,
-                })
-                .expect("first half of capture batch");
-            submitted_tx.send(()).expect("submission visible");
-            release_rx.recv().expect("release second half");
-            sender
-                .send(RawInputEvent::CardApprove("split-approval".to_string()))
-                .expect("late capture action");
-            drop(locked);
-        }
-    });
-    submitted_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("split submission");
-    let mut parser = parser_for_test("split-capture-batch");
-    let mut output = Vec::new();
-    let (_, mut prompt_replay) = tracker_for_test();
-    let presentation = PromptPresentation::new(false);
-    let mut echoed = 0;
-    drain_raw_input_events(
-        &receiver,
-        &mut parser,
-        &mut output,
-        "prompt> ",
-        &mut echoed,
-        &mut prompt_replay,
-        &presentation,
-        None,
-        None,
-    )
-    .expect("first drain");
-    assert!(!parser
-        .events
-        .iter()
-        .any(|event| event.message.as_deref() == Some("approve")));
-    let reset = CaptureRepresentationReset::default();
-    let (observer_started_tx, observer_started_rx) = mpsc::channel();
-    let observer = thread::spawn({
-        let mode = mode.clone();
-        move || {
-            observer_started_tx
-                .send(())
-                .expect("observer starts waiting for mode");
-            observe_with_input_mode_lock(
-                &mut |view: ShellEventView<'_>, _: &mut Vec<u8>| {
-                    let old_action = view
-                        .events()
-                        .iter()
-                        .position(|event| event.message.as_deref() == Some("approve"))
-                        .expect("late old action must enter the same invalidation snapshot");
-                    let exclusive_fence = view.base() + view.events().len();
-                    assert!(view.base() + old_action < exclusive_fence);
-                    reset.signal();
-                    Ok(RawObserverAction::CaptureInput(capture.clone()))
-                },
-                &mut parser,
-                &mut output,
-                &mode,
-                &reset,
-                &mut |parser, output| {
-                    assert!(
-                        mode.try_lock().is_err(),
-                        "second drain must hold the mode lock"
-                    );
-                    drain_raw_input_events(
-                        &receiver,
-                        parser,
-                        output,
-                        "prompt> ",
-                        &mut echoed,
-                        &mut prompt_replay,
-                        &presentation,
-                        None,
-                        None,
-                    )?;
-                    Ok(())
-                },
-            )
-            .expect("observer invalidation after full old batch drain");
-        }
-    });
-    observer_started_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("observer queued");
-    release_tx
-        .send(())
-        .expect("complete producer batch before unlocking");
-    producer.join().expect("join capture producer");
-    observer.join().expect("join draining observer");
-    assert!(
-        matches!(*mode.lock().expect("replacement capture"), RawInputMode::Capture { generation, .. } if generation != old_generation)
-    );
-}
-
-struct ControlledCaptureReader {
-    started: std::sync::mpsc::Sender<()>,
-    batches: std::sync::mpsc::Receiver<Vec<u8>>,
-}
-
-impl Read for ControlledCaptureReader {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if self.started.send(()).is_err() {
-            return Ok(0);
-        }
-        let bytes = self.batches.recv().unwrap_or_default();
-        buffer[..bytes.len()].copy_from_slice(&bytes);
-        Ok(bytes.len())
-    }
-}
-
-fn assert_representation_reset_rejects_inflight_read(
-    observer_fails: bool,
-    already_submitted: bool,
-    focused_deny: bool,
-) {
-    use crate::raw_input::{spawn_raw_input_relay, MainPromptGate, RawInputCapture};
-    use std::sync::mpsc;
-
-    let capture = RawInputCapture::Approval {
-        id: "same-approval".to_string(),
-        action_set: crate::ui::ApprovalActionSet::StandardHighRisk,
-    };
-    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
-    update_input_mode(
-        &mode,
-        &RawObserverAction::CaptureInput(capture.clone()),
-        None,
-    );
-    let old_generation = match &*mode.lock().expect("mode") {
-        RawInputMode::Capture { generation, .. } => *generation,
-        mode => panic!("expected capture, got {mode:?}"),
-    };
-    let (transport, receiver) = UnixStream::pair().expect("capture transport");
-    let mut slave = File::from(std::os::fd::OwnedFd::from(receiver));
-    let flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
-    assert_eq!(
-        unsafe {
-            nix::libc::fcntl(
-                slave.as_raw_fd(),
-                nix::libc::F_SETFL,
-                flags | nix::libc::O_NONBLOCK,
-            )
-        },
-        0
-    );
-    let (started_tx, started_rx) = mpsc::channel();
-    let (batch_tx, batch_rx) = mpsc::channel();
-    let (event_tx, event_rx) = mpsc::channel();
-    let driver = spawn_raw_input_relay(
-        ControlledCaptureReader {
-            started: started_tx,
-            batches: batch_rx,
-        },
-        File::from(std::os::fd::OwnedFd::from(transport)),
-        event_tx,
-        crate::input::InputClassifier::default(),
-        mode.clone(),
-        UserPtyInputGeneration::default(),
-        MainPromptGate::default(),
-        false,
-    );
-    started_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("old read started");
-    if focused_deny {
-        batch_tx
-            .send(b"\x1b[C".to_vec())
-            .expect("select Deny in the real reader");
-        assert_eq!(
-            event_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("queued Deny focus"),
-            RawInputEvent::CardFocus("same-approval".to_string(), 1)
-        );
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("read after queued Deny focus");
-    }
-    if already_submitted {
-        batch_tx
-            .send(b"\necho forbidden-old-batch\n".to_vec())
-            .expect("queued old approval and same-batch suffix");
-        loop {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("queued old approval");
-            match event {
-                RawInputEvent::CardApprove(id) => {
-                    assert!(!focused_deny);
-                    assert_eq!(id, "same-approval");
-                    break;
-                }
-                RawInputEvent::CardDeny(id) => {
-                    assert!(focused_deny);
-                    assert_eq!(id, "same-approval");
-                    break;
-                }
-                _ => {}
-            }
-        }
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("submitted-generation read started");
-        assert!(
-            matches!(*mode.lock().expect("submitted mode"), RawInputMode::Submitted { generation, .. } if generation == old_generation)
-        );
-    }
-    let reset = CaptureRepresentationReset::default();
-    let mut parser = parser_for_test(if observer_fails {
-        "reset-error"
-    } else {
-        "reset-success"
-    });
-    let mut output = Vec::new();
-    let result = observe_with_input_mode_lock(
-        &mut |_, output: &mut Vec<u8>| {
-            reset.signal();
-            if observer_fails {
-                return Err(io::Error::other("replacement write failed"));
-            }
-            output.write_all(b"complete replacement card")?;
-            output.flush()?;
-            Ok(RawObserverAction::CaptureInput(capture.clone()))
-        },
-        &mut parser,
-        &mut output,
-        &mode,
-        &reset,
-        &mut |_, _| Ok(()),
-    );
-    assert_eq!(result.is_err(), observer_fails);
-    if observer_fails {
-        assert!(matches!(
-            *mode.lock().expect("failed presentation mode"),
-            RawInputMode::Hold
-        ));
-    }
-    if !already_submitted {
-        batch_tx
-            .send(b"\necho forbidden-old-batch\n".to_vec())
-            .expect("release old read");
-    }
-    let rejected = event_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("old batch rejection");
-    let expected_rejected_len =
-        b"\necho forbidden-old-batch\n".len() - usize::from(already_submitted);
-    assert!(
-        matches!(rejected, RawInputEvent::CaptureInputRejected { generation, byte_len }
-        if generation == old_generation && byte_len == expected_rejected_len),
-        "{rejected:?}"
-    );
-    if already_submitted {
-        batch_tx
-            .send(b"\necho forbidden-old-batch\n".to_vec())
-            .expect("release submitted-generation read after suffix rejection");
-    }
-    started_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("next read started");
-    if observer_fails {
-        observe_with_input_mode_lock(
-            &mut |_, output: &mut Vec<u8>| {
-                output.write_all(b"complete replacement card")?;
-                output.flush()?;
-                Ok(RawObserverAction::CaptureInput(capture.clone()))
-            },
-            &mut parser,
-            &mut output,
-            &mode,
-            &reset,
-            &mut |_, _| Ok(()),
-        )
-        .expect("successful replacement");
-        // The read already started in Hold, so it cannot approve the newly published card.
-        batch_tx.send(b"\n".to_vec()).expect("finish held read");
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("new capture read started");
-    }
-    let new_generation = match &*mode.lock().expect("replacement mode") {
-        RawInputMode::Capture { generation, .. } => *generation,
-        mode => panic!("expected replacement capture, got {mode:?}"),
-    };
-    assert_ne!(old_generation, new_generation);
-    batch_tx.send(b"\n".to_vec()).expect("new approval input");
-    let mut decisions = 0;
-    loop {
-        let event = event_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("new capture event");
-        match event {
-            RawInputEvent::CardApprove(id) => {
-                assert!(
-                    !focused_deny,
-                    "replacement still highlights Deny; fresh Enter must not approve"
-                );
-                assert_eq!(id, "same-approval");
-                decisions += 1;
-                break;
-            }
-            RawInputEvent::CardDeny(id) => {
-                assert!(focused_deny);
-                assert_eq!(id, "same-approval");
-                decisions += 1;
-                break;
-            }
-            RawInputEvent::CaptureSubmitted { generation, .. } => {
-                assert_eq!(generation, new_generation);
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(decisions, 1);
-    let mut bytes = [0; 256];
-    assert!(
-        matches!(slave.read(&mut bytes), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-    );
-    batch_tx.send(Vec::new()).expect("stop reader");
-    driver
-        .join()
-        .expect("join capture worker")
-        .expect("capture worker");
-    assert!(!event_rx.try_iter().any(|event| matches!(
-        event,
-        RawInputEvent::CardApprove(_) | RawInputEvent::CardDeny(_)
-    )));
 }
 
 #[test]
 fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
-    assert_committed_handoff_preserves_transport_checks();
     let mut parser = parser_for_test("handoff-prompt-restore");
     feed_shell_ready(&mut parser);
     parser.feed(b"bash-4.4$ ").expect("feed prompt");
@@ -731,8 +350,6 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("drain pty writes");
     assert_eq!(
@@ -758,8 +375,6 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("drain post-prompt write");
     assert_eq!(
@@ -788,8 +403,6 @@ fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("drain post-command write");
 
@@ -832,8 +445,6 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         &mut 0,
         &mut prompt_replay,
         &PromptPresentation::new(false),
-        None,
-        None,
     )
     .unwrap();
     assert!(!parser
@@ -873,8 +484,6 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("draw candidate hint");
 
@@ -920,8 +529,6 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
-        None,
-        None,
     )
     .expect("draw isolated candidate states");
 
@@ -958,8 +565,6 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
             &mut echoed,
             &mut prompt_replay,
             &prompt_presentation,
-            None,
-            None,
         )
         .expect("draw candidate hint");
 
@@ -1536,8 +1141,6 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         Path::new("/tmp/cosh-test-recovery"),
         Path::new("/tmp/cosh-test-handoff"),
         false,
-        false,
-        None,
     )
     .expect("restore prompt");
     assert_eq!(action, RawObserverAction::Continue);
@@ -1562,124 +1165,48 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     );
 }
 
-struct FailedHandoffDisplay {
-    fail_flush: bool,
-}
-
-impl Write for FailedHandoffDisplay {
-    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-        Err(io::Error::other("handoff prompt write failed"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.fail_flush {
-            Err(io::Error::other("handoff display flush failed"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-fn assert_committed_handoff_preserves_transport_checks() {
-    for (restore_prompt, fail_flush) in [(false, true), (true, true), (true, false)] {
-        for case in 0..5 {
-            let directory = tempfile::tempdir().expect("handoff stage directory");
-            let stage = directory.path().join("handoff");
-            if case == 3 {
-                std::fs::create_dir(&stage).expect("block mandatory staging");
-            }
-            let (transport, receiver) = UnixStream::pair().expect("handoff transport");
-            let mut master = File::from(std::os::fd::OwnedFd::from(transport));
-            let mut slave = File::from(std::os::fd::OwnedFd::from(receiver));
-            let flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
-            assert_eq!(
-                unsafe {
-                    nix::libc::fcntl(
-                        slave.as_raw_fd(),
-                        nix::libc::F_SETFL,
-                        flags | nix::libc::O_NONBLOCK,
-                    )
-                },
-                0
-            );
-            let mut readonly_master = File::open("/dev/null").expect("nonwritable transport");
-            let mut parser = parser_for_test("committed-handoff-display-failure");
-            feed_shell_ready(&mut parser);
-            parser.feed(b"prompt> ").expect("painted prompt");
-            let mut display_start = parser.display.len();
-            let (_generation, mut replay) = tracker_for_test();
-            let mut presentation = PromptPresentation::new(false);
-            let mut recovery = PendingTerminalRecovery::default();
-            let mode = Arc::new(Mutex::new(RawInputMode::Hold));
-            let mut request = crate::types::ShellHandoffRequest::new(
-                "printf committed-effect",
-                "$ printf committed-effect",
-                "approved_provider_shell_tool",
-                "user",
-                "req-1",
-                "run-1",
-                1,
-            )
-            .expect("valid approved request");
-            if case == 2 {
-                request.command.push('\n');
-            }
-            let action = if restore_prompt {
-                RawObserverAction::EmitToPtyWithPromptRestore(request)
-            } else {
-                RawObserverAction::EmitToPty(request)
-            };
-            let result = resolve_pty_emit(
-                if case == 4 {
-                    &mut readonly_master
-                } else {
-                    &mut master
-                },
-                1,
-                slave.as_raw_fd(),
-                &mut parser,
-                &mut FailedHandoffDisplay { fail_flush },
-                &mode,
-                action,
-                &mut display_start,
+#[test]
+fn capture_batch_is_drained_under_mode_lock_before_observe() {
+    let mode = Arc::new(Mutex::new(RawInputMode::Hold));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender
+        .send(RawInputEvent::CardApprove("inline-approval".to_string()))
+        .expect("queue approval action");
+    let mut parser = parser_for_test("inline-capture-batch");
+    let mut output = Vec::new();
+    let (_, mut replay) = tracker_for_test();
+    let presentation = PromptPresentation::new(false);
+    let mut echoed = 0;
+    let action = observe_with_input_mode_lock(
+        &mut |view: ShellEventView<'_>, _: &mut Vec<u8>| {
+            assert!(mode.try_lock().is_err(), "observe must hold the mode lock");
+            assert!(view
+                .events()
+                .iter()
+                .any(|event| event.message.as_deref() == Some("approve")));
+            Ok(RawObserverAction::RawPassthrough)
+        },
+        &mut parser,
+        &mut output,
+        &mode,
+        &mut |parser, output| {
+            assert!(mode.try_lock().is_err(), "drain must hold the mode lock");
+            assert!(!drain_raw_input_events(
+                &receiver,
+                parser,
+                output,
+                "prompt> ",
+                &mut echoed,
                 &mut replay,
-                &mut presentation,
-                &mut recovery,
-                &directory.path().join("recovery"),
-                &stage,
-                false,
-                case != 1,
-                None,
-            );
-            let mut bytes = [0; 256];
-            if case == 0 {
-                assert_eq!(
-                    result.expect("a committed effect must survive display failure"),
-                    RawObserverAction::RawPassthrough
-                );
-                let count = slave
-                    .read(&mut bytes)
-                    .expect("approved bytes reached the transport");
-                assert_eq!(&bytes[..count], b"printf committed-effect\n");
-                assert!(
-                    matches!(slave.read(&mut bytes), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-                );
-                assert_eq!(
-                    std::fs::read_to_string(&stage).expect("mandatory stage"),
-                    "printf committed-effect"
-                );
-            } else {
-                assert!(
-                    result.is_err(),
-                    "transport/security error cannot be hidden: case={case}"
-                );
-                assert!(
-                    matches!(slave.read(&mut bytes), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-                );
-                if case == 4 {
-                    assert!(!stage.exists(), "failed PTY write clears staged authority");
-                }
-            }
-        }
-    }
+                &presentation,
+            )?);
+            Ok(())
+        },
+    )
+    .expect("consume the complete capture batch");
+    assert_eq!(action, RawObserverAction::RawPassthrough);
+    assert!(matches!(
+        *mode.try_lock().expect("mode lock released after update"),
+        RawInputMode::RawPassthrough
+    ));
 }

@@ -212,10 +212,13 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
             if trimmed.is_empty() {
                 return None;
             }
+            // A payload that is entirely valid JSON is read through its parsed
+            // form. Scanning the encoded text again would re-judge a result
+            // that declares success by its free-form content — the object arm
+            // already trusts that flag — and could also match words that only
+            // appear in a key or an escape.
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if let Some(error) = tool_response_failure_text(&parsed) {
-                    return Some(error);
-                }
+                return tool_response_failure_text(&parsed);
             }
             if text_has_tool_error_signal(trimmed) {
                 Some(trimmed.to_string())
@@ -2003,6 +2006,53 @@ mod tests {
                 "is_error": true,
                 "content": "command finished with exit code 1"
             }),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+
+    #[test]
+    fn a_json_string_tool_result_that_reports_success_is_not_a_failure() {
+        // A tool result can ride as a JSON-encoded string: the Responses API
+        // copies `function_call_output.output` through unchanged, and an MCP
+        // result is often serialized as `{"content":…,"isError":false}` text.
+        // The explicit success flag has to settle the question for that shape
+        // too; scanning the encoded text afterwards turns ordinary output that
+        // mentions a missing path into a ToolFailure.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-mcp".to_string()),
+                response: serde_json::json!(
+                    r#"{"content":[{"type":"text","text":"grep: no such file or directory"}],"isError":false}"#
+                ),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "noted".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "a successful JSON tool result is not a failure: {events:?}"
+        );
+
+        // The same payload with the failure flag still reports the failure.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-mcp".to_string()),
+            response: serde_json::json!(
+                r#"{"content":[{"type":"text","text":"grep: no such file or directory"}],"isError":true}"#
+            ),
         }];
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);

@@ -813,7 +813,7 @@ fn escape_ctl(s: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            c if c.is_control() => {
                 escaped.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => escaped.push(c),
@@ -2929,7 +2929,7 @@ fn escape_ctl_stderr(s: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            c if c.is_control() => {
                 escaped.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => escaped.push(c),
@@ -3455,11 +3455,14 @@ mod tests {
         );
         assert_eq!(escape_ctl_stderr("\u{7f}"), "\\x7f");
         assert_eq!(escape_ctl_stderr("a\u{0}b"), "a\\x00b");
-        // No raw control byte survives.
+        // C1 controls (NEL, the 8-bit CSI/OSC introducers) become \xNN too.
+        assert_eq!(escape_ctl_stderr("a\u{85}b"), "a\\x85b");
+        assert_eq!(escape_ctl_stderr("\u{9b}31m\u{9d}"), "\\x9b31m\\x9d");
+        // No raw control character survives.
         assert!(
-            !escape_ctl_stderr("\u{1}\u{2}\n\u{1b}\u{7f}")
+            !escape_ctl_stderr("\u{1}\u{2}\n\u{1b}\u{7f}\u{85}\u{9b}")
                 .chars()
-                .any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
+                .any(|c| c.is_control())
         );
         // Visible text — including multi-byte characters — passes through.
         assert_eq!(
@@ -3821,12 +3824,15 @@ mod tests {
             "ansi\\x1b]777;id\\x07"
         );
         assert_eq!(escape_ctl("\u{7f}"), "\\x7f");
-        // Other C0 controls get \xNN; nothing raw below 0x20 survives.
+        // Other C0 controls get \xNN; nothing raw survives.
         assert_eq!(escape_ctl("a\u{0}b"), "a\\x00b");
+        // C1 controls (NEL, the 8-bit CSI/OSC introducers) become \xNN too.
+        assert_eq!(escape_ctl("a\u{85}b"), "a\\x85b");
+        assert_eq!(escape_ctl("\u{9b}31m\u{9d}"), "\\x9b31m\\x9d");
         assert!(
-            !escape_ctl("\u{1}\u{2}\n\u{1b}")
+            !escape_ctl("\u{1}\u{2}\n\u{1b}\u{85}\u{9b}")
                 .chars()
-                .any(|c| (c as u32) < 0x20)
+                .any(|c| c.is_control())
         );
     }
 
