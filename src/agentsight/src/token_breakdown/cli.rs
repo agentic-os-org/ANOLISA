@@ -508,10 +508,14 @@ impl AnalyzeChatmlCommand {
                         // mid-stream or a custom_tool_call whose input only
                         // appears there). Routing only `added` left the call
                         // rendered with whatever partial deltas were caught.
+                        // A custom tool call streams its input on its own
+                        // event pair, so those names belong here too.
                         Some("response.output_item.added")
                         | Some("response.output_item.done")
                         | Some("response.function_call_arguments.delta")
-                        | Some("response.function_call_arguments.done") => {
+                        | Some("response.function_call_arguments.done")
+                        | Some("response.custom_tool_call_input.delta")
+                        | Some("response.custom_tool_call_input.done") => {
                             responses_tool_calls.observe(&data_json);
                         }
                         _ => {}
@@ -1395,6 +1399,52 @@ mod tests {
         )];
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
         assert_eq!(resp.tool_calls, vec![r#"tool_b: {"b":2}"#.to_string()]);
+    }
+
+    /// A custom tool call streams its input on
+    /// `response.custom_tool_call_input.delta`/`.done`; the CLI allow-list
+    /// routed only the function-call events into the shared aggregator, so a
+    /// stream cut before any done event reported the call with empty input
+    /// while a function call in the same shape kept its partial arguments.
+    #[test]
+    fn sse_responses_custom_tool_input_deltas_reach_the_call() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"item_9","call_id":"call_9","name":"apply_patch","input":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** Begin Patch\n"}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** End Patch"}"#,
+            ),
+            // No done event: the capture was cut mid-input.
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["apply_patch: *** Begin Patch\n*** End Patch".to_string()],
+            "the partial custom tool input must be rendered, not dropped"
+        );
+
+        // A full done payload supersedes the partial deltas it repeats.
+        let with_done = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"item_9","call_id":"call_9","name":"apply_patch","input":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** Beg"}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.done","output_index":0,"input":"*** Begin Patch\n*** End Patch"}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&with_done);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["apply_patch: *** Begin Patch\n*** End Patch".to_string()],
+            "the done payload must replace the deltas rather than duplicate them"
+        );
     }
 
     /// Reasoning models on the Responses protocol stream their thinking as
