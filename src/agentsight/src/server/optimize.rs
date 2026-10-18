@@ -58,7 +58,16 @@ impl OptLlmConfig {
     /// that must be resealed so the plaintext leaves the disk.
     fn load(path: &Path) -> (Self, bool) {
         let mut config: Self = match std::fs::read_to_string(path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            // A Windows editor saving as "UTF-8 with BOM" prefixes the file
+            // with U+FEFF, which `serde_json` rejects at offset 0. Without
+            // stripping it the whole file degrades to an empty configuration:
+            // the stored key, endpoint and model silently disappear from the
+            // settings page, and the next save overwrites them. Every other
+            // JSON boundary in this crate already ignores one leading mark
+            // (`config.rs::strip_leading_bom`); this one did not.
+            Ok(content) => {
+                serde_json::from_str(crate::config::strip_leading_bom(&content)).unwrap_or_default()
+            }
             Err(_) => return (Self::default(), false),
         };
         let mut needs_reseal = false;
@@ -166,7 +175,7 @@ fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
     // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
     // too: `load` drops it to the default config, so its contents are just as
     // lost as truncated JSON if `save` overwrites it unpreserved.
-    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
+    if serde_json::from_str::<OptLlmConfig>(crate::config::strip_leading_bom(&content)).is_ok() {
         return Ok(());
     }
     let ts = std::time::SystemTime::now()
@@ -1449,6 +1458,42 @@ mod tests {
         assert!(!needs_reseal);
         assert_eq!(loaded.api_key, None);
         assert_eq!(loaded.model.as_deref(), Some("m"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Windows editor saving as "UTF-8 with BOM" prefixes the config with
+    /// U+FEFF, which `serde_json` rejects at offset 0. `load` folded the whole
+    /// file into the default config, so a marked file looked unconfigured in
+    /// the settings page and the next save replaced the key, endpoint and
+    /// model it still held. Every other JSON boundary in the crate ignores one
+    /// leading mark; this one did not.
+    #[test]
+    fn load_reads_a_bom_marked_config() {
+        let dir = tmp_dir("bom-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            "\u{feff}{\"api_key\":null,\"base_url\":\"https://synthetic.example/v1\",\"model\":\"synthetic-model\",\"search_timeout_secs\":17}",
+        )
+        .unwrap();
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert_eq!(
+            loaded.base_url.as_deref(),
+            Some("https://synthetic.example/v1")
+        );
+        assert_eq!(loaded.model.as_deref(), Some("synthetic-model"));
+        assert_eq!(loaded.search_timeout_secs, Some(17));
+        assert!(!needs_reseal);
+
+        // The save-time guard reads the same boundary: a marked file parses, so
+        // saving over it must not leave a spurious backup behind.
+        assert!(preserve_unparseable_config(&path).is_ok());
+        assert!(
+            config_backups(&dir).is_empty(),
+            "a BOM-marked config is parseable and needs no backup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

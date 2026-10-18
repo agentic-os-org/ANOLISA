@@ -835,7 +835,7 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
 /// boundaries take the same one-mark rule, so a marked config parses as the
 /// config it is. Only the first mark is the format's: a second one is data
 /// and still fails the parse.
-fn strip_leading_bom(content: &str) -> &str {
+pub(crate) fn strip_leading_bom(content: &str) -> &str {
     content.strip_prefix('\u{feff}').unwrap_or(content)
 }
 
