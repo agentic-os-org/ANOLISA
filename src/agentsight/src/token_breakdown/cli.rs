@@ -335,6 +335,11 @@ impl AnalyzeChatmlCommand {
         let mut native_reasoning = String::new();
         let mut native_calls: std::collections::BTreeMap<u64, (String, String)> =
             std::collections::BTreeMap::new();
+        // OpenAI chat-completions cumulative `message` snapshots (see the
+        // choices walk below). They repeat the answer so far, so they need a
+        // single replace-or-extend buffer rather than one entry per frame.
+        let mut message_content = String::new();
+        let mut message_reasoning = String::new();
 
         /// Accumulate cumulative-or-incremental text: a chunk repeating the
         /// buffer plus more replaces it, a bare fragment is appended.
@@ -471,57 +476,80 @@ impl AnalyzeChatmlCommand {
                         _ => {}
                     }
 
-                    // Extract content and reasoning_content from choices[].delta
+                    // Extract content and reasoning_content from the OpenAI
+                    // chat-completions payload. A choice carries either
+                    // streaming `delta` fragments or a cumulative `message`
+                    // snapshot (SysOM's Copilot stream and some gateways send
+                    // the latter), so read both. A snapshot repeats the answer
+                    // so far, so it accumulates replace-or-extend into a single
+                    // buffer instead of being appended as another fragment.
                     if let Some(choices) = data_json.get("choices").and_then(|v| v.as_array()) {
                         for choice in choices {
-                            if let Some(delta) = choice.get("delta") {
-                                // Extract content
-                                if let Some(content) = delta.get("content").and_then(|v| v.as_str())
-                                {
-                                    if !content.is_empty() {
+                            let (payload, cumulative) =
+                                match (choice.get("delta"), choice.get("message")) {
+                                    (Some(delta), _) => (delta, false),
+                                    (None, Some(message)) => (message, true),
+                                    (None, None) => continue,
+                                };
+                            // Extract content
+                            if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                                if !content.is_empty() {
+                                    if cumulative {
+                                        accumulate(&mut message_content, content);
+                                    } else {
                                         content_parts.push(content.to_string());
                                     }
                                 }
-                                // Extract reasoning_content
-                                if let Some(reasoning) =
-                                    delta.get("reasoning_content").and_then(|v| v.as_str())
-                                {
-                                    if !reasoning.is_empty() {
+                            }
+                            // Extract reasoning_content
+                            if let Some(reasoning) =
+                                payload.get("reasoning_content").and_then(|v| v.as_str())
+                            {
+                                if !reasoning.is_empty() {
+                                    if cumulative {
+                                        accumulate(&mut message_reasoning, reasoning);
+                                    } else {
                                         reasoning_parts.push(reasoning.to_string());
                                     }
                                 }
-                                // Extract tool_calls - merge function name and
-                                // streamed arguments fragments by index
-                                if let Some(calls) =
-                                    delta.get("tool_calls").and_then(|t| t.as_array())
-                                {
-                                    for call in calls {
-                                        let index =
-                                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                                as usize;
-                                        let function = call.get("function");
-                                        let name = function
-                                            .and_then(|f| f.get("name"))
-                                            .and_then(|n| n.as_str())
-                                            .unwrap_or("");
-                                        let arguments = function
-                                            .and_then(|f| f.get("arguments"))
-                                            .and_then(|a| a.as_str())
-                                            .unwrap_or("");
-                                        match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
-                                            Some((_, slot_name, slot_arguments)) => {
-                                                if !name.is_empty() {
-                                                    *slot_name = name.to_string();
-                                                }
+                            }
+                            // Extract tool_calls - merge function name and
+                            // streamed arguments fragments by index. A message
+                            // snapshot carries the complete call, so it
+                            // replaces the slot instead of appending to it.
+                            if let Some(calls) =
+                                payload.get("tool_calls").and_then(|t| t.as_array())
+                            {
+                                for call in calls {
+                                    let index =
+                                        call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    let function = call.get("function");
+                                    let name = function
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("");
+                                    let arguments = function
+                                        .and_then(|f| f.get("arguments"))
+                                        .and_then(|a| a.as_str())
+                                        .unwrap_or("");
+                                    match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
+                                        Some((_, slot_name, slot_arguments)) => {
+                                            if !name.is_empty() {
+                                                *slot_name = name.to_string();
+                                            }
+                                            if cumulative {
+                                                *slot_arguments = arguments.to_string();
+                                            } else {
                                                 slot_arguments.push_str(arguments);
                                             }
-                                            None => {
-                                                tool_calls.push((
-                                                    index,
-                                                    name.to_string(),
-                                                    arguments.to_string(),
-                                                ));
-                                            }
+                                        }
+                                        None => {
+                                            tool_calls.push((
+                                                index,
+                                                name.to_string(),
+                                                arguments.to_string(),
+                                            ));
                                         }
                                     }
                                 }
@@ -594,6 +622,18 @@ impl AnalyzeChatmlCommand {
         }
         if !native_reasoning.is_empty() {
             reasoning_parts.push(native_reasoning);
+        }
+
+        // A message-snapshot stream answers in one cumulative form: the final
+        // snapshot is the answer, so it supersedes any delta fragments captured
+        // alongside it (a stream normally uses one form or the other).
+        if !message_content.is_empty() {
+            content_parts.clear();
+            content_parts.push(message_content);
+        }
+        if !message_reasoning.is_empty() {
+            reasoning_parts.clear();
+            reasoning_parts.push(message_reasoning);
         }
 
         let mut tool_calls: Vec<String> = {
@@ -1197,6 +1237,34 @@ mod tests {
             ),
         ];
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
+    /// SysOM's Copilot stream and some OpenAI-compatible gateways send
+    /// `choices[].message` snapshots instead of `choices[].delta` fragments:
+    /// each frame repeats the answer so far. The walk read only `delta`, so
+    /// such a capture broke down as an empty response.
+    #[test]
+    fn sse_openai_message_snapshots_are_aggregated_once() {
+        let events = vec![
+            sse(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello"}}]}"#),
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello there!","reasoning_content":"thin"}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello there!","reasoning_content":"thinking","tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]}}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.content,
+            vec!["Hello there!".to_string()],
+            "cumulative snapshots must not be appended as separate fragments"
+        );
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
         assert_eq!(
             resp.tool_calls,
             vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
