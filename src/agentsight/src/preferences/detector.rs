@@ -7,7 +7,7 @@
 //! thresholds and keyword tables live in [`super::signals`] so rule tuning
 //! never touches this file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::signals::{
     CJK_RATIO_THRESHOLD, CORRECTION_PATTERNS, CORRECTION_WINDOW_NS, MIN_QUERY_CHARS_FOR_LANGUAGE,
@@ -43,18 +43,39 @@ pub struct PreferenceEventRow {
 /// calls) are applied independently; the rapid follow-up correction rule
 /// needs cross-row context and runs over the whole batch. Malformed message
 /// JSON is tolerated: the row is skipped with a debug log, never an error.
+///
+/// The genai source emits one row per LLM call, so a single user turn with a
+/// five-step tool loop arrives as five rows carrying the same session,
+/// conversation and query. Those rows are one observation of the user's
+/// preference, not five: the turn-level rules run once per
+/// `(session, conversation, query)` tuple. Tool usage stays per row — call
+/// frequency is its evidence (see [`detect_tool_calls`]).
 pub fn detect_signals(rows: &[PreferenceEventRow]) -> Vec<PreferenceSignal> {
     let mut out = Vec::new();
+    let mut seen_turns: HashSet<(Option<&str>, Option<&str>, &str)> = HashSet::new();
     for row in rows {
-        detect_row_signals(row, &mut out);
+        let first_for_turn = match row.user_text.as_deref() {
+            Some(query) => seen_turns.insert((
+                row.session_id.as_deref(),
+                row.conversation_id.as_deref(),
+                query,
+            )),
+            // No query means the turn-level rules are skipped anyway.
+            None => true,
+        };
+        detect_row_signals(row, &mut out, first_for_turn);
     }
     detect_rapid_followups(rows, &mut out);
     out
 }
 
 /// Rules that only need a single row.
-fn detect_row_signals(row: &PreferenceEventRow, out: &mut Vec<PreferenceSignal>) {
-    if let Some(query) = row.user_text.as_deref() {
+fn detect_row_signals(
+    row: &PreferenceEventRow,
+    out: &mut Vec<PreferenceSignal>,
+    include_turn_rules: bool,
+) {
+    if include_turn_rules && let Some(query) = row.user_text.as_deref() {
         let excerpt = truncate_excerpt(query);
         if let Some(language) = detect_language(query) {
             out.push(make_signal(
@@ -285,6 +306,75 @@ mod tests {
             kinds
                 .iter()
                 .filter(|k| matches!(k, SignalKind::ToolUsage { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn repeated_calls_in_one_turn_are_one_preference_observation() {
+        // genai writes one row per LLM call; a tool loop repeats the same
+        // session, conversation and query. The user made one request, so the
+        // turn-level rules must contribute one observation, not one per call.
+        let rows: Vec<_> = (1..=5)
+            .map(|id| row(id, "先出方案再写代码，然后跑测试"))
+            .collect();
+        let signals = detect_signals(&rows);
+
+        let plan_first = signals
+            .iter()
+            .filter(|s| s.kind == SignalKind::PlanFirst)
+            .count();
+        assert_eq!(plan_first, 1, "five calls of one turn are one observation");
+
+        let chinese = signals
+            .iter()
+            .filter(|s| {
+                s.kind
+                    == SignalKind::Language {
+                        language: "chinese",
+                    }
+            })
+            .count();
+        assert_eq!(chinese, 1);
+
+        let test_requirement = signals
+            .iter()
+            .filter(|s| s.kind == SignalKind::TestRequirement)
+            .count();
+        assert_eq!(test_requirement, 1);
+    }
+
+    #[test]
+    fn tool_usage_stays_per_call_after_turn_dedup() {
+        // Call frequency is the evidence for tool usage, so the dedup above
+        // must not collapse it.
+        let mut first = row(1, "list the files for me please");
+        first.tool_names = vec!["bash".to_string()];
+        let mut second = row(2, "list the files for me please");
+        second.tool_names = vec!["bash".to_string()];
+
+        let signals = detect_signals(&[first, second]);
+        let bash = signals
+            .iter()
+            .filter(
+                |s| matches!(&s.kind, SignalKind::ToolUsage { tool_name } if tool_name == "bash"),
+            )
+            .count();
+        assert_eq!(bash, 2, "each tool call remains its own evidence unit");
+    }
+
+    #[test]
+    fn distinct_turns_keep_their_own_observations() {
+        // Same text in two separate turns is two observations, not a repeat
+        // of one call loop.
+        let mut second_turn = row(2, "先出方案再写代码");
+        second_turn.conversation_id = Some("c2".to_string());
+        let signals = detect_signals(&[row(1, "先出方案再写代码"), second_turn]);
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|s| s.kind == SignalKind::PlanFirst)
                 .count(),
             2
         );
