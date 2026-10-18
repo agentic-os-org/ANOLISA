@@ -24,7 +24,7 @@ use std::ops::Range;
 use agentsight_atif::{AtifTrajectory, Step, StepSource, same_call_id};
 
 use super::claims::{Claim, ClaimClass, extract_claims, numbers_agree};
-use super::outcome::{CallStatus, CallVerdict, Confidence, classify_call, result_text};
+use super::outcome::{CallStatus, CallVerdict, Confidence, classify_call, command_of, result_text};
 
 /// Cap on pool numbers considered when testing whether a claim was computed from
 /// evidence. The check is pairwise, so this bounds it to a fixed cost.
@@ -556,12 +556,7 @@ fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<
         .filter_map(|step| step.tool_calls.as_deref())
         .flatten()
         .find(|c| source_call_id.is_some_and(|id| same_call_id(c.tool_call_id.as_str(), id)))
-        .and_then(|call| {
-            call.arguments
-                .get("command")
-                .or_else(|| call.arguments.get("cmd"))
-        })
-        .and_then(|v| v.as_str())
+        .and_then(command_of)
     else {
         return text.to_string();
     };

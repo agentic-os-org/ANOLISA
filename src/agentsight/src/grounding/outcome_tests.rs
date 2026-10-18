@@ -315,6 +315,64 @@ fn redirected_probe_is_still_expected() {
     }
 }
 
+/// A shell call whose command is an argv array is still a shell call.
+///
+/// `agentsight-trajectory-collector` maps a Codex rollout's
+/// `local_shell_call` to an ATIF `ToolCall` whose `arguments.command` is the
+/// executable plus its argv — `{"type":"exec","command":["ls","-l"]}` — and
+/// its own regression asserts that shape (`test_tool_call_variants`). The
+/// grounding reader took the key as a string only, so such a call looked like
+/// one that runs no command at all: `is_probe` answered `false` for what is
+/// plainly a probe, and a non-zero exit from `["ls", "/nope"]` was graded a
+/// certain failure instead of the answer the probe produced.
+#[test]
+fn an_argv_command_is_read_like_a_shell_command() {
+    for argv in [
+        serde_json::json!(["ls", "/root/.qoder-server"]),
+        serde_json::json!(["ls", "-l", "/root/.qoder-server"]),
+        serde_json::json!(["/usr/bin/ls", "/root/.qoder-server"]),
+    ] {
+        let call = ToolCall {
+            tool_call_id: "tc-1".into(),
+            function_name: "shell".into(),
+            arguments: serde_json::json!({ "type": "exec", "command": argv }),
+            extra: None,
+        };
+        let v = classify(
+            &call,
+            "ls: cannot open directory '/root/.qoder-server': Permission denied\n(exit code 2)",
+        );
+        assert_eq!(
+            v.status,
+            CallStatus::OkProbe,
+            "{argv} rule={}",
+            v.matched_rule
+        );
+        assert_eq!(v.matched_rule, "B3", "{argv}");
+    }
+}
+
+/// Reading the argv form must not make every argv call a probe, and a
+/// non-probe command keeps the failure its exit code reports.
+#[test]
+fn an_argv_command_that_is_not_a_probe_is_not_demoted() {
+    let call = ToolCall {
+        tool_call_id: "tc-1".into(),
+        function_name: "shell".into(),
+        arguments: serde_json::json!({
+            "type": "exec",
+            "command": ["cp", "a", "/etc/app.conf"],
+        }),
+        extra: None,
+    };
+    let v = classify(
+        &call,
+        "cp: cannot create regular file '/etc/app.conf': Permission denied\n(exit code 1)",
+    );
+    assert_eq!(v.status, CallStatus::Failed, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "R3");
+}
+
 #[test]
 fn backgrounded_probe_chain_with_a_real_command_is_not_a_probe() {
     // A bare `&` still separates: the second command is real work, so a

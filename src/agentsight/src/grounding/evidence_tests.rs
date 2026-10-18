@@ -392,6 +392,39 @@ fn scenario_echoed_command_line_is_stripped_when_the_result_lives_on_a_later_ste
     );
 }
 
+/// The echo guard reads the argv form of a shell command too.
+///
+/// A Codex `local_shell_call` reaches ATIF with its command as an array
+/// (`{"type":"exec","command":["cat","/etc/secret/token"]}`). The guard only
+/// compared the echoed first line against a string command, so for this shape
+/// it never ran and the call's own command line stayed in the evidence pool —
+/// where it grounds the very path the agent then claims.
+#[test]
+fn argv_form_command_echo_is_not_evidence() {
+    let doc = traj(vec![
+        user(1, "读一下配置。"),
+        acting_agent(
+            2,
+            "随后汇报。",
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"type": "exec", "command": ["cat", "/etc/secret/token"]}),
+            )],
+            vec![ok_result("c1", "cat /etc/secret/token\nvariable 7")],
+        ),
+        agent(3, "配置在 /etc/secret/token。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert_eq!(
+        grounding_for(&index, "/etc/secret/token"),
+        Grounding::Unresolved,
+        "the echoed argv command line must not ground the claim: {:?}",
+        index.claims
+    );
+}
+
 #[test]
 fn scenario_system_prompt_is_not_evidence() {
     let doc = traj(vec![
