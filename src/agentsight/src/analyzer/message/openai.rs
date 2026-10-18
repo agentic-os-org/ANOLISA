@@ -163,6 +163,32 @@ impl ResponsesToolCalls {
                     self.current = None;
                 }
             }
+            // A custom tool calls its payload "input" rather than
+            // "arguments", and streams it on its own event pair. Handling
+            // only the function-call pair left a cut custom tool call with
+            // an empty payload while a cut function call kept its partial
+            // arguments.
+            Some("response.custom_tool_call_input.delta") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    if !call.done {
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            call.arguments.push_str(delta);
+                        }
+                    }
+                }
+            }
+            Some("response.custom_tool_call_input.done") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    // A full done payload supersedes partial captured deltas.
+                    if let Some(input) = event.get("input").and_then(|v| v.as_str()) {
+                        call.arguments = input.to_owned();
+                    }
+                    call.done = true;
+                }
+                if !identified {
+                    self.current = None;
+                }
+            }
             Some("response.output_item.done") => {
                 let Some(item) = item else { return };
                 if !matches!(
@@ -2338,6 +2364,41 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"q\":\"test\"}"
+        );
+    }
+
+    /// The truncated-stream shape for a custom tool call: the item is
+    /// announced with an empty input, then only
+    /// `response.custom_tool_call_input.delta` fragments arrive and the
+    /// stream is cut before any done event. A function call keeps its partial
+    /// arguments in that shape; the custom tool call landed with empty
+    /// arguments because its streaming input events were not handled.
+    #[test]
+    fn test_aggregate_responses_sse_truncated_custom_tool_input() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ctc_trunc", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "custom_tool_call", "id": "ctc_trunc", "call_id": "call_patch", "name": "apply_patch", "input": ""}}),
+            serde_json::json!({"type": "response.custom_tool_call_input.delta", "delta": "*** Begin Patch\n"}),
+            serde_json::json!({"type": "response.custom_tool_call_input.delta", "delta": "*** Update File: a.rs\n"}),
+            // NO response.custom_tool_call_input.done and no output_item.done
+            // — the stream was cut mid-input.
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ctc_trunc", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the cut custom tool call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** Update File: a.rs\n"),
+            "the partial custom tool input must be kept like function arguments"
         );
     }
 
