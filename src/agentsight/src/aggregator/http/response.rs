@@ -176,6 +176,7 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             | "response.reasoning_text.delta"
             | "response.reasoning_summary_text.delta"
             | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
             | "response.refusal.delta" => {
                 return non_empty_string(value.get("delta"));
             }
@@ -195,9 +196,11 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             }
             "response.output_item.added" => {
                 let item = value.get("item");
-                return item.and_then(|item| item.get("type"))
-                    == Some(&serde_json::Value::String("function_call".to_string()))
-                    && non_empty_string(item.and_then(|item| item.get("name")));
+                return matches!(
+                    item.and_then(|item| item.get("type"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("function_call" | "custom_tool_call")
+                ) && non_empty_string(item.and_then(|item| item.get("name")));
             }
             _ => {}
         }
@@ -475,6 +478,44 @@ mod latency_tests {
         assert!(!event_has_meaningful_output(Some(&empty)));
         assert!(event_has_meaningful_output(Some(&output)));
         assert!(event_has_meaningful_output(Some(&refusal)));
+    }
+
+    /// A custom tool call announces itself as `custom_tool_call` and streams
+    /// its payload on `response.custom_tool_call_input.delta`. Both were
+    /// missing from the meaningful-output check, which only knew the
+    /// `function_call` spellings, so a turn whose first output was a custom
+    /// tool call kept the first-output timestamp empty even though the same
+    /// turn with a function call recorded one.
+    #[test]
+    fn recognizes_a_custom_tool_call_as_output() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "custom_tool_call", "name": "apply_patch", "input": ""}
+        });
+        let delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "delta": "*** Begin Patch"
+        });
+        let empty_delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "delta": ""
+        });
+        assert!(
+            event_has_meaningful_output(Some(&added)),
+            "an announced custom tool call is output like an announced function call"
+        );
+        assert!(
+            event_has_meaningful_output(Some(&delta)),
+            "a custom tool input delta is output like a function argument delta"
+        );
+        assert!(!event_has_meaningful_output(Some(&empty_delta)));
+
+        // The function-call spellings keep working.
+        let function_added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "name": "read_file"}
+        });
+        assert!(event_has_meaningful_output(Some(&function_added)));
     }
 
     #[test]
