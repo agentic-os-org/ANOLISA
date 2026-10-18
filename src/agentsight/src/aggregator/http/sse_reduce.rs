@@ -205,6 +205,7 @@ fn key(value: &Value) -> Option<String> {
             | "response.reasoning_summary_text.delta"
             | "response.refusal.delta"
             | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
     ) {
         return Some(format!(
             "{kind}:{}:{}:{}:{}",
@@ -290,5 +291,81 @@ fn merge(previous: &mut Value, incoming: Value, field: &str, native: bool) {
             let _ = previous;
         }
         (previous, incoming) => *previous = incoming,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::sse::SseParser;
+
+    fn parsed_events(body: &str, ssl_ptr: u64) -> Vec<ParsedSseEvent> {
+        let source = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1_000,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: body.len() as u32,
+            rw: 1,
+            comm: "fixture".into(),
+            buf: body.as_bytes().to_vec(),
+            is_handshake: false,
+            ssl_ptr,
+        });
+        SseParser::new().parse(source)
+    }
+
+    fn reduced(body: &str) -> Vec<Value> {
+        let mut reducer = SseReducer::default();
+        for event in parsed_events(body, 0x1) {
+            reducer.push(event);
+        }
+        reducer
+            .into_events()
+            .iter()
+            .map(|event| event.json_body().expect("reduced events carry JSON"))
+            .collect()
+    }
+
+    /// Two captures of the same custom-tool stream must reduce to the same
+    /// shape a function-call stream does. The delta kinds that get a reduce
+    /// key omitted `response.custom_tool_call_input.delta`, so consecutive
+    /// input fragments stayed separate events instead of coalescing into one.
+    #[test]
+    fn custom_tool_input_deltas_reduce_like_function_arguments() {
+        let custom = reduced(concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
+            "\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",",
+            "\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\n",
+            "data: {\"type\":\"response.custom_tool_call_input.delta\",",
+            "\"output_index\":0,\"item_id\":\"ctc_1\",\"delta\":\"*** Begin Patch\\n\"}\n\n",
+            "data: {\"type\":\"response.custom_tool_call_input.delta\",",
+            "\"output_index\":0,\"item_id\":\"ctc_1\",\"delta\":\"*** End Patch\"}\n\n",
+        ));
+        let function = reduced(concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",",
+            "\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",",
+            "\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"*** Begin Patch\\n\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",",
+            "\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"*** End Patch\"}\n\n",
+        ));
+        assert_eq!(
+            custom.len(),
+            function.len(),
+            "a custom-tool stream must reduce to the same event count: {custom:?}"
+        );
+        assert_eq!(
+            custom.last().and_then(|event| event.get("delta")),
+            function.last().and_then(|event| event.get("delta")),
+            "both streams must end with the same coalesced payload: {custom:?}"
+        );
+        assert_eq!(
+            custom.last().and_then(|event| event.get("delta")),
+            Some(&Value::String("*** Begin Patch\n*** End Patch".to_string()))
+        );
     }
 }
