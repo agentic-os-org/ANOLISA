@@ -851,11 +851,13 @@ fn output_domain(function_name: &str) -> &'static [ClaimClass] {
         || name.contains("grep")
         || name.contains("search")
     {
-        // Dates belong here with the numbers and versions: a read returns the
-        // file's own content, and dates (log lines, headers, timestamps) are
-        // among what that content carries.
+        // Dates and URLs belong here with the numbers and versions: a read
+        // returns the file's own content, and both (log lines, headers,
+        // timestamps; config values, docs) are among what that content
+        // carries. The pool builder already extracts URLs from a read result.
         return &[
             ClaimClass::Path,
+            ClaimClass::Url,
             ClaimClass::Quoted,
             ClaimClass::Identifier,
             ClaimClass::Number,

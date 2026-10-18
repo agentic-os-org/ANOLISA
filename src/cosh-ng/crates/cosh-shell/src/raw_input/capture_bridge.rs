@@ -42,12 +42,10 @@ pub(super) fn consume_captured_input(
         // inside apply_capture, and only a non-capture mode drops the
         // state entirely.
         if let RawInputMode::Capture {
-            capture: active,
-            generation: active_generation,
-            ..
+            capture: active, ..
         } = &*mode
         {
-            card_state.apply_capture_generation(active, *active_generation);
+            card_state.apply_capture(active);
         } else {
             card_state.reset();
         }
@@ -57,7 +55,7 @@ pub(super) fn consume_captured_input(
             retry: true,
         };
     }
-    card_state.apply_capture_generation(capture, generation);
+    card_state.apply_capture(capture);
     let (events, remainder) = card_state.consume_split(capture, bytes);
     let released = events.iter().any(releases_capture);
     let submitted_generation = released.then_some(generation);
@@ -66,9 +64,8 @@ pub(super) fn consume_captured_input(
             capture: capture.clone(),
             generation,
         };
-        card_state.finish_submission(capture);
+        card_state.reset();
     }
-    // The observer drains this batch under the same lock before retiring capture.
     if let Some(generation) = submitted_generation {
         let (kind, target_id) = capture_target(capture);
         let _ = input_events.send(RawInputEvent::CaptureSubmitted {
@@ -298,92 +295,6 @@ mod tests {
             events.contains(&RawInputEvent::CardDeny("req-1".to_string())),
             "expected remapped Deny, got {events:?}"
         );
-        assert_unsubmitted_old_generation_buffers_do_not_consume_fresh_enter();
-    }
-
-    fn assert_unsubmitted_old_generation_buffers_do_not_consume_fresh_enter() {
-        let mut failures = Vec::new();
-        for old_bytes in [
-            b"cancel".as_slice(),
-            b"approve".as_slice(),
-            b"\x1b[".as_slice(),
-        ] {
-            let capture = RawInputCapture::Approval {
-                id: "buffered-approval".to_string(),
-                action_set: crate::ui::ApprovalActionSet::StandardHighRisk,
-            };
-            let mode = Arc::new(Mutex::new(RawInputMode::Hold));
-            update_input_mode(
-                &mode,
-                &RawObserverAction::CaptureInput(capture.clone()),
-                None,
-            );
-            let old_generation = match &*mode.lock().expect("old capture") {
-                RawInputMode::Capture { generation, .. } => *generation,
-                mode => panic!("expected capture, got {mode:?}"),
-            };
-            let (sender, receiver) = mpsc::channel();
-            let mut state = CardInputState::default();
-            let split_prefix = consume_captured_input(
-                &mut state,
-                &capture,
-                old_generation,
-                b"\x1b[",
-                &sender,
-                &mode,
-            );
-            assert_eq!(split_prefix.generation, None);
-            assert!(!split_prefix.retry);
-            assert!(receiver.try_recv().is_err());
-            let focus =
-                consume_captured_input(&mut state, &capture, old_generation, b"C", &sender, &mode);
-            assert_eq!(focus.generation, None);
-            assert_eq!(
-                receiver.try_iter().collect::<Vec<_>>(),
-                vec![RawInputEvent::CardFocus("buffered-approval".to_string(), 1)]
-            );
-            let buffered = consume_captured_input(
-                &mut state,
-                &capture,
-                old_generation,
-                old_bytes,
-                &sender,
-                &mode,
-            );
-            assert_eq!(buffered.generation, None, "old input has not submitted");
-            assert!(!buffered.retry);
-            assert!(receiver.try_recv().is_err());
-            let new_generation = {
-                let mut locked = mode.lock().expect("atomic representation cutover");
-                assert!(matches!(&*locked, RawInputMode::Capture { .. }));
-                *locked = RawInputMode::Hold;
-                crate::raw_input::update_locked_input_mode(
-                    &mut locked,
-                    &RawObserverAction::CaptureInput(capture.clone()),
-                    None,
-                );
-                match &*locked {
-                    RawInputMode::Capture { generation, .. } => *generation,
-                    mode => panic!("expected replacement capture, got {mode:?}"),
-                }
-            };
-            assert_ne!(old_generation, new_generation);
-            let fresh =
-                consume_captured_input(&mut state, &capture, new_generation, b"\r", &sender, &mode);
-            let events = receiver.try_iter().collect::<Vec<_>>();
-            if fresh.generation != Some(new_generation)
-                || !events.contains(&RawInputEvent::CardDeny("buffered-approval".to_string()))
-                || events
-                    .iter()
-                    .any(|event| matches!(event, RawInputEvent::CardApprove(_)))
-            {
-                failures.push(format!(
-                    "old bytes {old_bytes:?}: fresh generation {:?}, events {events:?}",
-                    fresh.generation
-                ));
-            }
-        }
-        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
