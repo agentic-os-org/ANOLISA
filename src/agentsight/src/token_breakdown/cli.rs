@@ -378,28 +378,62 @@ impl AnalyzeChatmlCommand {
                     let event_type = data_json.get("type").and_then(|v| v.as_str());
                     match event_type {
                         // ── Anthropic streaming shapes ────────────────────
+                        // A compatible gateway may put the block's complete
+                        // payload on `content_block_start` and send no deltas:
+                        // seed the text/thinking buffers and the tool input
+                        // from the start event, the rule the live analyzer
+                        // applies. The normal stream sends an empty payload
+                        // here, so the deltas still drive it.
                         Some("content_block_start") => {
                             if let Some(block) = data_json.get("content_block") {
-                                if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                    let index = data_json
-                                        .get("index")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    anthropic_calls.entry(index).or_insert_with(|| {
-                                        (
-                                            block
-                                                .get("id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                            block
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                            String::new(),
-                                        )
-                                    });
+                                let index =
+                                    data_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                                match block.get("type").and_then(|v| v.as_str()) {
+                                    Some("text") => {
+                                        if let Some(text) =
+                                            block.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("thinking") => {
+                                        if let Some(text) =
+                                            block.get("thinking").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                reasoning_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("tool_use") => {
+                                        let arguments = block
+                                            .get("input")
+                                            .filter(|input| {
+                                                input
+                                                    .as_object()
+                                                    .is_some_and(|object| !object.is_empty())
+                                            })
+                                            .map(|input| input.to_string())
+                                            .unwrap_or_default();
+                                        anthropic_calls.entry(index).or_insert_with(|| {
+                                            (
+                                                block
+                                                    .get("id")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                block
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                arguments,
+                                            )
+                                        });
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -1128,6 +1162,34 @@ mod tests {
             resp.tool_calls,
             vec![r#"get_weather: {"city":"Beijing"}"#.to_string()],
             "input_json_delta fragments must concatenate into the arguments"
+        );
+    }
+
+    /// A compatible Anthropic gateway may put the block's complete payload on
+    /// `content_block_start` and send no deltas. The CLI discarded the start
+    /// payload (text/thinking were ignored, the tool input was replaced with
+    /// an empty string), so such a capture broke down with an empty answer
+    /// and a tool call rendered as `name: `.
+    #[test]
+    fn sse_anthropic_block_start_payload_is_kept() {
+        let events = vec![
+            sse(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Hello"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"pondering"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Beijing"}}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Hello".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("pondering"));
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()],
+            "the block-start input must not be discarded"
         );
     }
 
