@@ -423,11 +423,18 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
         // N times; accumulate it the way the SSE merger does — replace when
         // the snapshot extends what we have.
         let snapshot = carries_message_snapshot(chunk);
+        // A closing event replays the complete answer, and `output_text.done`
+        // and the message in `output_item.done` repeat each other when no
+        // delta was captured. Treat it as a replacement rather than another
+        // fragment so the same answer is not appended twice.
+        let closing = is_closing_response_event(chunk);
         if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
             extract_response_content(Some(chunk))
         {
             if !chunk_content.is_empty() {
-                if snapshot {
+                if closing {
+                    content = chunk_content;
+                } else if snapshot {
                     accumulate_text(&mut content, &chunk_content);
                 } else {
                     content.push_str(&chunk_content);
@@ -435,7 +442,9 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
             }
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
-                    if snapshot {
+                    if closing {
+                        reasoning = reasoning_chunk;
+                    } else if snapshot {
                         accumulate_text(&mut reasoning, &reasoning_chunk);
                     } else {
                         reasoning.push_str(&reasoning_chunk);
@@ -491,6 +500,15 @@ fn read_output_item(item: &Value) -> (String, String) {
 /// Whether an `output_item` payload is a reasoning item.
 fn is_reasoning_item(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("reasoning")
+}
+
+/// Whether a chunk is a Responses closing event that carries the complete
+/// answer rather than an incremental delta.
+fn is_closing_response_event(chunk: &Value) -> bool {
+    matches!(
+        chunk.get("type").and_then(Value::as_str),
+        Some("response.output_text.done" | "response.refusal.done" | "response.output_item.done")
+    )
 }
 
 /// A choice that carries `message` instead of `delta` speaks in cumulative
@@ -970,6 +988,21 @@ mod tests {
             serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
         ];
         assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
+    }
+
+    /// A late-join capture can hold both closing events and no delta at all:
+    /// `response.output_text.done` and the message inside
+    /// `response.output_item.done` each replay the whole answer. Both passed
+    /// the "no delta" gate independently, so the merge appended the answer
+    /// twice and doubled the estimated output tokens.
+    #[test]
+    fn test_merge_response_output_text_two_closing_events_count_once() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "message", "content": [{"text": "hello there"}]}}),
+        ];
+        assert_eq!(merge_response_output_text(&chunks).0, "hello there");
     }
 
     /// A `choices[].message` snapshot repeats the answer so far (SysOM's
