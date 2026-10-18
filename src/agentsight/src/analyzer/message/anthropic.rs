@@ -1069,6 +1069,41 @@ mod tests {
         assert_eq!(response.usage.cache_read_input_tokens, Some(20565));
     }
 
+    /// DashScope-compatible streams slim the `message_start` event down to the
+    /// model and usage counters; the id, type and role the official API sends
+    /// are absent. The same shape is what the genai SSE-enrichment tests feed
+    /// in for DashScope. The typed event used to fail deserialization and be
+    /// skipped whole, so the aggregated response lost the model and the
+    /// preliminary input/cache snapshot whenever the terminal delta reported
+    /// only `output_tokens`.
+    #[test]
+    fn test_aggregate_sse_accepts_a_slim_message_start() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "model": "qwen3.7-max",
+                "usage": {"input_tokens": 1234, "output_tokens": 1}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 42}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.model, "qwen3.7-max",
+            "a slim message_start must still supply the model"
+        );
+        assert_eq!(
+            resp.usage.input_tokens, 1234,
+            "the start snapshot must survive an output-only terminal delta"
+        );
+        assert_eq!(resp.usage.output_tokens, 42);
+        assert_eq!(resp.content.len(), 1);
+    }
+
     /// Test: SSE stream whose terminal `message_delta` reports only the cache
     /// counters and the input count, without `usage.output_tokens`.
     ///

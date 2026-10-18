@@ -76,7 +76,6 @@ const MAX_WIDTH: u16 = 160;
 #[derive(Debug, Clone)]
 pub struct RatatuiInlineRenderer {
     width: u16,
-    column_limit: Option<u16>,
     pub(crate) plain: bool,
     pub(crate) styled: bool,
     language: crate::Language,
@@ -97,7 +96,6 @@ impl RatatuiInlineRenderer {
         };
         Self {
             width,
-            column_limit: None,
             plain: plain_output_requested(),
             styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
             language: crate::Language::EnUs,
@@ -107,22 +105,15 @@ impl RatatuiInlineRenderer {
     pub fn with_width(width: u16) -> Self {
         Self {
             width: width.clamp(20, 240),
-            column_limit: None,
             plain: false,
             styled: false,
             language: crate::Language::EnUs,
         }
     }
 
-    pub(crate) fn within_columns(mut self, columns: u16) -> Self {
-        self.column_limit = Some(columns);
-        self
-    }
-
     pub fn plain_with_width(width: u16) -> Self {
         Self {
             width: width.clamp(20, 240),
-            column_limit: None,
             plain: true,
             styled: false,
             language: crate::Language::EnUs,
@@ -454,14 +445,15 @@ impl RatatuiInlineRenderer {
     }
 
     pub(crate) fn panel_standard_width(&self) -> u16 {
-        self.width
-            .clamp(MIN_WIDTH, MAX_WIDTH)
-            .min(self.column_limit.unwrap_or(MAX_WIDTH))
+        self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
     fn content_width(&self) -> usize {
         let margin = if self.plain { 2 } else { 4 };
-        self.panel_standard_width().saturating_sub(margin).max(20) as usize
+        self.width
+            .clamp(MIN_WIDTH, MAX_WIDTH)
+            .saturating_sub(margin)
+            .max(20) as usize
     }
 
     fn supports_status_animation(&self) -> bool {
