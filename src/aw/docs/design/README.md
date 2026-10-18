@@ -27,7 +27,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Read in order | Owner and boundary |
 | --- | --- |
 | [Configuration](configuration.md) | `aw-config` validates desired input before runtime preparation |
-| [Adapter dispatch](adapter-dispatch.md) | The CLI registers native callbacks, normalizes events, and adopts effects |
+| [Adapter dispatch](adapter-dispatch.md) | `aw-adapter` owns native registration, normalization and effect adoption; the CLI owns transport |
 | [Local service](local-service.md) | `aw-service` manages bindings, events, and audit; dispatches steps to Host |
 | [Provider Host](provider-host.md) | `aw-host` prepares Providers and invokes admitted steps |
 | [Provider protocol](provider-protocol.md) | `aw-provider` validates request/reply messages and capabilities |
@@ -37,7 +37,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 
 | Integration | Design |
 | --- | --- |
-| Native Agent callbacks | [AgentScope](agentscope-adapter.md), [Claude SDK](claude-sdk-adapter.md), [Hermes](hermes-adapter.md), [OpenClaw](openclaw-adapter.md), [Pi](pi-adapter.md), [QwenPaw](qwenpaw-adapter.md); Qoder is covered by [Adapter dispatch](adapter-dispatch.md) and [Local service](local-service.md) |
+| Native Agent callbacks | [AgentScope](agentscope-adapter.md), [Claude SDK](claude-sdk-adapter.md), [Codex CLI](codex-cli-adapter.md), [Hermes](hermes-adapter.md), [OpenClaw](openclaw-adapter.md), [Pi](pi-adapter.md), [QwenPaw](qwenpaw-adapter.md); Qoder is covered by [Adapter dispatch](adapter-dispatch.md) and [Local service](local-service.md) |
 | Independent Provider development and contribution | [Shared directory](../../../../providers/README.md) and [distribution guide](../../../../docs/developer-guide/en/aw/providers.md) |
 | Security Provider and backend readiness | [sec-core Provider](sec-core-provider.md), then [sec-core health](sec-core-health.md) |
 | Tokenless Provider | [Integration reference](../../../../docs/developer-guide/en/aw/tokenless.md) |

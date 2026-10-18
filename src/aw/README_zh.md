@@ -28,6 +28,10 @@ aw stop --config "$HOME/aw/aw.yaml"
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
 后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
 
+Codex CLI 0.162.1 支持工具调用前观察/阻断、调用后观察。
+启动前先安装并审阅原生 Hook，参见
+[Codex 配置](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#codex)。
+
 ## 文档导航
 
 | 任务 | 文档 |
@@ -56,6 +60,7 @@ core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需
 | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | ✓ | — |
 | `hermes` | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "required_targets": [
     "aw-adapter/lib/aw_adapter",
     "aw-config/test/configuration",
@@ -129,6 +129,22 @@
     "cancel-initialization": {
       "target": "aw-service/lib/aw_service",
       "test": "audit::tests::cancellation_fences_hook_opens_blocked_in_initial_audit_claim"
+    },
+    "capability-rejection": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapter::catalog::tests::unsupported_capabilities_are_rejected_before_provider_discovery"
+    },
+    "codex-launch": {
+      "target": "aw-service/test/codex",
+      "test": "native_launch_preserves_config_serializes_steps_and_cleans_instances"
+    },
+    "codex-admission": {
+      "target": "aw-service/test/codex",
+      "test": "untrusted_disabled_and_unsupported_launches_never_start_tools"
+    },
+    "codex-interruption": {
+      "target": "aw-service/test/codex",
+      "test": "interrupted_native_launch_releases_binding_and_owned_process"
     }
   },
   "agents": {
@@ -159,8 +175,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "claude-sdk": {
       "events": {
@@ -189,8 +210,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "hermes": {
       "events": {
@@ -219,8 +245,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "openclaw": {
       "events": {
@@ -249,8 +280,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "pi": {
       "events": {
@@ -279,8 +315,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "qoder": {
       "events": {
@@ -309,8 +350,13 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
     },
     "qwenpaw": {
       "events": {
@@ -339,8 +385,54 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
-      ]
+        "final-replacement",
+        "security-retry"
+      ],
+      "admission": [
+        "capability-rejection"
+      ],
+      "unsupported": {}
+    },
+    "codex": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "codex-launch"
+          ],
+          "block": [
+            "security-retry",
+            "codex-launch"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "codex-launch"
+          ]
+        }
+      },
+      "lifecycle": [
+        "codex-launch",
+        "codex-admission",
+        "codex-interruption"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "security-retry",
+        "capability-rejection"
+      ],
+      "admission": [
+        "capability-rejection",
+        "codex-admission"
+      ],
+      "unsupported": {
+        "tool.after": {
+          "replace_result": [
+            "capability-rejection"
+          ]
+        }
+      }
     }
   },
   "providers": {

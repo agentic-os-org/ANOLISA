@@ -459,6 +459,57 @@
       "mode": "manual",
       "reason": "Native Qoder CLI/model environment is not provisioned on CI runners. Follow the Preview native Agent acceptance guide before release; contract fixtures do not certify native adoption.",
       "guide": "../../docs/developer-guide/en/aw/packages.md"
+    },
+    "codex": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "@openai/codex@0.162.1"
+      ],
+      "boundary": "Pinned native CLI exec, hook inventory/trust refusal, serial AW policies, denials, fresh-call retry, unchanged results and delayed completion with a local Responses fixture. Explicit hook-trust bypass and danger-full-access only in disposable test homes; no cloud model, sandbox enforcement, TUI trust UI, MCP or code-mode acceptance.",
+      "cases": [
+        {
+          "name": "native-cli",
+          "argv": [
+            "{python}",
+            "tests/test_codex_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/.bin/codex",
+            "--output",
+            "{output}/codex"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "untrusted",
+                  "disabled",
+                  "allow",
+                  "deny",
+                  "offline",
+                  "retry",
+                  "native-deny",
+                  "after-failure",
+                  "long"
+                ],
+                "values": {
+                  "passed": true,
+                  "cleaned": true
+                }
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

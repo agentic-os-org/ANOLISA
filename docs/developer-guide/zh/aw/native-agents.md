@@ -234,6 +234,56 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## 启动 Codex CLI
+
+在 Linux 上使用 Codex CLI **0.162.1** 和 Python 3。[Codex 示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.codex.yaml)
+包含中性的布尔 Hook，可替换为业务策略或现有 Provider。
+模型凭据和原生设置继续使用已有 Codex 配置。
+
+```bash
+aw install --config aw.yaml --agent codex
+codex
+# In Codex, open /hooks and review/trust both AW command hooks, then exit.
+aw run --config aw.yaml --agent codex
+```
+
+`aw install` 向 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`）添加两个稳定命令，
+保留已有分组和其他字段。相同定义重复安装保持原始文件字节。它不安装 Codex、授予
+Hook 信任或修改模型、sandbox、审批配置。AW 可执行文件路径变更后，需要重新检查
+新定义并移除旧 AW 条目。
+
+`aw run` 在绑定实例及启动模型回合前检查固定版本和原生 `hooks/list` 清单。所需 AW
+Hook 必须启用、同步、可信，matcher 为 `.*`，timeout 为 60 秒。禁用、变更未信任、
+未信任、缺失或重复的 AW 定义会拒绝启动。Python 仅执行有界清单查询桥接。
+交互运行使用 `--no-daemon`，由 AW 持有前台进程。非交互模式设置 `argv: [codex, exec]`，
+例如向 `aw run` 传入 `-- --ephemeral "Inspect this repository"`。
+
+Codex 支持 `tool.before` 观察/阻断和 `tool.after` 观察。AW 内部按配置顺序执行，安全
+拒绝优先。Tokenless `pre_tool` 建议会阻断原调用，新调用重新经过安全和原生权限。
+配置 `replace_result` 在准入时拒绝。AW 保留原始工具结果及失败状态，后置观察失败
+不会替换结果。支持布尔 Hook 和 `aw-provider/v1alpha1`；独立原生 Hook 保留在 Codex
+配置中，AW 链内不准入 `native-hook/v1alpha1`。原生匹配 Hook 可能并发，AW 只排序自身步骤。
+
+本 Adapter 准入新的本地 TUI/exec 会话以及模型、sandbox、审批和基本输出参数；拒绝
+配置/profile 覆盖、目录/worktree 切换、resume/fork、远端入口及 feature 开关。
+AW 不自动添加信任或 sandbox 旁路。用户显式传入的原生 `--dangerously-bypass-hook-trust`
+保留为该次运行的明确选择；自动验收仅在一次性且已审阅 Hook 来源的环境中使用它。
+
+原生验收使用真实 CLI、本地固定 Responses 服务、Provider 夹具和临时 home，验证
+信任拒绝、工具拒绝、新调用重试、失败输出保留与长命令完成。它不证明真实云模型、
+sandbox 强制隔离、TUI 信任交互、MCP 或 code mode 采纳。Hook 不是 OS 隔离边界：
+原生外层 Hook 超时/崩溃与 AW 步骤失败可能有不同语义。托管工具及 `write_stdin` 输入
+不获得新的 AW 前置授权。参见[官方 Hooks 契约](https://learn.chatgpt.com/docs/hooks)。
+
+退出 Agent 后使用 `aw stop --config aw.yaml` 停止 AW。启动文件和绑定会释放，共享服务
+保留到显式停止。回滚时仅从原生 `hooks.json` 删除此 AW 可执行文件对应的
+`codex-hook --event tool.before` 和 `codex-hook --event tool.after` 两个命令，恢复旧
+AW 配置/二进制。其他原生 Hook 和信任状态归用户所有。直接启动 Codex 而不经过 AW 时，
+已安装的 AW Hook 返回中性结果。
+
+Adapter 负责原生注册、探测和方言转换，CLI/服务负责回调顺序链、私有绑定、RPC
+和清理，参见 [Codex 职责划分](../../../../src/aw/docs/design/codex-cli-adapter_zh.md#workspace-拆分后的职责)。
+
 ## 启动 AgentScope SDK
 
 使用安装了 `agentscope==2.0.6` 的 Python 环境；这与 QwenPaw 已验证的

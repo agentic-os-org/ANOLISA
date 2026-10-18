@@ -46,7 +46,7 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 ## 一次 Hook 请求
 
 1. `aw run` 调用 `aw-adapter` 检查原生入口并准备注册，再由启动器启动 Agent。
-2. Agent 触发回调，Adapter 把原生事件转成服务请求。
+2. Agent 触发回调，Adapter 标准化原生 payload，由 `aw-service` 发送请求。
 3. `aw-service` 管理绑定、事件期限和审计，交给 `aw-host` 执行步骤。
 4. Host 用 `aw-provider` 校验协议，通过 `aw-exec` 启动配置中的 Provider 命令。
    内置桥接程序再调用 Tokenless 或 sec-core CLI；双方通过进程协议连接。
@@ -55,6 +55,11 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
+
+Codex 的原生 Hook 探测、注册及 payload/回复转换由 `aw-adapter` 负责；
+`aw-service/src/cli/hook_chain.rs` 负责回调顺序传输、私有绑定、事件关闭和取消。
+`NativeContext` 与 `LaunchFiles` 跨越 Adapter 边界，服务 RPC 和运行态不进入其中。
+参见 [Codex 设计](../../../../src/aw/docs/design/codex-cli-adapter_zh.md)。
 
 ### `aw-core` 在哪里
 

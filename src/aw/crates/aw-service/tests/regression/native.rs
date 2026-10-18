@@ -3,21 +3,22 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub fn agents() -> Vec<String> {
+pub fn agents(event: &str, effect: &str) -> Vec<String> {
     let matrix: Value =
         serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
     matrix["agents"]
         .as_object()
         .unwrap()
-        .keys()
-        .cloned()
+        .iter()
+        .filter(|(_, row)| row["events"][event].get(effect).is_some())
+        .map(|(name, _)| name.clone())
         .collect()
 }
 
 pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path) -> Value {
     let before = event == "tool.before";
     let mut native = match adapter {
-        "qoder" | "claude-sdk" => {
+        "qoder" | "claude-sdk" | "codex" => {
             let response = if adapter == "claude-sdk" {
                 json!({"stdout":"original", "stderr":"", "interrupted":false, "isImage":false})
             } else {

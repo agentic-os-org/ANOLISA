@@ -92,6 +92,26 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。
 需要压缩或安全检查时，在生成配置时增加上表参数。`agent --local` 会绕过这个 Gateway。
 
+### Codex
+
+在 Linux 上使用 Codex CLI **0.162.1** 和 Python 3。以
+[Codex 示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.codex.yaml)为起点，
+填写可执行文件及状态目录的绝对路径，将中性规则替换为观察或阻断规则。
+模型设置继续使用 Codex 配置。
+
+```bash
+aw install --config "$AW_HOME/aw.yaml" --agent codex
+codex
+# In Codex, open /hooks and review/trust both AW command hooks, then exit.
+aw run --config "$AW_HOME/aw.yaml" --agent codex
+```
+
+安装向 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`）添加两个定义，保留已有
+Hook。启动要求定义已启用且可信。新的本地 TUI 和 `exec` 会话支持调用前观察/阻断、
+调用后观察；结果替换会被拒绝。非交互运行设置 `argv: [codex, exec]`，并传入
+`-- --ephemeral "Inspect this repository"`。支持的选项、信任审阅、验证范围和回滚
+参见[原生接入参考](../../../../developer-guide/zh/aw/native-agents.md#启动-codex-cli)。
+
 ## 添加自己的规则
 
 简单规则可以从 stdin 读取工具事件，向 stdout 输出 JSON `true` 或 `false`。

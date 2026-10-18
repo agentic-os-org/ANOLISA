@@ -4,7 +4,13 @@ use super::{read_file, Arguments, Exit, Result};
 pub(super) use aw_adapter::*;
 use aw_service::Binding;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,4 +50,33 @@ pub(super) fn install(args: &Arguments) -> Result<Exit> {
         Ok(()) => Ok(super::run::interrupted().unwrap_or(Exit::Code(0))),
         Err(error) => super::run::interrupted_error(error.into()),
     }
+}
+
+// Bindings and bridge registrations share the same caller-owned private-file boundary.
+pub(super) fn read_private_file(path: &Path) -> Result<Vec<u8>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no arguments and does not mutate process state.
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() > 1024 * 1024
+    {
+        return Err("unsafe or oversized hook binding".into());
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("hook binding exceeds byte limit".into());
+    }
+    Ok(bytes)
+}
+
+pub(super) fn read_binding(path: &Path) -> Result<HookBinding> {
+    Ok(serde_json::from_slice(&read_private_file(path)?)?)
 }
