@@ -270,11 +270,16 @@ impl StepCategory {
 /// values are flattened to their JSON text, the same result the analyzer-side
 /// reader (`agentsight-opt`'s `de_step_message`) produces, so every reader of
 /// this schema accepts the same documents.
+///
+/// An explicit `null` message means the producer recorded no text, not the
+/// four-character string "null"; flatten it to the empty string, which is what
+/// the analyzer-side reader's `None` conveys.
 fn de_message<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => String::new(),
         serde_json::Value::String(text) => text,
         other => other.to_string(),
     })
@@ -503,6 +508,22 @@ mod tests {
     #[test]
     fn schema_version_constant() {
         assert_eq!(ATIF_SCHEMA_VERSION, "ATIF-v1.7");
+    }
+
+    #[test]
+    fn explicit_null_message_is_absent_not_the_text_null() {
+        // A producer that serializes an absent message as JSON null must not
+        // hand consumers the four-character string "null", which would read as
+        // a fabricated user turn and be written back on the next round trip.
+        let json = r#"{
+            "agent": {"name": "a"},
+            "steps": [{"step_id": 1, "source": "user", "message": null}]
+        }"#;
+        let traj: AtifTrajectory = serde_json::from_str(json).expect("null message parses");
+        assert_eq!(traj.steps[0].message, "");
+
+        let round_trip = serde_json::to_value(&traj).expect("trajectory serializes");
+        assert_eq!(round_trip["steps"][0]["message"], "");
     }
 
     #[test]
