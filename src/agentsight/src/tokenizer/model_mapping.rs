@@ -127,6 +127,10 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("deepseek-v2.5", "deepseek-ai/DeepSeek-V2.5");
     m.insert("deepseek-v3", "deepseek-ai/DeepSeek-V3");
     m.insert("deepseek-r1", "deepseek-ai/DeepSeek-R1");
+    // The DeepSeek API calls the same R1 model `deepseek-reasoner`; without
+    // this entry the bare alias took the Qwen fallback and every reasoner
+    // request was counted with an unrelated vocabulary.
+    m.insert("deepseek-reasoner", "deepseek-ai/DeepSeek-R1");
     m.insert(
         "deepseek-r1-distill-qwen",
         "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -573,6 +577,28 @@ mod tests {
         assert_eq!(map_to_hf_model_id("deepseek-r1"), "deepseek-ai/DeepSeek-R1");
     }
 
+    /// `deepseek-reasoner` is the alias the DeepSeek API uses for R1. It was
+    /// absent from the table, so the bare name fell through to the shared Qwen
+    /// tokenizer and `register_from_hf` counted every reasoner request with an
+    /// unrelated vocabulary.
+    #[test]
+    fn test_deepseek_reasoner_maps_to_the_r1_tokenizer() {
+        assert_eq!(
+            map_to_hf_model_id("deepseek-reasoner"),
+            "deepseek-ai/DeepSeek-R1"
+        );
+        // The gateway-prefixed spelling resolves through the table too.
+        assert_eq!(
+            map_to_hf_model_id("deepseek/deepseek-reasoner"),
+            "deepseek-ai/DeepSeek-R1"
+        );
+        // A name that already is a repo ID still passes through untouched.
+        assert_eq!(
+            map_to_hf_model_id("deepseek-ai/DeepSeek-R1"),
+            "deepseek-ai/DeepSeek-R1"
+        );
+    }
+
     #[test]
     fn test_llama_mapping() {
         assert_eq!(
@@ -685,6 +711,7 @@ mod tests {
         for (name, repo) in [
             ("deepseek/deepseek-chat", "deepseek-ai/DeepSeek-V3"),
             ("deepseek/deepseek-r1", "deepseek-ai/DeepSeek-R1"),
+            ("deepseek/deepseek-reasoner", "deepseek-ai/DeepSeek-R1"),
             ("dashscope/qwen-plus", "Qwen/Qwen2.5-14B-Instruct"),
             ("moonshot/moonshot-v1-8k", "Qwen/Qwen2.5-7B-Instruct"),
             ("gemini/gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
@@ -707,9 +734,11 @@ mod tests {
             map_to_hf_model_id("google/gemma-3-27b-it"),
             "google/gemma-3-27b-it"
         );
+        // A prefixed name the table does not know is a real Hub repo and
+        // still passes through unredirected.
         assert_eq!(
-            map_to_hf_model_id("deepseek/deepseek-reasoner"),
-            "deepseek/deepseek-reasoner"
+            map_to_hf_model_id("deepseek/deepseek-unknown"),
+            "deepseek/deepseek-unknown"
         );
         assert_eq!(map_to_hf_model_id("Qwen/QwQ-32B"), "Qwen/QwQ-32B");
     }
