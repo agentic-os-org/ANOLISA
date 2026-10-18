@@ -313,6 +313,11 @@ impl AnalyzeChatmlCommand {
         // first fragment) and the arguments stream as string fragments that
         // must be concatenated per index before rendering "name: arguments".
         let mut tool_calls: Vec<(usize, String, String)> = Vec::new();
+        // Slot each choice's latest tool-call fragment landed in, so an
+        // index-less continuation can extend the call that choice is holding
+        // instead of folding it into slot 0.
+        let mut current_tool_call_slot: std::collections::BTreeMap<u64, usize> =
+            std::collections::BTreeMap::new();
         // Anthropic tool_use blocks, keyed by content-block index: the id and
         // name arrive in `content_block_start`, the arguments stream as
         // `input_json_delta` fragments.
@@ -525,7 +530,11 @@ impl AnalyzeChatmlCommand {
                     // so far, so it accumulates replace-or-extend into a single
                     // buffer instead of being appended as another fragment.
                     if let Some(choices) = data_json.get("choices").and_then(|v| v.as_array()) {
-                        for choice in choices {
+                        for (choice_pos, choice) in choices.iter().enumerate() {
+                            let choice_index = choice
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(choice_pos as u64);
                             let (payload, cumulative) =
                                 match (choice.get("delta"), choice.get("message")) {
                                     (Some(delta), _) => (delta, false),
@@ -561,10 +570,7 @@ impl AnalyzeChatmlCommand {
                             if let Some(calls) =
                                 payload.get("tool_calls").and_then(|t| t.as_array())
                             {
-                                for call in calls {
-                                    let index =
-                                        call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                            as usize;
+                                for (call_pos, call) in calls.iter().enumerate() {
                                     let function = call.get("function");
                                     let name = function
                                         .and_then(|f| f.get("name"))
@@ -574,6 +580,31 @@ impl AnalyzeChatmlCommand {
                                         .and_then(|f| f.get("arguments"))
                                         .and_then(|a| a.as_str())
                                         .unwrap_or("");
+                                    // `index` is optional on the wire. A
+                                    // cumulative snapshot repeats the whole
+                                    // list, so the position names the call; in
+                                    // a delta stream a non-empty name starts a
+                                    // new call and an unnamed fragment extends
+                                    // the one this choice is holding.
+                                    let index = match call.get("index").and_then(|i| i.as_u64()) {
+                                        Some(index) => index as usize,
+                                        None if cumulative => call_pos,
+                                        None => {
+                                            if name.is_empty() {
+                                                current_tool_call_slot
+                                                    .get(&choice_index)
+                                                    .copied()
+                                                    .unwrap_or(0)
+                                            } else {
+                                                tool_calls
+                                                    .iter()
+                                                    .map(|(index, _, _)| *index)
+                                                    .max()
+                                                    .map_or(0, |slot| slot.saturating_add(1))
+                                            }
+                                        }
+                                    };
+                                    current_tool_call_slot.insert(choice_index, index);
                                     match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
                                         Some((_, slot_name, slot_arguments)) => {
                                             if !name.is_empty() {
@@ -1140,6 +1171,32 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_unindexed_sequential_tool_calls_stay_separate() {
+        // OpenAI's `index` is optional. A compatible gateway streams calls
+        // without one, marking each new call by its non-empty function name;
+        // an unnamed fragment continues the current call. Keying every
+        // index-less fragment to slot 0 folded the second call into the first
+        // and concatenated unrelated argument strings.
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","function":{"name":"first_tool","arguments":"{\"a\":1}"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_2","function":{"name":"second_tool","arguments":"{\"b\":2}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                r#"first_tool: {"a":1}"#.to_string(),
+                r#"second_tool: {"b":2}"#.to_string()
+            ]
         );
     }
 
