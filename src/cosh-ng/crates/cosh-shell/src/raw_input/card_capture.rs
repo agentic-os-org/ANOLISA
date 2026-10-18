@@ -12,7 +12,6 @@ use events::{
 pub(in crate::raw_input) mod events;
 mod navigation;
 mod prompt_draft;
-mod submission;
 mod text;
 
 #[derive(Debug, Default)]
@@ -20,7 +19,6 @@ pub(super) struct CardInputState {
     selected: usize,
     free_text: String,
     active_kind: Option<CardInputKind>,
-    active_generation: Option<u64>,
     selected_options: Vec<usize>,
     // Mirror toggles before emitting events so same-read Enter sees the
     // effective marks.
@@ -190,6 +188,18 @@ impl CardInputState {
         }
     }
 
+    pub(super) fn reset(&mut self) {
+        self.active_kind = None;
+        self.selected = 0;
+        self.free_text.clear();
+        self.selected_options.clear();
+        self.session_marked_for_clear.clear();
+        self.pending_input.clear();
+        self.draft = PromptDraftEditor::default();
+        self.draft_paste = false;
+        self.draft_selection = None;
+    }
+
     pub(super) fn consume(
         &mut self,
         capture: &RawInputCapture,
@@ -260,7 +270,7 @@ impl CardInputState {
                     // Always clear free_text after a submit attempt so that a
                     // subsequent capture (e.g. the next auth field) starts with
                     // a clean buffer.  The outer consume_captured_input also
-                    // clears submission buffers on release, but this covers any
+                    // calls reset() on release, but clearing here covers any
                     // non-release submit (e.g. QuestionSubmitAttempt) and
                     // eliminates reliance on preserve_for_retry which could
                     // leak text across captures when reset() is bypassed.

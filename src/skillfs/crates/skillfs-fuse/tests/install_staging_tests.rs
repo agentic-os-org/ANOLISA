@@ -4650,3 +4650,151 @@ fn hermes_root_listing_applies_the_ordinary_view_filters() {
             .is_dir()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #7968: nested read surfaces must honor the post-publish grace window.
+//
+// The flat layout's I4 grace bypass lets whitelisted paths (`.clawhub/**`)
+// keep resolving against the live source during a grace session even when the
+// skill resolves to a fallback snapshot. The nested layout only honored grace
+// in the shared `access()` resolver; lookup/getattr/readdir/opendir/open
+// redirected to the snapshot unconditionally, so `access()` said readable
+// while `stat`/`open` returned ENOENT for the same whitelisted path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_post_publish_grace_fallback_snapshot_reads_honor_grace() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    // Live nested skill on a fallback snapshot: the source has `.clawhub`
+    // (grace-whitelisted) and `data` (not whitelisted); the snapshot only
+    // carries a different SKILL.md.
+    let skill = source.path().join("apple/fallback-skill");
+    std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: fallback-skill\ndescription: live\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join(".clawhub/origin.json"),
+        r#"{"origin":"installer"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(skill.join("data")).unwrap();
+    std::fs::write(skill.join("data/secret.txt"), "secret").unwrap();
+
+    let snapshot_dir = skill.join(".skill-meta/versions/v1");
+    std::fs::create_dir_all(&snapshot_dir).unwrap();
+    std::fs::write(
+        snapshot_dir.join("SKILL.md"),
+        "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/fallback-skill",
+        ActiveTarget::Snapshot {
+            snapshot_dir: snapshot_dir.clone(),
+            version: "v1".to_string(),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".clawhub".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        active_resolver: Some(resolver),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    pp_ctrl.start_session(
+        "apple/fallback-skill",
+        PostPublishSessionKind::StagingRename,
+    );
+
+    let mp = mountpoint.path();
+    let whitelisted = mp.join("apple/fallback-skill/.clawhub/origin.json");
+
+    // lookup/getattr surface: stat of the grace-whitelisted file that only
+    // exists in the live source must succeed, matching access().
+    let meta = std::fs::metadata(&whitelisted);
+    assert!(
+        meta.is_ok(),
+        "stat of grace-whitelisted nested path must honor grace: {:?}",
+        meta.err()
+    );
+
+    // open surface: the same file must be readable back through the mount.
+    let content = std::fs::read_to_string(&whitelisted);
+    assert!(
+        content.is_ok(),
+        "open of grace-whitelisted nested path must honor grace: {:?}",
+        content.err()
+    );
+    assert_eq!(content.unwrap(), r#"{"origin":"installer"}"#);
+
+    // readdir/opendir surface: the grace directory must list its live
+    // contents instead of ENOENT from the snapshot view.
+    let entries = common::list_dir_names(&mp.join("apple/fallback-skill/.clawhub"));
+    assert!(
+        entries.contains(&"origin.json".to_string()),
+        "readdir of grace-whitelisted nested dir must honor grace: {:?}",
+        entries
+    );
+
+    // SKILL.md keeps serving the snapshot during grace (the whitelist never
+    // matches it), and non-whitelisted source-only files stay hidden behind
+    // the snapshot view.
+    let manifest = std::fs::read_to_string(mp.join("apple/fallback-skill/SKILL.md")).unwrap();
+    assert!(
+        manifest.contains("description: snapshot"),
+        "SKILL.md must still serve the snapshot during grace: {manifest}"
+    );
+    let secret = std::fs::metadata(mp.join("apple/fallback-skill/data/secret.txt"));
+    assert!(
+        secret.is_err(),
+        "non-whitelisted source-only file must stay hidden behind the snapshot view"
+    );
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}

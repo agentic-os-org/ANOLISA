@@ -674,16 +674,25 @@ pub enum AnthropicSseEvent {
 }
 
 /// Anthropic SSE message start data
+///
+/// The identity fields are optional because compatible gateways slim the
+/// event down to what they have: DashScope-compatible streams send only
+/// `model` plus `usage`, with no `id`, `type` or `role`. A required field
+/// failed the whole event's deserialization, so the aggregation skipped it
+/// and lost the model and the preliminary usage snapshot it carried.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicSseMessageStart {
     /// Message ID
+    #[serde(default)]
     pub id: String,
     /// Message type (always "message")
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
     pub type_: String,
     /// Role (always "assistant")
+    #[serde(default = "assistant_role")]
     pub role: MessageRole,
     /// Model used
+    #[serde(default)]
     pub model: String,
     /// Initial usage statistics
     #[serde(default)]
@@ -697,6 +706,12 @@ pub struct AnthropicSseMessageStart {
     /// Stop sequence
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
+}
+
+/// Default role for a `message_start` that omits it: the event only ever
+/// describes the assistant's reply.
+fn assistant_role() -> MessageRole {
+    MessageRole::Assistant
 }
 
 /// Anthropic SSE content delta

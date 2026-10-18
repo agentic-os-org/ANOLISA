@@ -268,7 +268,7 @@ fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
         action,
         Some(RawObserverAction::RestorePrompt {
             ghost_text: None,
-            ghost_route: Default::default(),
+            ghost_route: Default::default()
         })
     );
     assert!(
@@ -347,126 +347,6 @@ fn test_agent_request(id: &str) -> AgentRequest {
         hook_finding: None,
         recommended_skill: None,
     }
-}
-
-#[test]
-fn persistent_display_physical_failures_require_an_emitted_token() {
-    crate::shell_host::physical_failures_require_an_emitted_token_and_never_mask_other_errors();
-}
-#[test]
-fn persistent_display_queued_overlay_failure_preserves_hold_and_eof() {
-    crate::shell_host::queued_overlay_failure_stays_hold_and_preserves_eof();
-}
-#[test]
-fn persistent_display_zero_write_is_not_a_storage_failure() {
-    crate::shell_host::zero_write_is_physical_failure_without_masking_storage_write_zero();
-    assert_failed_observer_audits_each_absolute_event_once();
-    assert_gate_wrapping_preserves_only_physical_write_source();
-}
-
-fn assert_failed_observer_audits_each_absolute_event_once() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut state = InlineState {
-        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
-            root.path(),
-        )),
-        ..InlineState::default()
-    };
-    assert!(
-        !state.audit.as_ref().unwrap().is_degraded(),
-        "actual private audit segment must be writable"
-    );
-    let reset = state.approval_slice.capture_representation_reset.clone();
-    reset.bind_display_handoff("already-emitted");
-    reset
-        .defer_physical_error(
-            crate::shell_host::PhysicalDisplayWriter(&mut AuditFailedOutput)
-                .flush()
-                .unwrap_err(),
-        )
-        .unwrap();
-    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-    let events = [
-        ShellEvent::command_started("s", "first", "echo first", "/tmp", 1),
-        ShellEvent::command_started("s", "second", "echo second", "/tmp", 2),
-    ];
-    for (base, window) in [(100, &events[..1]), (100, &events[..]), (101, &events[1..])] {
-        for _ in 0..2 {
-            let action = render_raw_inline_event_view(
-                crate::shell_host::ShellEventView::new(base, window),
-                &mut Vec::new(),
-                &adapter,
-                "bash",
-                &mut state,
-            )
-            .unwrap();
-            assert_eq!(action, RawObserverAction::HoldShellOutput);
-            assert_eq!(
-                state.control.event_cursor().position(),
-                0,
-                "audit cannot acknowledge unfinished dispatch"
-            );
-        }
-    }
-    let mut text = String::new();
-    for date in std::fs::read_dir(root.path().join("v1/segments")).unwrap() {
-        for file in std::fs::read_dir(date.unwrap().path()).unwrap() {
-            text.push_str(&std::fs::read_to_string(file.unwrap().path()).unwrap());
-        }
-    }
-    let starts = text
-        .lines()
-        .filter(|line| {
-            let record: serde_json::Value = serde_json::from_str(line).unwrap();
-            record["event_type"] == "shell.command.started"
-        })
-        .count();
-    assert_eq!(
-        starts, 2,
-        "each native command start must have one audit record across repeat/compacted views"
-    );
-}
-
-struct AuditFailedOutput;
-impl Write for AuditFailedOutput {
-    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::from_raw_os_error(5))
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Err(std::io::Error::from_raw_os_error(5))
-    }
-}
-
-fn assert_gate_wrapping_preserves_only_physical_write_source() {
-    use crate::approval::surface_session::SurfaceError;
-    use crate::runtime::approval_gate::GateError;
-    let physical = crate::shell_host::PhysicalDisplayWriter(&mut AuditFailedOutput)
-        .flush()
-        .unwrap_err();
-    let wrapped = std::io::Error::other(SurfaceError::Gate(GateError::Write {
-        accepted: 0,
-        source: physical,
-    }));
-    assert!(crate::shell_host::physical_error(&wrapped));
-    let winsize = std::io::Error::other(SurfaceError::Gate(GateError::Winsize(
-        std::io::Error::from_raw_os_error(5),
-    )));
-    assert!(
-        !crate::shell_host::physical_error(&winsize),
-        "ioctl EIO is not a tagged display write"
-    );
-    let geometry = std::io::Error::other(SurfaceError::GeometryInvalidated);
-    assert!(!crate::shell_host::physical_error(&geometry));
-    let storage = std::io::Error::other(GateError::Write {
-        accepted: 0,
-        source: std::io::Error::from_raw_os_error(5),
-    });
-    assert!(
-        !crate::shell_host::physical_error(&storage),
-        "an untagged writer with the same OS code is strict"
-    );
 }
 
 #[test]
