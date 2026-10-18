@@ -63,8 +63,12 @@ pub fn recover_oom_events(
 
     let mut written = 0usize;
     for ev in &events {
-        // Skip events at or before the last recorded OOM timestamp
-        if since_ns > 0 && ev.timestamp_ns <= since_ns {
+        // Skip events strictly before the last recorded OOM timestamp. The
+        // boundary itself is not skipped: `dmesg -T` has one-second
+        // resolution, so a different pid killed in the same second as the
+        // recorded one still needs the per-event (pid, timestamp) check
+        // below. The comparison must not duplicate that check.
+        if since_ns > 0 && ev.timestamp_ns < since_ns {
             continue;
         }
 
@@ -851,6 +855,92 @@ printf '[%s] Out of memory: Killed process 4000003 (openclaw-gatewa) total-vm:10
         assert_eq!(status, "interrupted");
         assert_eq!(interruption_type.as_deref(), Some("oom_crash"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two kills in the same second: the recorded one seeds the cutoff, and
+    /// the other must still be recovered. The cutoff used `<=`, which dropped
+    /// every event sharing the last recorded timestamp even though the
+    /// per-event `(pid, timestamp)` dedup had never seen that pid.
+    const FAKE_DMESG_SAME_SECOND: &str = r#"#!/bin/sh
+printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 4000101 (openclaw-gatewa) total-vm:1024kB\n'
+printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 4000102 (openclaw-gatewa) total-vm:1024kB\n'
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn recovered_same_second_oom_kills_are_not_skipped() {
+        const CHILD: &str = "AGENTSIGHT_OOM_SAME_SECOND_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-same-second-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG_SAME_SECOND).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::recovered_same_second_oom_kills_are_not_skipped",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TZ", "UTC")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("oom-same-second-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        // 2026-04-17T10:00:00Z, the timestamp both fake dmesg lines carry.
+        let occurred_at_ns = 1_776_420_000_000_000_000i64;
+        istore
+            .insert(&InterruptionEvent::new(
+                InterruptionType::AgentCrash,
+                None,
+                None,
+                None,
+                None,
+                Some(4_000_101),
+                Some("OpenClaw".to_string()),
+                occurred_at_ns,
+                Some(serde_json::json!({"oom": true})),
+            ))
+            .expect("seed the already-recorded kill");
+
+        recover_oom_events(&istore, None, 0);
+
+        assert!(
+            istore.oom_event_exists(4_000_102, occurred_at_ns),
+            "a distinct pid killed in the recorded second must still be recovered"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
