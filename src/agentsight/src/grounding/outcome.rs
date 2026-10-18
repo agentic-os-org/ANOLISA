@@ -392,7 +392,11 @@ fn http_error_line(text: &str) -> Option<usize> {
 /// protocol field: a live capture emits `(Command exited with code 1)`, which
 /// the single `Exit code ` marker missed, dropping a structured exit code down
 /// to the weak text heuristic and grading a certain failure as a guess.
-const EXIT_CODE_MARKERS: &[&str] = &["exit code ", "exited with code ", "exit status "];
+///
+/// The status may be separated from the words by spaces, a colon or an equals
+/// sign, the separators the detector's and grader's twin scans already accept
+/// on the same payloads (`exit code: 1`, `exit code=2`).
+const EXIT_CODE_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
 
 /// Wrapper a live capture puts in front of the marker, as in
 /// `(Command exited with code 1)`.
@@ -444,7 +448,11 @@ fn reported_exit_code(line: &str, offset: usize) -> Option<(i64, usize)> {
     let lower = rest.to_lowercase();
     for marker in EXIT_CODE_MARKERS {
         if let Some(tail) = lower.strip_prefix(marker) {
-            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = tail
+                .trim_start_matches([' ', ':', '='])
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if let Ok(code) = digits.parse::<i64>() {
                 return Some((code, at));
             }
