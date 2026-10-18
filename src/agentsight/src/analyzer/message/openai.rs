@@ -651,8 +651,9 @@ impl OpenAIParser {
     /// A `response.output_item.done` for a message item carries the whole
     /// answer in its `content[]` parts, the shape the token extractor's
     /// `read_output_item` reads. Reasoning items also carry text, but it is
-    /// the thinking rather than the answer, so they are skipped here exactly
-    /// as they are there.
+    /// the thinking rather than the answer: they are skipped here and read
+    /// by `closing_reasoning_item_text` into the reasoning buffer, the way
+    /// `read_output_item` routes them to its thinking half.
     fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
         let item = chunk.get("item")?;
         if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
@@ -666,12 +667,37 @@ impl OpenAIParser {
         (!text.is_empty()).then_some(text)
     }
 
+    /// Thinking text of a finished `reasoning` output item, or `None`.
+    ///
+    /// The closing item carries the thinking in its `content[]` parts
+    /// (dashscope `reasoning_text`) and/or `summary[]` (the o-series default),
+    /// the same two fields the token extractor's `read_output_item` routes to
+    /// its thinking half. Reading them in that order keeps this fallback
+    /// identical to the drain path.
+    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+            return None;
+        }
+        let text: String = ["content", "summary"]
+            .iter()
+            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
         let mut saw_text_delta = false;
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
+        // The reasoning item's closing event repeats the thinking the same
+        // way, so it is kept aside on the same delta-wins rule.
+        let mut closing_reasoning_text: Option<String> = None;
+        let mut saw_reasoning_delta = false;
         let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
@@ -716,6 +742,11 @@ impl OpenAIParser {
                             closing_text = Some(text);
                         }
                     }
+                    if !saw_reasoning_delta {
+                        if let Some(text) = Self::closing_reasoning_item_text(chunk) {
+                            closing_reasoning_text = Some(text);
+                        }
+                    }
                 }
                 // Reasoning models stream their thinking as text deltas on
                 // the same event channel (qwen3-coder via dashscope sends
@@ -724,6 +755,9 @@ impl OpenAIParser {
                 // reasoning_content delta.
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_reasoning_delta = true;
+                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -815,6 +849,11 @@ impl OpenAIParser {
         if content_buf.is_empty() {
             if let Some(text) = closing_text {
                 content_buf = text;
+            }
+        }
+        if reasoning_buf.is_empty() {
+            if let Some(text) = closing_reasoning_text {
+                reasoning_buf = text;
             }
         }
 
@@ -2534,6 +2573,52 @@ mod tests {
             Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
             other => panic!("the answer must survive the missing deltas: {other:?}"),
         }
+    }
+
+    /// The reasoning counterpart of the late-join `message` item above: a
+    /// capture that attached after the thinking deltas carries the whole
+    /// thinking only in the closing `response.output_item.done` for the
+    /// `reasoning` item. The aggregator skipped every reasoning item there,
+    /// so the message view lost thinking the token extractor counted.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_from_item_done() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_001", "content": [{"type": "reasoning_text", "text": "Think "}], "summary": [{"type": "summary_text", "text": "step by step"}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The answer"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r003", "model": "qwen3-coder-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing item must still parse");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think step by step"),
+            "the reasoning item's thinking must survive the missing deltas"
+        );
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "The answer"),
+            other => panic!("the answer must stay answer text: {other:?}"),
+        }
+    }
+
+    /// A closing reasoning item repeats thinking the deltas already delivered,
+    /// so it must not replace or duplicate them.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_delta_wins() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Think "}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_002", "content": [{"type": "reasoning_text", "text": "Think step by step"}]}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "The answer"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r004", "model": "qwen3-coder-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think "),
+            "a captured reasoning delta supersedes the closing item"
+        );
     }
 
     /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
