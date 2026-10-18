@@ -561,6 +561,36 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // A refusal is the model's answer for that call and
+                        // arrives instead of a content delta, so it belongs in
+                        // the answer text — the same place the shared
+                        // aggregator and the live analyzer put it. Without
+                        // this arm a refusal-only turn rendered an empty
+                        // response while the message view showed the refusal.
+                        Some("response.refusal.delta") => {
+                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
+                                if !delta.is_empty() {
+                                    content_parts.push(delta.to_string());
+                                }
+                            }
+                        }
+                        // The closing event repeats the whole refusal and is
+                        // read only when no delta was captured — the same
+                        // delta-wins rule the aggregator applies. Like
+                        // `output_text.done` it is held as the closing answer,
+                        // so a later closing item that repeats it replaces it
+                        // instead of being counted next to it.
+                        Some("response.refusal.done") => {
+                            if content_parts.is_empty() {
+                                if let Some(refusal) =
+                                    data_json.get("refusal").and_then(|v| v.as_str())
+                                {
+                                    if !refusal.is_empty() {
+                                        responses_closing_content = Some(refusal.to_string());
+                                    }
+                                }
+                            }
+                        }
                         // Reasoning models stream their thinking on the
                         // same channel (dashscope qwen3-coder sends
                         // reasoning_text, the o-series summary_text); both
@@ -2201,5 +2231,37 @@ mod tests {
             vec!["a: 1".to_string(), "c: 3".to_string(), "b: 2".to_string()],
             "calls stay grouped and ordered by their choice"
         );
+    }
+
+    /// A refusal is the model's answer for the call: the Responses protocol
+    /// streams it on `response.refusal.delta` and closes it with
+    /// `response.refusal.done`, whose `refusal` field carries the finalized
+    /// text. The dispatch read neither, so a refusal-only capture rendered an
+    /// empty response in the token breakdown while the message view showed
+    /// the refusal.
+    #[test]
+    fn sse_responses_refusal_text_reaches_the_answer() {
+        let events = vec![
+            sse(r#"{"type":"response.created","response":{"id":"resp_1"}}"#),
+            sse(r#"{"type":"response.refusal.delta","delta":"I can't "}"#),
+            sse(r#"{"type":"response.refusal.delta","delta":"help with that."}"#),
+            sse(r#"{"type":"response.refusal.done","refusal":"I can't help with that."}"#),
+            sse(
+                r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["I can't ", "help with that."]);
+    }
+
+    /// A capture that joins after the deltas keeps the closing refusal, and a
+    /// stream that repeated both must not count the text twice.
+    #[test]
+    fn sse_responses_closing_refusal_fills_an_empty_answer() {
+        let only_done = vec![sse(
+            r#"{"type":"response.refusal.done","refusal":"I can't help with that."}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
+        assert_eq!(resp.content, vec!["I can't help with that."]);
     }
 }
