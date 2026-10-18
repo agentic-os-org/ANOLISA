@@ -311,9 +311,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 /// Map a model name to its HuggingFace model ID.
 ///
 /// This function attempts to:
-/// 1. Look up the model name in the predefined mapping table
-/// 2. If not found, check if the name already looks like a HF ID (contains '/')
-/// 3. If not, return the original name (let HF download fail naturally)
+/// 1. Look up the model name in the predefined mapping table, including the
+///    bare name behind a gateway's vendor prefix (`deepseek/deepseek-r1`)
+/// 2. If not found, return the name as-is when it already looks like a HF ID
+///    (contains '/')
+/// 3. Otherwise return `FALLBACK_HF_MODEL_ID`, the shared Qwen tokenizer,
+///    because an API model with no Hub repo of its own has no tokenizer to
+///    download; DrainCheck still needs a count. That vocabulary is unrelated
+///    to the model, so a production name must be added to the table instead.
 ///
 /// # Arguments
 /// * `model_name` - The model name from API request (e.g., "gpt-4", "qwen-turbo")
