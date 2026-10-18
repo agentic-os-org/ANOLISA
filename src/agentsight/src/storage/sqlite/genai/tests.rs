@@ -3273,6 +3273,52 @@ fn test_list_sessions_recap_does_not_move_last_seen_or_model() {
 }
 
 #[test]
+fn test_list_sessions_windowed_recap_fallback_ignores_out_of_window_main() {
+    // "Has a main row" is a property of the session, not of the queried time
+    // window: the preview subquery already checks the whole session. Using
+    // the windowed rows made a session whose main rows all fall outside the
+    // window look recap-only and report the recap model/agent.
+    let path = std::env::temp_dir().join(format!(
+        "test_recap_window_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, event_json) \
+             VALUES ('c1','llm_call',1000,1100,100,NULL,'sess-w','t','conv-main',NULL,1,'complete','main','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, event_json) \
+             VALUES ('c2','llm_call',2000,2100,100,'recap-model','sess-w','t','conv-recap','recap-agent',1,'complete','recap','{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let sessions = store.list_sessions(1500, 2500, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].model, None,
+        "an out-of-window main row must still suppress the recap model fallback"
+    );
+    assert_eq!(
+        sessions[0].agent_name, None,
+        "an out-of-window main row must still suppress the recap agent fallback"
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_list_sessions_recap_does_not_inflate_main_session_numbers() {
     // An existing session with both main and recap keeps its token totals and
     // conversation counts identical to the pre-#7271 behavior.

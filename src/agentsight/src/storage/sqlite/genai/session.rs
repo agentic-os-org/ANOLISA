@@ -119,10 +119,18 @@ impl GenAISqliteStore {
         // main rows at all (#7271 review): if main rows exist but carry NULL
         // model/agent_name, falling back to a recap row would change what
         // pre-#7271 queries returned.
+        // "The session has a main row" must be evaluated over the whole
+        // session, not over the rows that survived the time-window filter.
+        // The preview subqueries below already use the session-wide check, so
+        // a windowed aggregate here reported recap model/agent for a session
+        // whose main rows simply fell outside the requested window.
         let has_main = if include_auxiliary {
             ""
         } else {
-            "MAX(CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN 1 ELSE 0 END) = 1"
+            "EXISTS (SELECT 1 FROM genai_events gm \
+             WHERE gm.session_id = g1.session_id \
+               AND gm.event_type = 'llm_call' \
+               AND (gm.call_kind = 'main' OR gm.call_kind IS NULL))"
         };
         let model_expr = if include_auxiliary {
             "MAX(model)".to_string()
