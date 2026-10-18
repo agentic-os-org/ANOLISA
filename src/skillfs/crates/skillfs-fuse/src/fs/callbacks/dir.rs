@@ -1,13 +1,15 @@
 //! FUSE directory callbacks: `opendir`, `readdir`, `releasedir`, `fsyncdir`, plus the `readdir_dynamic` helper.
 
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use fuser::{FUSE_ROOT_ID, FileType, ReplyDirectory, ReplyEmpty, ReplyOpen, Request};
 use tracing::{debug, warn};
 
 use super::super::SkillFs;
+use super::super::paths::FlatLiveDirKind;
 use super::super::read_resolution::ReadResolution;
-use crate::attr::dir_entry_file_type;
+use crate::attr::{dir_entry_file_type, filetype_from_mode};
 use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{
     SKILL_META_DIR, inbox::INBOX_DIR_NAME, lifecycle::is_reserved_lifecycle_name,
@@ -297,10 +299,20 @@ impl SkillFs {
                         // I2: staging roots use the physical source dir
                         // directly, bypassing the active resolver.
                         // Pending installs use the same bypass.
+                        let mut grace_listing = false;
                         let skill_dir = if self.is_staging_skill_root(&skill_name)
                             || self.is_pending_install(&skill_name)
                         {
                             self.source_base().join(&skill_name)
+                        } else if self.is_post_publish_grace_allowed(
+                            &skill_name,
+                            Some(relative_path.as_path()),
+                        ) {
+                            // I4: grace bypass — whitelisted paths enumerate
+                            // from the live source, matching lookup/getattr/
+                            // access/open and the nested layout's dir listings.
+                            grace_listing = true;
+                            self.flat_live_dir(&skill_name, FlatLiveDirKind::ExistingSkill)
                         } else {
                             match self.skill_read_dir(&skill_name) {
                                 Some(d) => d,
@@ -318,17 +330,75 @@ impl SkillFs {
                             self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
                         };
                         let phys_dir = skill_dir.join(&relative_path);
+                        // I4: a grace-whitelisted directory does not whitelist
+                        // its children — exact and single-level patterns
+                        // authorize the directory itself while stat of a
+                        // non-matching child answers from the ordinary read
+                        // view. A live entry outside the whitelist stays
+                        // listable only when that view still stats it (the
+                        // trusted snapshot), and snapshot-only names merge in,
+                        // so the listing shows exactly what the read surface
+                        // serves. Skills whose ordinary read view is the live
+                        // source keep the full tree (those children stay
+                        // stat-able).
+                        let gate = self.grace_listing_gate(&skill_name, grace_listing);
                         let mut entries: Vec<(u64, FileType, String)> = vec![
                             (ino, FileType::Directory, ".".to_string()),
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
+                        let mut listed: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             for entry in dir_iter.flatten() {
                                 let name = entry.file_name().to_string_lossy().to_string();
-                                let kind = dir_entry_file_type(&entry);
+                                let kind = match self.grace_child_kind(
+                                    &skill_name,
+                                    &gate,
+                                    &relative_path.join(&name),
+                                    dir_entry_file_type(&entry),
+                                ) {
+                                    Some(kind) => kind,
+                                    None => {
+                                        // Live-only name outside the whitelist:
+                                        // the read surface stats it as ENOENT,
+                                        // so the grace listing must not expose
+                                        // it.
+                                        continue;
+                                    }
+                                };
+                                listed.insert(name.clone());
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
                                 entries.push((entry_ino, kind, name));
+                            }
+                        }
+                        // Snapshot-only names never appear in the live tree,
+                        // yet lookup/getattr stat them against the trusted
+                        // snapshot — merge them so the listing matches reads.
+                        // Grace-matching names are the exception: their reads
+                        // resolve to the live tree for the whole grace
+                        // window, so a name the mount deleted (or that never
+                        // existed live) must stay absent even though the
+                        // snapshot still carries it.
+                        if let Some(snapshot_dir) = gate.snapshot_dir.as_deref() {
+                            let snap_dir = snapshot_dir.join(&relative_path);
+                            if let Ok(dir_iter) = std::fs::read_dir(&snap_dir) {
+                                for entry in dir_iter.flatten() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    if self.is_post_publish_grace_allowed(
+                                        &skill_name,
+                                        Some(&relative_path.join(&name)),
+                                    ) {
+                                        continue;
+                                    }
+                                    if !listed.insert(name.clone()) {
+                                        continue;
+                                    }
+                                    let kind = dir_entry_file_type(&entry);
+                                    let entry_path = format!("{}/{}", path, name);
+                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                    entries.push((entry_ino, kind, name));
+                                }
                             }
                         }
                         entries
@@ -997,10 +1067,20 @@ impl SkillFs {
                         // ENOENT; snapshot drives the listing from the trusted
                         // snapshot tree so subdirectory enumerations stay
                         // consistent with what lookup/getattr/read reports.
+                        let mut grace_listing = false;
                         let skill_dir = if self.is_staging_skill_root(skill_name)
                             || self.is_pending_install(skill_name)
                         {
                             self.source_base().join(skill_name)
+                        } else if self.is_post_publish_grace_allowed(
+                            skill_name,
+                            Some(relative_path.as_path()),
+                        ) {
+                            // I4: grace bypass — whitelisted paths enumerate
+                            // from the live source, matching lookup/getattr/
+                            // access/open and the nested layout's dir listings.
+                            grace_listing = true;
+                            self.flat_live_dir(skill_name, FlatLiveDirKind::ExistingSkill)
                         } else {
                             match self.skill_read_dir(skill_name) {
                                 Some(d) => d,
@@ -1021,12 +1101,73 @@ impl SkillFs {
                         ];
 
                         let phys_dir = skill_dir.join(relative_path);
+                        // I4: a grace-whitelisted directory does not whitelist
+                        // its children — exact and single-level patterns
+                        // authorize the directory itself while stat of a
+                        // non-matching child answers from the ordinary read
+                        // view. A live entry outside the whitelist stays
+                        // listable only when that view still stats it (the
+                        // trusted snapshot), and snapshot-only names merge in,
+                        // so the listing shows exactly what the read surface
+                        // serves. Skills whose ordinary read view is the live
+                        // source keep the full tree (those children stay
+                        // stat-able).
+                        let gate = self.grace_listing_gate(skill_name, grace_listing);
+                        let mut listed: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
 
                             for entry in phys_entries {
                                 let name = entry.file_name().to_string_lossy().to_string();
+                                let kind = match self.grace_child_kind(
+                                    skill_name,
+                                    &gate,
+                                    &relative_path.join(&name),
+                                    dir_entry_file_type(&entry),
+                                ) {
+                                    Some(kind) => kind,
+                                    None => {
+                                        // Live-only name outside the whitelist:
+                                        // the read surface stats it as ENOENT,
+                                        // so the grace listing must not expose
+                                        // it.
+                                        continue;
+                                    }
+                                };
+                                listed.insert(name.clone());
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
+                            }
+                        }
+                        // Snapshot-only names never appear in the live tree,
+                        // yet lookup/getattr stat them against the trusted
+                        // snapshot — merge them so the listing matches reads.
+                        // Grace-matching names are the exception: their reads
+                        // resolve to the live tree for the whole grace
+                        // window, so a name the mount deleted (or that never
+                        // existed live) must stay absent even though the
+                        // snapshot still carries it.
+                        if let Some(snapshot_dir) = gate.snapshot_dir.as_deref() {
+                            let snap_dir = snapshot_dir.join(relative_path);
+                            let mut snap_entries: Vec<_> = match std::fs::read_dir(&snap_dir) {
+                                Ok(iter) => iter.flatten().collect(),
+                                Err(_) => Vec::new(),
+                            };
+                            snap_entries.sort_by_key(|e| e.file_name());
+                            for entry in snap_entries {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if self.is_post_publish_grace_allowed(
+                                    skill_name,
+                                    Some(&relative_path.join(&name)),
+                                ) {
+                                    continue;
+                                }
+                                if !listed.insert(name.clone()) {
+                                    continue;
+                                }
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1500,4 +1641,71 @@ impl SkillFs {
             }
         }
     }
+
+    /// I4: gating context for children of a grace-listed directory.
+    ///
+    /// A grace-whitelisted directory enumerates from the live source, but
+    /// the whitelist does not extend to its children: stat of a
+    /// non-matching child answers from the ordinary read view. For a
+    /// snapshot-resolved skill that view is the trusted snapshot, so
+    /// shared and snapshot-only names stay stat-able (and must stay
+    /// listable); for a hidden skill it is ENOENT, so only whitelisted
+    /// children remain. Source-resolved skills need no gating — every
+    /// live child stays stat-able through the ordinary view.
+    fn grace_listing_gate(&self, skill_name: &str, grace_listing: bool) -> GraceListingGate {
+        if !grace_listing {
+            return GraceListingGate {
+                gates_children: false,
+                snapshot_dir: None,
+            };
+        }
+        match self.resolve_skill_read(skill_name) {
+            ReadResolution::Source => GraceListingGate {
+                gates_children: false,
+                snapshot_dir: None,
+            },
+            ReadResolution::Snapshot { dir, .. } => GraceListingGate {
+                gates_children: true,
+                snapshot_dir: Some(dir),
+            },
+            ReadResolution::Hidden => GraceListingGate {
+                gates_children: true,
+                snapshot_dir: None,
+            },
+        }
+    }
+
+    /// I4: the listed kind for one child of a grace-listed directory, or
+    /// `None` when the read surface cannot serve the child at all.
+    /// Whitelisted names answer from the live entry; non-whitelisted
+    /// names answer from the ordinary (snapshot) read view, mirroring
+    /// lookup/getattr so the listing never shows more — or less — than
+    /// the read surface serves.
+    fn grace_child_kind(
+        &self,
+        skill_name: &str,
+        gate: &GraceListingGate,
+        child_relative: &Path,
+        live_kind: FileType,
+    ) -> Option<FileType> {
+        if !gate.gates_children
+            || self.is_post_publish_grace_allowed(skill_name, Some(child_relative))
+        {
+            return Some(live_kind);
+        }
+        let snapshot_dir = gate.snapshot_dir.as_deref()?;
+        let meta = std::fs::symlink_metadata(snapshot_dir.join(child_relative)).ok()?;
+        Some(filetype_from_mode(meta.mode()))
+    }
+}
+
+/// I4: gating context for children of a grace-listed directory (see
+/// [`SkillFs::grace_listing_gate`]).
+struct GraceListingGate {
+    /// Whether children need per-name gating at all.
+    gates_children: bool,
+    /// Ordinary (snapshot) read view consulted for non-whitelisted
+    /// children and merged for snapshot-only names; `None` for hidden
+    /// and source-resolved skills.
+    snapshot_dir: Option<PathBuf>,
 }
