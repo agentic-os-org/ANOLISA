@@ -463,7 +463,14 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // The shared aggregator also treats `output_item.done`
+                        // as authoritative: it carries the complete arguments
+                        // (and the whole call, for a capture that started
+                        // mid-stream or a custom_tool_call whose input only
+                        // appears there). Routing only `added` left the call
+                        // rendered with whatever partial deltas were caught.
                         Some("response.output_item.added")
+                        | Some("response.output_item.done")
                         | Some("response.function_call_arguments.delta")
                         | Some("response.function_call_arguments.done") => {
                             responses_tool_calls.observe(&data_json);
@@ -1228,6 +1235,36 @@ mod tests {
             resp.tool_calls,
             vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()]
         );
+    }
+
+    /// `response.output_item.done` is authoritative for a Responses tool
+    /// call: it repeats the complete arguments and is the only event that
+    /// carries a `custom_tool_call`'s input or a call whose `added` event was
+    /// missed. The CLI routed only `added` and the argument events, so the
+    /// done item's payload was discarded.
+    #[test]
+    fn sse_responses_done_item_carries_the_tool_call() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"tool_a","arguments":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"tool_a","arguments":"{\"a\":1}"}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"tool_a: {"a":1}"#.to_string()],
+            "the done item's complete arguments must win"
+        );
+
+        // A capture that started after `added` still recovers the call.
+        let only_done = vec![sse(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"item_2","call_id":"call_2","name":"tool_b","input":"{\"b\":2}"}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
+        assert_eq!(resp.tool_calls, vec![r#"tool_b: {"b":2}"#.to_string()]);
     }
 
     /// Reasoning models on the Responses protocol stream their thinking as
