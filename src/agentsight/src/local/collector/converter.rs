@@ -51,6 +51,9 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Codex's shared loader already consumes its BOM; normalize only this path.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
     let mut session_id = String::new();
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
@@ -413,6 +416,77 @@ mod tests {
         assert_eq!(traj.agent.name, "my-agent");
         assert_eq!(traj.agent.version, "1.2.3");
         assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn local_bom_keeps_the_first_user_record() {
+        let content = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"marked-session\",\"message\":{\"content\":\"inspect the project\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.steps.len(), 2);
+            assert_eq!(traj.steps[0].source, StepSource::User);
+            assert_eq!(traj.steps[0].message, "inspect the project");
+            assert_eq!(traj.steps[1].source, StepSource::Agent);
+        }
+    }
+
+    #[test]
+    fn local_bom_keeps_runtime_config_metadata() {
+        let content = format!(
+            "{}\n{}\n",
+            rt_cfg("marked-config", "gpt-4o", "1.2.3", "my-agent"),
+            r#"{"type":"user","message":{"content":"hello"}}"#,
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.session_id.as_deref(), Some("marked-config"));
+            assert_eq!(traj.agent.name, "my-agent");
+            assert_eq!(traj.agent.version, "1.2.3");
+            assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-4o"));
+            assert_eq!(traj.steps.len(), 1);
+        }
+    }
+
+    #[test]
+    fn local_bom_preserves_marks_outside_the_file_prefix() {
+        let content = "{\"type\":\"user\",\"message\":{\"content\":\"left\u{feff}right\"}}\n";
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.steps.len(), 1);
+            assert_eq!(traj.steps[0].message, "left\u{feff}right");
+        }
+        for content in [
+            format!("\u{feff}\u{feff}{content}"),
+            format!("\n\u{feff}{content}"),
+        ] {
+            let traj = convert_jsonl_content_to_atif(&content).unwrap();
+            assert!(
+                traj.steps.is_empty(),
+                "a mark outside the prefix remains data"
+            );
+        }
+    }
+
+    #[test]
+    fn local_bom_codex_delegation_does_not_strip_twice() {
+        let content = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"marked-codex\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"inspect the project\"}]}}\n",
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.session_id.as_deref(), Some("marked-codex"));
+            assert_eq!(traj.agent.name, "codex");
+            assert_eq!(traj.agent.version, "0.146.0");
+            assert_eq!(traj.steps[0].message, "inspect the project");
+        }
+        // Codex's shared loader owns its BOM handling; stripping before
+        // delegation would incorrectly accept a second leading mark.
+        let traj = convert_jsonl_content_to_atif(&format!("\u{feff}\u{feff}{content}")).unwrap();
+        assert_eq!(traj.session_id, None);
     }
 
     #[test]

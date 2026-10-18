@@ -100,18 +100,6 @@ mod terminal_resize;
 #[cfg(target_os = "linux")]
 #[path = "raw_cli/terminal_unicode.rs"]
 mod terminal_unicode;
-#[cfg(target_os = "linux")]
-#[path = "raw_cli/ui_approval_slice.rs"]
-mod ui_approval_slice;
-#[cfg(target_os = "linux")]
-#[path = "raw_cli/ui_approval_slice_reflow.rs"]
-mod ui_approval_slice_reflow;
-#[cfg(target_os = "linux")]
-#[path = "raw_cli/ui_worker_isolation.rs"]
-mod ui_worker_isolation;
-#[cfg(target_os = "linux")]
-#[path = "raw_cli/ui_worker_logging.rs"]
-mod ui_worker_logging;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;
@@ -171,7 +159,3 @@ pub(crate) fn ls_ccc_failure_analysis(output: &str) -> Option<&'static str> {
     .into_iter()
     .find(|message| output.contains(message))
 }
-
-#[cfg(target_os = "linux")]
-#[path = "raw_cli/ui_output_fault.rs"]
-mod ui_output_fault;

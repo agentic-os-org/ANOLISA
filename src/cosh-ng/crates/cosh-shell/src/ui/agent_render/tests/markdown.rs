@@ -478,7 +478,6 @@ fn markdown_render_model_projects_plain_rich_and_styled_outputs() {
 #[test]
 fn markdown_agent_response_styles_inline_bold_and_code_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 80,
         plain: false,
         styled: true,
@@ -516,7 +515,6 @@ fn markdown_agent_response_uses_zh_catalog_title() {
 #[test]
 fn markdown_agent_response_keeps_styled_cjk_list_card_aligned() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 118,
         plain: false,
         styled: true,
@@ -563,7 +561,6 @@ fn markdown_agent_response_keeps_styled_cjk_list_card_aligned() {
 #[test]
 fn markdown_agent_response_keeps_styled_inline_code_and_table_borders_aligned() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 96,
         plain: false,
         styled: true,
@@ -598,7 +595,6 @@ fn markdown_agent_response_keeps_styled_inline_code_and_table_borders_aligned() 
 #[test]
 fn markdown_stream_styles_inline_bold_and_code_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -773,7 +769,6 @@ fn markdown_styled_code_block_keeps_border_geometry_aligned() {
 #[test]
 fn markdown_agent_response_emits_ansi_colors_inside_code_block() {
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 80,
         plain: false,
         styled: true,
@@ -865,7 +860,6 @@ fn markdown_styled_code_block_truncates_over_long_language_label() {
     // styled Line: the outer Paragraph would re-wrap it and break the
     // inner borders.
     let renderer = RatatuiInlineRenderer {
-        column_limit: None,
         width: 40,
         plain: false,
         styled: true,

@@ -219,18 +219,3 @@ macro_rules! approval_trust_catalog_ids {
         );
     };
 }
-
-// Inserted immediately before the Auth ECS segment rather than after it: that
-// segment is pinned as the tail of the enum, so appending past it would move
-// `ALL.last()` out from under `ecs_refresh_message_is_appended_and_bilingual`.
-// Every discriminant before this point is untouched, and the one relative pin
-// that counts from the end (`AuthEcsChecking == ALL.len() - 12`) becomes - 13.
-macro_rules! approval_presentation_reset_ids {
-    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
-        $next!(
-            $remaining,
-            $($ids,)*
-            ApprovalPresentationInvalidatedNotice,
-        );
-    };
-}
