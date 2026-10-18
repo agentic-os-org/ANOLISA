@@ -569,13 +569,13 @@ fn scenario_unlinked_calls_drive_the_unknown_ratio() {
 fn scenario_a_failed_read_is_blamed_for_a_date_the_file_would_carry() {
     // A failed read supplies nothing, and dates are what a file's own content
     // carries most often (log lines, headers) — the same reasoning that admits
-    // their `Number`s and `Version`s into the read domain. Only `Date` was
-    // missing from `read`/`glob`/`grep`/`search`, while every name outside
-    // those branches takes the default domain, which admits every class: the
-    // identical failure and claim produced the directed finding under `Bash`
-    // and nothing but the bare onset under `Read`. The claim is already
-    // reported as ungrounded, so the link adds the failed call, not an
-    // accusation.
+    // their `Number`s and `Version`s into the read domain. `Date` was missing
+    // from `read`/`glob`/`grep`/`search` (as was `Url`, covered by its own
+    // test below), while every name outside those branches takes the default
+    // domain, which admits every class: the identical failure and claim
+    // produced the directed finding under `Bash` and nothing but the bare
+    // onset under `Read`. The claim is already reported as ungrounded, so the
+    // link adds the failed call, not an accusation.
     let doc = traj(vec![
         user(1, "日志是哪天轮转的"),
         acting_agent(
@@ -606,6 +606,46 @@ fn scenario_a_failed_read_is_blamed_for_a_date_the_file_would_carry() {
             assert_eq!(claim.class, ClaimClass::Date);
         }
         other => panic!("a failed read must be blamed for a date it would carry, got {other:?}"),
+    }
+}
+
+#[test]
+fn scenario_a_failed_read_is_blamed_for_a_url_the_file_would_carry() {
+    // The same file content that carries dates carries URLs (config values,
+    // docs, log lines), and the pool builder already extracts `Url` claims
+    // from a read result. The read domain alone omitted `Url`, so the identical
+    // failure and claim produced the directed finding under `Bash` (the default
+    // domain) and only the bare onset under `Read`.
+    let doc = traj(vec![
+        user(1, "这个配置指向哪个地址"),
+        acting_agent(
+            2,
+            "读取配置",
+            vec![call(
+                "c1",
+                "Read",
+                serde_json::json!({"file_path": "/etc/app/config.toml"}),
+            )],
+            vec![failed_result(
+                "c1",
+                "Error: ENOENT: no such file or directory",
+            )],
+        ),
+        agent(3, "配置指向 https://internal.example/api 。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(has_onset(&index), "the url is still ungrounded");
+    match fabrication(&index) {
+        Some(Finding::FailureThenFabrication {
+            function_name,
+            claim,
+            ..
+        }) => {
+            assert_eq!(function_name, "Read");
+            assert_eq!(claim.class, ClaimClass::Url);
+        }
+        other => panic!("a failed read must be blamed for a url it would carry, got {other:?}"),
     }
 }
 

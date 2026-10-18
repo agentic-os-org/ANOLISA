@@ -484,26 +484,20 @@ impl SkillFs {
                     }
                     None => {}
                 }
-                let nested_id_lu = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id_lu)
-                    && !self.is_pending_install(&nested_id_lu)
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        crate::fs::read_resolution::ReadResolution::Hidden
-                    )
-                {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
-                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
-                        dir.join(relative_path)
+                // I4: route through the shared nested read resolver so
+                // staging, pending, and post-publish grace paths resolve
+                // against the live source exactly like the access()
+                // callbacks, instead of the snapshot view.
+                let physical = match self.nested_access_read_path(
+                    category,
+                    skill_name,
+                    Some(relative_path.as_path()),
+                ) {
+                    Some(p) => p,
+                    None => {
+                        reply.error(libc::ENOENT);
+                        return;
                     }
-                    _ => self
-                        .source_base()
-                        .join(category)
-                        .join(skill_name)
-                        .join(relative_path),
                 };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
@@ -886,26 +880,20 @@ impl SkillFs {
                     }
                     None => {}
                 }
-                let nid = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nid)
-                    && !self.is_pending_install(&nid)
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        crate::fs::read_resolution::ReadResolution::Hidden
-                    )
-                {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
-                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
-                        dir.join(relative_path)
+                // I4: route through the shared nested read resolver so
+                // staging, pending, and post-publish grace paths resolve
+                // against the live source exactly like the access()
+                // callbacks, instead of the snapshot view.
+                let physical = match self.nested_access_read_path(
+                    category,
+                    skill_name,
+                    Some(relative_path.as_path()),
+                ) {
+                    Some(p) => p,
+                    None => {
+                        reply.error(libc::ENOENT);
+                        return;
                     }
-                    _ => self
-                        .source_base()
-                        .join(category)
-                        .join(skill_name)
-                        .join(relative_path),
                 };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
