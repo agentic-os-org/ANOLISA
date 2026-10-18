@@ -1057,6 +1057,23 @@ impl GenAIBuilder {
             messages
         };
 
+        // A non-streaming Gemini answer is one JSON object carrying
+        // `candidates`; it is neither SSE nor a DashScope envelope, and a
+        // cached context makes the branches above trust the (empty) parsed
+        // message. Reconstruct it from the single-object body before giving
+        // up on the answer.
+        let messages = if messages.is_empty()
+            && !http.is_sse
+            && crate::analyzer::message::MessageParser::gemini_model_from_path(&http.path).is_some()
+        {
+            http.response_body
+                .as_ref()
+                .and_then(|body| Self::parse_sse_response_body(body, finish_reason.as_deref()))
+                .unwrap_or(messages)
+        } else {
+            messages
+        };
+
         LLMResponse {
             messages,
             streamed: http.is_sse,
@@ -1616,6 +1633,35 @@ mod tests {
 
         assert_eq!(call.provider, "gemini");
         assert_eq!(call.model, "gemini-2.5-pro");
+    }
+
+    /// A non-streaming Gemini `:generateContent` answer is one JSON object
+    /// carrying `candidates`, not an SSE stream and not a DashScope envelope.
+    /// Response reconstruction ran only for those two paths, so the assistant
+    /// text, the function calls and the finish reason were all dropped.
+    #[test]
+    fn non_streaming_gemini_keeps_its_answer() {
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let request = r#"{"contents":[{"role":"user","parts":[{"text":"What is 2+2?"}]}]}"#;
+        let response = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"4"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-2.5-flash"}"#;
+        let http = make_http(path, Some(request.to_string()), Some(response.to_string()));
+
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(
+            matches!(
+                &call.response.messages[0].parts[0],
+                MessagePart::Text { content } if content == "4"
+            ),
+            "the answer must survive, got {:?}",
+            call.response.messages
+        );
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("STOP")
+        );
     }
 
     #[test]
