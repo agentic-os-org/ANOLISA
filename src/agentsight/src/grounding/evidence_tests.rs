@@ -1423,6 +1423,33 @@ fn strong_literals_require_complete_observed_values() {
     }
 }
 
+/// Tool output delimits a path with a colon: `grep -n`, compilers and stack
+/// traces all print `path:line:…`. The extractor already treats `:` as a
+/// structural separator that opens a value, so the verifier must accept it as
+/// a closing delimiter too; otherwise the agent's path cannot be grounded in
+/// the very result that printed it.
+#[test]
+fn a_colon_delimited_path_is_grounded() {
+    let mut pool = Vec::new();
+    push_entry(
+        &mut pool,
+        3,
+        Some("source".into()),
+        "src/grounding/claims.rs:42:fn extract_claims",
+    );
+    assert!(matches!(
+        ground_one(
+            &Claim {
+                text: "src/grounding/claims.rs".into(),
+                class: ClaimClass::Path,
+                value: None
+            },
+            &pool
+        ),
+        Grounding::Grounded { .. }
+    ));
+}
+
 #[test]
 fn a_pipe_delimited_column_still_grounds_its_literal() {
     // The shape the extractor already reads for numbers: sqlite3 delimits
