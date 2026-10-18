@@ -7,7 +7,7 @@ use asc_daemon_protocol::method::{BindingMethod, PapMethod, PolicyMethod, ScopeM
 use asc_daemon_protocol::{
     CreatePolicyParams, CreateScopeParams, DaemonResponse, ListParams, ListResult,
     MAX_DAEMON_ERROR_MESSAGE_BYTES, RequestId, ResourceParams, RevisionParams, UpdatePolicyParams,
-    error_code,
+    error_code, next_list_offset,
 };
 
 const INVALID_PARAMETER_MESSAGE: &str = "request parameters are invalid";
@@ -92,7 +92,8 @@ fn dispatch_policy(
         }
         PolicyMethod::List => {
             let input: ListParams = decode(params)?;
-            encode_page(application.list_policies(principal, input.limit, input.offset)?)
+            let page = application.list_policies(principal, input.limit, input.offset)?;
+            encode_page(page, input.offset)
         }
         PolicyMethod::Delete => {
             let input: RevisionParams = decode(params)?;
@@ -126,7 +127,8 @@ fn dispatch_scope(
         }
         ScopeMethod::List => {
             let input: ListParams = decode(params)?;
-            encode_page(application.list_scopes(principal, input.limit, input.offset)?)
+            let page = application.list_scopes(principal, input.limit, input.offset)?;
+            encode_page(page, input.offset)
         }
         ScopeMethod::Delete => {
             let input: ResourceParams = decode(params)?;
@@ -148,7 +150,8 @@ fn dispatch_binding(
         }
         BindingMethod::List => {
             let input: ListParams = decode(params)?;
-            encode_page(application.list_bindings(principal, input.limit, input.offset)?)
+            let page = application.list_bindings(principal, input.limit, input.offset)?;
+            encode_page(page, input.offset)
         }
     }
 }
@@ -175,10 +178,16 @@ fn encode<T: serde::Serialize>(value: T) -> Result<serde_json::Value, PapDispatc
 
 fn encode_page<T: serde::Serialize>(
     page: ResourcePage<T>,
+    offset: u32,
 ) -> Result<serde_json::Value, PapDispatchError> {
+    // The repository may return fewer records than `limit` (the response
+    // byte budget can cut a page short), so the response must tell the
+    // client where to resume; `items.len() < limit` is not end-of-list.
+    let next_offset = next_list_offset(offset, page.items.len(), page.total);
     encode(ListResult {
         items: page.items,
         total: page.total,
+        next_offset,
     })
 }
 
