@@ -596,3 +596,79 @@ fn explicit_success_preserves_blocked_unknown_and_nested_evidence() {
             .is_some_and(|text| text.contains("NullPointerException"))
     );
 }
+
+/// A payload whose only failure signal is an operating-system refusal is a
+/// certain failure for the other two readers of the same tool result.
+///
+/// `interruption::detector::text_has_tool_error_signal` and
+/// `grader::evidence::text_has_error_signal` both read "permission denied"
+/// and the `EACCES` / `EPERM` errno spellings. They were kept when the
+/// generic words were dropped, and the errno pair was added to align the two
+/// scans, so that a stored result is not a `ToolFailure` interruption for one
+/// reader and a clean success for the other. The grounding classifier had
+/// neither, so a failed permission check fell through to the default `Ok`
+/// verdict: its result stayed in the evidence pool and could ground the very
+/// paths it failed to access, and the directed `FailureThenFabrication` edge
+/// could never name the call that caused the failure.
+#[test]
+fn denied_permission_is_a_failure_signature() {
+    for payload in [
+        "cp: cannot create regular file '/etc/app.conf': Permission denied",
+        "open('/root/.ssh/id_ed25519') failed: EACCES",
+        "write /proc/sys/net/ipv4/ip_forward: EPERM (Operation not permitted)",
+    ] {
+        let v = classify(&plain_call(), payload);
+        assert_eq!(v.status, CallStatus::Failed, "{payload}");
+        assert_eq!(v.matched_rule, "R4", "{payload}");
+        assert_eq!(v.confidence, Confidence::High, "{payload}");
+        assert!(v.evidence_quote.is_some(), "{payload}");
+    }
+}
+
+/// The signals this rule adds sit below the rules that already decide these
+/// payloads, so no established verdict changes.
+#[test]
+fn denied_permission_respects_the_rules_above_it() {
+    // A declared success is the provider's word for this invocation, and the
+    // grader reads the same payload the same way (`a search that skips
+    // unreadable directories still exits 0`).
+    let mut successful = flagged_result("find: '/root': Permission denied");
+    successful
+        .extra
+        .as_mut()
+        .unwrap()
+        .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+    assert_eq!(
+        classify_call(&plain_call(), Some(&successful)).status,
+        CallStatus::Ok
+    );
+
+    // A successful command may print a permission error in its body.
+    let v = classify(
+        &bash_call("grep -r denied /var/log"),
+        "find: '/root': Permission denied\nExit code 0",
+    );
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "R3(exit0)");
+
+    // The user's own refusal is still an interception, not an agent failure.
+    for payload in [
+        "User denied permission",
+        "Permission denied: User denied",
+        "Claude requested permissions to write to /tmp/poem.txt, but you haven't granted it yet.",
+    ] {
+        assert_eq!(
+            classify(&plain_call(), payload).status,
+            CallStatus::Blocked,
+            "{payload}"
+        );
+    }
+
+    // A probe asking whether something is reachable answers with its refusal.
+    let v = classify(
+        &bash_call("ls /root/.qoder-server"),
+        "ls: cannot open directory '/root/.qoder-server': Permission denied",
+    );
+    assert_eq!(v.status, CallStatus::OkProbe);
+    assert_eq!(v.matched_rule, "B3");
+}

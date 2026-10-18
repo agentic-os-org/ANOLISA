@@ -91,6 +91,19 @@ const FAILURE_SIGNATURES: &[&str] = &[
     "file has not been read yet",
     "only edit on /",
     "no such file or directory",
+    // An operating-system refusal is this call's own failure, the reading the
+    // other two scanners of the same tool results already give it: the
+    // interruption detector and the grader both read the prose spelling and
+    // the `EACCES` / `EPERM` errno spellings, and keep them among the signals
+    // that carry an outcome. Without them a denied write matched no rule and
+    // classified as a certain success, so its result stayed in the evidence
+    // pool and could ground the very paths the call failed to reach. A user's
+    // own refusal is not this: R2 above matches the interception wordings and
+    // decides those payloads first, and a provider-declared success
+    // short-circuits in R1.
+    "permission denied",
+    "eacces",
+    "eperm",
     "upstream server not found",
     "tool execution failed:",
     "error during web fetch for",
