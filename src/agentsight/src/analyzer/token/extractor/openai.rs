@@ -331,7 +331,14 @@ pub fn extract_response_content(
             // delivered them, and counting both would double the call.
             "response.output_item.added" => {
                 if let Some(item) = resp.get("item") {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    // A custom (freeform) tool is announced the same way as a
+                    // function call; only the kind differs. The message parser
+                    // and the chatml reader both accept it, so a captured
+                    // turn that called one must count its name here too.
+                    if matches!(
+                        item.get("type").and_then(|t| t.as_str()),
+                        Some("function_call" | "custom_tool_call")
+                    ) {
                         if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                             if !name.is_empty() {
                                 return Some((String::new(), None, vec![format!("{name}: ")]));
@@ -340,7 +347,11 @@ pub fn extract_response_content(
                     }
                 }
             }
-            "response.function_call_arguments.delta" => {
+            // The two protocols stream a call's body under different event
+            // names: `arguments` fragments for a function call, `input`
+            // fragments for a custom one. Reading only the first meant a
+            // truncated custom call kept its name and lost its body.
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 if let Some(delta) = resp.get("delta").and_then(|d| d.as_str()) {
                     if !delta.is_empty() {
                         return Some((String::new(), None, vec![delta.to_string()]));
@@ -1261,6 +1272,40 @@ mod tests {
         // exact string they expect.
         let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
         assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// A custom (freeform) tool call is announced and streamed exactly like a
+    /// function call, under `custom_tool_call` and
+    /// `response.custom_tool_call_input.delta`. The arm only claimed
+    /// `function_call`, so a truncated capture that caught the call counted
+    /// nothing for it and the drained turn's output tokens came up short.
+    #[test]
+    fn test_responses_api_custom_tool_call_events_yield_tool_call_fragments() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "custom_tool_call",
+                "id": "ctc_1",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the call's name must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(tool_calls, vec!["apply_patch: ".to_string()]);
+
+        let delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "item_id": "ctc_1",
+            "output_index": 0,
+            "delta": "*** Begin Patch\n",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&delta)).expect("input fragments must be extracted");
+        assert_eq!(tool_calls, vec!["*** Begin Patch\n".to_string()]);
     }
 
     /// A message item that arrives after the call is announced must keep
