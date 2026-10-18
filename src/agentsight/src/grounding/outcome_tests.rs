@@ -411,6 +411,32 @@ fn alternate_exit_code_wordings_are_structured_evidence() {
     assert_eq!(v.status, CallStatus::Ok);
 }
 
+#[test]
+fn colon_and_equals_separated_exit_codes_are_structured_evidence() {
+    // The detector's and the grader's scans read the same tool results and both
+    // accept a status separated from the words by spaces, a colon or an equals
+    // sign (`mentions_failing_exit_code`); merged fixes treat "exit code: 0" as
+    // a spelling that occurs. This classifier only accepted the space form, so
+    // a failure whose only structured signal was "Exit code: 1" fell through to
+    // the default Ok verdict and stayed in the evidence pool.
+    for payload in [
+        "Exit code: 1\nbuild stopped",
+        "exit code=2\nno report generated",
+        "(Command exited with code: 1)",
+    ] {
+        let v = classify(&bash_call("make"), payload);
+        assert_eq!(v.status, CallStatus::Failed, "{payload}");
+        assert_eq!(v.matched_rule, "R3", "{payload}");
+        assert_eq!(v.confidence, Confidence::High, "{payload}");
+    }
+
+    // The success short-circuit must read the same spellings: error words in
+    // the body of a successful command are not this call's failure.
+    let v = classify(&bash_call("grep -r Error ."), "Error: none\nExit code: 0");
+    assert_eq!(v.status, CallStatus::Ok);
+    assert_eq!(v.matched_rule, "R3(exit0)");
+}
+
 /// A successful call whose *output* quotes the exit-code wording is not that
 /// call's failure. A `Read` of a file that merely mentions `Exit code 1` — this
 /// repository's own `outcome_tests.rs`, `grader/evidence.rs` and
