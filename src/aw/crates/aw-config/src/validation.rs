@@ -77,6 +77,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                                 | "hermes"
                                 | "claude-sdk"
                                 | "agentscope"
+                                | "deepseek-harness"
                         )
                     )
                     && parts.next().is_some_and(|name| {

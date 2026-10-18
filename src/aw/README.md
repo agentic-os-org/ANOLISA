@@ -8,6 +8,7 @@ entrypoints, runs external Providers and retains execution metadata after Agent
 sessions end. Frameworks keep their native interfaces, model configuration,
 scheduling and permissions. It also manages public Pi SDK workers and explicitly
 wired AgentScope SDK 2.0.6 public factories in a foreground Python worker.
+It also launches DeepSeek Harness headless with native tool policy hooks.
 The current release is a Preview.
 
 ## Start here
@@ -47,6 +48,7 @@ in the sec-core guide; `aw inspect` remains unchanged and does not probe the bac
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.9 | App/API |
 | Hermes | Official revision `952c941e` | Local chat after explicit plugin installation |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | Public SDK factory in an AW-owned foreground Node worker |
+| DeepSeek Harness | 0.2.1-rc.2 | Official headless CLI with a private AW plugin overlay |
 | Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | Foreground Python worker using its public AW client factory |
 
 AgentScope factories also support the shared PreTool/PostTool operations; use the
@@ -73,6 +75,13 @@ Pi uses an application factory module with `adapter: pi` and shares PreTool retr
 reasons and PostTool single-text replacement. Its per-invocation UUID pairs both
 hooks while preserving the SDK session and original tool ID; see the
 [SDK launch guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-a-pi-sdk-worker).
+
+DeepSeek Harness uses `adapter: deepseek-harness` and the official headless CLI.
+Use the [combined YAML](crates/aw-service/examples/aw.deepseek.yaml) for safety,
+fresh-call retry and root-call text compression; see the
+[headless guide](../../docs/user-guide/en/user-entrypoint/aw.md#start-deepseek-harness-headless).
+Nested programmatic values, native whole-value replacements and non-headless
+entrypoints are outside its replacement/launch boundary.
 
 ## One configuration, native Agents
 
@@ -107,6 +116,7 @@ or a real SDK run on every push.
 | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `deepseek-harness` | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |
@@ -124,12 +134,15 @@ composition; real SDK acceptance is separate.
 
 | Stage | Supported or planned points | Completion condition |
 | --- | --- | --- |
-| Current | `tool.before` and `tool.after` across the seven registered Agents | Required runnable contract cases, native capability admission and documented adoption limits |
+| Current | `tool.before` and `tool.after` across the eight registered Agents | Required runnable contract cases, native capability admission and documented adoption limits |
+| Planned: Codex CLI | Native before observation/block and after observation; qualify result replacement separately | Fixed-version native Hooks, trust/permission coexistence and explicit unsupported-capability rejection |
 | Next: deeper acceptance | Real SDK/CLI checks at the pinned versions, including security + Tokenless coexistence | Isolated, bounded fixtures and explicit native adoption evidence; keep heavyweight acceptance separate from the push gate |
 | Planned: lifecycle and context | Session start/end, user prompt and model/context preparation | Define native semantics and failure policy, then add catalog entries and per-Agent matrix cases before declaring support |
 | Planned: broader effects | Additional result shapes and explicit approval/context effects where native APIs allow them | Versioned contracts, preserved native authorization and tests for denied/unsupported combinations |
 
 These are priorities, not delivery dates or capabilities enabled by configuration.
+The [expansion design](docs/design/agent-capability-expansion.md) defines row/column growth.
+Unsupported cells require explicit declarations and admission rejection tests.
 New Agent or Hook support must extend the matrix and pass CI before it is listed
 as supported. See [contribution checks](CONTRIBUTING.md) for the local workflow.
 

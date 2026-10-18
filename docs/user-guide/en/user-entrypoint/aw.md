@@ -841,6 +841,52 @@ Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guid
 
 Model-visible PostTool compression uses the optional [Tokenless Provider](aw-tokenless.md).
 
+## Start DeepSeek Harness headless
+
+Install AW with the [Preview packages](aw-preview.md), install the official
+`@deepseek-ai/dsh@0.2.1-rc.2` CLI with Node.js >=24, and retain your native model
+configuration in `DSH_HOME`. Copy the [combined example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.deepseek.yaml)
+to `aw.yaml`; replace the absolute executable/state paths and sec-core socket.
+The security backend must already be available. RTK must be discoverable on PATH
+for PreTool suggestions; final result compression does not require RTK.
+
+```bash
+aw validate --config aw.yaml
+aw run --config aw.yaml --agent deepseek -- "Summarize the current working tree"
+aw status --config aw.yaml
+aw stop --config aw.yaml
+```
+
+The Agent argv starts with the absolute `dsh` path and `--profile headless`.
+Native `--patch <path>` overlays may follow before application arguments such as
+`--json` or the task. AW adds its private overlay last and makes the stock headless
+runner depend on installed AW hooks. It does not edit the user's profile or reset
+it with `--from-default-profile`. Other profiles, config-dump modes, native AW
+profile overrides and different runtime versions fail before AW service startup.
+
+AW uses native pre-execute policy plus a monotonic guard: a later plugin's allow
+cannot undo an AW denial, and a plugin that bypasses preparation cannot execute
+an unscanned tool. Native permissions remain authoritative. Retry suggestions stop
+the original call; the new call is scanned and authorized again. Configure sec-core
+mappings for the actual code-executing tool names and argument fields, including
+custom tools; registering an Adapter alone does not enable code scanning.
+
+PostTool policy runs after delegated native post policies. Compression changes
+only one successful root-call text block, retaining canonical values, metadata and
+error status. Nested programmatic results and native whole-value replacements
+are outside this replacement boundary. When a native policy replaces the whole
+value, AW skips its PostTool pipeline because the new text is not rendered yet.
+Native finalizers can still shape content;
+this is a text optimization contract, not an output confidentiality filter.
+Native pre-dispatch denials may also reach PostTool as failed results.
+
+Nightly/manual acceptance uses the published CLI, actual plugin loader and headless
+model/tool loop with real AW security and Tokenless Providers/CLI. Model responses,
+tool bodies, scanner and RTK execution are controlled fixtures. It checks denial,
+fail-closed behavior, bypass resistance, retry rescanning, model-visible compression,
+concurrency, nested denial and cancellation/cleanup. Web, SDK, ACP and hosted-model
+flows are outside this acceptance. Upgrades require a new pinned native run.
+
 ## Start a Pi SDK worker
 
 For a high-code Pi application, use `adapter: pi` with the public Coding Agent/Core

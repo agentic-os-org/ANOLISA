@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "required_targets": [
     "aw-config/test/configuration",
     "aw-contracts/test/canonical",
@@ -30,7 +30,8 @@
     "aw-service/test/posttool",
     "aw-service/test/pretool",
     "aw-service/test/qwenpaw",
-    "aw-service/test/service"
+    "aw-service/test/service",
+    "aw-service/test/deepseek"
   ],
   "cases": {
     "catalog": {
@@ -128,6 +129,14 @@
     "cancel-initialization": {
       "target": "aw-service/lib/aw_service",
       "test": "audit::tests::cancellation_fences_hook_opens_blocked_in_initial_audit_claim"
+    },
+    "capability-rejection": {
+      "target": "aw-service/bin/aw",
+      "test": "cli::adapter::catalog::tests::unsupported_capabilities_are_rejected_before_provider_discovery"
+    },
+    "deepseek-lifecycle": {
+      "target": "aw-service/test/deepseek",
+      "test": "headless_overlay_blocks_tools_and_releases_binding"
     }
   },
   "agents": {
@@ -158,7 +167,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "claude-sdk": {
@@ -188,7 +202,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "hermes": {
@@ -218,7 +237,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "openclaw": {
@@ -248,7 +272,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "pi": {
@@ -278,7 +307,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "qoder": {
@@ -308,7 +342,12 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     },
     "qwenpaw": {
@@ -338,7 +377,47 @@
         "security-retry"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
+      ]
+    },
+    "deepseek-harness": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "deepseek-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement",
+        "security-retry"
+      ],
+      "unsupported": {},
+      "admission": [
+        "capability-rejection"
       ]
     }
   },

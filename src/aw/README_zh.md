@@ -6,7 +6,8 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它通过
 启动 Qoder CLI >=1.1.64、OpenClaw、QwenPaw、Hermes 及显式接入的 Claude SDK worker，运行外部 Provider，并在 Agent
 会话结束后保留执行元数据。框架继续管理自己的界面、模型配置、调度与权限。
 同时支持公开 Pi SDK worker 的受管启动，以及 AgentScope SDK 2.0.6 在前台 Python
-worker 中显式接线的公共工厂。当前交付为 Preview。
+worker 中显式接线的公共工厂，以及带原生工具策略 Hook 的 DeepSeek Harness headless。
+当前交付为 Preview。
 
 ## 从这里开始
 
@@ -42,6 +43,7 @@ sec-core 指南；`aw inspect` 保持原合同，不探测后台。
 | QwenPaw / AgentScope | 2.2.2b4 / 2.0.9 | App/API |
 | Hermes | 官方提交 `952c941e` | 显式安装插件后的本地 chat |
 | Pi Coding Agent / Core | 0.84.2 / 0.84.2 | AW 管理的前台 Node worker 中的公共 SDK 工厂 |
+| DeepSeek Harness | 0.2.1-rc.2 | 使用私有 AW 插件 overlay 的官方 headless CLI |
 | Claude Agent SDK | 0.2.88 / bundled CLI 2.1.161 | 使用公共 AW client 工厂的前台 Python worker |
 
 AgentScope 工厂支持共用 PreTool/PostTool 操作；可使用
@@ -59,6 +61,11 @@ OpenClaw 缺少替换 middleware API 时，启动会报告压缩降级，保留 
 Preview 范围内。各 Adapter 的 profile 要求与共存方式见使用指南。
 Pi 使用应用工厂模块与 `adapter: pi`，复用 PreTool 重试理由和 PostTool 单文本替换；
 每次调用的 UUID 配对前后 Hook，保留 SDK 会话和模型原工具 ID。见 [SDK 启动指南](../../docs/user-guide/zh/user-entrypoint/aw.md#启动-pi-sdk-worker)。
+
+DeepSeek Harness 使用 `adapter: deepseek-harness` 和官方 headless CLI。
+通过[联合 YAML](crates/aw-service/examples/aw.deepseek.yaml)接入安全、新调用重试与根调用文本压缩，
+见 [headless 指南](../../docs/user-guide/zh/user-entrypoint/aw.md#启动-deepseek-harness-headless)。
+嵌套程序化 value、原生完整 value 替换及非 headless 入口不在替换/启动边界内。
 
 ## 一份配置，接入原生 Agent
 
@@ -91,6 +98,7 @@ Tokenless 给出重试建议时会阻止原调用；Agent 必须发起一次新�
 | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `deepseek-harness` | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |
@@ -106,10 +114,14 @@ Tokenless 给出重试建议时会阻止原调用；Agent 必须发起一次新�
 
 | 阶段 | 已支持或计划中的点位 | 完成条件 |
 | --- | --- | --- |
-| 当前 | 七个已注册 Agent 的 `tool.before`、`tool.after` | 可运行的必需契约测试、原生能力准入和明确的采纳边界 |
+| 当前 | 八个已注册 Agent 的 `tool.before`、`tool.after` | 可运行的必需契约测试、原生能力准入和明确的采纳边界 |
+| 计划：Codex CLI | 原生执行前观察/阻断、执行后观察；单独验收结果替换 | 固定版本原生 Hooks、信任与权限共存，以及不支持能力的显式拒绝 |
 | 下一步：深化验收 | 固定版本的真实 SDK/CLI，包括安全与 Tokenless 共存 | 隔离、有时限的 fixture 与真实效果采纳证据；重验收与推送门禁分开 |
 | 计划：生命周期与上下文 | 会话开始/结束、用户输入、模型调用/上下文准备 | 先明确原生语义和失败策略，再增加 catalog 与各 Agent 的矩阵用例，最后声明支持 |
 | 计划：扩展效果 | 原生 API 允许的更多结果形态、显式批准与上下文效果 | 版本化契约、保留原生授权，以及拒绝和不支持组合的回归 |
+
+[扩展设计](docs/design/agent-capability-expansion_zh.md)约定矩阵逐行逐列扩展；
+不支持的格子必须显式声明并关联准入拒绝测试。
 
 上述内容表示优先方向，不是交付日期或配置即生效的承诺。新增 Agent 或 Hook
 须先补齐矩阵并通过 CI，再列为支持。开发入口见[贡献检查](CONTRIBUTING_zh.md)。

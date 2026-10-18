@@ -211,7 +211,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
 
 fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> bool {
     match (adapter, result) {
-        ("pi", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
+        ("pi" | "deepseek-harness", Ok(output)) => serde_json::from_slice::<Value>(&output.stdout)
             .is_ok_and(|value| value["block"] == true),
         ("openclaw", Ok(output)) => {
             if !matches!(output.exit, Exit::Code(0)) {
@@ -238,9 +238,10 @@ fn stops_before(adapter: &str, result: &Result<HookOutput>, on_error: &str) -> b
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw", Err(_)) => {
-            on_error == "block"
-        }
+        (
+            "pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw" | "deepseek-harness",
+            Err(_),
+        ) => on_error == "block",
         _ => false,
     }
 }
@@ -318,8 +319,8 @@ fn response(
                 return Err("invalid_native_response".into());
             }
         }
-        if adapter_id == "pi" {
-            validate_pi_native(event, &exit, &stdout)?;
+        if matches!(adapter_id, "pi" | "deepseek-harness") {
+            validate_block_directive(event, &exit, &stdout)?;
         }
         return Ok(HookOutput {
             exit,
@@ -374,9 +375,9 @@ fn response(
 
 // Validate raw native output before returning to the SDK so an invalid directive
 // and a nonzero/signal exit share the same error action and early-close path.
-fn validate_pi_native(event: &str, exit: &Exit, stdout: &[u8]) -> Result<()> {
+fn validate_block_directive(event: &str, exit: &Exit, stdout: &[u8]) -> Result<()> {
     if !matches!(exit, Exit::Code(0)) {
-        return Err("Pi native callback must exit zero".into());
+        return Err("native block callback must exit zero".into());
     }
     let value: Value = if stdout.is_empty() {
         serde_json::json!({})
@@ -385,7 +386,7 @@ fn validate_pi_native(event: &str, exit: &Exit, stdout: &[u8]) -> Result<()> {
     };
     let object = value
         .as_object()
-        .ok_or("Pi native directive must be an object")?;
+        .ok_or("native block directive must be an object")?;
     if object
         .keys()
         .any(|key| !matches!(key.as_str(), "block" | "reason"))
@@ -393,7 +394,7 @@ fn validate_pi_native(event: &str, exit: &Exit, stdout: &[u8]) -> Result<()> {
         || object.get("reason").is_some_and(|value| !value.is_string())
         || (event == "tool.after" && value["block"] == true)
     {
-        return Err("unsupported Pi native directive".into());
+        return Err("unsupported native block directive".into());
     }
     Ok(())
 }
@@ -512,7 +513,7 @@ mod tests {
             br#"{}"#,
             br#"{"block":true,"reason":"retry"}"#,
         ] {
-            assert!(validate_pi_native("tool.before", &Exit::Code(0), valid).is_ok());
+            assert!(validate_block_directive("tool.before", &Exit::Code(0), valid).is_ok());
         }
         for invalid in [
             b" ".as_slice(),
@@ -524,11 +525,13 @@ mod tests {
             br#"{"aw_replacement":{"content":[]}}"#,
             br#"{"approval":true}"#,
         ] {
-            assert!(validate_pi_native("tool.before", &Exit::Code(0), invalid).is_err());
+            assert!(validate_block_directive("tool.before", &Exit::Code(0), invalid).is_err());
         }
-        assert!(validate_pi_native("tool.after", &Exit::Code(0), br#"{"block":true}"#).is_err());
-        assert!(validate_pi_native("tool.before", &Exit::Code(2), b"{}").is_err());
-        assert!(validate_pi_native("tool.before", &Exit::Signal(15), b"{}").is_err());
+        assert!(
+            validate_block_directive("tool.after", &Exit::Code(0), br#"{"block":true}"#).is_err()
+        );
+        assert!(validate_block_directive("tool.before", &Exit::Code(2), b"{}").is_err());
+        assert!(validate_block_directive("tool.before", &Exit::Signal(15), b"{}").is_err());
         let output = json!({"status":"ok","kind":"native","native":{"stdout":br#"{"aw_replacement":{}}"#.to_vec(),"stderr":[],"exit_code":0,"signal":null}});
         assert!(response(
             adapter::select("pi").unwrap(),

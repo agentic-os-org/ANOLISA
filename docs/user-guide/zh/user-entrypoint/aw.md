@@ -716,6 +716,45 @@ sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使�
 
 模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](aw-tokenless.md)。
 
+## 启动 DeepSeek Harness headless
+
+先使用 [Preview 包](aw-preview.md) 安装 AW，再安装官方
+`@deepseek-ai/dsh@0.2.1-rc.2` CLI 与 Node.js >=24，在 `DSH_HOME` 中保留原生模型配置。
+将[联合示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.deepseek.yaml)复制为
+`aw.yaml`，替换绝对可执行文件/状态路径与 sec-core socket。安全后端需要已可用；
+PreTool 建议要求 PATH 中可找到 RTK，最终结果压缩不依赖 RTK。
+
+```bash
+aw validate --config aw.yaml
+aw run --config aw.yaml --agent deepseek -- "Summarize the current working tree"
+aw status --config aw.yaml
+aw stop --config aw.yaml
+```
+
+Agent argv 必须以绝对 `dsh` 路径和 `--profile headless` 开始。原生
+`--patch <path>` 可放在后面，但须位于 `--json` 或任务等应用参数之前。
+AW 最后追加私有 overlay，让官方 headless runner 依赖已安装的 AW Hooks；
+不编辑用户 profile，也不通过 `--from-default-profile` 重置它。
+其他 profile、配置 dump 模式、AW 原生 profile 覆盖参数和不同运行时版本，
+都会在 AW 服务启动前拒绝。
+
+AW 使用原生 pre-execute 策略与只能收紧决策的 guard：后续插件的 allow 不能撤销
+AW 拒绝，绕过准备步骤的插件也不能执行未检查的工具。原生权限仍然有效。
+重试建议会阻断原调用，新调用重新经过扫描和授权。按实际执行代码的工具名与参数
+字段配置 sec-core 映射，包括自定义工具；注册 Adapter 本身不会自动启用代码扫描。
+
+PostTool 策略在委托的原生后置策略之后执行。压缩只替换成功的根调用中的单个文本块，
+保留规范值、metadata 和错误状态。嵌套程序化结果及原生完整 value 替换不在替换范围内。
+原生策略替换完整 value 时，新文本尚未渲染，AW 会跳过本次 PostTool 流程。
+原生 finalizer 仍可调整内容，因此这是文本优化契约，不是输出保密过滤器。
+原生执行前拒绝也可能作为失败结果进入 PostTool。
+
+Nightly/手动验收使用已发布 CLI、真实插件加载器和 headless 模型/工具循环，
+接入真实 AW 安全与 Tokenless Provider/CLI；模型响应、工具实现、scanner 与 RTK
+执行采用受控 fixture。覆盖拒绝、fail-closed、防绕过、重试重新扫描、模型可见压缩、
+并发、嵌套拒绝和取消清理。Web、SDK、ACP 及托管模型流程不在此验收范围内，
+升级前需要重新固定版本并执行原生验收。
+
 ## 启动 Pi SDK worker
 
 高代码 Pi 应用使用 `adapter: pi`、公开 Coding Agent/Core SDK 0.84.2 与

@@ -31,9 +31,12 @@ CI 失败时，从任务日志中找到失败的命令，再到本地 `src/aw` �
 
 [tests/regression-matrix.json](tests/regression-matrix.json) 把已注册 Agent、Hook
 事件/效果和生命周期关联到具体可运行的 Rust 测试。编译后的 Adapter catalog
-必须与矩阵、配置 schema 一致。共享 PreTool/PostTool 用例遍历矩阵中的所有
-Agent，并使用明确的原生输入；新增 Agent 缺少 fixture、Hook 单元格漏填、
+必须与矩阵、配置和 Provider 请求 schema 一致。共享 PreTool/PostTool 用例只遍历
+声明对应能力的 Agent，并使用明确的原生输入；新增 Agent 缺少 fixture、Hook 单元格漏填、
 引用的测试被删除或标为 ignored，都会使现有 `AW / required` 门禁失败。
+
+每行必须将所有单元格声明为 `events` 支持或 `unsupported` 不支持；后者必须
+引用准入拒绝测试。参见[扩展设计](docs/design/agent-capability-expansion_zh.md)。
 
 安全回归覆盖拒绝、扫描错误、取消和离线观察；Tokenless 覆盖新调用的重试归属、
 禁止原地改参、最终文本替换、不支持/失败/无收益结果、托管 RTK 隔离和可选视图
@@ -82,7 +85,7 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
 版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。AgentScope、
-Claude SDK/CLI、Hermes、OpenClaw、Pi 和 QwenPaw 有自动验收；Qoder 因 CI 未配置
+Claude SDK/CLI、DeepSeek Harness headless、Hermes、OpenClaw、Pi 和 QwenPaw 有自动验收；Qoder 因 CI 未配置
 原生 CLI/模型环境，明确显示 **MANUAL — not tested**，不会计为原生通过。
 OpenClaw 覆盖官方 Hook runner。QwenPaw 套件覆盖原生 AgentScope middleware，
 以及 AW plugin 对模拟 API 的注册契约；QwenPaw 插件加载、App/API 启动和模型

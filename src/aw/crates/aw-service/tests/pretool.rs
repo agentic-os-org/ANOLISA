@@ -30,7 +30,7 @@ fn blocked(adapter: &str, output: &std::process::Output) -> bool {
 
 #[test]
 fn retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors() {
-    for agent in native::agents() {
+    for agent in native::agents("tool.before", "block") {
         let adapter = agent.as_str();
         let f = Fixture::new();
         let provider = f.root.join("policy.py");
@@ -129,7 +129,11 @@ print(json.dumps(reply))
                 // SDK chains stop at a veto; the service must close unvisited steps.
                 if matches!(
                     adapter,
-                    "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
+                    "pi" | "claude-sdk"
+                        | "agentscope"
+                        | "qwenpaw"
+                        | "openclaw"
+                        | "deepseek-harness"
                 ) && blocked(adapter, outputs.last().unwrap())
                 {
                     break;

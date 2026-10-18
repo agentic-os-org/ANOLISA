@@ -2,6 +2,7 @@
 
 pub(super) mod agentscope;
 pub(super) mod claude_sdk;
+pub(super) mod deepseek;
 pub(super) mod hermes;
 pub(super) mod openclaw;
 pub(super) mod pi;
