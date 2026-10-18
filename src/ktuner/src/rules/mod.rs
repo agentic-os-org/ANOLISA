@@ -2803,6 +2803,20 @@ fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
     // `preempt-flag-$(CONFIG_PREEMPT_RT)` feeds into `UTS_VERSION` (`init/
     // Makefile`), decides. A strict read dropped the whole banner on one such
     // byte, and the gate then reported a threaded kernel as unthreaded.
+    preempt_rt_banner(version_path)
+}
+
+/// Whether the UTS banner names a `CONFIG_PREEMPT_RT` build.
+///
+/// `init/Makefile` feeds `preempt-flag-$(CONFIG_PREEMPT_RT) := PREEMPT_RT`
+/// into `UTS_VERSION`, and `version_proc_show()` (`fs/proc/version.c`) prints
+/// that whole line, so the token is the only readable marker of the real-time
+/// build. Lossy, like the readers above: `(user@host)` carries the build
+/// environment's bytes (`scripts/mkcompile_h`:9,14, or `KBUILD_BUILD_USER`/
+/// `KBUILD_BUILD_HOST`:11,16), and one such non-UTF-8 byte must not hide the
+/// config flag behind it. A banner that cannot be read says nothing about the
+/// build, so it answers false and every caller keeps its legacy behavior.
+fn preempt_rt_banner(version_path: &str) -> bool {
     match std::fs::read(version_path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).contains("PREEMPT_RT"),
         Err(_) => false,
@@ -11435,11 +11449,17 @@ fn soft_lockup_detector_is_live(soft_watchdog_path: &str) -> bool {
 }
 
 fn eval_compact_unevictable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_compact_unevictable_at(info, recs, "/proc/sys/vm/compact_unevictable_allowed")
+    eval_compact_unevictable_at(
+        info,
+        recs,
+        "/proc/sys/vm/compact_unevictable_allowed",
+        "/proc/version",
+    )
 }
 
 /// Path-injectable form of [`eval_compact_unevictable`] (the `eval_*_at`
-/// idiom) so the switch read is assertable against synthetic files.
+/// idiom) so the switch read and the PREEMPT_RT gate are both assertable
+/// against synthetic files.
 ///
 /// The rule fires on a zero — unevictable pages are left out of compaction —
 /// and [`read_sysctl_u64`] maps an unreadable or unparseable file to that same
@@ -11447,12 +11467,32 @@ fn eval_compact_unevictable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 /// a masked or garbled proc entry (a container's, typically) neither reports a
 /// `current_value` the host does not have nor asks for a write it may not
 /// need.
+///
+/// That zero is also the kernel's own default on a `CONFIG_PREEMPT_RT` build,
+/// where it is not an unset switch but a deliberate choice: `CONFIG_
+/// COMPACT_UNEVICTABLE_DEFAULT` is `0 if PREEMPT_RT` (`mm/Kconfig`:653-657),
+/// `sysctl_compact_unevictable_allowed` is initialized from it
+/// (`mm/compaction.c`:1806), and vm.rst states the reason outright — "in order
+/// to avoid a page fault, due to compaction, which would block the task from
+/// becoming active until the fault is resolved" (vm.rst:142-144). The entry is
+/// even registered through `proc_dointvec_minmax_warn_RT_change()`
+/// (`mm/compaction.c`:3173-3190), which warns "sysctl attribute ... changed by
+/// ..." on exactly this write, so raising it is the change the kernel ships a
+/// warning for. The reason this rule gives (fragmentation on a big host) is
+/// the trade vm.rst says an RT build refuses; recommending it on that build
+/// asks for the stall the default exists to prevent. An unreadable banner says
+/// nothing about the build, so it keeps the advice under the non-RT default 1.
 fn eval_compact_unevictable_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    version_path: &str,
 ) -> usize {
     if info.memory_total_gb < 64 {
+        return 1;
+    }
+    // 0 is a PREEMPT_RT build's deliberate default, not an unset switch.
+    if preempt_rt_banner(version_path) {
         return 1;
     }
     if read_switch(path) == Some(0) {
@@ -21591,9 +21631,29 @@ mod tests {
         let (off, on, others) = switch_fixture("compact_unevictable");
         let mut info = make_test_info();
         info.memory_total_gb = 256;
+        // The switch's 0 is only a finding on a build whose default is 1, so
+        // the banner decides. A non-RT build keeps every branch of the read
+        // gate unchanged.
+        let plain_version = off.with_file_name("version.plain");
+        std::fs::write(
+            &plain_version,
+            b"Linux version 6.6.0 (gcc) #1 SMP PREEMPT_DYNAMIC\n",
+        )
+        .unwrap();
+        let rt_version = off.with_file_name("version.rt");
+        std::fs::write(
+            &rt_version,
+            b"Linux version 6.12.0 (gcc) #1 SMP PREEMPT_RT\n",
+        )
+        .unwrap();
         let advice = |info: &SystemInfo, path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_compact_unevictable_at(info, &mut recs, path.to_str().unwrap());
+            eval_compact_unevictable_at(
+                info,
+                &mut recs,
+                path.to_str().unwrap(),
+                plain_version.to_str().unwrap(),
+            );
             recs
         };
 
@@ -21612,6 +21672,39 @@ mod tests {
         let mut small = make_test_info();
         small.memory_total_gb = 16;
         assert!(advice(&small, &off).is_empty());
+
+        // CONFIG_PREEMPT_RT makes 0 this entry's default (mm/Kconfig:653-657),
+        // for the stall vm.rst:142-144 names: compaction of a mlocked page
+        // faults it in and blocks the task. The kernel even registers the
+        // entry through proc_dointvec_minmax_warn_RT_change()
+        // (mm/compaction.c:3173-3190) to warn on exactly this write, so the
+        // same readable 0 is a deliberate setting there, not an unset switch.
+        let mut recs = Vec::new();
+        eval_compact_unevictable_at(
+            &info,
+            &mut recs,
+            off.to_str().unwrap(),
+            rt_version.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "an RT build's 0 is the default the warning exists to protect: {recs:?}"
+        );
+        // The banner is the only evidence involved: a missing one says
+        // nothing about the build, so the non-RT default 1 stands and the
+        // advice survives.
+        let mut recs = Vec::new();
+        eval_compact_unevictable_at(
+            &info,
+            &mut recs,
+            off.to_str().unwrap(),
+            others[3].to_str().unwrap(),
+        );
+        assert_eq!(
+            recs.len(),
+            1,
+            "a missing banner is not evidence of an RT build"
+        );
     }
 
     #[test]
