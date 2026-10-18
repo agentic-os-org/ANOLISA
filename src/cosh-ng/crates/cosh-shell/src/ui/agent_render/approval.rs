@@ -104,18 +104,6 @@ impl RatatuiInlineRenderer {
     }
 
     fn plain_approval_panel_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
-        let lines = self.unbounded_plain_approval_panel_lines(model);
-        if self.column_limit.is_some() {
-            let width = usize::from(self.panel_standard_width());
-            return lines
-                .into_iter()
-                .flat_map(|line| super::wrap_plain_line(&line, width))
-                .collect();
-        }
-        lines
-    }
-
-    fn unbounded_plain_approval_panel_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
         let i18n = self.i18n();
         if is_command_approval_request(&model) {
             let command_rows = command_preview_rows(

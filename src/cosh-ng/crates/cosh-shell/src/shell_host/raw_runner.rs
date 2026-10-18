@@ -478,7 +478,6 @@ where
         bounded_bash_handoff,
         watchdog.as_ref(),
         &config.input_wait_status,
-        &config.capture_representation_reset,
         &crate::i18n::I18n::new(config.hint_language),
         config.input_wait_timeout_secs,
         config.hint_card_renderer.as_ref(),
