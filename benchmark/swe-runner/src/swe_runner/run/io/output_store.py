@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,13 @@ _PREDICTIONS_FILE = "preds.json"
 _RESULTS_DIR = "results"
 _RUN_METADATA_FILE = "run_metadata.json"
 _predictions_lock = threading.Lock()
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Replace *path* with *payload* without leaving a truncated file behind."""
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 class RunOutputStore:
@@ -53,19 +61,35 @@ class RunOutputStore:
         )
 
         with _predictions_lock:
-            if self.predictions_path.exists():
-                predictions = json.loads(self.predictions_path.read_text(encoding="utf-8"))
-            else:
-                predictions = {}
-
+            predictions = self._load_predictions()
             predictions[prediction.instance_id] = prediction.model_dump()
-            self.predictions_path.write_text(json.dumps(predictions, indent=2), encoding="utf-8")
+            _write_json_atomic(self.predictions_path, predictions)
 
         logger.info(
             "OUTPUT_WRITE_PREDICTION_END instance=%s total_predictions=%s",
             prediction.instance_id,
             len(predictions),
         )
+
+    def _load_predictions(self) -> dict[str, Any]:
+        """Load ``preds.json``, ignoring a file a previous run left incomplete."""
+        if not self.predictions_path.exists():
+            return {}
+        try:
+            loaded = json.loads(self.predictions_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "OUTPUT_LOAD_PREDICTIONS_FAILED file=%s error=%s", self.predictions_path, exc
+            )
+            return {}
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "OUTPUT_LOAD_PREDICTIONS_NOT_OBJECT file=%s type=%s",
+                self.predictions_path,
+                type(loaded).__name__,
+            )
+            return {}
+        return loaded
 
     def write_run_metadata(self, snapshot: RunMetadataSnapshot) -> Path:
         """Write batch-level run timing metadata for later trace export."""
