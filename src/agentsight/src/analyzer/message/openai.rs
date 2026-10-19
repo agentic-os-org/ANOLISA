@@ -3053,8 +3053,12 @@ mod tests {
     /// the thinking deltas has only the closing `response.output_item.done`
     /// events, and they carry different text rather than a repeat of the same
     /// answer. Keeping the last one dropped the earlier thinking from the
-    /// message view while the token extractor counted every item, so the two
-    /// halves disagreed about the same capture.
+    /// message view.
+    ///
+    /// Both views lost it: the token extractor's `merge_response_output_text`
+    /// applied the same last-wins replacement to a closing reasoning item, so
+    /// the two halves agreed on the wrong answer rather than disagreeing. Each
+    /// reader now accumulates its own closing items.
     #[test]
     fn test_aggregate_responses_sse_keeps_every_closing_reasoning_item() {
         let chunks = vec![
