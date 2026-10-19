@@ -712,18 +712,33 @@ impl OpenAIParser {
                 // carries its text in `input` instead of `arguments`, exactly
                 // as the replayed request of the same call does. Reading only
                 // `function_call` dropped the call from the recorded response
-                // while the request side kept it.
-                "function_call" | "custom_tool_call" => {
+                // while the request side kept it. `local_shell_call` is the
+                // shell-tool spelling of the same answer, with its argv in an
+                // `action` object; the collector crate maps it, so the recorded
+                // response must not lose it either.
+                "function_call" | "custom_tool_call" | "local_shell_call" => {
+                    // `local_shell_call` keeps its argv in an `action` object
+                    // rather than a string `arguments`; render it the way the
+                    // chat shape carries every payload, as JSON text.
                     let arguments = item
                         .get("arguments")
                         .or_else(|| item.get("input"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .map(str::to_string)
+                        .or_else(|| item.get("action").map(|action| action.to_string()))
+                        .unwrap_or_default();
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or(
+                        if item_type == "local_shell_call" {
+                            "shell"
+                        } else {
+                            ""
+                        },
+                    );
                     let tc = serde_json::json!({
                         "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "type": "function",
                         "function": {
-                            "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            "name": name,
                             "arguments": arguments,
                         }
                     });
@@ -2048,6 +2063,51 @@ mod tests {
         );
         assert_eq!(request.messages[2].role, MessageRole::Tool);
         assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_ls"));
+    }
+
+    /// The answer side of the same turn: a whole `response` body whose output
+    /// holds a `local_shell_call`. Reading only `function_call` and
+    /// `custom_tool_call` dropped it, so the recorded response disagreed with
+    /// the request that replayed it.
+    #[test]
+    fn test_parse_response_responses_local_shell_call() {
+        let json = serde_json::json!({
+            "id": "resp_lsc001",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [
+                {
+                    "type": "local_shell_call",
+                    "id": "lsc_001",
+                    "call_id": "call_ls",
+                    "status": "completed",
+                    "action": {"type": "exec", "command": ["ls", "-l"]}
+                }
+            ],
+            "usage": {"input_tokens": 40, "output_tokens": 8, "total_tokens": 48}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("the response must parse");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the local_shell_call must become a tool call");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("shell"));
+        // The chat shape spells `function.arguments` as text, the same way the
+        // `function_call` item does; the argv object survives as its JSON
+        // spelling and the consumer re-parses it.
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("{\"type\":\"exec\",\"command\":[\"ls\",\"-l\"]}")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
     }
 
     #[test]
