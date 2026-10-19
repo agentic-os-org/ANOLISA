@@ -2383,6 +2383,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&label_dir);
     }
 
+    /// The dashboard clears a filter by sending an empty value. Treating
+    /// `?label=` as "select the empty label set" kept nothing and answered an
+    /// empty 200 even though unlabelled trajectories existed.
+    #[actix_web::test]
+    async fn empty_label_filter_does_not_hide_every_trajectory() {
+        let db = unique_handler_db("empty-label");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-empty-label");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?label=",
+            "/api/trajectories?exclude_label=",
+            "/api/trajectories?label=&exclude_label=",
+            "/api/trajectories?label=%20",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            let rows: serde_json::Value = awtest::read_body_json(resp).await;
+            assert_eq!(
+                rows.as_array().map(Vec::len),
+                Some(1),
+                "{uri} must not filter out unlabelled trajectories: {rows}"
+            );
+        }
+
+        cleanup_db(&db);
+        let _ = std::fs::remove_dir_all(&label_dir);
+    }
+
     /// `human_backed=false` is a public query field, but the filter used to
     /// recognise only `Some(true)`: the negative request was silently ignored
     /// and answered with every trajectory, including human-settled ones —
@@ -5765,7 +5808,15 @@ pub async fn list_trajectories(
 /// `false` excludes human-settled rows and needs the label store just as much
 /// as `true` needs it.
 fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
-    query.label.is_some() || query.exclude_label.is_some() || query.human_backed.is_some()
+    // An empty value (`?label=`) is the UI clearing the filter, not a request
+    // for the empty label set: parsing it would keep nothing and return an
+    // empty 200 for every unlabelled trajectory.
+    let present = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    present(&query.label) || present(&query.exclude_label) || query.human_backed.is_some()
 }
 
 /// A `reuse.db` read failure while resolving label filters.
@@ -5815,19 +5866,21 @@ fn filter_rows_by_reuse_labels(
         .label
         .as_deref()
         .map(|raw| parse("label", raw))
-        .transpose()?;
+        .transpose()?
+        .filter(|labels| !labels.is_empty());
     let excluded = query
         .exclude_label
         .as_deref()
         .map(|raw| parse("exclude_label", raw))
-        .transpose()?;
+        .transpose()?
+        .filter(|labels| !labels.is_empty());
 
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
         // `human_backed=false` is the opposite polarity — nothing is settled,
         // so every row belongs in the answer.
-        if query.label.is_some() || query.human_backed == Some(true) {
+        if requested.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
         return Ok(());
