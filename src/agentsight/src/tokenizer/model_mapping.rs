@@ -76,6 +76,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("chatgpt-4o", "Xenova/gpt-4o");
     m.insert("chatgpt-4o-latest", "Xenova/gpt-4o");
 
+    // The Codex mini family. tiktoken's extra-prefix table maps `codex-mini`
+    // to `o200k_base` as well, and the `codex-mini-latest` alias the API echoes
+    // resolves through that prefix; `Xenova/gpt-4o` carries the encoding, so
+    // both names take it like the families above instead of the Qwen fallback.
+    m.insert("codex-mini", "Xenova/gpt-4o");
+    m.insert("codex-mini-latest", "Xenova/gpt-4o");
+
     // ============== Anthropic Models ==============
     // No Claude model has a repo on the Hub, so `anthropic/<model>` never
     // resolved. Anthropic has not published the Claude 3 tokenizer; the one
@@ -612,6 +619,32 @@ mod tests {
             "gpt-4.1-nano",
             "gpt-4.1-nano-2025-04-14",
             "openai/gpt-5-mini",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The Codex mini family.
+    ///
+    /// tiktoken's extra-prefix table maps `codex-mini` to `o200k_base`, and
+    /// the `codex-mini-latest` alias the API echoes resolves through that
+    /// prefix. Neither name was in the table, so the Codex model took the
+    /// unrelated Qwen fallback even though `Xenova/gpt-4o` carries its
+    /// encoding.
+    #[test]
+    fn test_codex_mini_names_take_the_o200k_tokenizer() {
+        let names = [
+            "codex-mini",
+            "codex-mini-latest",
+            "codex-mini-2025-05-16",
+            "openai/codex-mini-latest",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
