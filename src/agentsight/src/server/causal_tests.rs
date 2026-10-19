@@ -1164,3 +1164,44 @@ fn a_genuine_quote_survives_a_trailing_heartbeat_step() {
         contra.said
     );
 }
+
+/// A clean round ending in a bookkeeping heartbeat must anchor its outcome on
+/// the last substantive agent response. Selecting the trailing empty-message
+/// step labelled the heartbeat "最终结论" and hid the real answer from the
+/// chain, while `build_contra` already skipped no-op steps.
+#[test]
+fn clean_round_anchors_on_the_last_substantive_agent_step() {
+    let doc = heartbeat_terminated_trajectory();
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    let anchor = case_
+        .nodes
+        .iter()
+        .find(|n| n.step == Some(2))
+        .expect("the substantive answer is the outcome anchor");
+    assert_eq!(anchor.kind, "good");
+    assert_eq!(anchor.tag, "最终结论");
+    assert!(
+        case_.nodes.iter().all(|n| n.step != Some(3)),
+        "the empty heartbeat must not become the conclusion"
+    );
+}
