@@ -96,24 +96,36 @@ impl TokenParser {
 
     /// Recover token usage fields from a possibly-truncated JSON string by
     /// scanning for the integer values that follow `"input_tokens"`,
-    /// `"output_tokens"`, etc. The first occurrence wins, which matches
-    /// dashscope's behaviour of placing the canonical `usage` block before
-    /// any `x_details` echo.
+    /// `"output_tokens"`, etc. The first *numeric* occurrence wins, which
+    /// matches dashscope's behaviour of placing the canonical `usage` block
+    /// before any `x_details` echo.
+    ///
+    /// A non-numeric occurrence is skipped: a committed Responses payload
+    /// echoes the request's `tools` before `usage`, so a tool parameter
+    /// named `input_tokens` appears there as an object schema. Stopping at
+    /// it lost the real count that followed.
     fn scan_partial_usage(data: &str) -> Option<TokenUsage> {
         fn find_u64(s: &str, key: &str) -> Option<u64> {
             let pat = format!("\"{key}\"");
-            let mut idx = s.find(&pat)?;
-            idx += pat.len();
-            let rest = s.get(idx..)?;
-            let rest = rest.trim_start();
-            let rest = rest.strip_prefix(':')?.trim_start();
-            let end = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            if end == 0 {
-                return None;
+            let mut search_from = 0usize;
+            while let Some(relative) = s.get(search_from..)?.find(&pat) {
+                let idx = search_from + relative + pat.len();
+                search_from = idx;
+                let rest = s.get(idx..)?.trim_start();
+                let Some(rest) = rest.strip_prefix(':').map(str::trim_start) else {
+                    continue;
+                };
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    continue;
+                }
+                if let Ok(value) = rest[..end].parse::<u64>() {
+                    return Some(value);
+                }
             }
-            rest[..end].parse::<u64>().ok()
+            None
         }
 
         // Gemini's wire counters are camelCase (`promptTokenCount` /
@@ -908,6 +920,21 @@ data:{"sequence_number":10,"type":"response.completed","response":{"usage":{"tot
         assert_eq!(usage.cache_creation_input_tokens, Some(10));
         assert_eq!(usage.cache_read_input_tokens, Some(20));
         assert_eq!(usage.provider, LLMProvider::Anthropic);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_skips_a_tool_schema_key() {
+        // The Responses `response.completed` payload echoes the request's
+        // tool definitions before `usage`. A tool parameter named like a
+        // usage counter is an object schema, not a count; the scan used to
+        // stop there and record input=0 for a truncated buffer.
+        let data = r#"{"type":"response.completed","response":{"tools":[{"type":"function","function":{"name":"meter","parameters":{"type":"object","properties":{"input_tokens":{"type":"integer"},"output_tokens":{"type":"integer"}}}}}],"usage":{"input_tokens":57,"output_tokens":3"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("the real usage counters must still parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
     }
 
     #[test]
