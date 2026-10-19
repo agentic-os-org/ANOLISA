@@ -300,6 +300,18 @@ impl OpenAIParser {
             return Self::normalize_responses_request(body);
         }
 
+        // Legacy `/v1/completions` request: the input is a top-level `prompt`
+        // (string, or an array for the batch form) and there is no `messages`
+        // array. The path is an admitted inference endpoint, so rejecting the
+        // body dropped the recorded prompt, the output cap the token-limit
+        // rules read, and the streaming flag. Project it onto the chat shape.
+        if body.get("model").is_some()
+            && body.get("messages").is_none()
+            && body.get("prompt").is_some()
+        {
+            return Self::normalize_legacy_completion_request(body);
+        }
+
         // Quick validation - must have model and messages fields
         if body.get("model").is_none() || body.get("messages").is_none() {
             log::trace!("OpenAI request missing required fields: model or messages");
@@ -345,6 +357,43 @@ impl OpenAIParser {
                 None
             }
         }
+    }
+
+    /// Project a legacy `/v1/completions` request onto the chat shape.
+    ///
+    /// The protocol differs from chat completions in three places this
+    /// parser reads: the input rides a top-level `prompt` (one string, or an
+    /// array of independent prompts), `stop` may be a single string, and
+    /// `logprobs` is the number of alternatives to return where chat spells
+    /// it a boolean. Rewrite those onto the chat shape and leave every other
+    /// field alone, so the typed reader sees one shape either way.
+    fn normalize_legacy_completion_request(body: &serde_json::Value) -> Option<OpenAIRequest> {
+        let prompt = body.get("prompt")?;
+        let prompts: Vec<&str> = match prompt {
+            serde_json::Value::String(text) => vec![text.as_str()],
+            serde_json::Value::Array(items) => {
+                items.iter().filter_map(serde_json::Value::as_str).collect()
+            }
+            _ => return None,
+        };
+        let messages: Vec<serde_json::Value> = prompts
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::json!({"role": "user", "content": text}))
+            .collect();
+        // An empty prompt is not a conversation turn; the request still
+        // carries its sampling parameters, so it parses with no messages.
+        let mut normalized = body.clone();
+        normalized["messages"] = serde_json::Value::Array(messages);
+        if let Some(serde_json::Value::String(stop)) = body.get("stop").cloned() {
+            normalized["stop"] = serde_json::json!([stop]);
+        }
+        if body.get("logprobs").is_some_and(|v| v.is_number()) {
+            // Chat's boolean asks for the alternatives; the legacy integer
+            // chooses how many, which this typed field cannot hold.
+            normalized["logprobs"] = serde_json::json!(true);
+        }
+        serde_json::from_value::<OpenAIRequest>(normalized).ok()
     }
 
     fn normalize_responses_request(body: &serde_json::Value) -> Option<OpenAIRequest> {
@@ -1556,6 +1605,52 @@ mod tests {
 
         let request = OpenAIParser::parse_request(&json);
         assert!(request.is_none());
+    }
+
+    /// A legacy `/v1/completions` request carries its input on `prompt`, not
+    /// on a `messages` array, and it spells two sampling knobs differently:
+    /// `stop` may be a single string and `logprobs` is the number of
+    /// alternatives to return (chat spells it a boolean). The path is an
+    /// admitted inference endpoint, so the typed parser must read the request
+    /// — otherwise the recorded call has no prompt, no output cap (the
+    /// token-limit and context-overflow rules read it) and no streaming flag.
+    #[test]
+    fn test_parse_request_legacy_completion_prompt() {
+        let json = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": "The capital of France is",
+            "max_tokens": 8,
+            "temperature": 0.2,
+            "stop": "\n",
+            "logprobs": 5,
+            "stream": true
+        });
+
+        let request =
+            OpenAIParser::parse_request(&json).expect("a legacy completion request must parse");
+        assert_eq!(request.model, "gpt-3.5-turbo-instruct");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, MessageRole::User);
+        assert_eq!(
+            request.messages[0].content.as_ref().map(|c| c.as_text()),
+            Some("The capital of France is".to_string())
+        );
+        assert_eq!(request.max_tokens, Some(8));
+        assert_eq!(request.stream, Some(true));
+        // The single-stop spelling becomes the array the chat shape uses.
+        assert_eq!(request.stop, Some(vec!["\n".to_string()]));
+
+        // The batch form is one prompt per element.
+        let batch = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": ["first", "second"]
+        });
+        let request = OpenAIParser::parse_request(&batch).expect("a batch request must parse");
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(
+            request.messages[1].content.as_ref().map(|c| c.as_text()),
+            Some("second".to_string())
+        );
     }
 
     #[test]
