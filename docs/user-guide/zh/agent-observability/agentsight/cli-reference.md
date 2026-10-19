@@ -11,7 +11,7 @@
 |---|---|
 | 权限 | `trace` 需要 root（或 `CAP_BPF` + `CAP_PERFMON`）。查询类命令需要读取 `/var/log/sysak/.agentsight`，该目录归服务所有，请加 `sudo`。 |
 | 配置文件 | 需要读取规则的命令支持 `--config`，默认 `/etc/agentsight/config.json`。`discover` 读取与 `trace` 相同的文件，因此会反映你的自定义规则。 |
-| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption` 支持用 `--db` 指定其他数据库文件。 |
+| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption`、`token` 支持用 `--db` 指定其他数据库文件。 |
 | 机器可读输出 | `discover`、`token`、`metrics`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
 | 输出语言 | `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
 | 平台 | macOS 上只有 `trace`（轨迹采集）和 `serve`。 |
@@ -191,9 +191,18 @@ FLAGS:
 
 OPTIONS:
         --data-file <data-file>    Custom data file path
+        --db <db>                  Override the database path (same as --data-file)
         --hours <hours>            Query last N hours
         --period <period>          Query by fixed time period
                                    [possible values: today, yesterday, week, last_week, month, last_month]
+```
+
+`--db` 与其余查询命令的库路径覆盖同名同义；它在 `--data-file` 之后加入，后者继续支持。两者只传
+一个，同时给出会报用法错误。
+
+```bash
+# 读取一份数据库副本，而不是默认位置
+agentsight token --db /backup/agentsight/agentsight.db --period week
 ```
 
 ```bash
@@ -401,8 +410,26 @@ OPTIONS:
         --last <last>            Query last N hours (default: 24) [default: 24]
 ```
 
-两者各自原有的统计口径不变：`stats` 统计整个窗口（含已解决与未解决），`count` 只统计未解决事件。
-不带 `--agent` 时覆盖主机上的所有 Agent。
+`stats` 另外接受 `--unresolved` / `--resolved` 这对参数，于是按类型的表可以只回答「这个窗口里
+还有多少未解决」，而不必把别人已经关掉的事件也算进去：
+
+```
+FLAGS:
+        --json          Output as JSON
+        --resolved      Count only resolved events
+        --unresolved    Count only unresolved events
+```
+
+```
+$ sudo agentsight interruption stats --last 168 --unresolved
+TYPE                 SEVERITY    COUNT
+----------------------------------------
+token_limit          medium          3
+llm_error            high            1
+```
+
+两个 flag 都不给时 `stats` 保持原有口径，统计整个窗口（含已解决与未解决）；两个 flag 互斥。
+`count` 不变，仍只统计未解决事件。不带 `--agent` 时两者都覆盖主机上的所有 Agent。
 
 ```bash
 $ sudo agentsight interruption list --last 24
@@ -450,7 +477,14 @@ sudo agentsight interruption count --last 24 --agent CoshNG
 # 查某个会话命中的全部中断，然后关闭其中一条
 sudo agentsight interruption session 00000000-1111-2222-3333-444444444444
 sudo agentsight interruption resolve 11111111222222223333333344444444
+
+# 只看该会话里仍未解决的中断
+sudo agentsight interruption session 00000000-1111-2222-3333-444444444444 --unresolved
 ```
+
+`session` 与 `conversation` 接受和 `list`、`stats` 相同的 `--unresolved` / `--resolved` 这对参数，
+于是按 id 的视图可以只看仍未解决（或已关闭）的事件，不必用眼睛去读 `RESOLVED` 列。两个 flag 互斥；
+都不给时照旧打印该 id 的全部历史。
 
 > `--type` 接受检测器能产出的所有中断类型（取值由 `InterruptionType::ALL` 派生）。
 > `agentsight interruption list --help` 会列出当前取值；带触发条件的完整清单见
