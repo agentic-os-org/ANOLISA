@@ -249,11 +249,23 @@ impl MessageParser {
         Some(model)
     }
 
-    /// Check if a path matches any known LLM API endpoint
+    /// Check if a path matches any known LLM API endpoint.
+    ///
+    /// This is the gate on message parsing itself: `should_parse_message`
+    /// calls it for every aggregated result, so a path missing here never
+    /// reaches `parse_by_path` no matter what the per-provider parsers accept.
+    /// It therefore has to stay in lockstep with [`Self::detect_provider`],
+    /// which is what picks the parser once this gate admits the request — a
+    /// provider `detect_provider` names but this predicate rejects can never be
+    /// parsed at all.
+    ///
+    /// Gemini was exactly that: `detect_provider` and [`Self::parse_by_path`]
+    /// both handled `:generateContent`/`:streamGenerateContent`, but the gate
+    /// rejected those paths, so a Gemini exchange produced no parsed message on
+    /// any of the aggregated paths while the drain and the token counters read
+    /// it fine.
     pub fn is_llm_api_path(path: &str) -> bool {
-        AnthropicParser::matches_path(path)
-            || OpenAIParser::matches_path(path)
-            || SysomParser::matches_path(path)
+        Self::detect_provider(path).is_some()
     }
 }
 
@@ -527,6 +539,51 @@ mod tests {
         assert_eq!(openai_msg.provider(), "openai");
         assert_eq!(openai_msg.model(), Some("gpt-4"));
         assert_eq!(openai_msg.is_streaming(), Some(true));
+    }
+
+    /// The message-parsing gate must admit every provider `detect_provider`
+    /// names, because it is the gate on `parse_by_path` itself. Gemini's
+    /// generation endpoints were named by `detect_provider` and rejected here,
+    /// so those exchanges produced no parsed message on any aggregated path.
+    #[test]
+    fn is_llm_api_path_admits_every_detected_provider() {
+        for path in [
+            "/v1/messages",
+            "https://api.anthropic.com/v1/messages",
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:generateContent",
+        ] {
+            assert!(
+                MessageParser::detect_provider(path).is_some(),
+                "{path} must have a provider"
+            );
+            assert!(
+                MessageParser::is_llm_api_path(path),
+                "{path} is detected but the parsing gate rejects it"
+            );
+        }
+    }
+
+    /// Gemini token counting shares the generation prefix but is not an
+    /// inference call: it must stay out of the gate even though the model
+    /// rides the path the same way.
+    #[test]
+    fn is_llm_api_path_still_rejects_gemini_count_tokens() {
+        for path in [
+            "/v1beta/models/gemini-2.5-pro:countTokens",
+            "/v1/messages/count_tokens",
+            "/v1/messages/batches",
+            "/v1/embeddings",
+            "/health",
+        ] {
+            assert!(
+                !MessageParser::is_llm_api_path(path),
+                "{path} is not an inference call"
+            );
+        }
     }
 
     #[test]
