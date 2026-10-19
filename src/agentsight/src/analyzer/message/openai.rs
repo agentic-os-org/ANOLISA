@@ -734,6 +734,10 @@ impl OpenAIParser {
         // was cut by the output cap.
         let mut output_capped = false;
         let mut output_filtered = false;
+        // Whether the capture saw a terminal event. A truncated capture has
+        // no authoritative finish reason, and reporting a clean "stop" makes
+        // callers treat the still-running turn as finished.
+        let mut completed = false;
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -801,6 +805,7 @@ impl OpenAIParser {
                     }
                 }
                 "response.completed" => {
+                    completed = true;
                     if let Some(resp) = chunk.get("response") {
                         model = resp
                             .get("model")
@@ -827,6 +832,7 @@ impl OpenAIParser {
                 // chat-completions "length" finish rather than a clean
                 // "stop".
                 "response.incomplete" => {
+                    completed = true;
                     if let Some(resp) = chunk.get("response") {
                         model = resp
                             .get("model")
@@ -913,13 +919,19 @@ impl OpenAIParser {
             // The cap ended the stream: report the truncation even when a
             // tool call was in flight (its arguments may be cut mid-JSON,
             // so a normal "tool_calls" terminal would overstate the turn).
-            "length"
+            Some("length".to_string())
         } else if output_filtered {
-            "content_filter"
+            Some("content_filter".to_string())
+        } else if !completed {
+            // The capture ended without `response.completed` or
+            // `response.incomplete`: the stream was truncated, so no
+            // terminal reason was observed. The drain merger leaves the
+            // same `None` instead of fabricating a clean stop.
+            None
         } else if has_tool_calls {
-            "tool_calls"
+            Some("tool_calls".to_string())
         } else {
-            "stop"
+            Some("stop".to_string())
         };
 
         let resp = serde_json::json!({
@@ -2284,6 +2296,40 @@ mod tests {
             resp.choices[0].finish_reason,
             Some("content_filter".to_string())
         );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_without_terminal_event_keeps_finish_unknown() {
+        // A capture that ends before `response.completed`/`response.incomplete`
+        // has no authoritative finish reason. Fabricating "stop" made the
+        // builder treat the still-running turn as terminal and evict its
+        // conversation anchor; the drain merger already leaves `None` here.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cut", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a truncated stream still aggregates");
+        assert_eq!(resp.choices[0].finish_reason, None);
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "partial"),
+            other => panic!("the captured text must stay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_completed_still_reports_stop() {
+        // The terminal event is what makes "stop" authoritative.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ok", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ok", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a completed stream aggregates");
+        assert_eq!(resp.choices[0].finish_reason, Some("stop".to_string()));
     }
 
     #[test]
