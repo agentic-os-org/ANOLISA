@@ -663,11 +663,12 @@ impl Analyzer {
     /// provider and is therefore worth message parsing.
     ///
     /// Unlike `GenAIBuilder::build_llm_call`, no `is_sse` exception is needed
-    /// here: this predicate is exactly the OR of the per-provider
-    /// `matches_path` checks that gate `parse_by_path` itself, so any SSE
-    /// stream it rejects could never have produced a parsed message. The
-    /// genai SSE fallback consumes the `HttpRecord` built elsewhere in
-    /// `analyze_aggregated` and is unaffected by this filter.
+    /// here: the predicate is `MessageParser::is_llm_api_path`, i.e.
+    /// `detect_provider(path).is_some()`, which is the same provider set
+    /// `parse_by_path` dispatches on. Any SSE stream it rejects could
+    /// therefore never have produced a parsed message. The genai SSE fallback
+    /// consumes the `HttpRecord` built elsewhere in `analyze_aggregated` and is
+    /// unaffected by this filter.
     fn should_parse_message(result: &AggregatedResult) -> bool {
         match result {
             AggregatedResult::Abandoned { partial, .. } => Self::should_parse_message(partial),
