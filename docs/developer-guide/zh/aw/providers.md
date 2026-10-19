@@ -20,6 +20,17 @@ ANOLISA/
 具体集成，可以包含程序、Schema、配置示例和测试。现有二进制仍叫
 `aw-provider-sec-core`、`aw-provider-tokenless`，安装包和启动命令保持兼容。
 
+## OS 分发设计
+
+组件 owner 负责 Provider 的实现、测试、依赖与发布；OS 发行方选择组件版本，
+验证来源和组合兼容性，再交付安装包与升级路径。收录在同一仓库不等于共用发布周期。
+
+一方 Provider 的目标是仅依赖固定版本的公共 AW 库，在仓库外完成构建、测试和发布，
+自身后端依赖由 owner 管理。第三方可直接实现公开进程协议，通过 YAML 接入，
+无需链接 Rust 库或检出 ANOLISA。分发层消费各组件产物，负责随包依赖的组合验证。
+
+完整职责和迁移范围见[架构边界](../../../../src/aw/docs/design/architecture-boundaries_zh.md)。
+
 ## 独立接入
 
 1. 实现 `describe`、`validate_config` 和 `invoke`，通过 stdin/stdout 交换 JSON。
@@ -47,9 +58,9 @@ cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 ```
 
-目前两个 workspace 通过仓库内路径复用 AW SDK，Tokenless 组合测试还依赖 sec-core
-桥接库。SDK 独立发布和基于产物的组合测试留待后续。现有 Preview 包继续要求
-core 与 Provider 使用相同版本和源码提交。
+目前两个 workspace 通过仓库内路径复用 AW 库，Tokenless 组合测试还依赖 sec-core
+桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
+Preview 将 core 与 Provider 作为一批构建产物交付，安装时校验版本和源码提交一致。
 
 `aw-build` 和 `aw-package` 当前只打包、安装内置组件，不能自动安装任意社区 Provider。
 独立安装不影响协议接入；加入统一安装包需另补打包清单和安装验收。

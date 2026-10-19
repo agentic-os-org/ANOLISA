@@ -22,6 +22,22 @@ Each directory under `providers/` owns a concrete integration, including its
 program, schemas, examples, and tests. Existing binaries retain the names
 `aw-provider-sec-core` and `aw-provider-tokenless`, preserving packages and commands.
 
+## OS distribution design
+
+The component owner maintains the implementation, tests, dependencies and release.
+The OS distributor selects versions, verifies origin and composition compatibility,
+and delivers installation packages and upgrade paths. Sharing a repository does
+not require a shared release cycle.
+
+First-party Providers should build, test and release outside the repository using
+pinned public AW libraries, with backend dependencies managed by their owners.
+Third parties can implement the public process protocol and connect through YAML,
+without linking Rust libraries or checking out ANOLISA. The distribution layer
+consumes component artifacts and validates bundled dependencies together.
+
+See [architecture boundaries](../../../../src/aw/docs/design/architecture-boundaries.md)
+for ownership and migration scope.
+
 ## Integrate independently
 
 1. Implement `describe`, `validate_config`, and `invoke` using JSON over stdin/stdout.
@@ -54,10 +70,11 @@ cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 ```
 
-The bundled workspaces currently use repository-local AW SDK paths; Tokenless
-composition tests also depend on the sec-core bridge. Independent SDK publication
-and artifact-based composition are deferred. Existing Preview packages retain
-their matching-version and matching-source installation rules.
+The bundled workspaces currently use repository-local AW library paths; Tokenless
+composition tests also depend on the sec-core bridge. These implementations cannot
+yet build outside the repository. Pinned SDKs, independent releases and artifact
+composition tests are deferred. Preview delivers core and Providers as one build
+set, with installation checking matching versions and source commits.
 
 `aw-build` and `aw-package` currently package and install built-in components only;
 they do not automatically install arbitrary community Providers. Independent

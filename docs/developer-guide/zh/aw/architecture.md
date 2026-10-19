@@ -11,7 +11,8 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 ![AW 用户流程与组件架构](../../../images/aw/architecture_zh.png)
 
 图中按用户操作组织各包，箭头表示运行时协作；绿色区域是 Provider 协作目录。
-具体实现可独立开发和分发，接入方式见 [Provider 指南](providers.md)。
+底部说明目标分发职责：组件 owner 交付组件，OS 发行方验证并组合产物。
+当前接入方式与后续发布范围见 [Provider 指南](providers.md)。
 
 ## Crate 关系
 

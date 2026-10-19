@@ -46,9 +46,15 @@ require a Provider to join this source tree. Follow the
 Each bundled Rust Provider owns its Cargo workspace, lockfile and toolchain.
 The AW workspace contains framework packages only; the gate combines independent
 test inventories without adding Provider members or dependencies to AW.
-Keep Preview same-version/same-source installation and receipt rules unchanged;
-independent publication and compatibility changes are a later stage. Preserve existing
-package and binary names when moving source directories. New Provider directories
+Provider owners own dependencies, tests and releases; the OS distributor selects
+versions, validates composition and delivers installation and upgrades. Target
+out-of-tree Provider builds against pinned public AW libraries. Third parties
+need only the public process protocol and YAML, not a Rust SDK or OS checkout.
+The bundled implementations still use local SDK paths. Preview delivers one
+build set and checks matching versions and source commits for common origin.
+Independent SDK publication and installation compatibility changes are a later
+stage, including receipt migration tests. Preserve existing package and binary
+names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
 

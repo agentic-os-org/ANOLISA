@@ -24,11 +24,14 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 
 每个 Rust 实现拥有独立 Cargo workspace 和锁文件，`providers/` 不设置公共 workspace。
 框架 crate 不依赖具体 Provider。其他语言使用自己的工具链和相同进程协议，
-契约测试同样接入 AW 门禁。原生框架适配放在 `aw-service`，后端能力由 Provider 负责。
+契约测试同样接入 AW 门禁。原生框架适配放在 `aw-adapter`，后端能力由 Provider 负责。
+
+组件 owner 负责实现、依赖和发布；OS 发行方选择版本、验证组合并交付安装升级。
+一方 Provider 的目标是依赖固定版本的公共 AW 库，在仓库外构建、测试和发布。
 
 目前两个 Rust Provider 通过仓库内路径复用 AW 库，Tokenless 组合测试还使用 sec-core
-桥接库。SDK 独立发布和基于产物的组合测试留待后续；现有 Preview 包继续要求
-core 与 Provider 使用相同版本和源码提交。
+桥接库，尚不支持仓库外构建。SDK 独立发布和基于产物的组合测试留待后续。
+Preview 按同一批构建交付，安装时校验 core 与 Provider 的版本和源码提交一致。
 
 现有打包器支持 core、sec-core 和 Tokenless。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。

@@ -12,8 +12,10 @@ calls, tool scheduling, and permission approval.
 ![AW user workflow and component architecture](../../../images/aw/architecture.png)
 
 This view follows user actions; arrows show runtime collaboration. The green
-area is the Provider contribution space. See the [Provider guide](providers.md)
-for independent development and distribution.
+area is the Provider contribution space. The footer shows target release ownership:
+component owners deliver components, and the OS distributor validates and combines
+artifacts. See the [Provider guide](providers.md) for current integration and
+subsequent release work.
 
 ## Crate relationships
 

@@ -28,13 +28,19 @@ For a contributed Provider, include:
 Each Rust implementation owns an independent Cargo workspace and lockfile.
 `providers/` has no shared workspace; framework crates never depend on concrete
 Providers. Other languages use their own toolchain and the same process protocol.
-Wire contract tests into the AW gate. Keep native framework adaptation in `aw-service` and backend
+Wire contract tests into the AW gate. Keep native framework adaptation in `aw-adapter` and backend
 behavior in the Provider.
 
+Component owners maintain implementations, dependencies and releases. The OS
+distributor selects versions, validates their composition and delivers installation
+and upgrades. First-party Providers should build, test and release outside the
+repository using pinned public AW libraries.
+
 The bundled Rust Providers currently use repository-local AW libraries; Tokenless
-composition tests also use the sec-core bridge. Standalone SDK publication and
-artifact-based composition are future work. The Preview package builder retains
-its matching-version and matching-source requirements for core and Providers.
+composition tests also use the sec-core bridge, so builds outside the repository
+are not yet supported. Standalone SDK publication and artifact-based composition
+are future work. Preview delivers a single build set, with installation checking
+matching versions and source commits for core and Providers.
 
 The existing package builder supports core, sec-core, and Tokenless. A new folder
 is not automatically bundled or installed; independent Providers supply their

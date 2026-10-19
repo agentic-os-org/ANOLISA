@@ -83,18 +83,39 @@ New versions use distinct names and IDs alongside supported older versions, with
 semantic validation and positive/negative fixtures. The schema inventory test
 requires each contract file to be registered, preventing unused runtime schemas.
 
-## Current distribution and deferred work
+## Component owners and the OS distributor
 
-Independent workspaces are implemented. Both Providers currently consume AW SDK
-crates through repository-local paths; Tokenless composition tests still reference
-the sec-core Provider. `aw-build` retains Preview composition, package contents
-and same-version/same-source installation requirements. Existing users need no
-configuration or installation-receipt migration.
+`providers/` is a source collaboration space; each component owns its build and
+release. The target is for each first-party Provider to build, test and release
+outside ANOLISA using only pinned public AW libraries for its AW integration.
+Its owner manages third-party and backend dependencies. Providers must not depend
+on service internals, another Provider's source or the complete OS source tree.
 
-Provider release entrypoints, pinned SDK consumption, artifact composition tests,
-distribution of published artifacts and protocol-based installation compatibility
-are a later stage. Receipt migration tests must accompany those installation-rule
-changes. Source separation alone does not implement these release capabilities.
+| Role | Responsibility and deliverables |
+| --- | --- |
+| AW maintainer | Public SDK, process protocol, compatibility tests and version compatibility boundaries |
+| Provider owner | Implementation, contract tests, pinned dependencies, versioned artifacts, backend requirements and installation instructions |
+| OS distributor | Version selection, source and checksum verification, composition testing, installation and upgrades |
+| Third-party implementer | An executable using the public process protocol, configured through YAML; language and repository are independent choices |
+
+The OS distributor consumes component artifacts without owning their internal
+implementation. Bundled backend dependencies enter distribution validation;
+externally installed Providers integrate through their public contract. The SDK
+is a source interface, while JSON/stdio is the runtime boundary. This does not
+promise a stable Rust binary ABI.
+
+### This migration and subsequent releases
+
+Independent workspaces, lockfiles and test entrypoints are implemented. Both
+Providers still use repository-local AW library paths, and Tokenless composition
+tests reference the sec-core Provider. Builds and releases outside the repository
+are not yet supported for these implementations.
+
+Preview currently delivers core and Providers as one build set. Installation
+therefore checks matching versions and source commits to establish their common
+origin. Published SDKs and Provider artifacts will underpin a compatibility matrix
+before installation rules change, with migration tests for old receipts. This
+migration requires no user configuration or receipt changes.
 
 ## Regression boundary
 
