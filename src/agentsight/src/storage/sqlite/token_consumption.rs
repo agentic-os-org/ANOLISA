@@ -309,7 +309,13 @@ impl TokenConsumptionStore {
         period_label: impl Into<String>,
         include_records: bool,
     ) -> anyhow::Result<TokenConsumptionQueryResult> {
-        let records = self.query(filter)?;
+        // The limit bounds the returned row list, not the rows an aggregate
+        // covers: scanning with it made every total describe only the newest
+        // N records of the filter match.
+        let requested_limit = filter.limit;
+        let mut scan_filter = filter.clone();
+        scan_filter.limit = 0;
+        let mut records = self.query(&scan_filter)?;
 
         let record_count = records.len() as u64;
         let total_input_tokens: u64 = records.iter().map(|r| r.total_input_tokens as u64).sum();
@@ -331,7 +337,14 @@ impl TokenConsumptionStore {
             }
         }
 
-        let rows = if include_records { records } else { Vec::new() };
+        let rows = if include_records {
+            if requested_limit > 0 {
+                records.truncate(requested_limit);
+            }
+            records
+        } else {
+            Vec::new()
+        };
 
         Ok(TokenConsumptionQueryResult {
             period: period_label.into(),
@@ -490,6 +503,41 @@ mod tests {
         assert_eq!(result.total_input_tokens, 300);
         assert_eq!(result.by_role.get("user"), Some(&200));
 
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn aggregate_totals_ignore_the_row_limit() {
+        // `limit` bounds the rows a caller wants to read, not the rows an
+        // aggregate sums: applying it to the scan reported the newest N rows
+        // as if they were the whole window.
+        let path = unique_db_path("aggregate_limit");
+        let store = TokenConsumptionStore::new(&path).unwrap();
+        let bd = make_breakdown("openai", "gpt-4o");
+        for second in 2..5 {
+            store
+                .insert(&bd, second * 1_000_000_000, 1, "python")
+                .unwrap();
+        }
+
+        let filter = TokenConsumptionFilter {
+            limit: 1,
+            ..Default::default()
+        };
+        let result = store.aggregate(&filter, "window", false).unwrap();
+
+        assert_eq!(result.record_count, 3);
+        assert_eq!(result.total_input_tokens, 450);
+        assert_eq!(result.total_output_tokens, 240);
+        assert_eq!(result.by_role.get("user"), Some(&300));
+        assert!(result.records.is_empty());
+
+        // Requesting the records back still honors the row limit, while the
+        // totals keep covering the whole match.
+        let with_rows = store.aggregate(&filter, "window", true).unwrap();
+        assert_eq!(with_rows.record_count, 3);
+        assert_eq!(with_rows.total_input_tokens, 450);
+        assert_eq!(with_rows.records.len(), 1);
         cleanup_db(&path);
     }
 }
