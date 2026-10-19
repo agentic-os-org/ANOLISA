@@ -1194,6 +1194,15 @@ impl OpenAIParser {
                             content_parts.push(content.clone());
                         }
                     }
+                    // Legacy `/v1/completions` streams carry each fragment on
+                    // the choice itself. The delta object is always present
+                    // (it defaults), so without this arm every chunk looks
+                    // empty and the answer closes as an empty response.
+                    if let Some(text) = &choice.text {
+                        if !text.is_empty() {
+                            content_parts.push(text.clone());
+                        }
+                    }
                     // Extract reasoning_content delta
                     if let Some(reasoning) = &choice.delta.reasoning_content {
                         if !reasoning.is_empty() {
@@ -3059,6 +3068,36 @@ mod tests {
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"file_path\": \"/tmp/a.md\"}"
         );
+    }
+
+    /// A legacy `/v1/completions` stream carries each fragment on
+    /// `choices[].text` instead of a `delta` object, so the aggregation walked
+    /// past every chunk and closed the response with an empty answer.
+    #[test]
+    fn test_aggregate_sse_chunks_legacy_completion_text() {
+        let chunk = |text: &str, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "cmpl-legacy",
+                "object": "text_completion",
+                "created": 1_786_504_982u64,
+                "model": "gpt-3.5-turbo-instruct",
+                "choices": [{"index": 0, "text": text, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk("The capital of ", None),
+            chunk("France is Paris.", Some("stop")),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a legacy completion stream must still aggregate");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => {
+                assert_eq!(text, "The capital of France is Paris.")
+            }
+            other => panic!("the streamed fragments must reach the message: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     /// A refusal arrives as `delta.refusal` with no content delta. The

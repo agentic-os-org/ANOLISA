@@ -611,6 +611,10 @@ pub struct OpenAiSseChoice {
     /// an increment. Kept untyped because its shape is the terminal message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<serde_json::Value>,
+    /// Legacy `/v1/completions` fragment. That protocol puts the generated
+    /// text directly on the choice, with no `delta` or `message` object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// Reason for finishing (stop, length, tool_calls, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
