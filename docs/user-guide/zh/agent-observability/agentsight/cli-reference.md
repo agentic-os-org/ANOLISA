@@ -522,14 +522,24 @@ OPTIONS（所有子命令通用）:
         --db <db>          Override database path
         --last <last>      Query last N hours (default: 168 = 7 days) [default: 168]
         --json             Output as JSON
+
+OPTIONS（all、hotness）:
+        --granularity <granularity>    按天或按周切分热度趋势
+                                       [possible values: day, week] [default: week]
 ```
 
 ```bash
 sudo agentsight skill-metrics all --last 168
 sudo agentsight skill-metrics hotness --agent CoshNG --json
+
+# 按天分桶，而不是默认的按周
+sudo agentsight skill-metrics hotness --last 168 --granularity day
 ```
 
-Dashboard 的 Skill 指标页展示的是同一批数字。
+Dashboard 的 Skill 指标页展示的是同一批数字，其热度图也支持同样的按天/按周切换。
+`--granularity` 只切分热度趋势，因此只有 `all` 和 `hotness` 接受它，四个单项指标子命令不接受——
+在那里传该参数是用法错误，与 `GET /api/skill-metrics/downloads` 等接口的拒绝行为一致。不给该参数时
+趋势仍按周分桶，文本与 JSON 输出保持不变。
 
 ## 相关页面
 
