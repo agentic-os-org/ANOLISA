@@ -358,10 +358,8 @@ impl Runtime {
             let automatic = native_input.is_some();
             let association = evidence::association(&host.capabilities().adapter, &value, native_input.as_deref());
             let candidate = value.clone();
-            // Qoder's native sequential flag serializes external Hooks too.
-            let ordered = automatic && host.capabilities().adapter == "qoder"
-                && value["name"] == "tool.after"
-                && host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result());
+            let ordered = automatic && aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
+                host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result()));
             let event = match native_input {
                 Some(input) => host.hook_event(value, input, deadline, &cancelled),
                 None => host.event(value, deadline, &cancelled),

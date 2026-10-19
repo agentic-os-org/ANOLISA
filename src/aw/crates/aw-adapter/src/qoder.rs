@@ -2,13 +2,13 @@
 
 use super::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch,
     },
     read_file, Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -26,11 +26,13 @@ struct Prepared {
 }
 
 impl Adapter for Qoder {
-    fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        for flag in input.flags.keys() {
-            if !matches!(flag.as_str(), "--config" | "--agent" | "--native-settings") {
-                return Err(format!("Qoder does not support {flag}").into());
-            }
+    fn prepare(
+        &self,
+        input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if input.options.profile.is_some() || input.options.state_dir.is_some() {
+            return Err("Qoder supports only native settings".into());
         }
         let native = input
             .command
@@ -43,9 +45,10 @@ impl Adapter for Qoder {
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         check_args(&native)?;
-        let settings = settings(input.flags.get("--native-settings"))?;
+        let settings = settings(input.options.settings.as_ref())?;
         check_sources(&input.command.cwd, &settings)?;
-        let version = adapter::version_output(&input.command, &["--version".into()])?;
+        let version =
+            adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
         if version.is_empty() || version.len() > 128 {
             return Err("Qoder CLI version probe output must contain 1..128 bytes".into());
         }
@@ -66,7 +69,7 @@ impl Adapter for Qoder {
         }))
     }
 
-    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         normalize(binding, event, native)
     }
 
@@ -334,7 +337,7 @@ pub(super) fn generate(
     Ok((settings, events))
 }
 
-pub(super) fn normalize(binding: &HookBinding, name: &str, native: &Value) -> Result<Value> {
+pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> Result<Value> {
     if native["hook_event_name"] != event_name(name)?
         || native["cwd"].as_str() != binding.cwd.to_str()
     {
@@ -356,7 +359,7 @@ pub(super) fn normalize(binding: &HookBinding, name: &str, native: &Value) -> Re
     }
     Ok(json!({
         "name": name,
-        "agent": {"adapter": "qoder", "binding_id": binding.binding.target, "instance_id": binding.binding.instance_id},
+        "agent": {"adapter": "qoder", "binding_id": binding.target, "instance_id": binding.instance_id},
         "session_id": session,
         "tool": {"name": tool, "native_name": tool, "call_id": call,
                  "input": native["tool_input"], "result": native.get("tool_response").cloned().unwrap_or(Value::Null)},

@@ -130,11 +130,8 @@ pub fn preflight(
         .get(target)
         .ok_or(Error::Invalid("unknown configured Agent target"))?;
     require(
-        agent["adapter"] == capabilities.adapter
-            && matches!(
-                capabilities.adapter.as_str(),
-                "qoder" | "openclaw" | "hermes" | "qwenpaw" | "pi" | "claude-sdk" | "agentscope"
-            ),
+        // Configuration is already validated against the catalog-aligned schema.
+        agent["adapter"] == capabilities.adapter,
         "Adapter evidence does not match the configured target",
     )?;
     require(

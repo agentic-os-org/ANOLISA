@@ -114,7 +114,9 @@ fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
     let suffix = match value.get("degraded") {
         None => "",
         Some(reason)
-            if ready.adapter == "openclaw" && reason == "result_middleware_unavailable" =>
+            if reason.as_str().is_some_and(|reason| {
+                aw_adapter::callback::readiness_degraded(&ready.adapter, reason)
+            }) =>
         {
             " (degraded: result replacement unavailable)"
         }

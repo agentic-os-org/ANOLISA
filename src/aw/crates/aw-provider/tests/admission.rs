@@ -253,6 +253,12 @@ fn target_and_trusted_adapter_evidence_must_agree() {
     let providers = providers(&document);
     assert!(admit(&config, "missing", &capabilities("qoder"), &providers).is_err());
     assert!(admit(&config, "qoder", &capabilities("openclaw"), &providers).is_err());
+    assert!(preflight(&config, "qoder", &capabilities("unknown-adapter")).is_err());
+    let mut unknown = document.clone();
+    unknown["spec"]["agents"]["qoder"]["adapter"] = json!("unknown-adapter");
+    assert!(CONFIGURATION
+        .parse(&serde_json::to_vec(&unknown).unwrap())
+        .is_err());
     for (version, entrypoint) in [("", "fixture"), ("fixture", ""), (" ", "fixture")] {
         let mut adapter = capabilities("qoder");
         adapter.version = version.into();

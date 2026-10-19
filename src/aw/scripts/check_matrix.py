@@ -6,8 +6,8 @@ START = "<!-- aw-regression-matrix:start -->"
 END = "<!-- aw-regression-matrix:end -->"
 SHARED_CASES = {
     "catalog": (
-        "aw-service/bin/aw",
-        "cli::adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema",
+        "aw-adapter/lib/aw_adapter",
+        "adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema",
     ),
     "security-retry": (
         "aw-service/test/pretool",

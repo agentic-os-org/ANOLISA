@@ -224,7 +224,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
-                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "semver", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "aw-adapter", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
             (
                 "aw-provider-sec-core", self.root.parents[1] / "providers/agent-sec-core",
@@ -238,6 +238,8 @@ class GateTests(GateFixture):
                 "aw-provider-tokenless", self.root.parents[1] / "providers/tokenless",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"],
             ),
+            ("aw-adapter", self.root / "crates/aw-adapter",
+             ["aw-config", "aw-contracts", "aw-exec", "aw-provider", "serde_json"]),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -288,6 +290,7 @@ class GateTests(GateFixture):
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
             (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),
             (7, "asc-daemon-client"), (7, "aw-core"),
+            (10, "aw-service"), (10, "aw-host"), (10, "aw-provider-tokenless"),
         ):
             invalid = deepcopy(metadata)
             invalid["packages"][package]["dependencies"].append({"name": dependency})

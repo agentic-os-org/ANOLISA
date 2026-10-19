@@ -1,9 +1,9 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_service::Capabilities;
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 
-pub(in crate::cli) struct Profile {
+pub(crate) struct Profile {
     pub name: &'static str,
     pub adapter: &'static dyn Adapter,
     pub events: &'static [(&'static str, &'static [&'static str])],
@@ -34,49 +34,49 @@ impl Profile {
     }
 }
 
-pub(in crate::cli) const QODER: Profile = Profile {
+pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const OPENCLAW: Profile = Profile {
+pub(crate) const OPENCLAW: Profile = Profile {
     name: "openclaw",
     adapter: &super::super::adapters::openclaw::OpenClaw,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const HERMES: Profile = Profile {
+pub(crate) const HERMES: Profile = Profile {
     name: "hermes",
     adapter: &super::super::adapters::hermes::Hermes,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const QWENPAW: Profile = Profile {
+pub(crate) const QWENPAW: Profile = Profile {
     name: "qwenpaw",
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const PI: Profile = Profile {
+pub(crate) const PI: Profile = Profile {
     name: "pi",
     adapter: &super::super::adapters::pi::Pi,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const CLAUDE_SDK: Profile = Profile {
+pub(crate) const CLAUDE_SDK: Profile = Profile {
     name: "claude-sdk",
     adapter: &super::super::adapters::claude_sdk::ClaudeSdk,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const AGENTSCOPE: Profile = Profile {
+pub(crate) const AGENTSCOPE: Profile = Profile {
     name: "agentscope",
     adapter: &super::super::adapters::agentscope::AgentScope,
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const PROFILES: &[Profile] =
+pub(crate) const PROFILES: &[Profile] =
     &[QODER, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE];
 
 #[cfg(test)]
@@ -88,8 +88,7 @@ mod tests {
     #[test]
     fn registered_capabilities_match_the_regression_matrix_and_config_schema() {
         let matrix: Value =
-            serde_json::from_str(include_str!("../../../../../tests/regression-matrix.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
         let declared: BTreeMap<_, BTreeMap<_, BTreeSet<_>>> = matrix["agents"]
             .as_object()
             .unwrap()
@@ -139,7 +138,7 @@ mod tests {
             "register each agent/event/effect with runnable regressions"
         );
         let schema: Value = serde_json::from_str(include_str!(
-            "../../../../aw-config/schemas/configuration-v1alpha1.schema.json"
+            "../../../aw-config/schemas/configuration-v1alpha1.schema.json"
         ))
         .unwrap();
         let names: BTreeSet<_> = schema["$defs"]["agent"]["properties"]["adapter"]["enum"]

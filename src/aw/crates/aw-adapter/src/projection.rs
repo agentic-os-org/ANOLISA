@@ -134,7 +134,8 @@ fn openclaw_result_failed(value: &Value) -> bool {
         || details["exitCode"].as_f64().is_some_and(|code| code != 0.0)
 }
 
-pub(super) fn project(adapter: &str, native: &Value) -> Option<Value> {
+/// Select the supported native text slot without modifying its envelope.
+pub fn project(adapter: &str, native: &Value) -> Option<Value> {
     let value = decoded_result(adapter, native);
     let (_, text) = text_slot(adapter, &value)?;
     let (name, input) = tool(adapter, native);
@@ -189,7 +190,8 @@ pub(super) fn project(adapter: &str, native: &Value) -> Option<Value> {
     Some(projection)
 }
 
-pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
+/// Encode a replacement for a previously authorized native text slot.
+pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
     if text.is_empty() || text.len() > aw_provider::MAX_MESSAGE_BYTES {
         return Err("replacement text must be nonempty and bounded".into());
     }

@@ -45,18 +45,21 @@ require a Provider to join this source tree. Follow the
 
 Each bundled Rust Provider owns its Cargo workspace, lockfile and toolchain.
 The AW workspace contains framework packages only; the gate combines independent
-test inventories without adding Provider members or dependencies to AW. Preserve existing
+test inventories without adding Provider members or dependencies to AW.
+Keep Preview same-version/same-source installation and receipt rules unchanged;
+independent publication and compatibility changes are a later stage. Preserve existing
 package and binary names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
 
-The root Cargo manifest is a virtual workspace. Present the eight framework
+The root Cargo manifest is a virtual workspace. Present the nine framework
 crates separately from concrete Providers:
 
 | Responsibility | Framework crates | Boundary |
 | --- | --- | --- |
 | Build and install | `aw-package` | Package composition, installation and configuration generation |
-| Native entrypoint and local runtime | `aw-service` | CLI, Adapters, bindings, events and audit |
+| Native dialects | `aw-adapter` | Catalog, registration, callbacks, native phases and effect adoption |
+| Native entrypoint and local runtime | `aw-service` | CLI, bindings, events, deadlines, cancellation and audit |
 | Hook execution | `aw-host`, `aw-exec` | Prepare Providers and execute steps; bound process lifetime and cleanup |
 | Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
 | Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
@@ -65,7 +68,14 @@ The Hook path is Adapter -> service -> Host -> executor -> Provider process.
 Results return to the Adapter for native adoption. The service uses
 `aw-core::journal::FileJournal`, not `Core::prepare/execute`; do not insert the
 Core plan API into this path or equate its `ProviderHost` port with `aw-host::Host`.
-Production framework code must not depend on concrete Provider implementations.
+Framework crates must not depend on concrete Provider implementations, including
+through dev-dependencies. `aw-adapter` must not depend on `aw-service`, `aw-host`
+or CLI internals. Keep Client, wire DTOs, full Binding, serialized HookBinding,
+argument parsing, signal handling and resource ownership in `aw-service`.
+Pass only NativeContext and typed options into the Adapter. The caller supplies
+cancellation and launch-file access; the Adapter returns plans, comparison data
+and native replies. Raw native verification must retain strict decoding and
+cannot trust a callback's self-reported verification state.
 
 Keep crate-local source, schemas and Rust tests together. Every contract schema
 in `crates/aw-contracts/schemas/` must be registered and tested. Retain supported
@@ -84,7 +94,7 @@ framework and Provider tables, with test-only dependencies identified.
 Update these together in the same change:
 
 1. Register the Adapter and its event/effect profile in
-   `crates/aw-service/src/cli/adapter/catalog.rs`; use that profile when building
+   `crates/aw-adapter/src/adapter/catalog.rs`; use that profile when building
    launch capabilities. Keep the configuration schema aligned.
 2. Implement native normalization, registration, effect adoption and teardown in
    the Adapter. Keep process ownership in `aw-exec` and common lifecycle in the
@@ -115,7 +125,7 @@ matrix case. Package acceptance separately covers real Tokenless/RTK binaries.
 ## Layout and CI cost
 
 Keep workspace/native acceptance under `tests/` and runtime bridge assets under
-`adapters/`. When changing crate boundaries, update `scripts/check_layout.py`
+`crates/aw-adapter/native/`. When changing crate boundaries, update `scripts/check_layout.py`
 and its behavior tests alongside the architecture documentation.
 
 Rust, Python and JavaScript (`.js`, `.mjs`, `.cjs`) files share a 699-line ceiling,

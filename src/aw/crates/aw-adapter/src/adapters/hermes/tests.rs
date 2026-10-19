@@ -80,7 +80,10 @@ fn installation_preserves_a_concurrently_created_plugin_directory() {
     );
     let error = result.unwrap_err();
     assert_eq!(
-        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        match error {
+            crate::Error::Io(error) => error.kind(),
+            error => panic!("expected I/O error: {error}"),
+        },
         std::io::ErrorKind::AlreadyExists
     );
     assert_eq!(Some(fs::metadata(&destination).unwrap().ino()), inode);
@@ -482,22 +485,20 @@ fn managed_profile_is_rejected_before_install_config_or_native_probe() {
     fs::write(profile.0.join(".container-mode"), "managed").unwrap();
     let config = aw_config::Validator::new()
         .unwrap()
-        .parse(include_bytes!("../../../../examples/aw.hermes.yaml"))
+        .parse(include_bytes!(
+            "../../../../aw-service/examples/aw.hermes.yaml"
+        ))
         .unwrap();
-    let args = Arguments::parse(
-        [
-            "--native-profile".into(),
-            profile.0.to_str().unwrap().into(),
-            "--config".into(),
-            "/missing-aw-config".into(),
-            "--agent".into(),
-            "hermes".into(),
-        ]
-        .into_iter(),
-    )
-    .unwrap();
+    let options = crate::InstallOptions {
+        target: "hermes".into(),
+        profile: Some(profile.0.to_str().unwrap().into()),
+    };
     assert!(Hermes
-        .install(&args, &config)
+        .install(
+            &options,
+            &config,
+            &std::sync::atomic::AtomicBool::new(false)
+        )
         .err()
         .unwrap()
         .to_string()
@@ -625,20 +626,10 @@ fn installation_rejects_writable_plugin_and_config_files_without_rewriting() {
     }
 }
 
-fn binding() -> HookBinding {
-    HookBinding {
-        adapter: "hermes".into(),
+fn binding() -> NativeContext {
+    NativeContext {
+        target: "hermes".into(),
+        instance_id: "instance".into(),
         cwd: "/work".into(),
-        socket: "/aw.sock".into(),
-        events: BTreeMap::new(),
-        binding: aw_service::Binding {
-            identity: aw_service::Identity {
-                generation: "one".into(),
-                config_revision: "revision".into(),
-            },
-            target: "hermes".into(),
-            instance_id: "instance".into(),
-            audit_key: "audit".into(),
-        },
     }
 }

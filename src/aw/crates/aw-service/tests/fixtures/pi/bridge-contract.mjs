@@ -4,7 +4,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { installSessionBridge } from "../../../../../adapters/pi/bridge.mjs";
+import { installSessionBridge } from "../../../../aw-adapter/native/pi/bridge.mjs";
 
 const output = fileURLToPath(
   new URL("../../../../../target/pi-bridge-contract/", import.meta.url),

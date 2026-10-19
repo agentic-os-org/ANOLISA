@@ -1,34 +1,32 @@
 //! Pi Coding Agent 0.84.2 public factory bridge in an owned foreground Node worker.
 
-use crate::cli::{
+use crate::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch, Readiness,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch, Readiness,
     },
     Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 
 const VERSION: &str = "0.84.2";
-pub(in crate::cli) struct Pi;
+pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
     application: PathBuf,
 }
 
 impl Adapter for Pi {
-    fn prepare(&self, mut input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        for flag in [
-            "--native-settings",
-            "--native-profile",
-            "--native-state-dir",
-        ] {
-            if input.flags.contains_key(flag) {
-                return Err("Pi SDK workers do not accept native CLI overrides".into());
-            }
+    fn prepare(
+        &self,
+        mut input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if !input.options.is_empty() {
+            return Err("Pi SDK workers do not accept native CLI overrides".into());
         }
         let application = input
             .command
@@ -46,9 +44,9 @@ impl Adapter for Pi {
         // --eval executes only AW metadata validation, never the business application factory.
         let probe = format!(
             "process.env.AW_PI_PROBE='1';\n{}",
-            include_str!("../../../../../adapters/pi/entrypoint.mjs")
+            include_str!("../../native/pi/entrypoint.mjs")
         );
-        let result = adapter::version_output(
+        let result = adapter::Probe(cancelled).version_output(
             &input.command,
             &[
                 "--input-type=module".into(),
@@ -67,7 +65,7 @@ impl Adapter for Pi {
             .remove(std::ffi::OsStr::new("AW_PI_PROBE"));
         Ok(Box::new(Prepared { input, application }))
     }
-    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
             return Err("Pi event does not match binding".into());
         }
@@ -99,7 +97,7 @@ impl Adapter for Pi {
             return Err("Pi tool.after requires a result and isError".into());
         }
         Ok(
-            json!({"name":event,"agent":{"adapter":"pi","binding_id":binding.binding.target,"instance_id":binding.binding.instance_id},
+            json!({"name":event,"agent":{"adapter":"pi","binding_id":binding.target,"instance_id":binding.instance_id},
             "session_id":session,"tool":{"name":tool,"native_name":tool,"call_id":call,"input":native["tool_call"]["input"],"result":native.get("tool_response").cloned().unwrap_or(Value::Null)},"native":native}),
         )
     }
@@ -127,16 +125,15 @@ impl PreparedLaunch for Prepared {
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
-        let ready = context.files.0.join("pi-ready.json");
+        let ready = context.files.directory().join("pi-ready.json");
         let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
         let entrypoint = context.files.write(
             "pi-entrypoint.mjs",
-            include_bytes!("../../../../../adapters/pi/entrypoint.mjs"),
+            include_bytes!("../../native/pi/entrypoint.mjs"),
         )?;
-        context.files.write(
-            "bridge.mjs",
-            include_bytes!("../../../../../adapters/pi/bridge.mjs"),
-        )?;
+        context
+            .files
+            .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
         let mut command = self.input.command.clone();
         command.args = std::iter::once(entrypoint.into_os_string())
             .chain(std::iter::once(self.application.clone().into_os_string()))

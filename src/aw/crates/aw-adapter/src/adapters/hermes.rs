@@ -11,13 +11,13 @@ mod tests;
 
 use super::super::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch, Readiness,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch, Readiness,
     },
-    read_file, Arguments, Exit, Result,
+    read_file, Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
@@ -34,15 +34,17 @@ struct Prepared {
 }
 
 impl Adapter for Hermes {
-    fn prepare(&self, mut input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        if input.flags.contains_key("--native-settings")
-            || input.flags.contains_key("--native-state-dir")
-        {
+    fn prepare(
+        &self,
+        mut input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if input.options.settings.is_some() || input.options.state_dir.is_some() {
             return Err(
                 "Hermes uses --native-profile; it has no temporary settings overlay".into(),
             );
         }
-        let profile = install::profile(input.flags.get("--native-profile").ok_or(
+        let profile = install::profile(input.options.profile.as_ref().ok_or(
             "Hermes requires --native-profile pointing to an existing installed profile",
         )?)?;
         check_args(&input.command.args)?;
@@ -53,8 +55,10 @@ impl Adapter for Hermes {
                 profile.display()
             )
         })?;
-        let (selector, python, cache) = checked_profile_command(&mut input.command, &profile)?;
-        let timeout = callback_timeout(&input.command, &python, &selector, cache.path())?;
+        let (selector, python, cache) =
+            checked_profile_command(&mut input.command, &profile, cancelled)?;
+        let timeout =
+            callback_timeout(&input.command, &python, &selector, cache.path(), cancelled)?;
         cache.close()?;
         input.command.args.insert(1, "--cli".into());
         input
@@ -69,7 +73,7 @@ impl Adapter for Hermes {
         }))
     }
 
-    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         if (native["hook_event_name"] != event_name(event)?
             && !(event == "tool.after" && native["hook_event_name"] == "transform_tool_result"))
             || native["cwd"].as_str() != binding.cwd.to_str()
@@ -92,8 +96,8 @@ impl Adapter for Hermes {
         }
         Ok(json!({
             "name": event,
-            "agent": {"adapter": "hermes", "binding_id": binding.binding.target,
-                      "instance_id": binding.binding.instance_id},
+            "agent": {"adapter": "hermes", "binding_id": binding.target,
+                      "instance_id": binding.instance_id},
             "session_id": session,
             "tool": {"name": tool, "native_name": tool, "call_id": call,
                      "input": native["tool_input"], "result": native["extra"]["result"]},
@@ -113,9 +117,19 @@ impl Adapter for Hermes {
         }
     }
 
-    fn install(&self, args: &Arguments, config: &aw_config::Configuration) -> Result<Exit> {
-        let profile = install::profile(args.required("--native-profile")?)?;
-        let argv = config.as_value()["spec"]["agents"][args.required("--agent")?]["argv"]
+    fn install(
+        &self,
+        options: &crate::InstallOptions,
+        config: &aw_config::Configuration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        let profile = install::profile(
+            options
+                .profile
+                .as_deref()
+                .ok_or("missing --native-profile")?,
+        )?;
+        let argv = config.as_value()["spec"]["agents"][&options.target]["argv"]
             .as_array()
             .ok_or("Hermes Agent argv missing")?;
         let program = argv[0]
@@ -139,8 +153,7 @@ impl Adapter for Hermes {
             cwd: std::env::current_dir()?.canonicalize()?,
             environment: std::env::vars_os().collect(),
         };
-        let (selector, python, cache) = checked_profile_command(&mut command, &profile)?;
-        let cancelled = &super::super::run::CANCELLED;
+        let (selector, python, cache) = checked_profile_command(&mut command, &profile, cancelled)?;
         let backup = install::install(
             &profile,
             cancelled,
@@ -242,7 +255,7 @@ _roundtrip_dump(path, yaml, config)
         cache.close().map_err(|error| {
             format!("Hermes plugin installed, but Python cache cleanup failed: {error}")
         })?;
-        Ok(Exit::Code(0))
+        Ok(())
     }
 }
 
@@ -306,7 +319,7 @@ impl PreparedLaunch for Prepared {
                 },
             );
         }
-        let ready = context.files.0.join("hermes-ready.json");
+        let ready = context.files.directory().join("hermes-ready.json");
         let token = String::from_utf8(read_file("/proc/sys/kernel/random/uuid", 128)?)?
             .trim()
             .to_owned();
@@ -321,7 +334,7 @@ impl PreparedLaunch for Prepared {
         let mut command = self.input.command.clone();
         let entrypoint = context.files.write(
             "hermes-entrypoint.py",
-            include_bytes!("../../../../../adapters/hermes/launch.py"),
+            include_bytes!("../../native/hermes/launch.py"),
         )?;
         command.args.splice(
             0..0,
@@ -330,7 +343,7 @@ impl PreparedLaunch for Prepared {
                 command.program.clone().into_os_string(),
             ],
         );
-        command.args = python_args(&context.files.0.join("pycache"), &command.args);
+        command.args = python_args(&context.files.directory().join("pycache"), &command.args);
         command.program = self.python.as_os_str().into();
         command
             .environment
@@ -455,6 +468,7 @@ fn callback_timeout(
     python: &std::path::Path,
     selector: &std::ffi::OsStr,
     cache: &std::path::Path,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<f64> {
     let mut probe = command.clone();
     probe.program = python.into();
@@ -466,21 +480,22 @@ from hermes_cli import main
 from hermes_cli.plugins import _resolve_hook_callback_timeout
 print(json.dumps(_resolve_hook_callback_timeout(), allow_nan=False))
 "#;
-    let value = adapter::version_output_with_timeout(
-        &probe,
-        &python_args(
-            cache,
-            &[
-                "-P".into(),
-                "-c".into(),
-                script.into(),
-                command.program.as_os_str().into(),
-                selector.into(),
-            ],
-        ),
-        Duration::from_secs(30),
-    )
-    .map_err(|error| format!("Hermes callback timeout probe failed: {error}"))?;
+    let value = adapter::Probe(cancelled)
+        .version_output_with_timeout(
+            &probe,
+            &python_args(
+                cache,
+                &[
+                    "-P".into(),
+                    "-c".into(),
+                    script.into(),
+                    command.program.as_os_str().into(),
+                    selector.into(),
+                ],
+            ),
+            Duration::from_secs(30),
+        )
+        .map_err(|error| format!("Hermes callback timeout probe failed: {error}"))?;
     let timeout: f64 = serde_json::from_str(&value)?;
     if !timeout.is_finite() || timeout < 0.0 {
         return Err("Hermes hook_callback_timeout must be nonnegative and finite".into());

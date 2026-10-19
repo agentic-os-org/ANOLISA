@@ -4,17 +4,14 @@ use super::{
     adapter::{self, HookBinding, LaunchContext, LaunchInput},
     read_file, readiness, Arguments, Exit, Result,
 };
+use aw_adapter::LaunchFiles;
 use aw_exec::CommandSpec;
 use aw_service::{launch_service, Binding, Operation, RunOutcome};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs::{self, DirBuilder, OpenOptions},
-    io::Write,
-    os::unix::{
-        fs::{DirBuilderExt, OpenOptionsExt},
-        process::ExitStatusExt,
-    },
+    fs::{self, DirBuilder},
+    os::unix::{fs::DirBuilderExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicI32},
     time::{Duration, Instant},
@@ -38,21 +35,15 @@ impl Artifacts {
         Ok(Self(path))
     }
 
-    pub(super) fn write(&self, name: &str, bytes: &[u8]) -> Result<PathBuf> {
-        let path = self.0.join(name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(path)
-    }
-
     fn cleanup(&self) -> Result<()> {
         fs::remove_dir_all(&self.0)?;
         Ok(())
+    }
+}
+
+impl LaunchFiles for Artifacts {
+    fn directory(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -107,20 +98,27 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         cwd: cwd.clone(),
         environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
     };
-    let prepared = adapter.prepare(LaunchInput {
-        document: config.as_value().clone(),
-        target: target.into(),
-        flags: args.flags.clone(),
-        command,
-    });
+    let prepared = adapter.prepare(
+        LaunchInput {
+            document: config.as_value().clone(),
+            target: target.into(),
+            options: aw_adapter::NativeOptions {
+                settings: args.flags.get("--native-settings").cloned(),
+                profile: args.flags.get("--native-profile").cloned(),
+                state_dir: args.flags.get("--native-state-dir").cloned(),
+            },
+            command,
+        },
+        &CANCELLED,
+    );
     let mut prepared = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => return interrupted_error(error),
+        Err(error) => return interrupted_error(error.into()),
     };
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
-    let capabilities = prepared.capabilities();
+    let capabilities: aw_service::Capabilities = prepared.capabilities().into();
     if capabilities.adapter != name {
         return Err("prepared Adapter does not match configured target".into());
     }

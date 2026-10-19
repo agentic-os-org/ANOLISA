@@ -9,17 +9,22 @@ fn identifier(value: &Value) -> Option<&str> {
     })
 }
 
-pub(in crate::runtime) fn association(adapter: &str, event: &Value, input: Option<&[u8]>) -> Value {
+/// Corroborate native IDs using the caller's strict decoder for all raw JSON.
+/// A callback-provided verification claim is never accepted as evidence.
+pub fn association(
+    adapter: &str,
+    event: &Value,
+    input: Option<&[u8]>,
+    decode: impl Fn(&[u8]) -> Option<Value>,
+) -> Value {
     let session = identifier(&event["session_id"]);
     let call = identifier(&event["tool"]["call_id"]);
-    let verified = input
-        .and_then(|input| crate::ipc::decode::<Value>(input).ok())
-        .is_some_and(|native| {
-            native == event["native"]
-                && session.is_some()
-                && call.is_some()
-                && matches_native(adapter, event, &native)
-        });
+    let verified = input.and_then(&decode).is_some_and(|native| {
+        native == event["native"]
+            && session.is_some()
+            && call.is_some()
+            && matches_native(adapter, event, &native, &decode)
+    });
     json!({
         "status": if verified { "verified" } else if session.is_some() || call.is_some() { "unverified" } else { "unassociated" },
         "basis": if verified { "native_callback" } else { "none" },
@@ -27,7 +32,12 @@ pub(in crate::runtime) fn association(adapter: &str, event: &Value, input: Optio
     })
 }
 
-fn matches_native(adapter: &str, event: &Value, native: &Value) -> bool {
+fn matches_native(
+    adapter: &str,
+    event: &Value,
+    native: &Value,
+    decode: &impl Fn(&[u8]) -> Option<Value>,
+) -> bool {
     let after = event["name"] == "tool.after";
     let tool = &event["tool"];
     let (session, call, name, input, result, seam) = match adapter {
@@ -45,7 +55,7 @@ fn matches_native(adapter: &str, event: &Value, native: &Value) -> bool {
             native["tool_call"]["name"].clone(),
             match native["tool_call"]["input"]
                 .as_str()
-                .and_then(|text| crate::ipc::decode::<Value>(text.as_bytes()).ok())
+                .and_then(|text| decode(text.as_bytes()))
             {
                 Some(value) => value,
                 None => return false,
@@ -131,4 +141,16 @@ fn matches_native(adapter: &str, event: &Value, native: &Value) -> bool {
         && tool["name"] == name
         && tool["input"] == input
         && tool["result"] == result
+}
+
+/// Match framework source labels without claiming session or process association.
+pub fn source_matches_adapter(adapter: &Value, name: &Value) -> bool {
+    // Source labels corroborate the framework only, never the native session or process.
+    matches!(
+        (adapter.as_str(), name.as_str()),
+        (Some("qoder"), Some("qoder" | "Qoder"))
+            | (Some("hermes"), Some("hermes" | "Hermes"))
+            | (Some("openclaw"), Some("openclaw" | "OpenClaw"))
+            | (Some("qwenpaw"), Some("qwenpaw"))
+    )
 }

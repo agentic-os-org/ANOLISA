@@ -7,7 +7,7 @@ fn prepared(profile: &Profile, mode: &str) -> Prepared {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":mode}}},
                 "execution":{"default_event_budget_ms":1001},"events":{}}}),
             target: "hermes".into(),
-            flags: BTreeMap::new(),
+            options: crate::NativeOptions::default(),
             command: aw_exec::CommandSpec {
                 program: "hermes".into(),
                 args: vec!["chat".into()],
@@ -56,7 +56,7 @@ fn observation_only_timeout_admission_matches_registered_budget() {
     prepared.validate_steps(&[]).unwrap();
     let directory = profile.0.join("launch");
     fs::create_dir(&directory).unwrap();
-    let files = crate::cli::run::Artifacts(directory);
+    let files = crate::test_support::Artifacts(directory);
     let plan = prepared
         .configure(&LaunchContext {
             files: &files,

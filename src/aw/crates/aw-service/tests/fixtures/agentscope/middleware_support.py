@@ -13,7 +13,7 @@ from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
 SPEC = importlib.util.spec_from_file_location(
-    "aw_agentscope", ROOT / "adapters/agentscope/aw_agentscope.py"
+    "aw_agentscope", ROOT / "crates/aw-adapter/native/agentscope/aw_agentscope.py"
 )
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

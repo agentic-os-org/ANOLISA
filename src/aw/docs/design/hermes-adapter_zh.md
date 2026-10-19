@@ -342,7 +342,7 @@ before+after 和仅 after 路由均不能进入最终 handler，空路由保持�
 ```bash
 python src/aw/crates/aw-service/tests/fixtures/hermes/native_contract.py \
   --source /absolute/hermes-agent \
-  --plugin /absolute/anolisa/src/aw/adapters/hermes
+  --plugin /absolute/anolisa/src/aw/crates/aw-adapter/native/hermes
 ```
 
 `live_cli.py` 使用确定性的本地 OpenAI 兼容服务、真实 AW daemon 与示例

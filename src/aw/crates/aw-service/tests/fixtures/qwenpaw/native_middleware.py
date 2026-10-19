@@ -16,7 +16,7 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
-SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "adapters/qwenpaw/plugin.py")
+SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 

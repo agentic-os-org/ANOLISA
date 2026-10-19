@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/aw-adapter",
     "crates/aw-contracts",
     "crates/aw-config",
     "crates/aw-core",
@@ -12,6 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+aw-adapter = { path = "crates/aw-adapter" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"

@@ -5,9 +5,11 @@
 先读[架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)，了解 crate 依赖和代码入口。
 当前 Hook 调用与审计经过以下路径。
 
+源码归属、内部接口与后续发布工作的范围见[架构边界](architecture-boundaries_zh.md)。
+
 ```mermaid
 flowchart LR
-    Agent[原生 Agent] --> Adapter[Adapter]
+    Agent[原生 Agent] --> Adapter[aw-adapter]
     Adapter --> Service[aw-service]
     Service --> Host[aw-host]
     Host --> Exec[aw-exec]
@@ -24,7 +26,7 @@ flowchart LR
 | 阅读顺序 | 负责的部分 |
 | --- | --- |
 | [配置](configuration_zh.md) | `aw-config` 在运行前校验期望配置 |
-| [Adapter 分发](adapter-dispatch_zh.md) | CLI 注册原生回调、转换事件并采用效果 |
+| [Adapter 分发](adapter-dispatch_zh.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
 | [本地服务](local-service_zh.md) | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
 | [Provider Host](provider-host_zh.md) | `aw-host` 准备 Provider，执行已准入的步骤 |
 | [Provider 协议](provider-protocol_zh.md) | `aw-provider` 校验请求、响应和能力 |

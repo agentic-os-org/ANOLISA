@@ -1,25 +1,29 @@
 //! Claude SDK workers explicitly compose the bridge in their public client factory.
 
-use crate::cli::{
+use crate::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch, Readiness,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch, Readiness,
     },
     Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, time::Duration};
 
-pub(in crate::cli) struct ClaudeSdk;
+pub(crate) struct ClaudeSdk;
 struct Prepared {
     input: LaunchInput,
 }
 
 impl Adapter for ClaudeSdk {
-    fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        if input.flags.keys().any(|key| key.starts_with("--native-")) {
+    fn prepare(
+        &self,
+        input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if !input.options.is_empty() {
             return Err(
                 "Claude SDK workers use their public options factory, not native profiles".into(),
             );
@@ -33,14 +37,15 @@ impl Adapter for ClaudeSdk {
             return Err("Claude SDK requires a Python worker script or -m module".into());
         }
         let script = "from importlib.metadata import version; from pathlib import Path; import claude_agent_sdk, subprocess; bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'; print(version('claude-agent-sdk') + ':' + subprocess.check_output([str(bundled), '--version'], timeout=4, text=True).strip())";
-        if adapter::version_output(&input.command, &["-c".into(), script.into()])?
+        if adapter::Probe(cancelled)
+            .version_output(&input.command, &["-c".into(), script.into()])?
             != "0.2.88:2.1.161 (Claude Code)"
         {
             return Err("Claude SDK 0.2.88 with bundled CLI 2.1.161 is required".into());
         }
         Ok(Box::new(Prepared { input }))
     }
-    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         let name = native["hook_event_name"].as_str();
         if !matches!(
             (event, name),
@@ -82,7 +87,7 @@ impl Adapter for ClaudeSdk {
             _ => &tool,
         };
         Ok(
-            json!({"name": event, "agent": {"adapter": "claude-sdk", "binding_id": binding.binding.target, "instance_id": binding.binding.instance_id}, "session_id": session,
+            json!({"name": event, "agent": {"adapter": "claude-sdk", "binding_id": binding.target, "instance_id": binding.instance_id}, "session_id": session,
             "tool": {"name": standard, "native_name": tool, "call_id": call, "input": native["tool_input"], "result": result}, "native": native}),
         )
     }
@@ -106,14 +111,14 @@ impl PreparedLaunch for Prepared {
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
-        let ready = context.files.0.join("claude-sdk-ready.json");
+        let ready = context.files.directory().join("claude-sdk-ready.json");
         context.files.write(
             "aw_claude.py",
-            include_bytes!("../../../../../adapters/claude-sdk/aw_claude.py"),
+            include_bytes!("../../native/claude-sdk/aw_claude.py"),
         )?;
         let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "hooks": hooks}))?)?;
         let mut command = self.input.command.clone();
-        let mut paths = vec![context.files.0.clone()];
+        let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {
             paths.extend(std::env::split_paths(existing));
         }
@@ -122,7 +127,7 @@ impl PreparedLaunch for Prepared {
             .insert("PYTHONPATH".into(), std::env::join_paths(paths)?);
         command.environment.insert(
             "PYTHONPYCACHEPREFIX".into(),
-            context.files.0.join("pycache").into_os_string(),
+            context.files.directory().join("pycache").into_os_string(),
         );
         command
             .environment
@@ -185,21 +190,11 @@ fn routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn binding() -> HookBinding {
-        HookBinding {
-            adapter: "claude-sdk".into(),
-            binding: aw_service::Binding {
-                identity: aw_service::Identity {
-                    generation: "generation".into(),
-                    config_revision: "revision".into(),
-                },
-                instance_id: "instance".into(),
-                target: "target".into(),
-                audit_key: "audit".into(),
-            },
-            socket: "/tmp/aw.sock".into(),
+    fn binding() -> NativeContext {
+        NativeContext {
+            instance_id: "instance".into(),
+            target: "target".into(),
             cwd: "/work".into(),
-            events: BTreeMap::new(),
         }
     }
     fn native() -> Value {

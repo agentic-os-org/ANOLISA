@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { register } from '../../../adapters/openclaw/hooks.mjs';
+import { register } from '../../aw-adapter/native/openclaw/hooks.mjs';
 const plugin = { register: api => register(api, result => structuredClone(result)) };
 
 const binary = fileURLToPath(new URL('./fixtures/openclaw/client.mjs', import.meta.url));

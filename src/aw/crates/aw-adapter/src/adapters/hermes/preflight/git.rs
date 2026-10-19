@@ -4,7 +4,11 @@ use super::{checked_native_name, trusted_native_path, Result};
 use std::{ffi::OsString, os::unix::ffi::OsStrExt, time::Duration};
 
 /// Run a bounded Git probe in its native directory.
-pub(super) fn inspect(command: &aw_exec::CommandSpec, args: &[&str]) -> Result<Vec<u8>> {
+pub(super) fn inspect(
+    command: &aw_exec::CommandSpec,
+    args: &[&str],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>> {
     let mut probe = command.clone();
     probe.args = ["--no-replace-objects", "--no-optional-locks"]
         .into_iter()
@@ -20,7 +24,7 @@ pub(super) fn inspect(command: &aw_exec::CommandSpec, args: &[&str]) -> Result<V
             stderr_bytes: 4096,
         },
         std::time::Instant::now() + Duration::from_secs(5),
-        &crate::cli::run::CANCELLED,
+        cancelled,
     )?;
     if !output.status.success() {
         return Err(format!(
@@ -34,7 +38,10 @@ pub(super) fn inspect(command: &aw_exec::CommandSpec, args: &[&str]) -> Result<V
 }
 
 /// Protect repository locators, configuration and the automatic index Hook.
-fn checked_repository(identity: &aw_exec::CommandSpec) -> Result<Option<&std::path::Path>> {
+fn checked_repository<'a>(
+    identity: &'a aw_exec::CommandSpec,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Option<&'a std::path::Path>> {
     let source = &identity.cwd;
     checked_native_name(&source.join(".git"))?;
     // Match Git's ceiling normalization, including its empty-entry shortcut.
@@ -71,7 +78,7 @@ fn checked_repository(identity: &aw_exec::CommandSpec) -> Result<Option<&std::pa
             break;
         }
     }
-    let inspect = |args: &[&str]| inspect(identity, args);
+    let inspect = |args: &[&str]| inspect(identity, args, cancelled);
     // Linked worktrees locate their common metadata through this optional file.
     let git_dir = inspect(&["rev-parse", "--absolute-git-dir"])?;
     let git_dir = git_dir
@@ -110,12 +117,15 @@ fn checked_repository(identity: &aw_exec::CommandSpec) -> Result<Option<&std::pa
 }
 
 /// Validate effective configuration origins, includes and helper settings.
-pub(super) fn checked_configuration(identity: &aw_exec::CommandSpec) -> Result<()> {
-    let repository = checked_repository(identity)?;
+pub(super) fn checked_configuration(
+    identity: &aw_exec::CommandSpec,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    let repository = checked_repository(identity, cancelled)?;
     let source = &identity.cwd;
     // Git reports relative origins after entering the discovered worktree.
     let origin_directory = repository.unwrap_or(source);
-    let inspect = |args: &[&str]| inspect(identity, args);
+    let inspect = |args: &[&str]| inspect(identity, args, cancelled);
     // Native imports also run Git. Check every loaded configuration file,
     // including includes, before any status check or framework import can run helpers.
     // Origins omit absent scope files. Explicit scope paths work with older Git;

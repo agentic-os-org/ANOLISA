@@ -17,7 +17,7 @@ extern "C" fn stop(_: libc::c_int) {
 
 fn main() {
     match run() {
-        Ok(exit) => exit.finish(),
+        Ok(exit) => cli::finish(exit),
         Err(error) => {
             eprintln!("aw: {error}");
             std::process::exit(1);

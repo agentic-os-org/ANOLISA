@@ -2,13 +2,13 @@
 
 use super::super::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch, Readiness,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch, Readiness,
     },
     read_file, Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -27,7 +27,7 @@ const VERSION: &str = "2026.9.6";
 const PLUGIN: &str = "aw-native-hooks";
 const MAX_BUDGET_MS: u64 = 12000;
 
-pub(in crate::cli) struct OpenClaw;
+pub(crate) struct OpenClaw;
 
 struct Prepared {
     input: LaunchInput,
@@ -37,16 +37,12 @@ struct Prepared {
 }
 
 impl Adapter for OpenClaw {
-    fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        if input.flags.keys().any(|key| {
-            ![
-                "--config",
-                "--agent",
-                "--native-settings",
-                "--native-state-dir",
-            ]
-            .contains(&key.as_str())
-        }) {
+    fn prepare(
+        &self,
+        input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if input.options.profile.is_some() {
             return Err("OpenClaw supports --native-settings and --native-state-dir; another adapter's profile options are not accepted".into());
         }
         let version_args = check_args(&input.command.args)?;
@@ -72,17 +68,19 @@ impl Adapter for OpenClaw {
             return Err("OpenClaw test-mode environment bypasses native Gateway ownership".into());
         }
         let settings_path = input
-            .flags
-            .get("--native-settings")
+            .options
+            .settings
+            .as_ref()
             .ok_or("OpenClaw requires --native-settings FILE and --native-state-dir ABS_DIR")?;
         let state_path = input
-            .flags
-            .get("--native-state-dir")
+            .options
+            .state_dir
+            .as_ref()
             .ok_or("OpenClaw requires --native-settings FILE and --native-state-dir ABS_DIR")?;
         let settings: Value = serde_json::from_slice(&read_file(settings_path, 4 * 1024 * 1024)?)?;
         check_settings(&settings)?;
         let (profile, lock) = lock_profile(Path::new(state_path))?;
-        let version = adapter::version_output(&input.command, &version_args)?;
+        let version = adapter::Probe(cancelled).version_output(&input.command, &version_args)?;
         if version.split_whitespace().take(2).collect::<Vec<_>>() != ["OpenClaw", VERSION] {
             return Err(format!("OpenClaw {VERSION} is required by this adapter").into());
         }
@@ -94,7 +92,7 @@ impl Adapter for OpenClaw {
         }))
     }
 
-    fn normalize(&self, binding: &HookBinding, name: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, name: &str, native: &Value) -> Result<Value> {
         let hook = match name {
             "tool.before" => "before_tool_call",
             "tool.after" => "after_tool_call",
@@ -137,8 +135,8 @@ impl Adapter for OpenClaw {
         let call_id = format!("{:x}", Sha256::digest(serde_json::to_vec(&[run, call])?));
         Ok(json!({
             "name": name,
-            "agent": {"adapter":"openclaw", "binding_id":binding.binding.target,
-                "instance_id":binding.binding.instance_id},
+            "agent": {"adapter":"openclaw", "binding_id":binding.target,
+                "instance_id":binding.instance_id},
             "session_id": session,
             "tool": {"name":tool, "native_name":tool, "call_id":call_id,
                 "input":params, "result":event.get("result").unwrap_or(&Value::Null)},
@@ -172,25 +170,25 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let plugin = context.files.0.join("openclaw-plugin");
+        let plugin = context.files.directory().join("openclaw-plugin");
         fs::create_dir(&plugin)?;
         context.files.write(
             "openclaw-plugin/index.mjs",
-            include_bytes!("../../../../../adapters/openclaw/index.mjs"),
+            include_bytes!("../../native/openclaw/index.mjs"),
         )?;
         context.files.write(
             "openclaw-plugin/hooks.mjs",
-            include_bytes!("../../../../../adapters/openclaw/hooks.mjs"),
+            include_bytes!("../../native/openclaw/hooks.mjs"),
         )?;
         context.files.write(
             "openclaw-plugin/package.json",
-            include_bytes!("../../../../../adapters/openclaw/package.json"),
+            include_bytes!("../../native/openclaw/package.json"),
         )?;
         context.files.write(
             "openclaw-plugin/openclaw.plugin.json",
-            include_bytes!("../../../../../adapters/openclaw/openclaw.plugin.json"),
+            include_bytes!("../../native/openclaw/openclaw.plugin.json"),
         )?;
-        let ready = context.files.0.join("ready.json");
+        let ready = context.files.directory().join("ready.json");
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -427,9 +425,11 @@ mod tests {
 
     #[test]
     fn after_identity_matches_native_completion_case_and_aliases() {
-        let binding: HookBinding = serde_json::from_value(json!({"adapter":"openclaw",
-            "binding":{"identity":{"generation":"fixture","config_revision":"a".repeat(64)},"instance_id":"instance","target":"target","audit_key":"key"},
-            "socket":"/tmp/fixture.sock","cwd":"/tmp","events":{}})).unwrap();
+        let binding = NativeContext {
+            target: "target".into(),
+            instance_id: "instance".into(),
+            cwd: "/tmp".into(),
+        };
         for (raw, canonical) in [
             ("Custom/Tool", "custom/tool"),
             ("Bash", "exec"),
@@ -460,7 +460,7 @@ mod tests {
         let root = tempfile::tempdir_in(parent).unwrap();
         let launch = root.path().join("launch");
         fs::create_dir(&launch).unwrap();
-        let files = crate::cli::run::Artifacts(launch);
+        let files = crate::test_support::Artifacts(launch);
         let steps: Vec<_> = ["observe", "compress"]
             .into_iter()
             .map(|id| AdmittedStep {
@@ -483,7 +483,7 @@ mod tests {
             input: LaunchInput {
                 document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
                 target: "openclaw".into(),
-                flags: BTreeMap::new(),
+                options: crate::NativeOptions::default(),
                 command: aw_exec::CommandSpec {
                     program: "/native/openclaw".into(),
                     args: vec!["gateway".into(), "run".into()],
@@ -577,11 +577,11 @@ mod tests {
 
     #[test]
     fn normalized_events_obey_provider_contract_and_scope_call_ids_to_runs() {
-        let binding: HookBinding = serde_json::from_value(json!({"adapter":"openclaw",
-            "binding":{"identity":{"generation":"fixture","config_revision":"a".repeat(64)},
-                "instance_id":"instance","target":"target","audit_key":"key"},
-            "socket":"/tmp/fixture.sock","cwd":"/tmp","events":{}}))
-        .unwrap();
+        let binding = NativeContext {
+            target: "target".into(),
+            instance_id: "instance".into(),
+            cwd: "/tmp".into(),
+        };
         let mut native = json!({"hook":"before_tool_call","event":{"toolName":"exec",
             "toolCallId":"call","runId":"first","params":{"command":"literal $HOME"}},
             "context":{"sessionId":"session"}});

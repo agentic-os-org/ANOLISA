@@ -17,12 +17,13 @@ for independent development and distribution.
 
 ## Crate relationships
 
-The AW framework contains eight crates under `crates/`. Concrete Providers are
+The AW framework contains nine crates under `crates/`. Concrete Providers are
 maintained separately under `providers/`.
 
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
-| `aw-service` | `aw` CLI, native Adapters, local service, and client | config, contracts, core, exec, host, provider |
+| `aw-service` | `aw` CLI, local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
+| `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
 | `aw-host` | Prepare Providers and execute admitted Hook steps | config, exec, provider |
 | `aw-provider` | Validate Provider messages and capability admission | config |
 | `aw-exec` | Bound process lifetimes and output; clean up owned processes | None |
@@ -43,13 +44,13 @@ on `aw-service`.
 
 These implementations each own an independent Cargo workspace and lockfile at
 the repository root. They connect as separate processes and are not part of the
-eight framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
+nine framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](providers.md).
 
 ## One Hook request
 
-1. The Adapter in `aw run` checks the native entrypoint, registers callbacks, and
-   starts the Agent.
+1. `aw run` calls `aw-adapter` to check the native entrypoint and prepare registration,
+   then the launcher starts the Agent.
 2. The Agent triggers a callback; the Adapter translates it into a service request.
 3. `aw-service` manages the binding, event deadline, and audit, then delegates the
    step to `aw-host`.
@@ -77,7 +78,7 @@ contracts and are not interchangeable call layers.
 
 ## Directories and source entry points
 
-`src/aw/Cargo.toml` defines only the workspace. Eight framework crates live in
+`src/aw/Cargo.toml` defines only the workspace. Nine framework crates live in
 `crates/`; two concrete Providers live in the repository-root `providers/`, each
 with its own workspace, source and tests. The former root `src/` contracts code now lives in `crates/aw-contracts/`.
 
@@ -88,18 +89,20 @@ and packaging scope.
 
 | Path, relative to `src/aw/` | Content |
 | --- | --- |
-| `crates/aw-service/src/main.rs`, `crates/aw-service/src/cli/` | CLI, launcher, and native Adapters |
+| `crates/aw-service/src/main.rs`, `crates/aw-service/src/cli/` | CLI, launcher and RPC coordination |
 | `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
 | `crates/aw-core/src/journal.rs` | Durable audit storage |
 | `crates/aw-contracts/src/registry.rs` | Contract schemas embedded in the program |
 | `../../providers/agent-sec-core/`, `../../providers/tokenless/` | Concrete Providers, configuration examples, and tests |
-| `adapters/` | Packaged Python/JavaScript native bridge assets |
+| `crates/aw-adapter/src/` | Shared native dialects and catalog for launcher and service |
+| `crates/aw-adapter/native/` | Packaged Python/JavaScript native bridge assets |
 | `scripts/`, `tests/` | Workspace checks, cross-language vectors, and native acceptance |
 | `docs/design/` | Protocol contracts, boundaries, and design rationale |
 
 Follow the [design index](../../../../src/aw/docs/design/README.md) in call order
-for details. See [Contributing](../../../../src/aw/CONTRIBUTING.md) for the
+for details. [Architecture boundaries](../../../../src/aw/docs/design/architecture-boundaries.md)
+explains Adapter interfaces and the deferred release changes. See [Contributing](../../../../src/aw/CONTRIBUTING.md) for the
 development environment and checks.
 
 ## Schema ownership

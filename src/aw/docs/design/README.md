@@ -5,9 +5,12 @@
 Start with the [architecture overview](../../../../docs/developer-guide/en/aw/architecture.md)
 for crate dependencies and source entry points. The current Hook path is:
 
+Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
+internal interfaces and release work deferred from this migration.
+
 ```mermaid
 flowchart LR
-    Agent[Native Agent] --> Adapter[Adapter]
+    Agent[Native Agent] --> Adapter[aw-adapter]
     Adapter --> Service[aw-service]
     Service --> Host[aw-host]
     Host --> Exec[aw-exec]

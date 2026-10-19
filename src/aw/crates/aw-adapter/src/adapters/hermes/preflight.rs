@@ -17,6 +17,7 @@ use std::{
 pub(super) fn checked_profile_command(
     command: &mut aw_exec::CommandSpec,
     profile: &std::path::Path,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<(OsString, PathBuf, tempfile::TempDir)> {
     checked_loader_environment(command)?;
     let python = python_entrypoint(command)?;
@@ -83,7 +84,7 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
             stderr_bytes: 4096,
         },
         std::time::Instant::now() + Duration::from_secs(5),
-        &super::super::super::run::CANCELLED,
+        cancelled,
     )
     .map_err(|error| {
         format!(
@@ -97,8 +98,8 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
     }
     let (source, sites): (PathBuf, Vec<PathBuf>) = serde_json::from_slice(&output.stdout)?;
     let source = trusted_native_path(&source)?;
-    checked_checkout(command, &source)?;
-    checked_site_paths(sites)?;
+    checked_checkout(command, &source, cancelled)?;
+    checked_site_paths(sites, cancelled)?;
     super::install::dotenv(&source.join(".env"))?;
     // Use the pinned loader's dotenv precedence/interpolation, before native CLI
     // imports. This subprocess cannot alter the eventual chat/provider environment.
@@ -128,7 +129,7 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
             stderr_bytes: 4096,
         },
         std::time::Instant::now() + Duration::from_secs(5),
-        &super::super::super::run::CANCELLED,
+        cancelled,
     )?;
     if !output.status.success() {
         return Err("Hermes native dotenv probe failed".into());
@@ -148,9 +149,9 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
             .map(|(key, value)| (OsString::from_vec(key), OsString::from_vec(value))),
     );
     checked_loader_environment(&after_dotenv)?;
-    checked_checkout(&after_dotenv, &source)?;
+    checked_checkout(&after_dotenv, &source, cancelled)?;
     // Sticky directories protect the script inode, not sibling import names.
-    let version = adapter::version_output_with_timeout(
+    let version = adapter::Probe(cancelled).version_output_with_timeout(
         &discovery,
         &python_args(
             cache.path(),
@@ -174,7 +175,11 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
     Ok((selector, python, cache))
 }
 
-fn checked_checkout(command: &aw_exec::CommandSpec, source: &std::path::Path) -> Result<()> {
+fn checked_checkout(
+    command: &aw_exec::CommandSpec,
+    source: &std::path::Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
     // Native Git runs from both cwd and source; relative scopes select different files.
     for key in [
         "GIT_CONFIG_SYSTEM",
@@ -210,7 +215,7 @@ fn checked_checkout(command: &aw_exec::CommandSpec, source: &std::path::Path) ->
     identity
         .environment
         .insert("GIT_WORK_TREE".into(), source.into());
-    let revision = adapter::version_output(
+    let revision = adapter::Probe(cancelled).version_output(
         &identity,
         &[
             "--no-replace-objects".into(),
@@ -228,15 +233,15 @@ fn checked_checkout(command: &aw_exec::CommandSpec, source: &std::path::Path) ->
             format!("Hermes official checkout {REVISION} is required by this adapter").into(),
         );
     }
-    let inspect = |args: &[&str]| git::inspect(&identity, args);
-    git::checked_configuration(&identity)?;
+    let inspect = |args: &[&str]| git::inspect(&identity, args, cancelled);
+    git::checked_configuration(&identity, cancelled)?;
     // Native imports also invoke Git from the caller's directory. Keep its
     // repository/includeIf context instead of reusing the installation context.
     if command.cwd != identity.cwd {
         let mut launch_git = command.clone();
         launch_git.program = identity.program.clone();
         launch_git.environment.remove(&OsString::from("GIT_CONFIG"));
-        git::checked_configuration(&launch_git)?;
+        git::checked_configuration(&launch_git, cancelled)?;
     }
     // Porcelain intentionally trusts these index flags, even when bytes differ.
     // Reject them without refreshing or rewriting the caller's index.
@@ -256,7 +261,7 @@ fn checked_checkout(command: &aw_exec::CommandSpec, source: &std::path::Path) ->
         trusted_native_path(&source.join(std::ffi::OsStr::from_bytes(path)))?;
     }
     let status = |command: &aw_exec::CommandSpec| {
-        adapter::version_output(
+        adapter::Probe(cancelled).version_output(
             command,
             &[
                 "--no-replace-objects".into(),
@@ -287,7 +292,7 @@ fn checked_checkout(command: &aw_exec::CommandSpec, source: &std::path::Path) ->
     fresh
         .environment
         .insert("GIT_INDEX_FILE".into(), scratch.path().join("index").into());
-    adapter::version_output(
+    adapter::Probe(cancelled).version_output(
         &fresh,
         &[
             "--no-replace-objects".into(),
@@ -332,11 +337,14 @@ fn checked_loader_environment(command: &aw_exec::CommandSpec) -> Result<()> {
     Ok(())
 }
 
-fn checked_site_paths(mut pending: Vec<PathBuf>) -> Result<()> {
+fn checked_site_paths(
+    mut pending: Vec<PathBuf>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut visited = std::collections::BTreeSet::new();
     while let Some(path) = pending.pop() {
-        if super::super::super::run::CANCELLED.load(std::sync::atomic::Ordering::Acquire) {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(aw_exec::Error::Cancelled.into());
         }
         if std::time::Instant::now() >= deadline {

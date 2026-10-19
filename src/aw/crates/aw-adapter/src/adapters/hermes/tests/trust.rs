@@ -31,7 +31,14 @@ fn callback_probe_ignores_project_modules_and_keeps_explicit_import_paths() {
     };
     let cache = tempfile::tempdir().unwrap();
     assert_eq!(
-        callback_timeout(&command, &python, "default".as_ref(), cache.path()).unwrap(),
+        callback_timeout(
+            &command,
+            &python,
+            "default".as_ref(),
+            cache.path(),
+            &std::sync::atomic::AtomicBool::new(false)
+        )
+        .unwrap(),
         30.0
     );
 }
@@ -96,10 +103,10 @@ fn mismatched_or_incomplete_plugins_support_explicit_reinstallation() {
         let input = LaunchInput {
             document: json!({}),
             target: "hermes".into(),
-            flags: BTreeMap::from([(
-                "--native-profile".into(),
-                profile.0.to_str().unwrap().into(),
-            )]),
+            options: crate::NativeOptions {
+                profile: Some(profile.0.to_str().unwrap().into()),
+                ..Default::default()
+            },
             command: aw_exec::CommandSpec {
                 program: "/missing-hermes".into(),
                 args: vec!["chat".into()],
@@ -107,7 +114,11 @@ fn mismatched_or_incomplete_plugins_support_explicit_reinstallation() {
                 environment: BTreeMap::new(),
             },
         };
-        let launch_error = Hermes.prepare(input).err().unwrap().to_string();
+        let launch_error = Hermes
+            .prepare(input, &std::sync::atomic::AtomicBool::new(false))
+            .err()
+            .unwrap()
+            .to_string();
         let install_error = install_profile(&profile.0).unwrap_err().to_string();
         for error in [launch_error, install_error] {
             assert!(error.contains(plugin.to_str().unwrap()), "{error}");
@@ -273,7 +284,12 @@ fn installation_releases_lock_with_an_inherited_descriptor() {
                 .filter_map(std::result::Result::ok)
                 .find(|entry| fs::read_link(entry.path()).ok().as_ref() == Some(&lock))
                 .ok_or("installation lock descriptor missing")?;
-            let fd = descriptor.file_name().to_str().unwrap().parse::<i32>()?;
+            let fd = descriptor
+                .file_name()
+                .to_str()
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
             // Model a concurrent fork retaining this open-file description until exec.
             // SAFETY: dup returns a new owned descriptor; OwnedFd closes it on exit.
             let fd = unsafe { libc::dup(fd) };

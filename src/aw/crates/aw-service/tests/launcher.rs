@@ -166,8 +166,8 @@ else:
             for directory in [profile.join("plugins"), plugin.clone()] {
                 fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
             }
-            let source =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/hermes");
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../aw-adapter/native/hermes");
             for name in ["plugin.yaml", "__init__.py"] {
                 fs::copy(source.join(name), plugin.join(name)).unwrap();
                 fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();

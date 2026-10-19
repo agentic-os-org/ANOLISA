@@ -131,7 +131,8 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
 协议阅读顺序见[设计索引](docs/design/README_zh.md)。
 
-原生 Adapter 放在 CLI 中；服务和 Host 保持框架无关。
+原生方言和桥接资产归 `aw-adapter`；CLI 负责参数、RPC、信号和资源，服务负责
+状态、预算和审计。两者共用 Adapter，不向它传递服务内部类型。
 `aw-provider` 负责离线协议校验，进程执行统一使用 `aw-exec`。
 修改 crate 边界时，同时更新 [check_layout.py](scripts/check_layout.py)
 和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](../../docs/developer-guide/zh/aw/architecture.md)。

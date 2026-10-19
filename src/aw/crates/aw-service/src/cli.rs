@@ -1,11 +1,8 @@
 //! Native launch commands share the daemon client; Agent arguments remain literal.
 
 mod adapter;
-mod adapters;
 mod hook;
 mod policy;
-mod projection;
-mod qoder;
 mod readiness;
 mod run;
 
@@ -65,28 +62,23 @@ impl Arguments {
     }
 }
 
-pub(crate) enum Exit {
-    Code(i32),
-    Signal(i32),
-}
+pub(crate) use aw_adapter::NativeExit as Exit;
 
-impl Exit {
-    pub fn finish(self) -> ! {
-        match self {
-            Self::Code(code) => std::process::exit(code),
-            Self::Signal(signal) => {
-                // SAFETY: native signal numbers are checked before construction;
-                // reset our launcher handler and deliver the original status.
-                unsafe {
-                    libc::signal(signal, libc::SIG_DFL);
-                    let mut set = std::mem::zeroed::<libc::sigset_t>();
-                    libc::sigemptyset(&mut set);
-                    libc::sigaddset(&mut set, signal);
-                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-                    libc::raise(signal);
-                }
-                std::process::exit(128 + signal)
+pub(crate) fn finish(exit: Exit) -> ! {
+    match exit {
+        Exit::Code(code) => std::process::exit(code),
+        Exit::Signal(signal) => {
+            // SAFETY: native signal numbers are checked before construction;
+            // reset our launcher handler and deliver the original status.
+            unsafe {
+                libc::signal(signal, libc::SIG_DFL);
+                let mut set = std::mem::zeroed::<libc::sigset_t>();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, signal);
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+                libc::raise(signal);
             }
+            std::process::exit(128 + signal)
         }
     }
 }

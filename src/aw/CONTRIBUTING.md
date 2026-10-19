@@ -155,7 +155,9 @@ the repository-root `providers/<provider>/` with independent workspaces; the roo
 [Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
 dependencies, and the [design index](docs/design/README.md) for protocol reading order.
 
-Keep native Adapters in the CLI and the service/Host framework-independent.
+Keep native dialects and bridge assets in `aw-adapter`; the CLI owns argument
+parsing, RPCs, signals and resources. The service owns state, budgets and audit.
+Both reuse the Adapter without exposing service internals to it.
 `aw-provider` owns offline protocol validation; process execution uses `aw-exec`.
 Changes to crate boundaries must update [check_layout.py](scripts/check_layout.py),
 its [regression tests](tests/test_ci_checks.py), and the

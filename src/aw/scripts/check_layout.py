@@ -7,6 +7,11 @@ from pathlib import Path
 def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and source sizes explicit."""
     allowed = {
+        "aw-adapter": {
+            "aw-config", "aw-contracts", "aw-exec", "aw-provider",
+            "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror",
+            "libc", "semver", "tempfile",
+        },
         "aw-package": {
             "serde",
             "serde_json",
@@ -49,6 +54,7 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-exec": {"libc", "thiserror"},
         "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
         "aw-service": {
+            "aw-adapter",
             "aw-contracts",
             "aw-config",
             "aw-core",
@@ -57,7 +63,6 @@ def structure(metadata: dict, root: Path) -> None:
             "aw-provider",
             "libc",
             "reqwest",
-            "semver",
             "serde",
             "serde_json",
             "serde_yaml_ng",

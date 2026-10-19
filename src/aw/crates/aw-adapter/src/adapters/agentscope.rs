@@ -1,33 +1,31 @@
 //! AgentScope 2.0.6 public factory bridge with explicit application opt-in.
 
-use crate::cli::{
+use crate::{
     adapter::{
-        self, Adapter, HookBinding, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
-        PreparedLaunch, Readiness,
+        self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
+        NativeContext, PreparedLaunch, Readiness,
     },
     Exit, Result,
 };
+use aw_provider::admission::AdapterCapabilities as Capabilities;
 use aw_provider::admission::AdmittedStep;
-use aw_service::Capabilities;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, time::Duration};
 
 const VERSION: &str = "2.0.6";
-pub(in crate::cli) struct AgentScope;
+pub(crate) struct AgentScope;
 struct Prepared {
     input: LaunchInput,
 }
 
 impl Adapter for AgentScope {
-    fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>> {
-        for flag in [
-            "--native-settings",
-            "--native-profile",
-            "--native-state-dir",
-        ] {
-            if input.flags.contains_key(flag) {
-                return Err("AgentScope uses an explicit public factory Bridge; native override flags are unsupported".into());
-            }
+    fn prepare(
+        &self,
+        input: LaunchInput,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn PreparedLaunch>> {
+        if !input.options.is_empty() {
+            return Err("AgentScope uses an explicit public factory Bridge; native override flags are unsupported".into());
         }
         let first = input
             .command
@@ -48,7 +46,7 @@ impl Adapter for AgentScope {
         } else if first.starts_with('-') || !first.ends_with(".py") {
             return Err("AgentScope requires a Python script or -m module entrypoint; interpreter override flags are unsupported".into());
         }
-        let probe = adapter::version_output(
+        let probe = adapter::Probe(cancelled).version_output(
             &input.command,
             &[
                 "-c".into(),
@@ -60,7 +58,7 @@ impl Adapter for AgentScope {
         }
         Ok(Box::new(Prepared { input }))
     }
-    fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+    fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         normalize(binding, event, native)
     }
     fn reply(&self, blocked: bool) -> HookOutput {
@@ -87,7 +85,7 @@ impl PreparedLaunch for Prepared {
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
-        let ready = context.files.0.join("agentscope-ready.json");
+        let ready = context.files.directory().join("agentscope-ready.json");
         let native = context.files.write(
             "agentscope-hooks.json",
             &serde_json::to_vec(&json!({
@@ -97,11 +95,11 @@ impl PreparedLaunch for Prepared {
         )?;
         context.files.write(
             "aw_agentscope.py",
-            include_bytes!("../../../../../adapters/agentscope/aw_agentscope.py"),
+            include_bytes!("../../native/agentscope/aw_agentscope.py"),
         )?;
         let mut command = self.input.command.clone();
         let inherited = command.environment.get(std::ffi::OsStr::new("PYTHONPATH"));
-        let mut paths = vec![context.files.0.clone()];
+        let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(inherited) = inherited {
             paths.extend(std::env::split_paths(inherited));
         }
@@ -185,7 +183,7 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
         .ok_or_else(|| format!("AgentScope requires nonempty {label} (up to 512 bytes)").into())
 }
 
-fn normalize(binding: &HookBinding, event: &str, native: &Value) -> Result<Value> {
+fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
     if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
         return Err("AgentScope callback event does not match the binding".into());
     }
@@ -205,7 +203,7 @@ fn normalize(binding: &HookBinding, event: &str, native: &Value) -> Result<Value
     }
     Ok(json!({
         "name": event,
-        "agent": {"adapter": "agentscope", "binding_id": binding.binding.target, "instance_id": binding.binding.instance_id},
+        "agent": {"adapter": "agentscope", "binding_id": binding.target, "instance_id": binding.instance_id},
         "session_id": session,
         "tool": {"name": tool, "native_name": tool, "call_id": call, "input": input,
             "result": native.get("tool_response").cloned().unwrap_or(Value::Null)},
@@ -217,7 +215,6 @@ fn normalize(binding: &HookBinding, event: &str, native: &Value) -> Result<Value
 mod tests {
     use super::*;
     use aw_provider::admission::StepExecution;
-    use aw_service::{Binding, Identity};
     use std::path::PathBuf;
 
     #[test]
@@ -265,21 +262,11 @@ mod tests {
         assert_eq!(hooks[2]["replace_result"], false);
     }
 
-    fn binding() -> HookBinding {
-        HookBinding {
-            adapter: "agentscope".into(),
-            binding: Binding {
-                identity: Identity {
-                    generation: "generation".into(),
-                    config_revision: "revision".into(),
-                },
-                instance_id: "instance".into(),
-                target: "sdk".into(),
-                audit_key: "audit".into(),
-            },
-            socket: PathBuf::from("/socket"),
+    fn binding() -> NativeContext {
+        NativeContext {
+            instance_id: "instance".into(),
+            target: "sdk".into(),
             cwd: PathBuf::from("/cwd"),
-            events: BTreeMap::new(),
         }
     }
 

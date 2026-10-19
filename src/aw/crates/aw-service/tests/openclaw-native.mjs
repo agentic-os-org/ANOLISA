@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { register } from '../../../adapters/openclaw/hooks.mjs';
+import { register } from '../../aw-adapter/native/openclaw/hooks.mjs';
 
 const packageRoot = process.env.OPENCLAW_PACKAGE_DIR;
 assert.ok(packageRoot, 'Set OPENCLAW_PACKAGE_DIR to the installed OpenClaw 2026.9.6 package');
@@ -130,7 +130,7 @@ test('official plugin loader accepts the entrypoint, SDK import and middleware m
   const entry = join(directory, 'plugin');
   mkdirSync(entry, { mode: 0o700 });
   for (const name of ['index.mjs', 'hooks.mjs', 'package.json', 'openclaw.plugin.json']) {
-    copyFileSync(fileURLToPath(new URL(`../../../adapters/openclaw/${name}`, import.meta.url)), join(entry, name));
+    copyFileSync(fileURLToPath(new URL(`../../aw-adapter/native/openclaw/${name}`, import.meta.url)), join(entry, name));
     chmodSync(join(entry, name), 0o600);
   }
   const loader = readdirSync(dist).find(name => /^loader-runtime-load-.*\.mjs$/.test(name));

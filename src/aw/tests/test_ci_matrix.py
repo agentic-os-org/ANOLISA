@@ -200,11 +200,11 @@ class ScriptLayoutTests(GateFixture):
         for relative in (
             "utility.py",
             "crates/new/scripts/check.py",
-            "adapters/new/worker.py",
+            "crates/aw-adapter/native/new/worker.py",
             "scripts/check.py",
             "tests/acceptance.py",
             "crates/new/tests/fixtures/bridge.js",
-            "adapters/new/worker.mjs",
+            "crates/aw-adapter/native/new/worker.mjs",
             "crates/new/src/bridge.cjs",
         ):
             file = self.root / relative
@@ -217,8 +217,8 @@ class ScriptLayoutTests(GateFixture):
             file.unlink()
 
     def test_symlink_cannot_bypass_script_audit(self) -> None:
-        directory = self.root / "adapters"
-        directory.mkdir()
+        directory = self.root / "crates/aw-adapter/native"
+        directory.mkdir(parents=True)
         (directory / "bridge.py").symlink_to(self.root / "outside.py")
         with self.assertRaisesRegex(ValueError, "symlink"):
             source_sizes(self.root)

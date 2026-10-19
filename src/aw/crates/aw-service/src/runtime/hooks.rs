@@ -49,22 +49,6 @@ fn lock_hooks<T>(hooks: &Mutex<T>, deadline: Instant) -> Result<MutexGuard<'_, T
     }
 }
 
-fn hermes_completion(mut native: Value) -> Result<Value> {
-    if !matches!(
-        native["hook_event_name"].as_str(),
-        Some("post_tool_call" | "transform_tool_result")
-    ) {
-        return Err(rejected("native_completion_seam_invalid"));
-    }
-    if let Some(fields) = native.as_object_mut() {
-        fields.insert("hook_event_name".into(), json!("post_tool_call"));
-        if let Some(extra) = fields.get_mut("extra").and_then(Value::as_object_mut) {
-            extra.remove("middleware_trace");
-        }
-    }
-    Ok(native)
-}
-
 impl Runtime {
     pub(super) fn close_hook(
         &self,
@@ -191,104 +175,36 @@ impl Runtime {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| rejected("native_correlation_missing"))?
             .to_owned();
-        let (hooks, hook_open, hermes_after, replacement_after) =
-            {
-                let instances = self
-                    .instances
-                    .lock()
-                    .map_err(|_| rejected("state_poisoned"))?;
-                let instance = instances
-                    .get(&instance_id)
-                    .and_then(Option::as_ref)
-                    .filter(|instance| !instance.closing)
-                    .ok_or_else(|| rejected("unknown_instance"))?;
-                (
-                    Arc::clone(&instance.hooks),
-                    Arc::clone(&instance.hook_open),
-                    value["name"] == "tool.after"
-                        && value["agent"]["adapter"] == "hermes"
-                        && instance.host.steps().iter().any(|step| {
-                            step.event == "tool.after" && step.execution.replaces_result()
-                        }),
-                    instance
-                        .host
-                        .steps()
-                        .iter()
-                        .any(|step| step.event == "tool.after" && step.execution.replaces_result()),
-                )
-            };
+        let (hooks, hook_open, replacement_after) = {
+            let instances = self
+                .instances
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?;
+            let instance = instances
+                .get(&instance_id)
+                .and_then(Option::as_ref)
+                .filter(|instance| !instance.closing)
+                .ok_or_else(|| rejected("unknown_instance"))?;
+            (
+                Arc::clone(&instance.hooks),
+                Arc::clone(&instance.hook_open),
+                instance
+                    .host
+                    .steps()
+                    .iter()
+                    .any(|step| step.event == "tool.after" && step.execution.replaces_result()),
+            )
+        };
         if native_input.len() > aw_provider::MAX_MESSAGE_BYTES {
             return Err(rejected("event_size_limit"));
         }
-        let mut comparison = value.clone();
-        let mut compared_input = native_input.clone();
-        let completion = value["native"]
-            .as_object_mut()
-            .and_then(|native| native.remove("aw_completion"));
-        let mut observed = false;
-        let mut completion_digest = None;
-        if let Some(completion) = completion {
-            if !replacement_after
-                || value["agent"]["adapter"] != "openclaw"
-                || value["name"] != "tool.after"
-            {
-                return Err(rejected("native_completion_seam_invalid"));
-            }
-            comparison = completion["snapshot"].clone();
-            if comparison["native"]["hook"] != "after_tool_call"
-                || value["native"]["hook"] != "after_tool_call"
-            {
-                return Err(rejected("native_completion_seam_invalid"));
-            }
-            match completion["phase"].as_str() {
-                Some("replacement") if value == comparison => {}
-                Some("observation") => {
-                    observed = true;
-                    let mut bound = value.clone();
-                    bound["native"] = comparison["native"].clone();
-                    for field in ["result", "result_projection"] {
-                        bound["tool"]
-                            .as_object_mut()
-                            .ok_or_else(|| rejected("event_invalid"))?
-                            .remove(field);
-                        if let Some(original) = comparison["tool"].get(field) {
-                            bound["tool"][field] = original.clone();
-                        }
-                    }
-                    if bound != comparison {
-                        return Err(rejected("native_correlation_mismatch"));
-                    }
-                    let mut digest = Sha256::new();
-                    digest.update(
-                        serde_json::to_vec(&value).map_err(|_| rejected("event_encoding"))?,
-                    );
-                    digest.update(&native_input);
-                    completion_digest = Some(digest.finalize().into());
-                }
-                _ => return Err(rejected("native_completion_seam_invalid")),
-            }
-            compared_input = completion["input"]
-                .as_str()
-                .ok_or_else(|| rejected("native_event_invalid"))?
-                .as_bytes()
-                .to_vec();
-            if serde_json::from_slice::<Value>(&compared_input)
-                .map_err(|_| rejected("native_event_invalid"))?
-                != comparison["native"]
-            {
-                return Err(rejected("native_correlation_mismatch"));
-            }
-        }
-        if hermes_after {
-            // Hermes observes completion before its model-bound transform seam.
-            // Only the seam name and observer-only trace differ; retain all other
-            // fields in the binding and the first callback's exact native bytes.
-            comparison["native"] = hermes_completion(comparison["native"].take())?;
-            let native: Value = serde_json::from_slice(&native_input)
-                .map_err(|_| rejected("native_event_invalid"))?;
-            compared_input = serde_json::to_vec(&hermes_completion(native)?)
-                .map_err(|_| rejected("event_encoding"))?;
-        }
+        let aw_adapter::completion::Comparison {
+            value: comparison,
+            input: compared_input,
+            observed,
+            completion_digest,
+        } = aw_adapter::completion::normalize(&mut value, &native_input, replacement_after)
+            .map_err(|error| rejected(error.code()))?;
         let encoded = serde_json::to_vec(&comparison).map_err(|_| rejected("event_encoding"))?;
         if native_input.len() > aw_provider::MAX_MESSAGE_BYTES
             || compared_input.len() > aw_provider::MAX_MESSAGE_BYTES
@@ -401,30 +317,6 @@ mod tests {
             mpsc, Mutex,
         },
     };
-
-    #[test]
-    fn hermes_completion_only_normalizes_the_two_final_native_seams() {
-        let original = json!({"hook_event_name":"post_tool_call","extra":{"result":"original","middleware_trace":["observer-only"]}});
-        let final_seam =
-            json!({"hook_event_name":"transform_tool_result","extra":{"result":"original"}});
-        assert_eq!(
-            hermes_completion(original).unwrap(),
-            hermes_completion(final_seam.clone()).unwrap()
-        );
-        let mut changed = final_seam.clone();
-        changed["extra"]["result"] = json!("changed");
-        assert_ne!(
-            hermes_completion(final_seam).unwrap(),
-            hermes_completion(changed).unwrap()
-        );
-        for native in [
-            json!(null),
-            json!("opaque"),
-            json!({"hook_event_name":"pre_tool_call"}),
-        ] {
-            assert!(hermes_completion(native).is_err());
-        }
-    }
 
     #[test]
     fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {

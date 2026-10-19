@@ -1,6 +1,7 @@
 {
   "version": 1,
   "required_targets": [
+    "aw-adapter/lib/aw_adapter",
     "aw-config/test/configuration",
     "aw-contracts/test/canonical",
     "aw-contracts/test/contracts",
@@ -34,8 +35,8 @@
   ],
   "cases": {
     "catalog": {
-      "target": "aw-service/bin/aw",
-      "test": "cli::adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
     },
     "security-retry": {
       "target": "aw-service/test/pretool",

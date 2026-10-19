@@ -1,6 +1,5 @@
 //! Service-owned evidence selection; native dispatch never depends on these optional reads.
 
-mod association;
 mod observation;
 mod projection;
 pub(super) use observation::Observation;
@@ -23,7 +22,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub(super) use association::association;
+pub(super) fn association(adapter: &str, event: &Value, input: Option<&[u8]>) -> Value {
+    aw_adapter::association::association(adapter, event, input, |bytes| {
+        crate::ipc::decode::<Value>(bytes).ok()
+    })
+}
 
 #[derive(Clone, Deserialize)]
 struct Settings {
@@ -48,16 +51,7 @@ impl Settings {
     }
 }
 
-fn source_matches_adapter(adapter: &Value, name: &Value) -> bool {
-    // Source labels corroborate the framework only, never the native session or process.
-    matches!(
-        (adapter.as_str(), name.as_str()),
-        (Some("qoder"), Some("qoder" | "Qoder"))
-            | (Some("hermes"), Some("hermes" | "Hermes"))
-            | (Some("openclaw"), Some("openclaw" | "OpenClaw"))
-            | (Some("qwenpaw"), Some("qwenpaw"))
-    )
-}
+use aw_adapter::association::source_matches_adapter;
 
 pub(super) struct Contexts {
     document: Value,

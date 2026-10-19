@@ -243,7 +243,7 @@
             "--source",
             "{source}",
             "--plugin",
-            "{aw_root}/adapters/hermes"
+            "{aw_root}/crates/aw-adapter/native/hermes"
           ],
           "timeout_seconds": 180,
           "report": "unittest",

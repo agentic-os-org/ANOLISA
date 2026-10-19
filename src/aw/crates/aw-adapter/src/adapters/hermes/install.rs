@@ -16,8 +16,8 @@ use std::{
 };
 
 pub(super) const PLUGIN: &str = "aw-native-hooks";
-const MANIFEST: &[u8] = include_bytes!("../../../../../../adapters/hermes/plugin.yaml");
-const CODE: &[u8] = include_bytes!("../../../../../../adapters/hermes/__init__.py");
+const MANIFEST: &[u8] = include_bytes!("../../../native/hermes/plugin.yaml");
+const CODE: &[u8] = include_bytes!("../../../native/hermes/__init__.py");
 const MARKER: &[u8] = b"aw-hermes-plugin/v1alpha1\n";
 
 pub(super) fn profile(path: &str) -> Result<PathBuf> {

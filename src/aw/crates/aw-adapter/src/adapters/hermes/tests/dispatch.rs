@@ -5,13 +5,13 @@ fn observation_only_launch_registers_two_noop_callbacks() {
     let profile = Profile::new("unknown: keep\n");
     let directory = profile.0.join("observe-launch");
     fs::create_dir(&directory).unwrap();
-    let files = crate::cli::run::Artifacts(directory);
+    let files = crate::test_support::Artifacts(directory);
     let mut prepared = Prepared {
         input: LaunchInput {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":"auto"}}},
                 "execution":{"default_event_budget_ms":1000},"events":{}}}),
             target: "hermes".into(),
-            flags: BTreeMap::new(),
+            options: crate::NativeOptions::default(),
             command: aw_exec::CommandSpec {
                 program: "hermes".into(),
                 args: vec!["chat".into()],
@@ -47,7 +47,9 @@ fn installation_uses_the_adapter_selection_snapshot() {
     let profile = Profile::new("unknown: keep\n");
     let validator = aw_config::Validator::new().unwrap();
     let example = validator
-        .parse(include_bytes!("../../../../../examples/aw.hermes.yaml"))
+        .parse(include_bytes!(
+            "../../../../../aw-service/examples/aw.hermes.yaml"
+        ))
         .unwrap();
     let mut document = example.as_value().clone();
     document["spec"]["agents"]["hermes"]["argv"] = json!(["/snapshot-hermes", "gateway"]);
@@ -69,20 +71,16 @@ fn installation_uses_the_adapter_selection_snapshot() {
     let saved = profile.0.join("replacement.json");
     fs::write(&saved, replacement).unwrap();
     fs::rename(saved, &path).unwrap();
-    let args = Arguments::parse(
-        [
-            "--config".into(),
-            path.to_str().unwrap().into(),
-            "--agent".into(),
-            "hermes".into(),
-            "--native-profile".into(),
-            profile.0.to_str().unwrap().into(),
-        ]
-        .into_iter(),
-    )
-    .unwrap();
+    let options = crate::InstallOptions {
+        target: "hermes".into(),
+        profile: Some(profile.0.to_str().unwrap().into()),
+    };
     let error = selected
-        .install(&args, &snapshot)
+        .install(
+            &options,
+            &snapshot,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
         .err()
         .unwrap()
         .to_string();
@@ -100,7 +98,7 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
     let profile = Profile::new("unknown: keep\n");
     let artifacts_path = profile.0.join("launch");
     fs::create_dir(&artifacts_path).unwrap();
-    let files = crate::cli::run::Artifacts(artifacts_path);
+    let files = crate::test_support::Artifacts(artifacts_path);
     let command = aw_exec::CommandSpec {
         program: "hermes".into(),
         args: vec!["chat".into(), "--cli".into()],
@@ -111,7 +109,7 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
         input: LaunchInput {
             document: json!({"spec":{"providers":{},"events":{}}}),
             target: "hermes".into(),
-            flags: BTreeMap::new(),
+            options: crate::NativeOptions::default(),
             command,
         },
         profile: profile.0.clone(),
@@ -178,7 +176,7 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
             "launch directory",
         ),
     ] {
-        let invalid_files = crate::cli::run::Artifacts(directory.to_path_buf());
+        let invalid_files = crate::test_support::Artifacts(directory.to_path_buf());
         let error = prepared
             .configure(&LaunchContext {
                 files: &invalid_files,
@@ -200,7 +198,7 @@ fn generated_profile_marks_only_the_admitted_replacement_step() {
     let profile = Profile::new("unknown: keep\n");
     let launch = profile.0.join("launch");
     fs::create_dir(&launch).unwrap();
-    let files = crate::cli::run::Artifacts(launch);
+    let files = crate::test_support::Artifacts(launch);
     let steps: Vec<_> = ["observe", "compress"]
         .into_iter()
         .map(|id| AdmittedStep {
@@ -223,7 +221,7 @@ fn generated_profile_marks_only_the_admitted_replacement_step() {
         input: LaunchInput {
             document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
             target: "hermes".into(),
-            flags: BTreeMap::new(),
+            options: crate::NativeOptions::default(),
             command: aw_exec::CommandSpec {
                 program: "/hermes".into(),
                 args: vec!["chat".into(), "--cli".into()],

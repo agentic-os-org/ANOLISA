@@ -34,6 +34,17 @@ pub struct Capabilities {
     pub events: BTreeMap<String, Vec<String>>,
 }
 
+impl From<AdapterCapabilities> for Capabilities {
+    fn from(value: AdapterCapabilities) -> Self {
+        Self {
+            adapter: value.adapter,
+            version: value.version,
+            entrypoint: value.entrypoint,
+            events: value.events,
+        }
+    }
+}
+
 impl From<Capabilities> for AdapterCapabilities {
     fn from(value: Capabilities) -> Self {
         Self {
