@@ -11,6 +11,7 @@ members = [
     "crates/asc-capability-pii-scan",
     "crates/asc-capability-prompt-scan",
     "crates/asc-capability-skill-sec",
+    "crates/asc-credential-store",
     "crates/asc-daemon-client",
     "crates/asc-daemon-core",
     "crates/asc-daemon-handler",
@@ -54,6 +55,7 @@ asc-agentsight-client = { path = "crates/asc-agentsight-client" }
 asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
 asc-capability-prompt-scan = { path = "crates/asc-capability-prompt-scan" }
 asc-capability-skill-sec = { path = "crates/asc-capability-skill-sec" }
+asc-credential-store = { path = "crates/asc-credential-store" }
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 tracing = "0.1"

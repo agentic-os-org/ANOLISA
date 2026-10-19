@@ -243,6 +243,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-credential-store"
+version = "1.0.0"
+dependencies = [
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "asc-daemon"
 version = "1.1.1"
 dependencies = [
