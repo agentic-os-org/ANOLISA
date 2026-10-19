@@ -1205,3 +1205,75 @@ fn clean_round_anchors_on_the_last_substantive_agent_step() {
         "the empty heartbeat must not become the conclusion"
     );
 }
+
+/// A trailing System step after the real answer must not become the outcome
+/// anchor. It is not an agent delivery; the previous substantive agent step is.
+#[test]
+fn clean_round_ignores_a_trailing_system_step() {
+    let mut doc = heartbeat_terminated_trajectory();
+    doc.steps[2].source = StepSource::System;
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    let anchor = case_
+        .nodes
+        .iter()
+        .find(|n| n.step == Some(2))
+        .expect("the substantive answer is the outcome anchor");
+    assert_eq!(anchor.kind, "good");
+    assert!(
+        case_.nodes.iter().all(|n| n.step != Some(3)),
+        "the trailing System step must not become the conclusion"
+    );
+}
+
+/// A round whose only agent step carries no message still needs an endpoint;
+/// the delivery rule falls back to the last non-user step.
+#[test]
+fn empty_agent_only_round_still_anchors() {
+    let mut doc = heartbeat_terminated_trajectory();
+    doc.steps = vec![doc.steps[0].clone(), doc.steps[2].clone()];
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    assert!(
+        case_.nodes.iter().any(|n| n.step == Some(3)),
+        "the fallback must still anchor a round with no agent message"
+    );
+}
