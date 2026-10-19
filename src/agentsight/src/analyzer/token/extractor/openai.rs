@@ -420,6 +420,56 @@ pub fn extract_response_content(
         }
     }
 
+    // Gemini's `streamGenerateContent` chunks are standalone generation
+    // payloads: there is no `choices` array and no `type` tag, the answer
+    // streams as `candidates[].content.parts[].text`, thinking as the parts
+    // marked `thought: true`, and calls as whole `parts[].functionCall`
+    // objects. Every other reader knows the shape — the drain merger
+    // (`merge_gemini_sse_chunks`), the SSE-reduce output predicate, and the
+    // usage parser all handle it — but the manual counters did not, so a
+    // Gemini capture counted no output tokens at all.
+    if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array()) {
+        let mut saw_part = false;
+        for candidate in candidates {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+            else {
+                continue;
+            };
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        saw_part = true;
+                        if part.get("thought").and_then(|t| t.as_bool()) == Some(true) {
+                            reasoning = match reasoning {
+                                Some(existing) => Some(existing + text),
+                                None => Some(text.to_string()),
+                            };
+                        } else {
+                            content.push_str(text);
+                        }
+                    }
+                }
+                if let Some(call) = part.get("functionCall") {
+                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if !name.is_empty() {
+                        saw_part = true;
+                        let arguments = call
+                            .get("args")
+                            .map(|args| args.to_string())
+                            .unwrap_or_default();
+                        tool_calls.push(format!("{name}: {arguments}"));
+                    }
+                }
+            }
+        }
+        if saw_part {
+            return Some((content, reasoning, tool_calls));
+        }
+    }
+
     None
 }
 
@@ -1513,6 +1563,65 @@ mod tests {
             extract_response_content(Some(&chunk)).expect("should extract the tool input fragment");
         assert!(content.is_empty());
         assert_eq!(tools, vec!["{\"city\":".to_string()]);
+    }
+
+    /// Gemini's `streamGenerateContent` chunks have no `choices` array and no
+    /// `type` tag: the answer rides `candidates[].content.parts[].text`,
+    /// thinking the parts marked `thought`, and calls whole
+    /// `parts[].functionCall` objects. The drain merger and the SSE-reduce
+    /// output predicate both know the shape, so a Gemini capture counted no
+    /// output tokens here while the drain recorded its parts.
+    #[test]
+    fn test_gemini_stream_parts_are_counted() {
+        let text = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "hel"}]}, "index": 0}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&text)).expect("a Gemini text part is the answer");
+        assert_eq!(content, "hel");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+
+        let thought = serde_json::json!({
+            "candidates": [{"content": {"role": "model",
+                "parts": [{"text": "weighing ", "thought": true}, {"text": "the options", "thought": true}]}}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&thought)).expect("a thought part is reasoning");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("weighing the options"));
+        assert!(tools.is_empty());
+
+        let call = serde_json::json!({
+            "candidates": [{"content": {"role": "model",
+                "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}]}}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&call)).expect("a functionCall part is a call");
+        assert!(content.is_empty());
+        assert!(reasoning.is_none());
+        assert_eq!(tools, vec!["get_weather: {\"city\":\"Paris\"}".to_string()]);
+    }
+
+    /// The terminal Gemini chunk carries `usageMetadata` and `finishReason`
+    /// but no parts. It must not be mistaken for an answer, and a candidate
+    /// with an empty parts array stays unextracted like every other
+    /// content-free event.
+    #[test]
+    fn test_gemini_terminal_chunk_without_parts_is_not_extracted() {
+        for chunk in [
+            serde_json::json!({
+                "candidates": [{"finishReason": "STOP", "index": 0}],
+                "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1},
+            }),
+            serde_json::json!({"candidates": [{"content": {"parts": []}, "index": 0}]}),
+            serde_json::json!({"candidates": [{"content": {"parts": [{"text": ""}]}, "index": 0}]}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
     }
 
     /// A gateway may deliver the whole block on `content_block_start` and
