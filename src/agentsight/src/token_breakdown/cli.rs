@@ -358,6 +358,11 @@ impl AnalyzeChatmlCommand {
         // single replace-or-extend buffer rather than one entry per frame.
         let mut message_content = String::new();
         let mut message_reasoning = String::new();
+        // A refusal rides its own field (`delta.refusal` on a stream,
+        // `message.refusal` in a cumulative snapshot) while `content` stays
+        // null, so the content walks above never see it. The message parser
+        // and the token extractor both read it as the call's answer.
+        let mut message_refusal = String::new();
         // Responses closing events repeat the finalized answer. Like the
         // analyzer and the drain merger, use them only when no delta carried
         // text: a capture that attached after the deltas has them as its only
@@ -694,6 +699,20 @@ impl AnalyzeChatmlCommand {
                                     }
                                 }
                             }
+                            // A refusal is the model's answer for the call and
+                            // arrives instead of content, so it belongs in the
+                            // answer text — where the message parser and the
+                            // token extractor put it. Without this the whole
+                            // answer of a refused call was dropped.
+                            if let Some(refusal) = payload.get("refusal").and_then(|v| v.as_str()) {
+                                if !refusal.is_empty() {
+                                    if cumulative {
+                                        accumulate(&mut message_refusal, refusal);
+                                    } else {
+                                        content_parts.push(refusal.to_string());
+                                    }
+                                }
+                            }
                             // Extract tool_calls - merge function name and
                             // streamed arguments fragments by index. A message
                             // snapshot carries the complete call, so it
@@ -842,6 +861,13 @@ impl AnalyzeChatmlCommand {
         if !message_reasoning.is_empty() {
             reasoning_parts.clear();
             reasoning_parts.push(message_reasoning);
+        }
+        // A refusal snapshot is the whole answer of that snapshot form, so it
+        // supersedes any fragments captured alongside it, exactly as the
+        // content snapshot does.
+        if !message_refusal.is_empty() {
+            content_parts.clear();
+            content_parts.push(message_refusal);
         }
 
         // A capture that attached after the deltas has the answer only in the
@@ -2317,6 +2343,39 @@ mod tests {
             sse(
                 r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"I can't help with that."}]}}"#,
             ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["I can't help with that."]);
+    }
+
+    /// The chat-completions protocol carries a refusal in its own `refusal`
+    /// field, on `delta` for a stream and on `message` for a cumulative
+    /// snapshot, while `content` stays null. The dispatch read `content` and
+    /// `reasoning_content` but not `refusal`, so a refused call broke down as
+    /// an empty answer even though the message view showed the refusal.
+    #[test]
+    fn sse_chat_refusal_delta_reaches_the_answer() {
+        let events = vec![
+            sse(r#"{"choices":[{"index":0,"delta":{"refusal":"I can't "}}]}"#),
+            sse(r#"{"choices":[{"index":0,"delta":{"refusal":"help with that."}}]}"#),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["I can't ", "help with that."]);
+    }
+
+    /// A cumulative `message` snapshot repeats the refusal so far; the final
+    /// snapshot is the answer and must not be counted once per frame.
+    #[test]
+    fn sse_chat_refusal_snapshot_is_not_accumulated_per_frame() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","refusal":"I can't help"}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","refusal":"I can't help with that."}}]}"#,
+            ),
+            sse("[DONE]"),
         ];
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
         assert_eq!(resp.content, vec!["I can't help with that."]);
