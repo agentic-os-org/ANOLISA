@@ -12,7 +12,7 @@ it is a real capture.
 |---|---|
 | Privileges | `trace` needs root (or `CAP_BPF` + `CAP_PERFMON`). Query commands need read access to `/var/log/sysak/.agentsight`, which the packaged service owns — use `sudo`. |
 | Config file | Commands that read rules accept `--config`, default `/etc/agentsight/config.json`. `discover` reads the same file `trace` does, so it reflects your custom rules. |
-| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, and `interruption` accept `--db` to point at a different database file. |
+| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, `interruption`, and `token` accept `--db` to point at a different database file. |
 | Machine output | `--json` is available on `discover`, `token`, `metrics`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
 | Output language | `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
 | Platform | On macOS only `trace` (trajectory collector) and `serve` exist. |
@@ -201,9 +201,18 @@ FLAGS:
 
 OPTIONS:
         --data-file <data-file>    Custom data file path
+        --db <db>                  Override the database path (same as --data-file)
         --hours <hours>            Query last N hours
         --period <period>          Query by fixed time period
                                    [possible values: today, yesterday, week, last_week, month, last_month]
+```
+
+`--db` is the same override every other query command spells that way; it was added after
+`--data-file`, which stays supported. Pass one or the other — giving both is a usage error.
+
+```bash
+# read a copy of the database instead of the default location
+agentsight token --db /backup/agentsight/agentsight.db --period week
 ```
 
 ```bash
@@ -415,8 +424,27 @@ OPTIONS:
         --last <last>            Query last N hours (default: 24) [default: 24]
 ```
 
-Both keep their existing scopes: `stats` reports the whole window (resolved and unresolved), and
-`count` reports unresolved events only. Without `--agent` they cover every agent on the host.
+`stats` additionally takes the `--unresolved` / `--resolved` pair, so the per-type table can
+answer "what is still open in this window" without also counting events someone already closed:
+
+```
+FLAGS:
+        --json          Output as JSON
+        --resolved      Count only resolved events
+        --unresolved    Count only unresolved events
+```
+
+```
+$ sudo agentsight interruption stats --last 168 --unresolved
+TYPE                 SEVERITY    COUNT
+----------------------------------------
+token_limit          medium          3
+llm_error            high            1
+```
+
+Without either flag `stats` keeps its previous scope and reports the whole window (resolved and
+unresolved); the two flags are mutually exclusive. `count` is unchanged and still reports
+unresolved events only. Without `--agent` both cover every agent on the host.
 
 ```bash
 $ sudo agentsight interruption list --last 24
@@ -464,7 +492,15 @@ sudo agentsight interruption count --last 24 --agent CoshNG
 # everything that hit one session, then close one event
 sudo agentsight interruption session 00000000-1111-2222-3333-444444444444
 sudo agentsight interruption resolve 11111111222222223333333344444444
+
+# only what is still open in that session
+sudo agentsight interruption session 00000000-1111-2222-3333-444444444444 --unresolved
 ```
+
+`session` and `conversation` take the same `--unresolved` / `--resolved` pair `list` and `stats`
+do, so a per-id view can be narrowed to the events still open (or already closed) without reading
+the `RESOLVED` column by eye. The two flags are mutually exclusive; without either the command
+prints the id's whole history, as before.
 
 > `--type` accepts every interruption type the detector can produce (the values are derived from
 > `InterruptionType::ALL`). `agentsight interruption list --help` prints the current list; the full
