@@ -62,6 +62,10 @@ pub enum SkillMetricsAction {
         /// Override database path
         #[structopt(long)]
         db: Option<String>,
+
+        /// Bucket the hotness trend by day or week (default: week)
+        #[structopt(long, possible_values = GRANULARITY_VALUES)]
+        granularity: Option<String>,
     },
 
     /// Show skill download tracking (first appearance in available_skills).
@@ -122,7 +126,29 @@ pub enum SkillMetricsAction {
         json: bool,
         #[structopt(long)]
         db: Option<String>,
+
+        /// Bucket the ranking by day or week (default: week)
+        #[structopt(long, possible_values = GRANULARITY_VALUES)]
+        granularity: Option<String>,
     },
+}
+
+/// Bucket widths the hotness trend can be cut by.
+///
+/// The same closed set `GET /api/skill-metrics` validates against, so a typo
+/// is refused instead of silently served as weekly buckets that look valid.
+const GRANULARITY_VALUES: &[&str] = &["day", "week"];
+
+/// Map a validated `--granularity` value onto the computation's bucket width.
+///
+/// `structopt` restricts the value to [`GRANULARITY_VALUES`] and the default
+/// stays [`MetricOptions::all`]'s weekly width, so an absent flag is not a
+/// behaviour change: only an explicit `day` cuts daily buckets.
+fn parse_granularity(raw: &str) -> agentsight::skill_metrics::HotnessGranularity {
+    match raw {
+        "day" => agentsight::skill_metrics::HotnessGranularity::Day,
+        _ => agentsight::skill_metrics::HotnessGranularity::Week,
+    }
 }
 
 impl SkillMetricsCommand {
@@ -134,19 +160,24 @@ impl SkillMetricsCommand {
     }
 
     fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let (last, agent, json, db, options) = match &self.action {
+        let (last, agent, json, db, mut options, granularity) = match &self.action {
             SkillMetricsAction::All {
                 last,
                 agent,
                 json,
                 db,
+                granularity,
             } => (
                 *last,
                 agent.as_deref(),
                 *json,
                 db.as_deref(),
                 MetricOptions::all(),
+                granularity.as_deref(),
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Downloads {
                 last,
                 agent,
@@ -161,7 +192,11 @@ impl SkillMetricsCommand {
                     downloads: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Loads {
                 last,
                 agent,
@@ -176,7 +211,11 @@ impl SkillMetricsCommand {
                     loads: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::UsageRatio {
                 last,
                 agent,
@@ -191,7 +230,11 @@ impl SkillMetricsCommand {
                     usage_ratio: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Distribution {
                 last,
                 agent,
@@ -206,12 +249,14 @@ impl SkillMetricsCommand {
                     distribution: true,
                     ..Default::default()
                 },
+                None,
             ),
             SkillMetricsAction::Hotness {
                 last,
                 agent,
                 json,
                 db,
+                granularity,
             } => (
                 *last,
                 agent.as_deref(),
@@ -221,8 +266,13 @@ impl SkillMetricsCommand {
                     hotness: true,
                     ..Default::default()
                 },
+                granularity.as_deref(),
             ),
         };
+
+        if let Some(granularity) = granularity {
+            options.hotness_granularity = parse_granularity(granularity);
+        }
 
         // Resolve database path
         let db_path = match db {
