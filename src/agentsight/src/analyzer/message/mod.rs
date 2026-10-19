@@ -39,11 +39,13 @@
 //! ```
 
 mod anthropic;
+pub mod gemini;
 mod openai;
 pub mod sysom;
 pub mod types;
 
 pub use anthropic::AnthropicParser;
+pub use gemini::GeminiParser;
 pub use openai::OpenAIParser;
 pub(crate) use openai::ResponsesToolCalls;
 pub use sysom::SysomParser;
@@ -118,6 +120,23 @@ impl MessageParser {
         // Try Aliyun SysOM (AK/SK auth mode)
         if let Some(parsed) = self.parse_by_path_sysom_only(path, request_body, response_body) {
             return Some(parsed);
+        }
+
+        // Try Gemini. The model and the streaming action live in the URL, not
+        // the body, so the path has to hand them to the parser.
+        if let Some(model) = Self::gemini_model_from_path(path) {
+            let streaming = path
+                .split('?')
+                .next()
+                .unwrap_or(path)
+                .ends_with(":streamGenerateContent");
+            let request =
+                request_body.and_then(|body| GeminiParser::parse_request(body, model, streaming));
+            let response = response_body.and_then(GeminiParser::parse_response);
+
+            if request.is_some() || response.is_some() {
+                return Some(ParsedApiMessage::GeminiMessage { request, response });
+            }
         }
 
         // The analyzer pre-filters non-LLM paths before calling in, so
@@ -749,5 +768,103 @@ mod tests {
             }
             other => panic!("expected SysomMessage with response, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_by_path_gemini() {
+        let parser = MessageParser::new();
+        let path = "/v1beta/models/gemini-2.5-pro:generateContent";
+        let request = serde_json::json!({
+            "systemInstruction": {"parts": [{"text": "Be concise"}]},
+            "contents": [
+                {"role": "user", "parts": [{"text": "What is 2+2?"}]},
+                {"role": "model", "parts": [{"text": "4"}]}
+            ],
+            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 32}
+        });
+        let response = serde_json::json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "4"}]},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11},
+            "responseId": "resp-gemini"
+        });
+
+        let parsed = parser
+            .parse_by_path(path, Some(&request), Some(&response))
+            .expect("Gemini path must parse");
+
+        assert_eq!(parsed.provider(), "gemini");
+        assert_eq!(parsed.model(), Some("gemini-2.5-pro"));
+        assert_eq!(parsed.response_id(), Some("resp-gemini"));
+        assert_eq!(parsed.is_streaming(), Some(false));
+        match parsed {
+            ParsedApiMessage::GeminiMessage {
+                request: Some(request),
+                response: Some(response),
+            } => {
+                assert_eq!(request.contents.len(), 2);
+                assert_eq!(request.contents[0].role.as_deref(), Some("user"));
+                assert_eq!(response.finish_reason(), Some("STOP"));
+            }
+            other => panic!("expected GeminiMessage, got {other:?}"),
+        }
+    }
+
+    /// The gate and `parse_by_path` must name the same provider set: a path
+    /// `is_llm_api_path` admits cannot fall through to the unknown-path branch.
+    #[test]
+    fn parse_by_path_handles_every_detected_provider() {
+        let parser = MessageParser::new();
+        let openai_request = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let anthropic_request = serde_json::json!({
+            "model": "claude-3-opus-20240229",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let sysom_params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let sysom_request = serde_json::json!({"llmParamString": sysom_params.to_string()});
+        let gemini_request = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}]
+        });
+
+        let cases = [
+            ("/v1/chat/completions", openai_request),
+            ("/v1/messages", anthropic_request),
+            ("/api/v1/copilot/generate_copilot", sysom_request),
+            (
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+                gemini_request,
+            ),
+        ];
+        for (path, request) in cases {
+            assert!(
+                MessageParser::is_llm_api_path(path),
+                "{path} must pass the message gate"
+            );
+            assert!(
+                parser.parse_by_path(path, Some(&request), None).is_some(),
+                "{path} is admitted by the gate but no parser claimed it"
+            );
+        }
+
+        // An unknown path still falls through to `None`.
+        assert!(
+            parser
+                .parse_by_path(
+                    "/v1/embeddings",
+                    Some(&serde_json::json!({"model": "x"})),
+                    None
+                )
+                .is_none()
+        );
     }
 }

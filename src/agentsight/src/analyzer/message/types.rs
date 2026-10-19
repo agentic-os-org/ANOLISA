@@ -1,11 +1,13 @@
 //! Message types for LLM API request/response parsing
 //!
-//! This module defines structured types for parsing OpenAI Chat Completions
-//! and Anthropic Messages API formats.
+//! This module defines structured types for parsing OpenAI Chat Completions,
+//! Anthropic Messages, Aliyun SysOM and Google Gemini API formats.
 //!
 //! # Supported APIs
 //! - OpenAI Chat Completions (`/v1/chat/completions`)
 //! - Anthropic Messages (`/v1/messages`)
+//! - Aliyun SysOM Copilot (`/api/v1/copilot/generate_copilot`)
+//! - Google Gemini (`/v1beta/models/{model}:generateContent`)
 
 use serde::{Deserialize, Serialize};
 
@@ -809,6 +811,13 @@ pub enum ParsedApiMessage {
         /// Parsed response body
         response: Option<super::sysom::SysomResponse>,
     },
+    /// Google Gemini `generateContent` API message
+    GeminiMessage {
+        /// Parsed request body (model and stream come from the request path)
+        request: Option<super::gemini::GeminiRequest>,
+        /// Parsed response body
+        response: Option<super::gemini::GeminiResponse>,
+    },
 }
 
 impl ParsedApiMessage {
@@ -826,6 +835,9 @@ impl ParsedApiMessage {
             ParsedApiMessage::SysomMessage { request, .. } => {
                 request.as_ref().map(|r| r.params.model.as_str())
             }
+            ParsedApiMessage::GeminiMessage { request, .. } => {
+                request.as_ref().map(|r| r.model.as_str())
+            }
         }
     }
 
@@ -835,6 +847,7 @@ impl ParsedApiMessage {
             ParsedApiMessage::OpenAICompletion { .. } => "openai",
             ParsedApiMessage::AnthropicMessage { .. } => "anthropic",
             ParsedApiMessage::SysomMessage { .. } => "sysom",
+            ParsedApiMessage::GeminiMessage { .. } => "gemini",
         }
     }
 
@@ -849,6 +862,9 @@ impl ParsedApiMessage {
             }
             ParsedApiMessage::SysomMessage { response, .. } => {
                 response.as_ref().and_then(|r| r.id.as_deref())
+            }
+            ParsedApiMessage::GeminiMessage { response, .. } => {
+                response.as_ref().and_then(|r| r.response_id.as_deref())
             }
         }
     }
@@ -880,6 +896,7 @@ impl ParsedApiMessage {
             ParsedApiMessage::SysomMessage { request, .. } => {
                 request.as_ref().map(|r| r.params.stream)
             }
+            ParsedApiMessage::GeminiMessage { request, .. } => request.as_ref().map(|r| r.stream),
         }
     }
 }
