@@ -280,6 +280,83 @@ async fn privileged_mutations_accept_a_valid_credential() {
     }
 }
 
+/// Endpoints that spend the stored LLM credential are host actions too: a
+/// loopback caller must not be able to run up the configured account without
+/// ever holding the dashboard credential.
+#[actix_web::test]
+async fn llm_spending_mutations_fail_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let token = fixture
+        .auth
+        .read_token_from_file()
+        .expect("the fixture writes a token file");
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/sessions/search",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/causal-attribution",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/reuse/judge",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/optimize/sessions/{session_id}/{dimension}",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+    for uri in [
+        "/api/sessions/search",
+        "/api/causal-attribution",
+        "/api/reuse/judge",
+        "/api/optimize/sessions/session-1/perf",
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(loopback)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri} did not route");
+    }
+
+    // A path with the wrong number of segments is not the spending route.
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/api/optimize/sessions/session-1")
+            .peer_addr(loopback)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "an unregistered shape must not be gated as the spending route"
+    );
+}
+
 #[actix_web::test]
 async fn remote_encoded_api_paths_share_canonical_auth_classification() {
     let fixture = AuthFixture::new();
