@@ -147,6 +147,31 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
             return Some((arr.clone(), None));
         }
     }
+    // Legacy `/v1/completions` puts its input on the top-level `prompt`
+    // field, a string or (for the batch form) an array of strings, with no
+    // `messages` array anywhere. The path is an admitted inference endpoint
+    // — the gate and the OpenAI parser both accept it — so without this arm
+    // the call created a row that carried no request message at all: the
+    // drained `input_tokens` stayed NULL, the recorded turn had no
+    // `user_query`, and the token breakdown counted no request side. Each
+    // array element is its own prompt, so each becomes its own user message;
+    // an empty prompt is not a turn and contributes nothing, the same rule
+    // the Responses string shorthand above follows.
+    if let Some(prompt) = body.get("prompt") {
+        let prompts: Vec<&str> = match prompt {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let messages: Vec<Value> = prompts
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::json!({"role": "user", "content": text}))
+            .collect();
+        if !messages.is_empty() {
+            return Some((messages, None));
+        }
+    }
     None
 }
 
@@ -549,6 +574,48 @@ mod tests {
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(instructions.as_deref(), Some("Be concise"));
+    }
+
+    /// A legacy `/v1/completions` request carries its input on the top-level
+    /// `prompt` field instead of a `messages` array. The path is an admitted
+    /// inference endpoint, so the request creates a row and is deep-parsed,
+    /// but every reader of this view answered `None` for it: the drained
+    /// call kept `input_tokens` NULL and the recorded request carried no
+    /// message at all. A string prompt is one user message; an array prompt
+    /// is one message per element, because the batch API generates each
+    /// completion independently.
+    #[test]
+    fn test_extract_messages_view_legacy_completion_prompt() {
+        let single = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": "The capital of France is",
+            "max_tokens": 8,
+            "stream": false
+        });
+        let (msgs, instructions) = extract_messages_view(&single).expect("a prompt is a message");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("user"));
+        assert_eq!(
+            msgs[0].get("content").and_then(|c| c.as_str()),
+            Some("The capital of France is")
+        );
+        assert!(instructions.is_none());
+
+        let batch = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": ["first", "second"]
+        });
+        let (msgs, _) = extract_messages_view(&batch).expect("a prompt array is a batch");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs[1].get("content").and_then(|c| c.as_str()),
+            Some("second")
+        );
+
+        // An empty prompt carries no message, like the Responses string
+        // shorthand: a blank completion request is not a conversation turn.
+        let empty = serde_json::json!({"model": "gpt-3.5-turbo-instruct", "prompt": ""});
+        assert!(extract_messages_view(&empty).is_none());
     }
 
     #[test]
