@@ -48,6 +48,15 @@ _SENSITIVE_KEY_SUFFIXES = (
     "secret",
     "token",
 )
+# A credential mapping or list is routinely named in the plural ("tokens",
+# "secrets"); only whole words are generalised, so a numeric limit such as
+# "max_tokens" keeps its value.
+_SENSITIVE_KEY_FORMS = _SENSITIVE_EXACT_KEYS | frozenset(
+    key + "s" for key in _SENSITIVE_EXACT_KEYS
+)
+# Split camelCase and acronym runs, so "APIKey" and "authToken" keep their
+# word boundaries instead of turning into one letter per underscore.
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -131,9 +140,19 @@ def directory_tree_record(path: Path | str | None) -> dict[str, Any]:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", key)
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", snake).strip("_").lower()
-    return normalized in _SENSITIVE_EXACT_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES)
+    """Return whether *key* names a credential that must never be recorded.
+
+    Separators are folded alike, so ``apiKey``, ``APIKey``, ``X-API-Key`` and
+    ``OPENAI_API_KEY`` all normalise to ``api_key``. The previous splitter
+    inserted an underscore before *every* capital, so all-caps and hyphenated
+    keys reached the matcher as one letter per underscore
+    (``o_p_e_n_a_i__a_p_i__k_e_y``) and were recorded verbatim.
+    """
+    snake = _CAMEL_BOUNDARY_RE.sub("_", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
+    return normalized in _SENSITIVE_KEY_FORMS or normalized.endswith(
+        _SENSITIVE_KEY_SUFFIXES
+    )
 
 
 def _redact_sensitive(value: Any, *, key: str = "") -> Any:
