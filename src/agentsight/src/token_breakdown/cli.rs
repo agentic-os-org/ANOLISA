@@ -357,6 +357,44 @@ impl AnalyzeChatmlCommand {
         // single replace-or-extend buffer rather than one entry per frame.
         let mut message_content = String::new();
         let mut message_reasoning = String::new();
+        // Responses closing events repeat the finalized answer. Like the
+        // analyzer and the drain merger, use them only when no delta carried
+        // text: a capture that attached after the deltas has them as its only
+        // copy, while a complete capture must not count the answer twice.
+        let mut saw_responses_text_delta = false;
+        let mut saw_responses_reasoning_delta = false;
+        let mut responses_closing_content: Option<String> = None;
+        let mut responses_closing_reasoning: Option<String> = None;
+
+        /// Answer text of a closing `message` output item, or `None`.
+        fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
+            let item = chunk.get("item")?;
+            if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+                return None;
+            }
+            let text: String = item
+                .get("content")?
+                .as_array()?
+                .iter()
+                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                .collect();
+            (!text.is_empty()).then_some(text)
+        }
+
+        /// Thinking text of a closing `reasoning` output item, or `None`.
+        fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
+            let item = chunk.get("item")?;
+            if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+                return None;
+            }
+            let text: String = ["content", "summary"]
+                .iter()
+                .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
+                .flatten()
+                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                .collect();
+            (!text.is_empty()).then_some(text)
+        }
 
         /// Accumulate cumulative-or-incremental text: a chunk repeating the
         /// buffer plus more replaces it, a bare fragment is appended.
@@ -501,7 +539,21 @@ impl AnalyzeChatmlCommand {
                         Some("response.output_text.delta") => {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
+                                    saw_responses_text_delta = true;
                                     content_parts.push(delta.to_string());
+                                }
+                            }
+                        }
+                        // The closing events carry the finalized answer and
+                        // repeat what the deltas delivered. Read them only
+                        // when no delta was captured, the delta-wins rule the
+                        // analyzer and the drain merger apply.
+                        Some("response.output_text.done") => {
+                            if !saw_responses_text_delta {
+                                if let Some(text) = data_json.get("text").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        responses_closing_content = Some(text.to_string());
+                                    }
                                 }
                             }
                         }
@@ -515,20 +567,35 @@ impl AnalyzeChatmlCommand {
                         | Some("response.reasoning_summary_text.delta") => {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
+                                    saw_responses_reasoning_delta = true;
                                     reasoning_parts.push(delta.to_string());
                                 }
                             }
                         }
+                        // A closing output item carries the whole message or
+                        // reasoning block, the fallback shape a capture that
+                        // started after the deltas is left with.
+                        Some("response.output_item.done") => {
+                            responses_tool_calls.observe(&data_json);
+                            if !saw_responses_text_delta {
+                                if let Some(text) = closing_message_item_text(&data_json) {
+                                    responses_closing_content = Some(text);
+                                }
+                            }
+                            if !saw_responses_reasoning_delta {
+                                if let Some(text) = closing_reasoning_item_text(&data_json) {
+                                    responses_closing_reasoning = Some(text);
+                                }
+                            }
+                        }
                         // The shared aggregator also treats `output_item.done`
-                        // as authoritative: it carries the complete arguments
-                        // (and the whole call, for a capture that started
-                        // mid-stream or a custom_tool_call whose input only
-                        // appears there). Routing only `added` left the call
-                        // rendered with whatever partial deltas were caught.
+                        // as authoritative for tool calls: it carries the
+                        // complete arguments (and the whole call, for a
+                        // capture that started mid-stream or a
+                        // custom_tool_call whose input only appears there).
                         // A custom tool call streams its input on its own
                         // event pair, so those names belong here too.
                         Some("response.output_item.added")
-                        | Some("response.output_item.done")
                         | Some("response.function_call_arguments.delta")
                         | Some("response.function_call_arguments.done")
                         | Some("response.custom_tool_call_input.delta")
@@ -722,6 +789,23 @@ impl AnalyzeChatmlCommand {
         if !message_reasoning.is_empty() {
             reasoning_parts.clear();
             reasoning_parts.push(message_reasoning);
+        }
+
+        // A capture that attached after the deltas has the answer only in the
+        // closing events; a complete capture already counted its deltas.
+        if !saw_responses_text_delta {
+            if let Some(text) = responses_closing_content {
+                if !text.is_empty() {
+                    content_parts.push(text);
+                }
+            }
+        }
+        if !saw_responses_reasoning_delta {
+            if let Some(text) = responses_closing_reasoning {
+                if !text.is_empty() {
+                    reasoning_parts.push(text);
+                }
+            }
         }
 
         let mut tool_calls: Vec<String> = {
@@ -1473,6 +1557,47 @@ mod tests {
             resp.tool_calls,
             vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()]
         );
+    }
+
+    /// A capture that started after the deltas carries the answer only in the
+    /// closing events. The CLI routed every Responses event except those, so
+    /// such a capture reported an empty response.
+    #[test]
+    fn sse_responses_closing_events_supply_a_missed_answer() {
+        let only_text = vec![sse(
+            r#"{"type":"response.output_text.done","text":"hello there"}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_text);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.reasoning_content, None);
+
+        let only_item = vec![sse(
+            r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"done answer"}]}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_item);
+        assert_eq!(resp.content, vec!["done answer".to_string()]);
+
+        let only_reasoning = vec![sse(
+            r#"{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"thought"}]}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_reasoning);
+        assert!(resp.content.is_empty());
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thought"));
+    }
+
+    /// The closing events replay what the deltas already delivered; a complete
+    /// capture must count the answer once.
+    #[test]
+    fn sse_responses_closing_events_do_not_double_count_deltas() {
+        let events = vec![
+            sse(r#"{"type":"response.output_text.delta","delta":"hello"}"#),
+            sse(r#"{"type":"response.output_text.done","text":"hello"}"#),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hello"}]}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["hello".to_string()]);
     }
 
     /// `response.output_item.done` is authoritative for a Responses tool
