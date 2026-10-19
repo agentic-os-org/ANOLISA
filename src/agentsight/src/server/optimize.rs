@@ -1687,6 +1687,16 @@ mod tests {
         let resp = load_trajectory(Some(&genai_store), None, "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
+        // No GenAI store either: both sources are absent, which is a 404 (the
+        // session exists nowhere), never the old 500.
+        let resp = load_trajectory(None, None, "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        // No GenAI store, collected store present but the session is absent.
+        let empty = TrajectoryStore::new_with_path(&dir.join("trajectories-empty.db")).unwrap();
+        let resp = load_trajectory(None, Some(Arc::new(empty)), "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
