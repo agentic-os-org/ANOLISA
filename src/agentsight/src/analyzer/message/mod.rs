@@ -139,11 +139,25 @@ impl MessageParser {
             }
         }
 
-        // The analyzer pre-filters non-LLM paths before calling in, so
-        // reaching this point is unexpected but harmless — keep it at debug
-        // as a last-resort diagnostic rather than a per-request alert.
-        log::debug!("Path '{path}' does not match any known LLM API endpoint");
+        // Reaching this point means no parser claimed the path. That is only
+        // surprising for a path the analyzer already knows to be an LLM
+        // endpoint (the request body may simply not have parsed), so keep the
+        // diagnostic for genuinely unknown paths only — a known provider that
+        // failed to parse is not "does not match any known endpoint".
+        if Self::fallthrough_log_applies(path) {
+            log::debug!("Path '{path}' does not match any known LLM API endpoint");
+        }
         None
+    }
+
+    /// Whether the fall-through diagnostic applies to `path`.
+    ///
+    /// `parse_by_path` reaches its tail for two different reasons: the path is
+    /// not an LLM endpoint at all, or it is one but neither body parsed. Only
+    /// the first is the "unknown endpoint" case the debug line describes, so
+    /// the decision is a predicate a test can pin without capturing logs.
+    fn fallthrough_log_applies(path: &str) -> bool {
+        Self::detect_provider(path).is_none()
     }
 
     /// Parse request/response bodies against the SysOM parser only.
@@ -866,5 +880,54 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    /// The fall-through debug line is the "unknown endpoint" diagnostic. A
+    /// path `detect_provider` already names is not unknown: the parser reaching
+    /// the tail means a body failed to parse, and logging "does not match any
+    /// known LLM API endpoint" for it is false. Gemini made that reachable for
+    /// a path the gate admits.
+    #[test]
+    fn fallthrough_log_covers_only_unknown_paths() {
+        for path in [
+            "/v1/messages",
+            "/v1/chat/completions",
+            "/api/v1/copilot/generate_copilot",
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+        ] {
+            assert!(
+                MessageParser::detect_provider(path).is_some(),
+                "{path} is a known provider"
+            );
+            assert!(
+                !MessageParser::fallthrough_log_applies(path),
+                "{path} is a known provider, so the unknown-endpoint line must not fire"
+            );
+            // Sanity: the parser really does reach the tail for this path when
+            // no body parses, which is the case the line used to misdescribe.
+            assert!(
+                MessageParser::new()
+                    .parse_by_path(path, Some(&serde_json::json!({"unexpected": true})), None)
+                    .is_none(),
+                "{path} with an unparsable body falls through"
+            );
+        }
+
+        for path in ["/v1/embeddings", "/health", "/v1/messages/count_tokens"] {
+            assert!(
+                MessageParser::detect_provider(path).is_none(),
+                "{path} must stay unknown"
+            );
+            assert!(
+                MessageParser::fallthrough_log_applies(path),
+                "{path} is genuinely unknown, so the diagnostic applies"
+            );
+            assert!(
+                MessageParser::new()
+                    .parse_by_path(path, None, None)
+                    .is_none()
+            );
+        }
     }
 }
