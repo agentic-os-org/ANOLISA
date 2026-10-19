@@ -589,6 +589,18 @@ impl HttpConnectionAggregator {
         };
 
         if body_complete {
+            // One TLS read can carry the declared body plus the next
+            // pipelined request (or simply more bytes than Content-Length).
+            // Keeping the surplus makes `json_body` reject the whole body as
+            // trailing garbage, silently dropping the request view; the
+            // split-read path already truncates to the declared length.
+            if let Some(content_length) = content_length.filter(|length| request.body_len > *length)
+            {
+                let body = request.body()[..content_length].to_vec();
+                request.reassembled_body = Some(body);
+                request.body_len = content_length;
+                request.source_event = Rc::new(request.source_event.metadata_only());
+            }
             log::trace!(
                 "[HttpAggregator] State transition: -> RequestPending | conn={:?} | method={} | path={}",
                 connection_id,
@@ -1960,6 +1972,65 @@ mod tests {
             ssl_ptr: 0x4000,
         };
         assert!(aggregator.has_pending_request(&conn_id));
+    }
+
+    /// A single TLS read can carry the declared body and the next pipelined
+    /// request. The surplus bytes must not become part of the body: JSON
+    /// parsing rejects trailing data, so the request view (model, messages,
+    /// tools) disappeared while the split-read path kept it.
+    #[test]
+    fn test_request_body_truncated_to_content_length_in_one_read() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let full_request = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}GET /next HTTP/1.1\r\nHost: x\r\n\r\n";
+        let event = create_mock_ssl_event_with_buf(1234, 0x4100, full_request.to_vec(), 1);
+        let header_end = full_request
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 1,
+            headers: HashMap::from([("content-length".to_string(), "2".to_string())]),
+            body_offset: header_end,
+            body_len: full_request.len() - header_end,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x4100,
+        };
+        assert!(aggregator.has_pending_request(&conn_id));
+
+        let resp_event = create_mock_ssl_event_with_buf(
+            1234,
+            0x4100,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec(),
+            0,
+        );
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::from([("content-length".into(), "2".into())]),
+            body_offset: 38,
+            body_len: 2,
+            source_event: resp_event,
+        };
+
+        match aggregator.process_response(response) {
+            Some(AggregatedResult::HttpComplete(pair)) => {
+                assert_eq!(pair.request.body(), b"{}");
+                assert_eq!(pair.request.body_len, 2);
+            }
+            other => panic!("expected a completed exchange, got {other:?}"),
+        }
     }
 
     #[test]
