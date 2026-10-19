@@ -221,7 +221,8 @@ impl GenAISqliteStore {
             return Ok(false);
         };
         conn.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM genai_events WHERE call_id = ?1)
+            "SELECT EXISTS(SELECT 1 FROM genai_events
+                           WHERE event_type = 'llm_call' AND call_id = ?1)
                 OR (SELECT COUNT(*) = 1 FROM genai_events
                     WHERE event_type = 'llm_call'
                       AND pending_origin = 'idle_drain'
@@ -520,7 +521,8 @@ impl GenAISqliteStore {
                 }
                 // Row exists with status='complete' — already done, skip.
                 let exists: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM genai_events WHERE call_id = ?1)",
+                    "SELECT EXISTS(SELECT 1 FROM genai_events
+                     WHERE event_type = 'llm_call' AND call_id = ?1)",
                     params![call.call_id],
                     |row| row.get(0),
                 )?;
