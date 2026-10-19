@@ -6081,9 +6081,12 @@ pub async fn list_trajectory_steps(
 /// Parse the parent ATIF JSON, embed subagent documents into
 /// `subagent_trajectories`, and re-serialize.
 fn inject_subagents(parent_json: &str, sub_jsons: &[String]) -> String {
+    // `IndexMut<&str>` panics for a parsed array or scalar, and the store does
+    // not validate what it was handed: a foreign or truncated ATIF row must
+    // not take the request handler down.
     let mut doc: serde_json::Value = match serde_json::from_str(parent_json) {
-        Ok(v) => v,
-        Err(_) => return parent_json.to_string(),
+        Ok(v @ serde_json::Value::Object(_)) => v,
+        _ => return parent_json.to_string(),
     };
     let subs: Vec<serde_json::Value> = sub_jsons
         .iter()
@@ -6285,4 +6288,33 @@ fn compute_skill_metrics_response(
 
     let report = crate::skill_metrics::compute_skill_metrics(&events, &options);
     HttpResponse::Ok().json(report)
+}
+
+#[cfg(test)]
+mod inject_subagents_tests {
+    use super::inject_subagents;
+
+    /// A parsed array/scalar parent is not indexable: `doc["key"] = …` used to
+    /// panic inside the request handler. A stored row with that shape must be
+    /// served unchanged instead.
+    #[test]
+    fn non_object_parent_document_is_returned_unchanged() {
+        for parent in ["[]", "true", "null", "\"text\"", "42"] {
+            let sub = r#"{"session_id":"child"}"#.to_string();
+            assert_eq!(inject_subagents(parent, std::slice::from_ref(&sub)), parent);
+        }
+    }
+
+    #[test]
+    fn object_parent_still_embeds_the_subagent_documents() {
+        let parent = r#"{"schema_version":"ATIF-v1.7","session_id":"root"}"#;
+        let sub = r#"{"session_id":"child"}"#.to_string();
+        let enriched = inject_subagents(parent, &[sub]);
+        let doc: serde_json::Value = serde_json::from_str(&enriched).expect("valid JSON");
+        assert_eq!(
+            doc["subagent_trajectories"][0]["session_id"],
+            serde_json::json!("child")
+        );
+        assert_eq!(doc["session_id"], serde_json::json!("root"));
+    }
 }
