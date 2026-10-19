@@ -152,6 +152,16 @@ pub fn extract_response_content(
                         }
                     }
                 }
+            } else if let Some(text) = choice.get("text").and_then(|t| t.as_str()) {
+                // Legacy `/v1/completions` answers put the generated text
+                // directly on the choice, without a `message` or `delta`
+                // object. The path is an admitted LLM endpoint, so without
+                // this arm a stream that reported no usage counted zero
+                // output tokens for the text it generated.
+                if !text.is_empty() {
+                    content.push_str(text);
+                    has_data = true;
+                }
             }
         }
     }
@@ -926,6 +936,26 @@ mod tests {
         let request = serde_json::json!({"model": "gpt-4"});
         let result = extract_token_data(Some(&request), None);
         assert!(result.is_none());
+    }
+
+    /// Legacy `/v1/completions` streams put each fragment on `choices[].text`
+    /// instead of a `message`/`delta` object, so the shared extractor used to
+    /// return nothing and the manual counter reported zero output tokens.
+    #[test]
+    fn test_legacy_completion_choice_text_counts_as_output() {
+        let first = serde_json::json!({"choices": [{"index": 0, "text": "hello "}]});
+        let second = serde_json::json!({"choices": [{"index": 0, "text": "there"}]});
+
+        let (content, _, tools) =
+            extract_response_content(Some(&first)).expect("legacy text must extract");
+        assert_eq!(content, "hello ");
+        assert!(tools.is_empty());
+
+        assert_eq!(
+            merge_response_output_text(&[first, second]).0,
+            "hello there",
+            "the manual counter must join the streamed fragments"
+        );
     }
 
     #[test]
