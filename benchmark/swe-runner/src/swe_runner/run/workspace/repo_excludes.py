@@ -33,8 +33,12 @@ def install_repo_exclude_rules(repo_dir: Path, *, instance_id: str) -> None:
     ``.git/info/exclude`` keeps patch extraction clean without modifying the
     upstream repository's tracked ``.gitignore``.
     """
-    info_dir = repo_dir / ".git" / "info"
-    if not (repo_dir / ".git").exists():
+    # ``.git`` is a directory in a normal checkout and a file in a linked
+    # worktree or a submodule. Only the directory form has ``info/exclude``;
+    # treating the file form as a checkout raised FileExistsError out of
+    # prepare and failed the instance.
+    git_dir = repo_dir / ".git"
+    if not git_dir.is_dir():
         logger.debug(
             "REPO_EXCLUDE_SKIP_NON_REPO instance=%s work_dir=%s",
             instance_id,
@@ -42,6 +46,7 @@ def install_repo_exclude_rules(repo_dir: Path, *, instance_id: str) -> None:
         )
         return
 
+    info_dir = git_dir / "info"
     info_dir.mkdir(parents=True, exist_ok=True)
     exclude_path = info_dir / "exclude"
     existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
