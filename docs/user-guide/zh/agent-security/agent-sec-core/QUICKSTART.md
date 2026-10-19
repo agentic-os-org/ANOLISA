@@ -2,10 +2,10 @@
 
 [English](../../../en/agent-security/agent-sec-core/QUICKSTART.md)
 
-AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测、系统加固和沙箱隔离。
+AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
 
 Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
-下文正式版本安装和 Agent 集成说明对应 V1。
+下文正式版本安装和 Agent 集成说明对应 V1；源码构建安装 V2 Rust CLI 和 daemon。
 
 ## 概述
 
@@ -15,7 +15,6 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 | Code Scanner | bash/python 静态分析检测危险操作（判定：pass/warn/deny/error） |
 | Skill Ledger | Ed25519 签名完整性追踪，6 状态生命周期（pass/none/drifted/warn/deny/tampered） |
 | PII Checker | 检测文本中的个人信息和凭据（邮箱/手机/身份证/JWT/AccessKey 等） |
-| Security Baseline | 系统安全基线扫描与加固（loongshield 后端） |
 | Sandbox | 基于 seccomp + namespace 的 cosh 命令执行隔离 |
 | Observability | 交互式事件审阅 TUI，4 级下钻 |
 | Security Events | 本地安全事件存储，支持查询与聚合统计 |
@@ -24,7 +23,8 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 
 - 源码和 RPM 安装支持 Linux x86_64、aarch64
 - ANOLISA raw 包仅支持 Linux x86_64 和 system mode
-- Python 3.11.6（固定版本）
+- V2 源码构建需要 Rust toolchain（构建脚本会在需要时完成准备）
+- Agent hook 需要 Python 3（源码构建会在缺失时安装发行版 `python3`）
 - ANOLISA CLI 0.2.17 或更高版本
 - 安装需要 root 权限（system mode）
 
@@ -61,21 +61,19 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、bubblewrap、GnuPG 和
-`jq`。user mode 会一次性列出缺少的系统 runtime package 和安装命令，然后退出；
-安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
+安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、
+GnuPG 和 `jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
+集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
+要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
+然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
 `--ignore-deps` 跳过检查。
 
-源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
-`sec-core`。这种安装方式不能继续执行 `anolisa adapter enable`，请使用下文的
-源码集成脚本。
+源码构建不会在 ANOLISA 状态中注册 `sec-core`。这种安装方式不能继续执行
+`anolisa adapter enable`，请使用下文的源码集成脚本。
 
 ## 快速开始
 
 ```bash
-# 系统安全基线扫描
-agent-sec-cli harden --scan --config agentos_baseline
-
 # 代码安全扫描
 agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
@@ -280,27 +278,6 @@ hook-stopped error，但不能撤销工具副作用。该版本的 `PostToolUseF
 因此失败输出只能扫描和审计，仍进入既有错误处理链。最终模型输出命中 deny 时只要求重写
 一次；重复进入 `Stop` 时不再阻断，以避免重试循环。Qwen Code 当前没有 pre-render 输出
 替换 Hook，因此模型输出阻断属于尽力而为。
-
-### Security Baseline（安全基线）
-
-通过 `agent-sec-cli harden` 执行系统安全加固（Alinux 上底层调用 loongshield seharden）。
-
-```bash
-# 合规扫描（默认 agentos_baseline 配置）
-agent-sec-cli harden --scan --config agentos_baseline
-
-# 预演修复（dry run）
-agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
-
-# 执行加固（需要 root）
-agent-sec-cli harden --reinforce --config agentos_baseline
-
-# OpenClaw 专属基线
-agent-sec-cli harden --scan --level openclaw
-
-# 显示完整 loongshield 帮助
-agent-sec-cli harden --downstream-help
-```
 
 ### Observability（可观测）
 
@@ -700,10 +677,6 @@ cosh 启动时会加载 hook。
 **Q: AgentSecCore 是否消耗 Token？**
 
 A: 不消耗。全部本地运行，无外部 API 调用，无 Token 开销。
-
-**Q: `harden` 和 `loongshield` 有什么区别？**
-
-A: `agent-sec-cli harden` 是 ANOLISA 统一入口，底层调用 `loongshield seharden` 并自动添加 `agentos_baseline` 配置。Alinux 上两者都可用；`harden` 省去了手动指定配置的步骤。
 
 **Q: 如何更新 Prompt Scanner 的 ML 模型？**
 

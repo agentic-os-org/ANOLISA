@@ -2,6 +2,11 @@
 
 [中文版](../../../zh/agent-security/agent-sec-core/asset-verification.md)
 
+> **V1 capability.** The V2 CLI does not provide `agent-sec-cli verify` (see
+> `CHANGELOG.md` 1.0.0). This page documents asset verification for V1
+> installations only. V2 Skill signing and verification use
+> [Skill Ledger](skill-ledger.md), which uses Ed25519 signatures.
+
 Asset Verification checks the distribution integrity of Skill directories. It verifies a
 GPG-signed manifest, checks the SHA-256 digest of every manifest entry, and rejects additional
 non-hidden regular files that the manifest does not cover.

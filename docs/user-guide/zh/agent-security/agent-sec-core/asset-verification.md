@@ -2,6 +2,10 @@
 
 [English](../../../en/agent-security/agent-sec-core/asset-verification.md)
 
+> **V1 能力。** V2 CLI 不提供 `agent-sec-cli verify`（见 `CHANGELOG.md` 1.0.0）。
+> 本页仅说明 V1 安装的资产验证。V2 的 Skill 签名与校验使用
+> [Skill Ledger](skill-ledger.md) 的 Ed25519 签名。
+
 资产验证用于检查 Skill 目录的分发完整性。它会验证 GPG 签名的 manifest，检查每个
 manifest 条目的 SHA-256 摘要，并拒绝 manifest 未覆盖的额外非隐藏普通文件。
 

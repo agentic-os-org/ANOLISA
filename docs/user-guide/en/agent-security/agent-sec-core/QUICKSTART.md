@@ -2,10 +2,11 @@
 
 [中文版](../../../zh/agent-security/agent-sec-core/QUICKSTART.md)
 
-AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, system hardening, and sandbox isolation.
+AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, and sandbox isolation.
 
 For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
-The release installation and Agent integrations below describe V1.
+Release installation and the Agent integrations below describe V1; source builds
+install the V2 Rust CLI and daemon.
 
 ## Overview
 
@@ -15,7 +16,6 @@ The release installation and Agent integrations below describe V1.
 | Code Scanner | Static analysis of bash/python code for dangerous operations (verdict: pass/warn/deny/error) |
 | Skill Ledger | Ed25519-signed integrity tracking with 6-state lifecycle (pass/none/drifted/warn/deny/tampered) |
 | PII Checker | Detects personal information and credentials in text (email, phone, ID, JWT, AccessKey, etc.) |
-| Security Baseline | System hardening scan and remediation via loongshield backend |
 | Sandbox | Syscall-level isolation for cosh command execution (seccomp + namespace) |
 | Observability | Interactive event review with 4-level drill-down TUI |
 | Security Events | Local event store for querying and aggregating security findings |
@@ -24,7 +24,8 @@ The release installation and Agent integrations below describe V1.
 
 - Linux x86_64 or aarch64 for source and RPM installations
 - Linux x86_64 with system mode for the ANOLISA raw package
-- Python 3.11.6 (pinned)
+- Rust toolchain for V2 source builds (the build script provisions it when needed)
+- Python 3 for Agent hooks (the source build installs the distribution `python3` package when missing)
 - ANOLISA CLI 0.2.17 or later
 - Root privileges for system-mode install
 
@@ -64,21 +65,21 @@ Developers building from source should use the repository-level entry point:
 ```
 
 Before installing files, the source-build entry point checks Node.js 20 or
-newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
-runtime packages with one install command and exits; install them and rerun the
-same command. `--ignore-deps` bypasses this verification for pre-provisioned
-hosts.
+newer, Python 3, bubblewrap, GnuPG, and `jq`. It uses `sudo` to install the
+Rust CLI, sandbox, and host-level daemon; default-mode integration resources
+remain in user paths. Python hooks use the host `python3`; the Qoder plugin
+installer currently requires Python >= 3.11, < 3.12. User mode reports all
+missing system runtime packages with one install command and exits; install
+them and rerun the same command. `--ignore-deps` bypasses this verification for
+pre-provisioned hosts.
 
-The source build installs the runtime and integration resources in user paths,
-but it does not register `sec-core` in ANOLISA state. Do not follow it with
-`anolisa adapter enable`; use the source integration scripts documented below.
+The source build does not register `sec-core` in ANOLISA state. Do not follow
+it with `anolisa adapter enable`; use the source integration scripts documented
+below.
 
 ## Quick Start
 
 ```bash
-# System hardening scan
-agent-sec-cli harden --scan --config agentos_baseline
-
 # Scan code for security issues
 agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
@@ -291,27 +292,6 @@ blocking fields in that version, so failed outputs are scan-and-audit only and r
 existing error flow. A denied final model output receives one rewrite attempt; a repeated
 `Stop` hook is not blocked again, preventing retry loops. Qwen Code does not currently
 provide a pre-render output replacement hook, so model-output blocking is best effort.
-
-### Security Baseline
-
-System hardening via `agent-sec-cli harden` (wraps loongshield seharden on Alinux).
-
-```bash
-# Compliance scan (default: agentos_baseline profile)
-agent-sec-cli harden --scan --config agentos_baseline
-
-# Preview remediation (dry run)
-agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
-
-# Execute remediation (requires root)
-agent-sec-cli harden --reinforce --config agentos_baseline
-
-# OpenClaw-specific baseline
-agent-sec-cli harden --scan --level openclaw
-
-# Show full downstream help
-agent-sec-cli harden --downstream-help
-```
 
 ### Observability
 
@@ -737,10 +717,6 @@ Extension path:
 **Q: Does AgentSecCore consume Tokens?**
 
 A: No. All processing is local. No external API calls, no Token cost.
-
-**Q: What is the difference between `harden` and `loongshield`?**
-
-A: `agent-sec-cli harden` is the ANOLISA unified entry point that wraps `loongshield seharden` with default configuration. On Alinux systems, both work; `harden` adds the `agentos_baseline` profile by default.
 
 **Q: How do I update the ML model for prompt scanning?**
 

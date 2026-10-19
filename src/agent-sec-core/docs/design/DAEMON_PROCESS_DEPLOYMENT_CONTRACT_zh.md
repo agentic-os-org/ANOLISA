@@ -409,6 +409,23 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
 SkillSec 持久化与激活恢复见第 11 节。
 
+**DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
+`./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
+`agent-sec-cli`、`agent-sec-daemon` 和 `linux-sandbox`，以 root 安装到
+`/usr/local/bin`，并在 `/etc/systemd/system/agent-sec-core.service` 渲染 V2
+host-level unit；不创建 wheel、venv、Python wrapper 或 user unit。默认模式仍将
+现有 Agent integration assets 安装在调用用户路径，`--system` 则安装 system 路径。
+安装器在 active systemd host 上必须 daemon-reload、enable 与 restart 服务；没有
+active systemd 的构建环境只安装文件，并明确要求操作者在 systemd host 启用服务。
+
+**DPROC-V2-SOURCE-BUILD-2（2026-10-20）**：source-build 的 V2 验收不再要求
+Security Baseline 迁移。`harden`、`verify` 和 `log-sandbox` 按 `CHANGELOG.md` 1.0.0
+记录的版本化退役契约不再由 V2 CLI 提供；依赖这些命令的脚本必须在切换安装器前
+更新。`verify` 的发行资产校验由 Skill Ledger 的 Ed25519 签名承担。Prompt、PII、
+Skill Ledger、Observability 和 Security Events 仍须具备对应的 Rust command/RPC、
+兼容输出和端到端 fixture 后才能切换。RPM 和 raw 安装路径不由该变更修改。
+回退本变更时恢复目标 revision 的安装器与文档，不恢复已退役命令。
+
 RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
 V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
 
