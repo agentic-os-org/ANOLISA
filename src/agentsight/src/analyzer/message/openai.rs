@@ -1301,8 +1301,14 @@ impl OpenAIParser {
                             entry.1.push_str(args);
                         }
                     }
-                    if finish_reason.is_none() && choice.finish_reason.is_some() {
-                        finish_reason = choice.finish_reason.clone();
+                    // The last non-null value is decisive: a multi-choice
+                    // stream finishes each choice on its own chunk, and every
+                    // other reader (the interruption detector, the drain
+                    // merger) reads the last one. Keeping the first reported
+                    // an earlier choice's `stop` for a call whose final choice
+                    // was cut.
+                    if let Some(reason) = choice.finish_reason.as_ref() {
+                        finish_reason = Some(reason.clone());
                     }
                 }
             }
@@ -3656,5 +3662,42 @@ mod tests {
         );
         assert_eq!(tc[0]["function"]["name"].as_str().unwrap(), "read_file");
         assert_eq!(tc[1]["function"]["name"].as_str().unwrap(), "write_file");
+    }
+
+    /// A multi-choice stream finishes each choice on its own chunk. Keeping the
+    /// *first* non-null finish reason therefore reports an earlier choice's
+    /// `stop` for a call whose last choice was cut by the safety filter — the
+    /// same "last is decisive" rule the interruption detector and the drain
+    /// merger follow.
+    #[test]
+    fn test_aggregate_sse_chunks_reads_the_last_choices_finish_reason() {
+        let chunk = |choice: u32, finish: &str| {
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": choice, "delta": {"content": "x"}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(0, "stop"),
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": 1, "delta": {"content": "y"}, "finish_reason": null}]
+            }),
+            chunk(1, "content_filter"),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason.as_deref(),
+            Some("content_filter"),
+            "the last choice's finish reason is decisive, not the first"
+        );
     }
 }
