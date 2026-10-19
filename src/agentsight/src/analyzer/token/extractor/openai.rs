@@ -327,6 +327,54 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // A gateway may put the whole block payload on
+            // `content_block_start` and send no deltas at all. The chatml
+            // reader seeds its buffers from that event, and the live analyzer
+            // does the same, but the manual counters recognised only the
+            // deltas — so such a capture counted zero output tokens for an
+            // answer that was fully present. The standard Anthropic stream
+            // starts every block with an empty payload, where seeding is a
+            // no-op; a tool_use's empty `input` object is the placeholder the
+            // deltas replace and is not a body.
+            "content_block_start" => {
+                if let Some(block) = resp.get("content_block") {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    return Some((text.to_string(), None, Vec::new()));
+                                }
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                                if !thinking.is_empty() {
+                                    return Some((
+                                        String::new(),
+                                        Some(thinking.to_string()),
+                                        Vec::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = block.get("input").filter(|input| {
+                                input.as_object().is_some_and(|object| !object.is_empty())
+                            });
+                            if !name.is_empty() {
+                                let arguments = input.map(|i| i.to_string()).unwrap_or_default();
+                                return Some((
+                                    String::new(),
+                                    None,
+                                    vec![format!("{name}: {arguments}")],
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // A Responses function call is announced by
             // `response.output_item.added` (which carries the name) and then
             // streamed as `response.function_call_arguments.delta` fragments.
@@ -369,6 +417,150 @@ pub fn extract_response_content(
                 }
             }
             _ => {}
+        }
+    }
+
+    // The DashScope/Bailian native envelope has no `choices[].delta`: the
+    // payload rides a top-level `output` object (`output.text`, or
+    // `output.choices[].message` for `result_format: message`), and native
+    // streaming repeats the cumulative text on every chunk by default. The
+    // drain merger reads it (`extract_dashscope_native_parts`), and the chatml
+    // reader routes it too, but the manual counters recognized neither shape —
+    // so a native capture counted zero output tokens.
+    //
+    // The cumulative/delta ambiguity is the drain merger's rule: a value that
+    // extends the buffer replaces it, anything else appends.
+    if let Some(output) = resp.get("output").filter(|o| o.is_object()) {
+        let mut native_content = String::new();
+        let mut native_reasoning = String::new();
+        let mut native_calls: Vec<String> = Vec::new();
+        // Native tool calls arrive whole and repeat on every chunk, so the
+        // last value per slot wins rather than being concatenated.
+        let mut call_slots: std::collections::BTreeMap<u64, (String, String)> =
+            std::collections::BTreeMap::new();
+        let native_text = |content: &Value| -> String {
+            if let Some(text) = content.as_str() {
+                return text.to_string();
+            }
+            content
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default()
+        };
+        if let Some(text) = output.get("text").and_then(|t| t.as_str()) {
+            accumulate_native_text(&mut native_content, text);
+        }
+        for choice in output
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .map(|c| c.as_slice())
+            .unwrap_or_default()
+        {
+            let Some(message) = choice.get("message") else {
+                continue;
+            };
+            if let Some(content) = message.get("content") {
+                accumulate_native_text(&mut native_content, &native_text(content));
+            }
+            if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
+                accumulate_native_text(&mut native_reasoning, reasoning);
+            }
+            for (call_pos, call) in message
+                .get("tool_calls")
+                .and_then(|t| t.as_array())
+                .map(|t| t.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let function = call.get("function");
+                let name = function
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let slot = call
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(call_pos as u64);
+                if name.is_empty() && arguments.is_empty() {
+                    continue;
+                }
+                call_slots.insert(slot, (name, arguments));
+            }
+        }
+        for (name, arguments) in call_slots.into_values() {
+            if !name.is_empty() {
+                native_calls.push(format!("{name}: {arguments}"));
+            }
+        }
+        if !native_content.is_empty() || !native_reasoning.is_empty() || !native_calls.is_empty() {
+            return Some((
+                native_content,
+                (!native_reasoning.is_empty()).then_some(native_reasoning),
+                native_calls,
+            ));
+        }
+    }
+
+    // Gemini's `streamGenerateContent` chunks are standalone generation
+    // payloads: there is no `choices` array and no `type` tag, the answer
+    // streams as `candidates[].content.parts[].text`, thinking as the parts
+    // marked `thought: true`, and calls as whole `parts[].functionCall`
+    // objects. Every other reader knows the shape — the drain merger
+    // (`merge_gemini_sse_chunks`), the SSE-reduce output predicate, and the
+    // usage parser all handle it — but the manual counters did not, so a
+    // Gemini capture counted no output tokens at all.
+    if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array()) {
+        let mut saw_part = false;
+        for candidate in candidates {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+            else {
+                continue;
+            };
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        saw_part = true;
+                        if part.get("thought").and_then(|t| t.as_bool()) == Some(true) {
+                            reasoning = match reasoning {
+                                Some(existing) => Some(existing + text),
+                                None => Some(text.to_string()),
+                            };
+                        } else {
+                            content.push_str(text);
+                        }
+                    }
+                }
+                if let Some(call) = part.get("functionCall") {
+                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if !name.is_empty() {
+                        saw_part = true;
+                        let arguments = call
+                            .get("args")
+                            .map(|args| args.to_string())
+                            .unwrap_or_default();
+                        tool_calls.push(format!("{name}: {arguments}"));
+                    }
+                }
+            }
+        }
+        if saw_part {
+            return Some((content, reasoning, tool_calls));
         }
     }
 
@@ -529,6 +721,22 @@ fn read_output_item(item: &Value) -> (String, String) {
     }
 }
 
+/// Fold one native-protocol text value into `buf`.
+///
+/// Native streaming repeats the cumulative text on every chunk by default and
+/// sends only the delta with `incremental_output=true`; a passive observer
+/// cannot see that flag, so a value that extends the buffer replaces it and
+/// anything else appends — the rule the drain merger applies.
+fn accumulate_native_text(buf: &mut String, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if text.starts_with(buf.as_str()) {
+        buf.clear();
+    }
+    buf.push_str(text);
+}
+
 /// Whether an `output_item` payload is a reasoning item.
 fn is_reasoning_item(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("reasoning")
@@ -546,6 +754,17 @@ fn is_closing_response_event(chunk: &Value) -> bool {
 /// A choice that carries `message` instead of `delta` speaks in cumulative
 /// snapshots: each frame repeats the answer so far rather than an increment.
 fn carries_message_snapshot(chunk: &Value) -> bool {
+    // The DashScope/Bailian native envelope is a snapshot too, and the most
+    // literal one: it has no `choices[].delta` at all, and by default every
+    // chunk repeats the cumulative text (`incremental_output=false`). Treating
+    // it as a fragment made a multi-chunk native stream concatenate the
+    // cumulative text once per chunk — "The The answer" — because the
+    // per-chunk read buffers are local to `extract_response_content` and start
+    // empty, so its own replace-or-append rule can never see the previous
+    // chunk. The fold across chunks has to happen here.
+    if chunk.get("output").is_some_and(Value::is_object) {
+        return true;
+    }
     chunk
         .get("choices")
         .and_then(|c| c.as_array())
@@ -1509,6 +1728,253 @@ mod tests {
             extract_response_content(Some(&chunk)).expect("should extract the tool input fragment");
         assert!(content.is_empty());
         assert_eq!(tools, vec!["{\"city\":".to_string()]);
+    }
+
+    /// The DashScope/Bailian native envelope has no `choices[].delta`: the
+    /// payload rides a top-level `output` object. The drain merger reads it
+    /// (`extract_dashscope_native_parts`) and the chatml reader routes it, so a
+    /// native capture drained on the dead-pid path recorded its parts while
+    /// the manual counters recorded none.
+    #[test]
+    fn test_dashscope_native_envelope_is_counted() {
+        // `result_format: text` and the cumulative default: every chunk
+        // repeats the whole answer so far, which must not be appended twice.
+        let chunks = [
+            serde_json::json!({"output": {"text": "The "}, "usage": {"output_tokens": 1}}),
+            serde_json::json!({"output": {"text": "The answer"}, "usage": {"output_tokens": 2}}),
+        ];
+        let mut plain = String::new();
+        for chunk in &chunks {
+            let (content, _, _) =
+                extract_response_content(Some(chunk)).expect("native text is the answer");
+            plain.push_str(&content);
+        }
+        // Each chunk is read on its own here; folding the cumulative repeats
+        // is `merge_response_output_text`'s job, already covered elsewhere.
+        assert_eq!(plain, "The The answer");
+
+        // The envelope itself, in one chunk, with its reasoning and a whole
+        // tool call.
+        let single = serde_json::json!({
+            "output": {
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant",
+                    "content": [{"text": "look "}, {"text": "here"}],
+                    "reasoning_content": "weighing it",
+                    "tool_calls": [
+                        {"index": 0, "function": {"name": "read_file", "arguments": "{\"p\":\"a\"}"}}
+                    ]
+                }}]
+            }
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&single)).expect("native message is the answer");
+        assert_eq!(content, "look here");
+        assert_eq!(reasoning.as_deref(), Some("weighing it"));
+        assert_eq!(tools, vec!["read_file: {\"p\":\"a\"}".to_string()]);
+    }
+
+    /// The merge across chunks, not the single-chunk read, is where a native
+    /// stream's cumulative repeats have to be folded. Native streaming
+    /// defaults to `incremental_output=false`, so every chunk repeats the whole
+    /// answer so far; appending each one counted the answer once per chunk.
+    #[test]
+    fn test_native_stream_cumulative_text_is_folded_once() {
+        let chunks = [
+            serde_json::json!({"output": {"text": "The "}}),
+            serde_json::json!({"output": {"text": "The answer"}}),
+        ];
+        assert_eq!(merge_response_output_text(&chunks).0, "The answer");
+
+        // The incremental form (`incremental_output=true`) appends instead.
+        let incremental = [
+            serde_json::json!({"output": {"text": "The "}}),
+            serde_json::json!({"output": {"text": "answer"}}),
+        ];
+        assert_eq!(merge_response_output_text(&incremental).0, "The answer");
+
+        // Reasoning rides the same rule.
+        let reasoning = [
+            serde_json::json!({"output": {"choices": [{"message": {"reasoning_content": "weigh"}}]}}),
+            serde_json::json!({"output": {"choices": [{"message": {"reasoning_content": "weighing"}}]}}),
+        ];
+        assert_eq!(merge_response_output_text(&reasoning).1, "weighing");
+    }
+
+    /// Native tool calls arrive whole on every chunk, so the last value per
+    /// slot wins; pushing each chunk's copy counted the same call once per
+    /// chunk.
+    #[test]
+    fn test_native_stream_repeated_tool_calls_are_not_duplicated() {
+        let call = |name: &str, args: &str| {
+            serde_json::json!({"output": {"choices": [{"message": {"tool_calls": [
+                {"index": 0, "function": {"name": name, "arguments": args}}
+            ]}}]}})
+        };
+        let chunks = [
+            call("read_file", "{\"p\":\"a\"}"),
+            call("read_file", "{\"p\":\"a\"}"),
+        ];
+        assert_eq!(
+            merge_response_output_text(&chunks).2,
+            vec!["read_file: {\"p\":\"a\"}".to_string()]
+        );
+    }
+
+    /// A native chunk that carries only its terminal state (`finish_reason`,
+    /// `usage`) must stay unextracted, so the counters do not invent an empty
+    /// answer for it.
+    #[test]
+    fn test_dashscope_native_terminal_chunk_is_not_extracted() {
+        for chunk in [
+            serde_json::json!({"output": {"finish_reason": "stop"},
+                "usage": {"output_tokens": 3}}),
+            serde_json::json!({"output": {"choices": [{"index": 0, "finish_reason": "stop"}]}}),
+            serde_json::json!({"output": {"text": ""}}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
+    }
+
+    /// Gemini's `streamGenerateContent` chunks have no `choices` array and no
+    /// `type` tag: the answer rides `candidates[].content.parts[].text`,
+    /// thinking the parts marked `thought`, and calls whole
+    /// `parts[].functionCall` objects. The drain merger and the SSE-reduce
+    /// output predicate both know the shape, so a Gemini capture counted no
+    /// output tokens here while the drain recorded its parts.
+    #[test]
+    fn test_gemini_stream_parts_are_counted() {
+        let text = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "hel"}]}, "index": 0}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&text)).expect("a Gemini text part is the answer");
+        assert_eq!(content, "hel");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+
+        let thought = serde_json::json!({
+            "candidates": [{"content": {"role": "model",
+                "parts": [{"text": "weighing ", "thought": true}, {"text": "the options", "thought": true}]}}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&thought)).expect("a thought part is reasoning");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("weighing the options"));
+        assert!(tools.is_empty());
+
+        let call = serde_json::json!({
+            "candidates": [{"content": {"role": "model",
+                "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}]}}],
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&call)).expect("a functionCall part is a call");
+        assert!(content.is_empty());
+        assert!(reasoning.is_none());
+        assert_eq!(tools, vec!["get_weather: {\"city\":\"Paris\"}".to_string()]);
+    }
+
+    /// The terminal Gemini chunk carries `usageMetadata` and `finishReason`
+    /// but no parts. It must not be mistaken for an answer, and a candidate
+    /// with an empty parts array stays unextracted like every other
+    /// content-free event.
+    #[test]
+    fn test_gemini_terminal_chunk_without_parts_is_not_extracted() {
+        for chunk in [
+            serde_json::json!({
+                "candidates": [{"finishReason": "STOP", "index": 0}],
+                "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1},
+            }),
+            serde_json::json!({"candidates": [{"content": {"parts": []}, "index": 0}]}),
+            serde_json::json!({"candidates": [{"content": {"parts": [{"text": ""}]}, "index": 0}]}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
+    }
+
+    /// A gateway may deliver the whole block on `content_block_start` and
+    /// send no delta at all. The chatml reader seeds its buffers from that
+    /// event and the live analyzer does too, but the manual counters read
+    /// only the deltas, so such a capture counted zero output tokens for a
+    /// fully captured answer.
+    #[test]
+    fn test_anthropic_content_block_start_payload_is_kept() {
+        let text = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": "the whole answer"},
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&text)).expect("a seeded text block is answer text");
+        assert_eq!(content, "the whole answer");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+
+        let thinking = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "weighing options"},
+        });
+        let (content, reasoning, tools) = extract_response_content(Some(&thinking))
+            .expect("a seeded thinking block is reasoning");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("weighing options"));
+        assert!(tools.is_empty());
+
+        let call = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "get_weather",
+                "input": {"city": "Paris"},
+            },
+        });
+        let (content, _, tools) =
+            extract_response_content(Some(&call)).expect("a seeded tool block is a call");
+        assert!(content.is_empty());
+        assert_eq!(tools, vec!["get_weather: {\"city\":\"Paris\"}".to_string()]);
+    }
+
+    /// The standard stream opens every block with an empty payload and lets
+    /// the deltas fill it. Seeding must stay a no-op there, or the same text
+    /// would be counted twice.
+    ///
+    /// A named tool_use is the exception: its name is the announcement's
+    /// whole contribution, exactly as the Responses `output_item.added` arm
+    /// contributes `name: `, and its empty `input` object is the placeholder
+    /// the deltas replace rather than a body.
+    #[test]
+    fn test_anthropic_content_block_start_without_payload_is_not_extracted() {
+        for chunk in [
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "", "input": {}},
+            }),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
     }
 
     #[test]
