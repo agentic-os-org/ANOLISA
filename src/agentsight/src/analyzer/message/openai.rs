@@ -457,28 +457,37 @@ impl OpenAIParser {
                         // user message holding their JSON dropped the whole
                         // tool interaction from the recorded request. A custom
                         // (freeform) tool is replayed the same way, with its
-                        // text in `input` instead of `arguments`.
-                        "function_call" | "custom_tool_call" => {
+                        // text in `input` instead of `arguments`. A Codex
+                        // `local_shell_call` carries its argv in an `action`
+                        // object and names the tool implicitly; the collector
+                        // crate already maps that shape, so read it here too
+                        // instead of flattening the call into a user message.
+                        "function_call" | "custom_tool_call" | "local_shell_call" => {
+                            let arguments = item
+                                .get("arguments")
+                                .or_else(|| item.get("input"))
+                                .or_else(|| item.get("action"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(if t == "local_shell_call" { "shell" } else { "" });
                             messages.push(serde_json::json!({
                                 "role": "assistant",
                                 "tool_calls": [{
                                     "id": item.get("call_id"),
                                     "type": "function",
                                     "function": {
-                                        "name": item
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default(),
-                                        "arguments": item
-                                            .get("arguments")
-                                            .or_else(|| item.get("input"))
-                                            .cloned()
-                                            .unwrap_or(serde_json::Value::Null),
+                                        "name": name,
+                                        "arguments": arguments,
                                     },
                                 }],
                             }));
                         }
-                        "function_call_output" | "custom_tool_call_output" => {
+                        "function_call_output"
+                        | "custom_tool_call_output"
+                        | "local_shell_call_output" => {
                             // `content` must be text: the chat content type is
                             // string-or-parts, so a structured output is carried
                             // as its JSON text and re-parsed by the consumer.
@@ -1993,6 +2002,52 @@ mod tests {
         );
         assert_eq!(request.messages[2].role, MessageRole::Tool);
         assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_2"));
+    }
+
+    /// A Codex shell call rides the Responses protocol as
+    /// `local_shell_call`: the item carries its argv in an `action` object
+    /// instead of `arguments`/`input`, and the reply is typed
+    /// `local_shell_call_output`. The replayed request of the same turn is the
+    /// only reader that knew `function_call`; dropping this pair flattened the
+    /// call and its output into two fake user messages, so the recorded
+    /// request held no tool interaction at all.
+    #[test]
+    fn test_parse_request_responses_local_shell_items() {
+        let json = serde_json::json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {"role": "user", "content": "list the directory"},
+                {
+                    "type": "local_shell_call",
+                    "call_id": "call_ls",
+                    "action": {"type": "exec", "command": ["ls", "-l"]}
+                },
+                {
+                    "type": "local_shell_call_output",
+                    "call_id": "call_ls",
+                    "output": "total 0\n"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the local_shell_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("shell")
+        );
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_ls"));
     }
 
     #[test]
