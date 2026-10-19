@@ -135,3 +135,24 @@ def test_results_after_intervening_agent_step_attach_to_latest_step():
     assert len(agent_steps) == 2
     assert [r["source_call_id"] for r in agent_steps[0]["observation"]["results"]] == ["a"]
     assert [r["source_call_id"] for r in agent_steps[1]["observation"]["results"]] == ["b"]
+
+
+def test_thinking_only_assistant_record_keeps_its_step():
+    """Claude Code can stream a thinking block in its own assistant record.
+    Dropping text-less, call-less records discarded the reasoning entirely."""
+    lines = [
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"thinking","thinking":"weigh the options"}]}}',
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"text","text":"the answer is 4"}]}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 2
+    assert agent_steps[0]["reasoning_content"] == "weigh the options"
+    assert agent_steps[0]["message"] is None
+    assert agent_steps[1]["message"] == "the answer is 4"

@@ -179,7 +179,10 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             tool_calls = extract_tool_calls(content)
             thinking = extract_thinking(content)
 
-            if not text.strip() and not tool_calls:
+            # Thinking is part of the turn even when the record carries no
+            # text or tool call: Claude Code can stream it in its own record,
+            # and dropping the step also dropped the reasoning_content.
+            if not text.strip() and not tool_calls and not thinking:
                 continue
 
             step_id += 1
