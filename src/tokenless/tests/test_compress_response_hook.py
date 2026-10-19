@@ -632,12 +632,12 @@ class TestReplacementProtocol(unittest.TestCase):
                          "Compressed content must not be in additionalContext (duplication)")
 
     def test_qoder_cli_uses_updated_tool_output(self):
-        """Qoder CLI should replace tool output without version gating."""
+        """Qoder CLI should replace structured tool output without version gating."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
             {
-                "tool_name": "run_in_terminal",
+                "tool_name": "CustomTool",
                 "tool_response": large_payload,
                 "session_id": "test-session",
                 "tool_use_id": "toolu_test",
@@ -1177,6 +1177,42 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertIsInstance(updated, str,
                               "Qoder requires a string updatedToolOutput")
         self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+
+    def test_qoder_uses_text_slot_at_200_chars(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "no-savings")
+        for length in (199, 200):
+            with self.subTest(length=length):
+                stdout = "x" * length
+                envelope = self._bash_envelope(stdout, "")
+                result = _run_hook(
+                    {"tool_name": "Bash", "tool_response": envelope},
+                    agent_id="qoder-cli",
+                    mock_tokenless_path=binary,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertEqual(result, {})
+                with open(os.path.join(self.tmpdir, "request.json")) as captured:
+                    request = json.load(captured)
+                expected = stdout if length == 200 else json.dumps(
+                    envelope, separators=(",", ":"), ensure_ascii=False
+                )
+                self.assertEqual(request["content"], expected)
+
+    def test_qoder_keeps_unselected_stderr_when_both_streams_are_long(self) -> None:
+        stdout = "build step\n" * 30
+        stderr = "warning\n" * 25
+        envelope = self._bash_envelope(stdout, stderr)
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": envelope},
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertEqual(json.load(captured)["content"], stdout)
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(json.loads(updated), self._bash_envelope(stdout[:40], stderr))
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
         log = "npm verbose progress line\n" * 150
