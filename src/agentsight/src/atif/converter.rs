@@ -677,6 +677,51 @@ fn build_observation(
     }
 }
 
+/// Flatten a tool-result payload into the text downstream consumers read.
+///
+/// Anthropic writes `tool_result.content` as an array of content blocks as soon
+/// as a result carries more than one piece of text — an MCP server, or a
+/// command whose streams were captured separately, returns
+/// `[{"type":"text","text":…},{"type":"text","text":…}]` — and
+/// `GenAIBuilder::anthropic_content_block_to_part` passes that array through
+/// unchanged.
+///
+/// Serialising it whole left the observation as JSON punctuation:
+/// `outcome::classify_call` looks for a line that *starts* with an error token
+/// and saw `[{"type":"text"`, so a marked failure fell through to the weak text
+/// heuristics, and the evidence pool's haystack carried the encoding instead of
+/// the output, so a value the tool printed could not ground a later claim. The
+/// local collector's converter already flattens this shape in
+/// `flatten_tool_result_content`; both converters must produce the same text
+/// for the same capture.
+///
+/// Non-text blocks (an image, a document) have no textual form to contribute
+/// and are skipped rather than rendered as empty strings, so the joining
+/// newlines stay meaningful. Anything that is not a block array keeps its
+/// previous rendering, including a string payload, which is returned verbatim.
+fn flatten_result_content(payload: &serde_json::Value) -> String {
+    if let serde_json::Value::Array(blocks) = payload {
+        let texts: Vec<&str> = blocks
+            .iter()
+            .filter_map(|block| {
+                let block = block.as_object()?;
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 /// Scan input messages for ToolCallResponse parts, matching by tool_call_id.
 ///
 /// Role is deliberately not filtered. Agents disagree about where a tool result
@@ -731,16 +776,34 @@ fn collect_tool_responses(
                 // plain `or_else` chain never reached the status arm once the
                 // boolean answered, so the certain failure arrived at the
                 // classifier carrying an explicit success flag.
-                let status_is_error = response
+                // The Responses API copies `function_call_output.output`
+                // through unchanged and `parse_request_body` clones it into the
+                // part without re-parsing, so the envelope can arrive as a
+                // JSON-encoded *string* rather than an object. The detector and
+                // the grader both re-parse that shape before judging it; read
+                // the same envelope here so the same bytes get the same
+                // outcome. Only an object envelope is looked through — a
+                // plain string payload keeps its previous rendering, which is
+                // what the flattening below expects.
+                let encoded = match response {
+                    serde_json::Value::String(text) => {
+                        serde_json::from_str::<serde_json::Value>(text.trim())
+                            .ok()
+                            .filter(serde_json::Value::is_object)
+                    }
+                    _ => None,
+                };
+                let envelope = encoded.as_ref().unwrap_or(response);
+                let status_is_error = envelope
                     .get("status")
                     .and_then(|v| v.as_str())
                     .is_some_and(|status| status.eq_ignore_ascii_case("error"));
-                let declared = response
+                let declared = envelope
                     .get(EXTRA_IS_ERROR)
-                    .or_else(|| response.get("isError"))
+                    .or_else(|| envelope.get("isError"))
                     .and_then(|v| v.as_bool())
                     .or_else(|| {
-                        response
+                        envelope
                             .get("success")
                             .and_then(|v| v.as_bool())
                             .map(|success| !success)
@@ -761,14 +824,11 @@ fn collect_tool_responses(
                 // token, and a `{"content":"Error: …` prefix defeats that check
                 // on precisely the results the flag marks as failures.
                 let payload = if is_error.is_some() {
-                    response.get("content").unwrap_or(response)
+                    envelope.get("content").unwrap_or(response)
                 } else {
                     response
                 };
-                let content_str = match payload {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
+                let content_str = flatten_result_content(payload);
                 pending.push((id.as_deref(), content_str, extra));
             }
         }
@@ -1327,6 +1387,147 @@ pub(crate) mod tests {
             assert_eq!(
                 index.has_deterministic_finding(),
                 expected == CallStatus::Failed
+            );
+        }
+    }
+
+    /// Anthropic writes `tool_result.content` as an array of content blocks
+    /// whenever a result has more than one piece of text: MCP servers, a
+    /// command whose stdout and stderr were captured separately, and Claude
+    /// Code's own multi-block results all arrive as
+    /// `[{"type":"text","text":…},{"type":"text","text":…}]`.
+    ///
+    /// `GenAIBuilder::anthropic_content_block_to_part` passes that array
+    /// through unchanged, so the converter is the only place left to read it.
+    /// Serialising the array whole turned the observation into
+    /// `[{"type":"text","text":"command failed"},…]`, which loses the text the
+    /// downstream consumers read: `outcome::classify_call` looks for a line
+    /// that *starts* with an error token and found `[{"type":"text"`, and the
+    /// evidence pool haystack carried JSON punctuation instead of the output,
+    /// so a value the tool actually printed could not ground anything.
+    ///
+    /// The local collector's converter already flattens this shape
+    /// (`flatten_tool_result_content`, "flatten array tool results in the
+    /// local ATIF converter"), and the ATIF schema says the content is the
+    /// result text. Read the same blocks here.
+    #[test]
+    fn a_multi_block_tool_result_reaches_the_classifier_as_its_text() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-blocks".into()),
+                name: "Bash".into(),
+                arguments: Some(serde_json::json!({"command": "false"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        // The shape Anthropic returns for a failed multi-block result.
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-blocks".into()),
+                response: serde_json::json!({
+                    "content": [
+                        {"type": "text", "text": "command failed"},
+                        {"type": "text", "text": "exit 1"}
+                    ],
+                    "is_error": true
+                }),
+            }],
+            name: None,
+        }];
+
+        let doc = convert_trace_to_atif(
+            "trace-blocks",
+            vec![
+                call_event(1, 1_000_000_000, Some(agent_turn), None, Some("run it")),
+                call_event(2, 3_000_000_000, None, Some(replayed), None),
+            ],
+        )
+        .unwrap();
+        let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
+        let text = result
+            .content
+            .as_ref()
+            .and_then(|c| c.as_str())
+            .expect("content is flattened to a string");
+        assert_eq!(text, "command failed\nexit 1", "got {text:?}");
+        assert_eq!(result.is_error(), Some(true));
+
+        let index = build_index(&doc, 0..doc.steps.len());
+        assert_eq!(index.call_verdicts[0].verdict.status, CallStatus::Failed);
+    }
+
+    /// The Responses API copies `function_call_output.output` through
+    /// unchanged, so a tool result can arrive as a JSON-encoded *string*
+    /// holding the envelope — `{\"content\":…,\"isError\":false}` — rather than
+    /// as an object. An MCP result is often serialised that way too.
+    ///
+    /// The interruption detector and the grader both re-parse such a payload
+    /// before judging it (`tool_response_failure_text` and its grader twin),
+    /// which is what keeps an explicit `isError: false` authoritative over
+    /// free-form output that happens to mention a missing path. The converter
+    /// read the outer string only, so `declared` was `None`, the success flag
+    /// never reached the observation, and the same payload the detector calls
+    /// a success reached `classify_call` with no outcome at all: the result
+    /// stayed in the evidence pool, where `grep: no such file or directory`
+    /// could ground — or refuse to ground — a later claim it never sourced.
+    ///
+    /// Both spellings must agree on the same bytes; that agreement is what
+    /// this pins.
+    #[test]
+    fn an_encoded_tool_result_envelope_keeps_its_declared_outcome() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        for (encoded, flag, expected) in [
+            (
+                r#"{"content":"grep: no such file or directory","isError":false}"#,
+                Some(false),
+                CallStatus::Ok,
+            ),
+            (
+                r#"{"content":"command failed","isError":true}"#,
+                Some(true),
+                CallStatus::Failed,
+            ),
+        ] {
+            let agent_turn = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("tc-enc".into()),
+                    name: "Bash".into(),
+                    arguments: Some(serde_json::json!({"command": "grep -r x /root"})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let replayed = vec![InputMessage {
+                role: "tool".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tc-enc".into()),
+                    response: serde_json::json!(encoded),
+                }],
+                name: None,
+            }];
+
+            let doc = convert_trace_to_atif(
+                "trace-encoded",
+                vec![
+                    call_event(1, 1_000_000_000, Some(agent_turn), None, Some("look")),
+                    call_event(2, 3_000_000_000, None, Some(replayed), None),
+                ],
+            )
+            .unwrap();
+            let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
+            assert_eq!(result.is_error(), flag, "payload {encoded}");
+
+            let index = build_index(&doc, 0..doc.steps.len());
+            assert_eq!(
+                index.call_verdicts[0].verdict.status, expected,
+                "payload {encoded}"
             );
         }
     }
