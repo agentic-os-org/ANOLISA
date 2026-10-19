@@ -516,6 +516,66 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // A whole Anthropic message (a non-streaming body,
+                        // or a gateway that returns one). `content` is the
+                        // same block array the streaming shape delivers
+                        // piecewise.
+                        Some("message") => {
+                            if let Some(blocks) =
+                                data_json.get("content").and_then(|v| v.as_array())
+                            {
+                                for (position, block) in blocks.iter().enumerate() {
+                                    match block.get("type").and_then(|v| v.as_str()) {
+                                        Some("text") => {
+                                            if let Some(text) =
+                                                block.get("text").and_then(|v| v.as_str())
+                                            {
+                                                if !text.is_empty() {
+                                                    content_parts.push(text.to_string());
+                                                }
+                                            }
+                                        }
+                                        Some("thinking") => {
+                                            if let Some(text) =
+                                                block.get("thinking").and_then(|v| v.as_str())
+                                            {
+                                                if !text.is_empty() {
+                                                    reasoning_parts.push(text.to_string());
+                                                }
+                                            }
+                                        }
+                                        Some("tool_use") => {
+                                            let arguments = block
+                                                .get("input")
+                                                .filter(|input| {
+                                                    input
+                                                        .as_object()
+                                                        .is_some_and(|object| !object.is_empty())
+                                                })
+                                                .map(|input| input.to_string())
+                                                .unwrap_or_default();
+                                            anthropic_calls.insert(
+                                                position as u64,
+                                                (
+                                                    block
+                                                        .get("id")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                    block
+                                                        .get("name")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                    arguments,
+                                                ),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                         Some("content_block_delta") => {
                             let index =
                                 data_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -656,6 +716,93 @@ impl AnalyzeChatmlCommand {
                             responses_tool_calls.observe(&data_json);
                         }
                         _ => {}
+                    }
+
+                    // ── Non-streaming provider bodies ─────────────────────
+                    // `process_events` offers a body as a single synthetic
+                    // frame, so it has no streaming `type` (Anthropic's whole
+                    // message is the exception, handled above). Read the
+                    // response object the provider returns instead of
+                    // reporting a zero-token answer.
+                    if matches!(event_type, None | Some("response")) {
+                        // OpenAI Responses: `output` is an array of items.
+                        if let Some(items) = data_json.get("output").and_then(|v| v.as_array()) {
+                            for item in items {
+                                match item.get("type").and_then(|v| v.as_str()) {
+                                    Some("message") => {
+                                        if let Some(parts) =
+                                            item.get("content").and_then(|v| v.as_array())
+                                        {
+                                            for part in parts {
+                                                if let Some(text) =
+                                                    part.get("text").and_then(|v| v.as_str())
+                                                {
+                                                    if !text.is_empty() {
+                                                        content_parts.push(text.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some("function_call") | Some("custom_tool_call") => {
+                                        let name =
+                                            item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                        let arguments = item
+                                            .get("arguments")
+                                            .or_else(|| item.get("input"))
+                                            .map(|value| match value {
+                                                serde_json::Value::String(text) => text.clone(),
+                                                other => other.to_string(),
+                                            })
+                                            .unwrap_or_default();
+                                        if !name.is_empty() || !arguments.is_empty() {
+                                            let slot = (0, tool_calls.len());
+                                            tool_calls.push((slot, name.to_string(), arguments));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // Gemini: answer parts live under candidates[].content.
+                        if let Some(candidates) =
+                            data_json.get("candidates").and_then(|v| v.as_array())
+                        {
+                            for candidate in candidates {
+                                if let Some(parts) = candidate
+                                    .pointer("/content/parts")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for part in parts {
+                                        if let Some(text) =
+                                            part.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                        if let Some(call) = part.get("functionCall") {
+                                            let name = call
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let arguments = call
+                                                .get("args")
+                                                .map(|value| value.to_string())
+                                                .unwrap_or_default();
+                                            if !name.is_empty() || !arguments.is_empty() {
+                                                let slot = (0, tool_calls.len());
+                                                tool_calls.push((
+                                                    slot,
+                                                    name.to_string(),
+                                                    arguments,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Extract content and reasoning_content from the OpenAI
@@ -1363,6 +1510,83 @@ mod tests {
             resp.content,
             vec!["hello".to_string(), " there".to_string()]
         );
+    }
+
+    #[test]
+    fn non_sse_anthropic_body_keeps_the_answer() {
+        let body = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "hello there"},
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup",
+                 "input": {"q": "x"}}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    #[test]
+    fn non_sse_anthropic_body_keeps_thinking() {
+        let body = json!({
+            "type": "message",
+            "content": [
+                {"type": "thinking", "thinking": "reason first"},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("reason first"));
+        assert_eq!(resp.content, vec!["answer".to_string()]);
+    }
+
+    #[test]
+    fn non_sse_responses_body_keeps_the_answer() {
+        let body = json!({
+            "object": "response",
+            "output": [
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "hello there"}]},
+                {"type": "function_call", "name": "lookup", "arguments": "{\"q\":\"x\"}"},
+                {"type": "custom_tool_call", "name": "custom", "input": "payload"}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                r#"lookup: {"q":"x"}"#.to_string(),
+                "custom: payload".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_sse_gemini_body_keeps_the_answer() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "hello there"},
+                    {"functionCall": {"name": "lookup", "args": {"q": "x"}}}
+                ]},
+                "finishReason": "STOP"
+            }]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    #[test]
+    fn non_sse_legacy_completion_body_keeps_the_answer() {
+        let body = json!({
+            "choices": [{"index": 0, "text": "hello there", "finish_reason": "stop"}]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
     }
 
     #[test]
