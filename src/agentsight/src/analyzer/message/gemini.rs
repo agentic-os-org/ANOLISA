@@ -399,11 +399,26 @@ impl GeminiParser {
             };
             saw_gemini = true;
             for (position, candidate) in candidates.iter().enumerate() {
-                let index = candidate
-                    .get("index")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(position as u64) as usize;
-                while merged.candidates.len() <= index {
+                // `index` is wire data, so it is never used to size the
+                // vector: candidates arrive contiguously from slot 0 and a
+                // far-away index would otherwise reserve one slot per
+                // position below it. An index that is not the next free slot
+                // cannot be a position of this response, and one past `u32`
+                // does not fit the field that reports it, so both are dropped.
+                let index = match candidate.get("index").and_then(serde_json::Value::as_u64) {
+                    Some(index) => {
+                        let fits = usize::try_from(index)
+                            .ok()
+                            .filter(|index| *index <= u32::MAX as usize)
+                            .filter(|index| *index <= merged.candidates.len());
+                        match fits {
+                            Some(index) => index,
+                            None => continue,
+                        }
+                    }
+                    None => position,
+                };
+                if index == merged.candidates.len() {
                     merged.candidates.push(GeminiCandidate::default());
                 }
                 let slot = &mut merged.candidates[index];
@@ -646,6 +661,38 @@ mod tests {
             9
         );
         assert_eq!(response.response_id.as_deref(), Some("resp-stream"));
+    }
+
+    /// A stream candidate's `index` is wire data, not a position this reader
+    /// may allocate up to. Gemini numbers candidates contiguously from 0, so
+    /// an index that is not the next free slot is not a position of this
+    /// response; growing the vector to it let a few dozen bytes of traffic
+    /// reserve one default candidate per position below it.
+    #[test]
+    fn a_non_contiguous_candidate_index_is_skipped_not_allocated() {
+        let chunks = serde_json::json!([
+            {"candidates": [
+                {"content": {"parts": [{"text": "a"}]}, "index": 0},
+                {"content": {"parts": [{"text": "b"}]}, "index": 64}
+            ]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+
+        assert_eq!(
+            response.candidates.len(),
+            1,
+            "the contiguous candidate is kept and the far index is not materialized"
+        );
+        let text: String = response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "a");
     }
 
     #[test]
