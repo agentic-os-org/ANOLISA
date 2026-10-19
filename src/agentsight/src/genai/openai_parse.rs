@@ -936,32 +936,52 @@ impl GenAIBuilder {
                     let Some(index) = chunk.get("index").and_then(|v| v.as_u64()) else {
                         continue;
                     };
+                    // Match `content_block_start`: a delta must not revive an
+                    // index the start event refuses to allocate.
+                    if index >= MAX_TOOL_CALL_SLOTS {
+                        continue;
+                    }
                     let Some(delta) = chunk.get("delta") else {
                         continue;
                     };
                     match delta.get("type").and_then(|v| v.as_str()) {
                         Some("text_delta") => {
-                            if let (Some(text), Some(Block::Text(buf))) = (
-                                delta.get("text").and_then(|v| v.as_str()),
-                                blocks.get_mut(&index),
-                            ) {
-                                buf.push_str(text);
+                            if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                // A drain capture can attach after the
+                                // block-start event. The live analyzer
+                                // creates the missing block on the first
+                                // delta; dropping it here lost every text
+                                // fragment of a mid-stream capture.
+                                let block = blocks
+                                    .entry(index)
+                                    .or_insert_with(|| Block::Text(String::new()));
+                                if let Block::Text(buf) = block {
+                                    buf.push_str(text);
+                                }
                             }
                         }
                         Some("thinking_delta") => {
-                            if let (Some(text), Some(Block::Thinking(buf))) = (
-                                delta.get("thinking").and_then(|v| v.as_str()),
-                                blocks.get_mut(&index),
-                            ) {
-                                buf.push_str(text);
+                            if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                let block = blocks
+                                    .entry(index)
+                                    .or_insert_with(|| Block::Thinking(String::new()));
+                                if let Block::Thinking(buf) = block {
+                                    buf.push_str(text);
+                                }
                             }
                         }
                         Some("input_json_delta") => {
-                            if let (Some(fragment), Some(Block::ToolUse { args_json, .. })) = (
-                                delta.get("partial_json").and_then(|v| v.as_str()),
-                                blocks.get_mut(&index),
-                            ) {
-                                args_json.push_str(fragment);
+                            if let Some(fragment) =
+                                delta.get("partial_json").and_then(|v| v.as_str())
+                            {
+                                let block = blocks.entry(index).or_insert_with(|| Block::ToolUse {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    args_json: String::new(),
+                                });
+                                if let Block::ToolUse { args_json, .. } = block {
+                                    args_json.push_str(fragment);
+                                }
                             }
                         }
                         _ => {}
@@ -2070,6 +2090,60 @@ mod tests {
             MessagePart::ToolCall { arguments, .. }
                 if arguments == &Some(serde_json::json!({"city": "Paris"}))
         ));
+    }
+
+    /// A drain capture often attaches after `content_block_start`. The live
+    /// analyzer creates the missing block on the first delta; the drain merger
+    /// used to drop every delta whose start was never seen, leaving the call
+    /// with no output at all.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_deltas_without_block_starts() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":5}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"weigh"}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}},
+            {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp/a\"}"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a delta-only Anthropic capture must still yield parts");
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Reasoning { content } if content == "weigh"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::Text { content } if content == "hello"
+        ));
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                MessagePart::ToolCall { arguments, .. }
+                    if arguments == &Some(serde_json::json!({"path": "/tmp/a"}))
+            )),
+            "the streamed tool input must survive: {parts:?}"
+        );
+    }
+
+    /// `content_block_start` refuses indices at or above
+    /// `MAX_TOOL_CALL_SLOTS`; a delta on the same index must not revive the
+    /// block the start path rejected.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_ignores_out_of_range_delta_index() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":5}}},
+            {"type":"content_block_delta","index":256,"delta":{"type":"text_delta","text":"ghost"}}
+        ]"#;
+        // The merger falls back when it has no block to report, so `None` and
+        // an empty part list both mean the delta was dropped.
+        let parts = GenAIBuilder::extract_parts_from_sse_body(body)
+            .map(|(parts, _)| parts)
+            .unwrap_or_default();
+        assert!(
+            !parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Text { content } if content == "ghost")),
+            "an out-of-range delta index must be dropped: {parts:?}"
+        );
     }
 
     /// A Gemini `streamGenerateContent` body carries no `choices` and no
