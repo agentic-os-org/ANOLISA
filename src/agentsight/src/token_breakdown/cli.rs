@@ -626,7 +626,21 @@ impl AnalyzeChatmlCommand {
                                 match (choice.get("delta"), choice.get("message")) {
                                     (Some(delta), _) => (delta, false),
                                     (None, Some(message)) => (message, true),
-                                    (None, None) => continue,
+                                    // A legacy `/v1/completions` stream puts
+                                    // each fragment straight on the choice as
+                                    // `text`, with no `delta` or `message`
+                                    // object; the extractor counts it, so the
+                                    // breakdown has to read it too.
+                                    (None, None) => {
+                                        if let Some(text) =
+                                            choice.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 };
                             // Extract content
                             if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
@@ -1260,6 +1274,25 @@ mod tests {
 
     fn sse(payload: &str) -> serde_json::Value {
         json!({ "data": payload })
+    }
+
+    /// A legacy `/v1/completions` stream carries each fragment directly on the
+    /// choice (`choices[].text`), with no `delta` or `message` object. The
+    /// choices walk skipped every frame, so the CLI broke down an empty answer
+    /// while the token extractor counted the generated text.
+    #[test]
+    fn sse_legacy_completion_text_is_extracted() {
+        let events = vec![
+            sse(r#"{"choices":[{"index":0,"text":"hello","finish_reason":null}]}"#),
+            sse(r#"{"choices":[{"index":0,"text":" there","finish_reason":null}]}"#),
+            sse(r#"{"choices":[{"index":0,"text":"","finish_reason":"stop"}]}"#),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.content,
+            vec!["hello".to_string(), " there".to_string()]
+        );
     }
 
     #[test]
