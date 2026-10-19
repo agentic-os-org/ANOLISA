@@ -629,6 +629,13 @@ impl GenAIBuilder {
                     (Some(delta), _) => (delta, false),
                     (None, Some(message)) => (message, true),
                     (None, None) => {
+                        // Legacy `/v1/completions` streams carry their
+                        // fragment directly on the choice, with neither a
+                        // `delta` nor a `message` object, so skipping the
+                        // choice dropped the whole answer of a drained call.
+                        if let Some(text) = choice.get("text").and_then(|v| v.as_str()) {
+                            content_buf.push_str(text);
+                        }
                         // Even a choice with no payload can carry the terminal
                         // finish reason.
                         if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
@@ -2556,6 +2563,25 @@ mod tests {
         let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
         assert_eq!(finish, Some("length".to_string()));
         assert!(matches!(&parts[0], MessagePart::Text { content } if content == "hi"));
+    }
+
+    /// Legacy `/v1/completions` streams carry each fragment on the choice
+    /// itself, with no `delta` or `message` object. `merge_sse_chunks` skipped
+    /// every such chunk, so a drained legacy stream produced no output
+    /// message at all while the token extractor counted its text.
+    #[test]
+    fn test_merge_sse_chunks_reads_legacy_completion_text() {
+        let body = r#"[
+            {"id":"cmpl-1","object":"text_completion","choices":[{"index":0,"text":"The capital of "}]},
+            {"id":"cmpl-1","object":"text_completion","choices":[{"index":0,"text":"France is Paris.","finish_reason":"stop"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a drained legacy stream must produce output parts");
+        assert_eq!(finish, Some("stop".to_string()));
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "The capital of France is Paris."),
+            "{parts:?}"
+        );
     }
 
     #[test]
