@@ -73,6 +73,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // sibling `gpt-5-codex` take the same repo as the rest of the family.
     m.insert("gpt-5-pro", "Xenova/gpt-4o");
     m.insert("gpt-5-codex", "Xenova/gpt-4o");
+    // The dotted `gpt-5.x` versions. tiktoken's extra-prefix table maps the
+    // `gpt-5.` prefix to `o200k_base` for exactly these versioned names, and
+    // Codex CLI sessions carry them (`gpt-5.6-sol`); without the entries they
+    // took the Qwen fallback.
+    m.insert("gpt-5.1", "Xenova/gpt-4o");
+    m.insert("gpt-5.2", "Xenova/gpt-4o");
+    m.insert("gpt-5.4", "Xenova/gpt-4o");
+    m.insert("gpt-5.4-pro", "Xenova/gpt-4o");
+    m.insert("gpt-5.1-codex", "Xenova/gpt-4o");
+    m.insert("gpt-5.3-codex", "Xenova/gpt-4o");
+    m.insert("gpt-5.6-sol", "Xenova/gpt-4o");
     m.insert("gpt-4.1", "Xenova/gpt-4o");
     m.insert("gpt-4.1-mini", "Xenova/gpt-4o");
     m.insert("gpt-4.1-nano", "Xenova/gpt-4o");
@@ -677,6 +688,36 @@ mod tests {
             "gpt-5-codex-2025-09-15",
             "openai/gpt-5-pro",
             "openai/gpt-5-codex",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The dotted `gpt-5.x` names.
+    ///
+    /// tiktoken's extra-prefix table maps `gpt-5.` to `o200k_base` for the
+    /// versioned names the API accepts, and Codex CLI sessions carry them
+    /// (`gpt-5.6-sol` in the collector fixture). The table knew neither the
+    /// bare versions nor a dotted name, so they took the unrelated Qwen
+    /// fallback.
+    #[test]
+    fn test_dotted_gpt_5_names_take_the_o200k_tokenizer() {
+        let names = [
+            "gpt-5.1",
+            "gpt-5.2",
+            "gpt-5.4",
+            "gpt-5.4-pro",
+            "gpt-5.1-codex",
+            "gpt-5.3-codex",
+            "gpt-5.6-sol",
+            "openai/gpt-5.4",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
