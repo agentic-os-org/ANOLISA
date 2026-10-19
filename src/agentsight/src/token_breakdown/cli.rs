@@ -324,7 +324,8 @@ impl AnalyzeChatmlCommand {
         // keyed by `index`: the function name arrives once (usually in the
         // first fragment) and the arguments stream as string fragments that
         // must be concatenated per index before rendering "name: arguments".
-        let mut tool_calls: Vec<(usize, String, String)> = Vec::new();
+        // The index is scoped to its choice, so the slot key carries both.
+        let mut tool_calls: Vec<((u64, usize), String, String)> = Vec::new();
         // Slot each choice's latest tool-call fragment landed in, so an
         // index-less continuation can extend the call that choice is holding
         // instead of folding it into slot 0.
@@ -681,14 +682,19 @@ impl AnalyzeChatmlCommand {
                                             } else {
                                                 tool_calls
                                                     .iter()
-                                                    .map(|(index, _, _)| *index)
+                                                    .filter(|((choice, _), _, _)| {
+                                                        *choice == choice_index
+                                                    })
+                                                    .map(|((_, index), _, _)| *index)
                                                     .max()
                                                     .map_or(0, |slot| slot.saturating_add(1))
                                             }
                                         }
                                     };
                                     current_tool_call_slot.insert(choice_index, index);
-                                    match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
+                                    match tool_calls.iter_mut().find(|((choice, slot), _, _)| {
+                                        *choice == choice_index && *slot == index
+                                    }) {
                                         Some((_, slot_name, slot_arguments)) => {
                                             if !name.is_empty() {
                                                 *slot_name = name.to_string();
@@ -701,7 +707,7 @@ impl AnalyzeChatmlCommand {
                                         }
                                         None => {
                                             tool_calls.push((
-                                                index,
+                                                (choice_index, index),
                                                 name.to_string(),
                                                 arguments.to_string(),
                                             ));
@@ -810,7 +816,7 @@ impl AnalyzeChatmlCommand {
 
         let mut tool_calls: Vec<String> = {
             let mut calls = tool_calls;
-            calls.sort_by_key(|(index, _, _)| *index);
+            calls.sort_by_key(|(key, _, _)| *key);
             calls
                 .into_iter()
                 .filter(|(_, name, arguments)| !name.is_empty() || !arguments.is_empty())
@@ -1306,6 +1312,31 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_tool_calls_keep_choice_identity_apart() {
+        // OpenAI defines tool-call `index` per choice: both choices below
+        // start at index 0. Keying slots only by the wire index merged them
+        // into one call, replacing the first name and concatenating unrelated
+        // argument fragments.
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"first_tool","arguments":"{\"a\":1}"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"name":"second_tool","arguments":"{\"b\":2}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                r#"first_tool: {"a":1}"#.to_string(),
+                r#"second_tool: {"b":2}"#.to_string()
+            ]
         );
     }
 
