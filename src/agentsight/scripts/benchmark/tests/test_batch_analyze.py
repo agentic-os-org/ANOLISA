@@ -223,3 +223,34 @@ def test_usage_without_message_id_stays_with_its_step():
     agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
     assert agent_steps[0]["metrics"]["prompt_tokens"] == 10
     assert agent_steps[1]["metrics"]["prompt_tokens"] == 20
+
+
+def test_usage_on_only_one_split_record_is_not_dropped():
+    """Not every split record repeats usage. The deduplication must attach the
+    one snapshot that exists, whether it arrived first or last."""
+    text_only = (
+        '{"type":"assistant","message":{"id":"msg_3","role":"assistant",'
+        '"content":[{"type":"text","text":"hello"}]}}'
+    )
+    tool_with_usage = (
+        '{"type":"assistant","message":{"id":"msg_3","role":"assistant",'
+        '"content":[{"type":"tool_use","id":"t1","name":"read","input":{}}],'
+        '"usage":{"input_tokens":1000,"output_tokens":50}}}'
+    )
+    for lines, expected_index in [
+        ([text_only, tool_with_usage], 1),
+        ([tool_with_usage, text_only], 0),
+    ]:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session.jsonl"
+            session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            doc = batch_analyze.jsonl_to_atif(session)
+        assert doc is not None
+        agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+        assert len(agent_steps) == 2
+        with_metrics = [i for i, s in enumerate(agent_steps) if "metrics" in s]
+        assert with_metrics == [expected_index]
+        assert agent_steps[expected_index]["metrics"] == {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+        }
