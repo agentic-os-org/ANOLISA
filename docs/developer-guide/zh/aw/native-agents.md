@@ -1,6 +1,8 @@
-# AW 使用指南
+# AW 原生 Agent 接入参考
 
-[English](../../en/user-entrypoint/aw.md)
+[English](../../en/aw/native-agents.md)
+
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)。
 
 AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互界面。在 `aw.yaml`
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
@@ -13,16 +15,16 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
-安装请从 [Preview 包指南](aw-preview.md)开始；源码构建与无需模型的策略验证见
-[组件接入教程](../../../developer-guide/zh/aw/integration.md)。随后使用下方共用配置验证
-原生工具行为。字段定义集中在[配置参考](../../../developer-guide/zh/aw/configuration.md)。
+安装请从 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)开始；源码构建与无需模型的策略验证见
+[组件接入教程](integration.md)。随后使用下方共用配置验证
+原生工具行为。字段定义集中在[配置参考](configuration.md)。
 
 
-可选生命周期观测参见[通过 aw run 接入 AgentSight](aw-agentsight.md)。
+可选生命周期观测参见[通过 aw run 接入 AgentSight](../../../user-guide/zh/user-entrypoint/aw/observability.md)。
 
 ## 安装 Preview
 
-使用 [Preview 包](aw-preview.md) 安装并演示 AW + sec-core，无需编译。
+使用 [Preview 包](../../../user-guide/zh/user-entrypoint/aw/installation.md) 安装并演示 AW + sec-core，无需编译。
 下方源码构建说明面向开发者；Preview 尚非稳定发行。
 
 ## 当前支持范围
@@ -44,7 +46,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 | 通过 AW 启动 AgentScope SDK | ✅ 单个前台 Python worker 中[显式接线的公共工厂](#启动-agentscope-sdk) |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、输入改写或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
-| 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](aw-preview.md)，尚非稳定发行 |
+| 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)，尚非稳定发行 |
 
 对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
 是独立事件，本 Adapter 尚未接入。原生 Hook 命令仍按 Qoder 的响应语义处理。
@@ -54,7 +56,7 @@ Claude SDK 0.2.88 worker（bundled CLI 2.1.161），以及 Pi Coding Agent/Core 
 
 [共用 YAML](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/aw.shared.yaml)与
 [布尔脚本](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-service/examples/check-tool.py)让四个目标共用工具前
-阻断、工具后观察策略。按[教程](../../../developer-guide/zh/aw/integration.md)复制文件、
+阻断、工具后观察策略。按[教程](integration.md)复制文件、
 替换绝对路径并验证 Provider。这里沿用其 `AW_BIN`、`AW_CONFIG` 和 `AW_DEMO`
 变量。包安装用户也可使用这两个文件，将 `AW_BIN` 指向已安装的二进制；Python 3
 是该示例脚本的依赖。
@@ -170,9 +172,9 @@ QwenPaw 正常退出时删除自己的临时插件。Hermes 保留已安装插�
 移到 profile 的 `plugins` 目录之外，再恢复选定的安装前配置。保留安装后有意
 进行的原生修改，不要盲目整文件覆盖。AW 没有原生插件卸载命令。
 
-保留审计证据后，按[教程的清理步骤](../../../developer-guide/zh/aw/integration.md#5-验证原生效果并清理)
+保留审计证据后，按[教程的清理步骤](integration.md#5-验证原生效果并清理)
 删除演示目录。框架 profile 单独保留。包卸载见
-[Preview 指南](aw-preview.md#6-停止升级与卸载)。
+[Preview 指南](packages.md#6-停止升级与卸载)。
 
 ## 构建并启动 Qoder
 
@@ -276,7 +278,7 @@ native 和观察 Hook 不替换响应；只有最后一个已准入的结构化�
 PreTool 拒绝原始调用，向模型返回完整重试参数；每次新尝试重新经过原生权限和
 sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩。PreTool 需独立安装
 RTK，PostTool 不依赖 RTK。文本槽适用条件、故障处理和遥测配置见
-[Tokenless 行为](aw-tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
+[Tokenless 行为](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
 
 ## 启动 QwenPaw
 
@@ -371,7 +373,7 @@ event = json.load(sys.stdin)
 print(json.dumps(contains(event["tool"]["input"])))
 ```
 
-沿用[安装指南](aw-preview.md)中的前缀与路径，由工具生成完整 YAML，无需手工拼装
+沿用[安装指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)中的前缀与路径，由工具生成完整 YAML，无需手工拼装
 Provider 和步骤。只提供所需 Agent 入口；本例声明两个框架：
 
 ```bash
@@ -631,7 +633,7 @@ profile，并通过 `aw run` 启动所选 Agent；Dockerfile 无法保留活跃�
 | `<state_dir>/journal/` | 需要跨容器重建保留执行历史时持久化；本版本审计固定开启且仅保存元数据 |
 | Socket、锁、`launch-*` 和会话绑定 | 属于运行时产物，不能恢复会话；每次服务/Agent 启动建立新的运行状态 |
 | 原生 profile、凭据、会话与工作区 | 按所选框架的要求保留，不属于 AW 审计数据 |
-| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](aw-preview.md#2-按需安装并启动-sec-core) |
+| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](packages.md#2-按需安装并启动-sec-core) |
 
 即使不跨容器保留历史，AW 也需要可写的本地状态目录。需要持久历史时，将
 `daemon.state_dir` 设置为支持 `fsync` 的本地持久文件系统上的绝对路径，保留
@@ -708,13 +710,13 @@ rm -r -- "$AW_DEMO_ROOT"
 保留其中的锁和 Journal。重启产生新的服务身份，历史记录仍可查询，但不会恢复
 或重放旧事件。
 
-[配置参考](../../../developer-guide/zh/aw/configuration.md)列出完整字段和事件名。
+[配置参考](configuration.md)列出完整字段和事件名。
 [本地服务合同](../../../../src/aw/docs/design/local-service_zh.md)面向 Adapter 开发者，
 说明操作 JSON、截止时间和生命周期。
 
-sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](aw-sec-core.md)。
+sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](../../../user-guide/zh/user-entrypoint/aw/security.md)。
 
-模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](aw-tokenless.md)。
+模型可见的 PostTool 压缩使用可选的 [Tokenless Provider](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
 
 ## 启动 Pi SDK worker
 
@@ -848,7 +850,7 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
 选择 `claude` target，替换 executable、worker 与状态目录的绝对路径。源码示例
 `claude-worker.py` 除 echo 工具外显式开放并允许原生 Bash；组合业务工厂时保留应用
-自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](aw-tokenless.md)。
+自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
 
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一

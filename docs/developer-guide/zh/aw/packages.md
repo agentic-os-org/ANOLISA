@@ -1,6 +1,8 @@
-# 安装并使用 AW Preview
+# AW 打包与配置工具参考
 
-[English](../../en/user-entrypoint/aw-preview.md)
+[English](../../en/aw/packages.md)
+
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
 
 只安装 AW core 即可运行已有的 Qoder 或 OpenClaw，无需 Provider。按需添加 sec-core 或自定义布尔判断脚本，使用同一份 AW 配置。AW 和 sec-core 的构建、安装及运行使用 Rust 二进制，不依赖 Python；用户脚本自行承担其运行依赖。OpenClaw 仍需 Node.js，各 Agent 的模型账户由其原生配置管理。
 
@@ -13,10 +15,10 @@
 [集成验收说明](../../../../src/aw/CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
 
 从源码到组件接入的连续步骤及无需后端的策略示例见
-[组件教程](../../../developer-guide/zh/aw/integration.md)。需要 QwenPaw 或 Hermes 共用
-Provider 时，复制[四框架配置](aw.md#四框架使用同一份配置)，填写已安装的二进制路径。
+[组件教程](integration.md)。需要 QwenPaw 或 Hermes 共用
+Provider 时，复制[四框架配置](native-agents.md#四框架使用同一份配置)，填写已安装的二进制路径。
 下方 `aw-package configure` 仅生成 Qoder/OpenClaw 条目，不初始化原生 Agent profile。
-容器状态目录与卷要求见[运行指南](aw.md#容器与持久化数据)。
+容器状态目录与卷要求见[运行指南](native-agents.md#容器与持久化数据)。
 
 ## 1. 安装包
 
@@ -38,7 +40,7 @@ sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 
 ## 无 Provider 使用 core
 
-只需安装所选 Agent：保留[原生命令 Hook 合同](aw.md#构建并启动-qoder)的 Qoder CLI >=1.1.64，或 OpenClaw **2026.9.6** 与 Node.js。以普通用户生成 Qoder 的基础配置：
+只需安装所选 Agent：保留[原生命令 Hook 合同](native-agents.md#构建并启动-qoder)的 Qoder CLI >=1.1.64，或 OpenClaw **2026.9.6** 与 Node.js。以普通用户生成 Qoder 的基础配置：
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
@@ -57,12 +59,12 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 `configure` 就是初始化命令：安装 core 后，它生成包含 Agent、daemon、execution
 和 audit 设置的完整 `aw.yaml`。不传 `--provider`（或传 `--provider none`），
 `providers` 和 `events` 都为空。它只创建新文件，拒绝覆盖已有配置。若要一次生成
-带策略的配置，按[布尔脚本指南](aw.md#布尔判断脚本)选择 `--provider command`。
+带策略的配置，按[布尔脚本指南](native-agents.md#布尔判断脚本)选择 `--provider command`。
 后续逐项添加规则则按 `configure` → `config add-provider` → `config add-event` →
 `config add-hook` → `config validate` 执行。所有 `config` 命令（包括 `add-*`）都要求
 已有合法文件，不会自动初始化；只有事件不存在时才需要 `add-event`。
 QwenPaw/Hermes 或四框架共用配置则复制
-[共用模板](../../../developer-guide/zh/aw/integration.md#2-准备四框架共用配置)并填写路径；
+[共用模板](integration.md#2-准备四框架共用配置)并填写路径；
 当前 `configure` 只生成 Qoder/OpenClaw 条目，不初始化框架原生 profile。
 
 ## 编辑已有 Provider 与 Hook 配置
@@ -160,7 +162,7 @@ Provider 省略 `protocol` 就使用 `aw-hook/v1alpha1`，步骤省略 `operatio
 `invoke`。AW 只在已准入事件触发时调用脚本，脚本无需 method 分发或 response
 对象。true 请求步骤中的 `block` 效果与原因码，false 不请求效果；错误按
 `on_error: block` 处理。将脚本替换为自己的布尔规则即可。已有原生脚本使用显式
-[原生 Hook 形式](aw.md#接入自己的程序)。用上方的 `aw run` 命令和编辑后的配置
+[原生 Hook 形式](native-agents.md#接入自己的程序)。用上方的 `aw run` 命令和编辑后的配置
 验证原生行为；离线校验不执行脚本。
 
 后续撤销演示策略时，先退出 Agent 并停止服务，再删除引用步骤及 Provider。
@@ -210,13 +212,13 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
 包内还包含认证探测 `agent-sec-daemon-health` 和由回执校验的官方服务/配置
 参考资产。持久后台应复用已有 root 系统服务或独立安装 sec-core 系统包。
 AW 安装/卸载不会修改该服务或 `/etc`，不得让 root 服务执行用户可写前缀中的程序。
-参见[后台归属和健康诊断](aw-sec-core.md#包内后台与显式健康诊断)。
+参见[后台归属和健康诊断](sec-core.md#包内后台与显式健康诊断)。
 
 ## 3. 生成一份 AW 配置
 
 另外准备 Qoder CLI >=1.1.64、OpenClaw **2026.9.6** 及兼容的 Node.js。Qoder 须保留
 `--settings`、以字面量 `args` 执行的命令 Hook、`PreToolUse`/`PostToolUse`、
-回调 ID/输入及以退出码 2 阻断工具的合同，详见 [Qoder 支持合同](aw.md#构建并启动-qoder)。
+回调 ID/输入及以退出码 2 阻断工具的合同，详见 [Qoder 支持合同](native-agents.md#构建并启动-qoder)。
 AW 记录成功探测到的非空版本（最多 128 个 UTF-8 字节），以 1.1.64 为语义版本下限；版本探测
 不代表原生效果已被采用。OpenClaw 保留版本检查。将下面绝对路径替换为实际
 安装路径，其余步骤以普通用户执行。
@@ -319,4 +321,4 @@ CI / AW Integration 每晚运行，也可针对确切源码提交手动触发；
 `aw-all-in-one`。扩展包含桥接、Tokenless CLI 和固定版本带补丁的 RTK，要求匹配的 core，沿用 sec-core 的
 收据与完整性规则。通过 `configure --provider tokenless` 或
 `--provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
-结果槽和故障行为见 [Tokenless 指南](aw-tokenless.md)。
+结果槽和故障行为见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。

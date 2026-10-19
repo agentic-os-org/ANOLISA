@@ -314,7 +314,7 @@ executed (Agent/session/data directory, absolute `rtk` executable) and supplies
 `output_optimization: rtk` to PostTool. It also passes such retries through PreTool.
 Recognition decodes quoted/escaped literals and compares state paths through their
 canonical existing ancestor without creating directories. It skips only the
-[documented execution prefix forms](../../../../docs/user-guide/en/user-entrypoint/aw-tokenless.md#pretool-and-permission-behavior),
+[documented execution prefix forms](../../../../docs/developer-guide/en/aw/tokenless.md#pretool-and-permission-behavior),
 so an attributed wrapper appearing in another command's arguments is not sufficient.
 Bare `rtk`, foreign attribution, unknown or flag-bearing wrappers and compound shell
 commands are not inferred as RTK-owned. This is an optimization hint, never authorization or recovery access.

@@ -29,6 +29,14 @@ function normalizedTarget(relativePath) {
 }
 
 function publicDocumentPath(target) {
+  // Keep published AW entry points stable when their source files move.
+  const awRoutes = {
+    'user-guide/user-entrypoint/aw/installation.md': 'user-guide/user-entrypoint/aw-preview',
+    'user-guide/user-entrypoint/aw/tokenless.md': 'user-guide/user-entrypoint/aw-tokenless',
+    'user-guide/user-entrypoint/aw/security.md': 'user-guide/user-entrypoint/aw-sec-core',
+    'user-guide/user-entrypoint/aw/observability.md': 'user-guide/user-entrypoint/aw-agentsight',
+  };
+  if (awRoutes[target]) return awRoutes[target];
   const withoutExtension = target.replace(/\.md$/, '');
   if (withoutExtension === 'index') return '';
   return withoutExtension.replace(/\/index$/, '');
@@ -261,6 +269,8 @@ const categoryNames = {
 
 const categoryPathNames = {
   en: {
+    'user-guide/user-entrypoint/aw': 'AW',
+    'developer-guide/aw': 'AW',
     'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
     'user-guide/user-entrypoint/cosh-ng/shell': 'Terminal',
     'user-guide/user-entrypoint/cosh-ng/core': 'Automation and Integration',
@@ -269,6 +279,8 @@ const categoryPathNames = {
     'developer-guide/cosh-ng': 'cosh-ng',
   },
   zh: {
+    'user-guide/user-entrypoint/aw': 'AW',
+    'developer-guide/aw': 'AW',
     'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
     'user-guide/user-entrypoint/cosh-ng/shell': '终端',
     'user-guide/user-entrypoint/cosh-ng/core': '自动化与集成',
@@ -294,6 +306,20 @@ const categoryPositions = {
 };
 
 const documentPositions = {
+  'user-guide/user-entrypoint/aw/installation.md': 2,
+  'user-guide/user-entrypoint/aw/configuration.md': 3,
+  'user-guide/user-entrypoint/aw/tokenless.md': 4,
+  'user-guide/user-entrypoint/aw/security.md': 5,
+  'user-guide/user-entrypoint/aw/observability.md': 6,
+  'user-guide/user-entrypoint/aw/operations.md': 7,
+  'developer-guide/aw/building.md': 2,
+  'developer-guide/aw/integration.md': 3,
+  'developer-guide/aw/configuration.md': 4,
+  'developer-guide/aw/native-agents.md': 5,
+  'developer-guide/aw/packages.md': 6,
+  'developer-guide/aw/tokenless.md': 7,
+  'developer-guide/aw/sec-core.md': 8,
+  'developer-guide/aw/agentsight.md': 9,
   'user-guide/installation.md': 2,
   'user-guide/user-entrypoint/copilot-shell/quickstart.md': 1,
   'user-guide/user-entrypoint/cosh-ng/quickstart.md': 2,

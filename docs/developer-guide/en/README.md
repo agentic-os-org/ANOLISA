@@ -6,9 +6,11 @@ Use this guide when you need to understand, extend, test, or contribute to ANOLI
 
 ## AW
 
-- [Build, configure and integrate a component](./aw/integration.md)
-- [Configuration reference](./aw/configuration.md)
-- [Four-framework usage and operations](../../user-guide/en/user-entrypoint/aw.md)
+- [Development and integration index](aw/README.md)
+- [Build and package](aw/building.md)
+- [Component integration tutorial](aw/integration.md)
+- [Configuration reference](aw/configuration.md)
+- [User guide](../../user-guide/en/user-entrypoint/aw/README.md)
 
 ## Copilot Shell
 

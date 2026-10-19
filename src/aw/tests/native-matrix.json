@@ -452,7 +452,7 @@
       "owner": "@kongche-jbw",
       "mode": "manual",
       "reason": "Native Qoder CLI/model environment is not provisioned on CI runners. Follow the Preview native Agent acceptance guide before release; contract fixtures do not certify native adoption.",
-      "guide": "../../docs/user-guide/en/user-entrypoint/aw-preview.md"
+      "guide": "../../docs/developer-guide/en/aw/packages.md"
     }
   }
 }

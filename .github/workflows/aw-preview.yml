@@ -45,7 +45,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             src/aw
-            docs/user-guide/en/user-entrypoint
+            docs/developer-guide/en/aw
       - name: Validate native coverage and select pinned runtimes
         id: matrix
         env:
@@ -217,7 +217,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             src/aw
-            docs/user-guide/en/user-entrypoint
+            docs/developer-guide/en/aw
       - uses: actions/setup-node@v4
         with:
           node-version: '24.15.0'
@@ -270,7 +270,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             src/aw
-            docs/user-guide/en/user-entrypoint
+            docs/developer-guide/en/aw
       - uses: actions/download-artifact@v4
         with:
           pattern: aw-native-evidence-*-${{ needs.plan.outputs.sha }}

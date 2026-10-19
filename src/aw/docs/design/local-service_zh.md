@@ -206,7 +206,7 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 
 ## 源码入口
 
-- [用户命令与本地演示](../../../../docs/user-guide/zh/user-entrypoint/aw.md#运行本地服务演示)
+- [用户命令与本地演示](../../../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)
 - [公共 API](../../crates/aw-service/src/lib.rs)、
   [Client](../../crates/aw-service/src/client.rs) 和
   [Server](../../crates/aw-service/src/server.rs)

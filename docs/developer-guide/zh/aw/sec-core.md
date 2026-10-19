@@ -1,6 +1,8 @@
-# 通过 AW 使用 sec-core 扫描
+# sec-core Provider 接入参考
 
-[English](../../en/user-entrypoint/aw-sec-core.md)
+[English](../../en/aw/sec-core.md)
+
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/security.md)。
 
 `aw-provider-sec-core` 让 AW 策略调用已有的 `agent-sec-cli scan-code` 命令。
 配置指定哪些工具输入包含代码，以及发现风险后返回观察还是阻断候选效果。
@@ -9,18 +11,18 @@ sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调�
 当前交付为 Linux 源码，可用于本地 Provider 集成。完整 Preview 集成见下方指南。Provider 不启动任何 daemon，不安装 Agent Hook，也不持久化 AW 审计。
 工具后仅返回观察记录，不扫描或替换结果。
 
-完整的 AW 服务、Qoder 和 sec-core 预编译集成见 [Preview 包指南](aw-preview.md)。
+完整的 AW 服务、Qoder 和 sec-core 预编译集成见 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
 以下仍可单独从源码使用 Provider 桥接。
 
-通用的组件接入路径见 [AW 教程](../../../developer-guide/zh/aw/integration.md)。sec-core
+通用的组件接入路径见 [AW 教程](integration.md)。sec-core
 CLI 和 daemon 仍是独立管理的后端，AW 审计存储由 AW 服务负责，见
-[容器持久化说明](aw.md#容器与持久化数据)。Preview 生成器映射 Qoder `Bash` 和
+[容器持久化说明](native-agents.md#容器与持久化数据)。Preview 生成器映射 Qoder `Bash` 和
 OpenClaw `exec` 输入。使用 QwenPaw 或 Hermes 前，须在 `config.tools` 中补充并
 验证其实际工具名称和输入指针；未映射工具只观察，不扫描。
 
 ## 前置条件与构建
 
-按 [sec-core 指南](../agent-security/agent-sec-core/QUICKSTART.md) 安装 sec-core。
+按 [sec-core 指南](../../../user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md) 安装 sec-core。
 本桥接要求 Rust V2 CLI 支持 `--socket`、`--timeout-ms` 和
 `scan-code --code --language --mode`，且已有可访问的 sec-core daemon 正在运行。
 请核对部署版本的帮助；旧 Python CLI 未通过本桥接验收。
@@ -52,7 +54,7 @@ Preview sec-core Provider 包包含同一次源码构建的 `agent-sec-cli`、
 `share/aw/providers/sec-core/`；安装 AW 包不会注册服务或修改 `/etc`。
 
 已有 root `agent-sec-core.service` 时复用其 socket。新后台按照
-[sec-core 安装指南](../agent-security/agent-sec-core/QUICKSTART.md)安装，服务生命周期
+[sec-core 安装指南](../../../user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)安装，服务生命周期
 由正式系统包负责。目前组件清单声明 Linux x86_64；本地 AW ARM64 包不代表
 sec-core 已有正式 ARM64 发行。源码 `make install-core-v2` 可通过
 `V2_BIN_BUILD_DIR` 读取本包二进制，但会覆盖目标系统二进制和 unit，不能直接用于

@@ -8,7 +8,7 @@ Hermes. Start with a boolean command for a simple rule; implement a full Provide
 when your component needs its own operations or structured effects.
 
 AW is a Preview. `anolisa install aw` and RPM distribution are not available.
-For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/user-entrypoint/aw-preview.md).
+For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
 The source path below needs no sec-core installation or model account until you
 choose the sec-core or native Agent steps.
 
@@ -35,7 +35,7 @@ export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 
 This builds debug binaries in `src/aw/target/debug`; it installs no system
 service. For distributable release packages, use `aw-build` as described in the
-[package build instructions](../../../user-guide/en/user-entrypoint/aw-preview.md#build-artifacts-developers).
+[package build instructions](building.md).
 Core builds independently of sec-core. Do not mix installed core and Provider
 packages from different source commits or package versions.
 
@@ -44,7 +44,7 @@ packages from different source commits or package versions.
 An initial `aw.yaml` must exist before any `aw-package config add-*` command.
 For an installed core with Qoder/OpenClaw, use `aw-package configure` to create
 it; omitting `--provider` creates an empty policy configuration. Follow the
-[initialization and editing flow](../../../user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration)
+[initialization and editing flow](packages.md#edit-existing-provider-and-hook-configuration)
 for `configure` → `add-provider` → `add-event` → `add-hook` → `validate`.
 `configure` verifies an installed package prefix; source binaries alone do not
 supply it. It creates a new file and refuses to overwrite an existing one.
@@ -80,7 +80,7 @@ inside YAML. Quote paths that contain YAML punctuation.
 
 The Agent entries may remain unchanged for the synthetic checks below: those
 checks do not execute Agents. Before native launch, ensure the selected command
-resolves to the [supported version](../../../user-guide/en/user-entrypoint/aw.md#current-support).
+resolves to the [supported version](native-agents.md#current-support).
 For Hermes use its installed Python console script, with an absolute Python
 shebang. Keep the `chat`, `app` and `gateway run` arguments in the sample.
 
@@ -93,7 +93,7 @@ step. The sample requests a block when a before-tool input contains
 The [configuration reference](configuration.md) explains all fields. The
 generator `aw-package configure` currently creates Qoder/OpenClaw entries only;
 copying this YAML is the path for a four-framework configuration. The
-[configuration editor](../../../user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration)
+[configuration editor](packages.md#edit-existing-provider-and-hook-configuration)
 can add/remove Providers and Hook steps; it does not edit Agent entries.
 
 ```bash
@@ -122,7 +122,7 @@ timeout 15s "$AW_HOST" "$AW_CONFIG" tool.after demo_shell '{"command":"printf AW
 Expect `candidate_effects: []`, then `block/demo_marker_denied`, then
 `observe/demo_tool_observed`; each has `failure: null`. `adoption: not_tested`
 is deliberate: these are Hook checks, not native tool execution or durable
-service audit. The [local service demo](../../../user-guide/en/user-entrypoint/aw.md#run-the-local-service-demo)
+service audit. The [local service demo](native-agents.md#run-the-local-service-demo)
 separately demonstrates the socket, service client, audit query and shutdown
 using its own supplied configuration, without a model.
 
@@ -179,7 +179,7 @@ or importing your component's crates into it. Your executable and its runtime
 dependencies must be installed where the Agent runs. AW starts a fresh process
 per method; any long-lived backend belongs to your component.
 
-Use the [sec-core walkthrough](../../../user-guide/en/user-entrypoint/aw-sec-core.md)
+Use the [sec-core walkthrough](../../../user-guide/en/user-entrypoint/aw/security.md)
 for a concrete bridge to an existing CLI/daemon. Map the **actual tool name and
 input JSON Pointer for each framework**; a standard event envelope does not
 make every tool's arguments identical. The Preview-generated sec-core mapping
@@ -189,7 +189,7 @@ being scanned.
 
 ## 5. Verify native adoption and clean up
 
-Use the [shared-config launch and acceptance steps](../../../user-guide/en/user-entrypoint/aw.md#use-one-configuration-for-four-frameworks)
+Use the [shared-config launch and acceptance steps](native-agents.md#use-one-configuration-for-four-frameworks)
 with `AW_BIN`, `AW_CONFIG` and `AW_DEMO` from this terminal. Keep the frameworks'
 existing model profiles separate. Test one framework at a time initially, using
 its supported entrypoint. A denied tool must have both an AW denial and no tool

@@ -1,6 +1,9 @@
-# Compress model-visible tool results with AW
+# Tokenless Provider integration reference
 
-[中文版](../../zh/user-entrypoint/aw-tokenless.md)
+[中文版](../../zh/aw/tokenless.md)
+
+This reference is for integration and maintenance. For installation and daily use,
+see the [user guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md).
 
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
@@ -10,7 +13,7 @@ compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
 
-Use the [AW Preview packages](aw-preview.md). `aw-provider-tokenless` contains
+Use the [AW Preview packages](../../../user-guide/en/user-entrypoint/aw/installation.md). `aw-provider-tokenless` contains
 its bridge and Tokenless CLI from the same source commit, plus RTK v0.49.0 pinned
 at `b1c0dc00649c50fbe8930f849c800d4d6ca12091` with Tokenless's statistics and pytest
 patches. It requires matching `aw-core`; `aw-all-in-one` combines the same component
@@ -51,15 +54,15 @@ For supported targets, copy the
 replace its executable paths and `RTK_SHA256_FROM_RECEIPT` with the RTK entry's
 `sha256` from `PREFIX/.aw-packages/aw-provider-tokenless.json`, and keep both state
 directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
-[AW guide](aw.md#use-one-configuration-for-four-frameworks).
+[AW guide](native-agents.md#use-one-configuration-for-four-frameworks).
 
-Pi uses the SDK application factory described in the [Pi launch guide](aw.md#start-a-pi-sdk-worker);
+Pi uses the SDK application factory described in the [Pi launch guide](native-agents.md#start-a-pi-sdk-worker);
 the package configuration generator still targets Qoder/OpenClaw.
 
 For AgentScope SDK, wire every public factory through `AwBridge`; the
 [SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
 combines sec-core checks/observation with both Tokenless operations. Follow the
-[SDK launch contract](aw.md#start-agentscope-sdk) for Python and factory setup.
+[SDK launch contract](native-agents.md#start-agentscope-sdk) for Python and factory setup.
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`, optionally followed by
@@ -192,7 +195,7 @@ PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 
-Claude SDK uses the explicit worker factory described in the [AW guide](aw.md#start-a-claude-sdk-worker). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
+Claude SDK uses the explicit worker factory described in the [AW guide](native-agents.md#start-a-claude-sdk-worker). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
 
 ## Read-only Panel queries
 

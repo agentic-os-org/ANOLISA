@@ -102,4 +102,4 @@ Provider 私有值；选择器可选 Provider、事件或事件下的步骤，�
 修改操作打印 `Updated configuration` 或 `Configuration unchanged`；`validate`
 打印 `Valid configuration`。CLI 编辑不修改 Schema、Registry 或 Service 合同，
 也不重载当前服务。选项、回滚及使用新 revision 重启的说明见
-[CLI 参考](../../../../docs/user-guide/zh/user-entrypoint/aw-preview.md#编辑已有-provider-与-hook-配置)。
+[CLI 参考](../../../../docs/developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。

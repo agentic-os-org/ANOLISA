@@ -112,8 +112,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
-        "docs/user-guide/en/user-entrypoint/aw-preview.md",
-        "docs/user-guide/zh/user-entrypoint/aw-preview.md",
+        "docs/user-guide/en/user-entrypoint/aw/installation.md",
+        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -253,15 +253,20 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::copy("/bin/true", path).unwrap();
     }
-    for name in [
-        "LICENSE",
-        "NOTICE",
-        "docs/user-guide/en/user-entrypoint/aw-preview.md",
-        "docs/user-guide/zh/user-entrypoint/aw-preview.md",
-    ] {
-        let path = repo.join(name);
+    for name in ["LICENSE", "NOTICE"] {
+        fs::write(repo.join(name), "fixture").unwrap();
+    }
+    for language in ["en", "zh"] {
+        let name = format!("docs/user-guide/{language}/user-entrypoint/aw/installation.md");
+        let path = repo.join(&name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "fixture").unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../..")
+                .join(name),
+            path,
+        )
+        .unwrap();
     }
     let output = repo.join("output");
     fs::create_dir(&output).unwrap();
@@ -296,6 +301,18 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     assert!(!unpacked.join("payload/libexec").exists());
     assert!(!repo.join("src/agent-sec-core").exists());
     assert!(!repo.join("src/tokenless").exists());
+    for (name, counterpart) in [("README.md", "README_zh.md"), ("README_zh.md", "README.md")] {
+        let readme = fs::read_to_string(unpacked.join(name)).unwrap();
+        assert!(readme.contains(&format!("]({counterpart})")));
+        assert!(readme.contains("aw-package configure"));
+        for target in readme.split("](").skip(1) {
+            let target = target.split(')').next().unwrap();
+            assert!(
+                target.starts_with("https://") || unpacked.join(target).is_file(),
+                "packaged {name} has an unavailable link: {target}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -320,8 +337,8 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
         "src/agent-sec-core/packaging/systemd/skillsec.json",
         "LICENSE",
         "NOTICE",
-        "docs/user-guide/en/user-entrypoint/aw-preview.md",
-        "docs/user-guide/zh/user-entrypoint/aw-preview.md",
+        "docs/user-guide/en/user-entrypoint/aw/installation.md",
+        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -407,8 +424,8 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
         "src/tokenless/scripts/setup-rtk.sh",
         "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
         "src/tokenless/third_party/patches/rtk-pytest-error-report.patch",
-        "docs/user-guide/en/user-entrypoint/aw-preview.md",
-        "docs/user-guide/zh/user-entrypoint/aw-preview.md",
+        "docs/user-guide/en/user-entrypoint/aw/installation.md",
+        "docs/user-guide/zh/user-entrypoint/aw/installation.md",
     ] {
         let path = repo.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();

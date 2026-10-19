@@ -125,5 +125,5 @@ are errors. `show` and `validate` publish nothing.
 Mutations print `Updated configuration` or `Configuration unchanged`;
 `validate` prints `Valid configuration`. CLI editing changes no Schema,
 registry or service contracts and does not reload the running service. See the
-[CLI reference](../../../../docs/user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration)
+[CLI reference](../../../../docs/developer-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
 for options, rollback and restarting with the edited revision.

@@ -245,6 +245,10 @@ anolisa install tokenless
 [源码构建](https://agentic-os.sh/zh/docs/building/) ·
 [变更日志](https://agentic-os.sh/zh/changelog/)
 
+AW 专项文档见[用户指南](docs/user-guide/zh/user-entrypoint/aw/README.md)、
+[本地编译与打包](docs/developer-guide/zh/aw/building.md)和
+[开发指南](docs/developer-guide/zh/aw/README.md)。
+
 ## 仓库目录
 
 各组件保留在同一仓库中，仍可独立构建。目录按运行能力、发行工具、评测和保留的旧版实现划分；源码位置变化不改变已安装的命令、包名或发布 tag。

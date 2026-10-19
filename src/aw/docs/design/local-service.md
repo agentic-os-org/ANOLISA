@@ -270,7 +270,7 @@ history and allocates a new generation.
 
 ## Source entry points
 
-- [User commands and local demonstration](../../../../docs/user-guide/en/user-entrypoint/aw.md#run-the-local-service-demo)
+- [User commands and local demonstration](../../../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
 - [Public API](../../crates/aw-service/src/lib.rs),
   [Client](../../crates/aw-service/src/client.rs) and
   [Server](../../crates/aw-service/src/server.rs)

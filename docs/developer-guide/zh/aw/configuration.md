@@ -3,7 +3,7 @@
 [English](../../en/aw/configuration.md)
 
 本文说明当前配置校验器接受的字段。起步模板、可用能力及 Agent
-使用流程见[用户指南](../../../user-guide/zh/user-entrypoint/aw.md)。
+使用流程见[用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)。
 
 [随包 Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 定义公共字段结构，Rust 校验器另行检查引用及字段之间的关系。本地 Host 负责
@@ -64,7 +64,7 @@ Provider 省略 `protocol` 时选择 `aw-hook/v1alpha1`，步骤省略 `operatio
 和可选 reason code，false 时不请求效果，关联字段由 AW 内部处理。非零退出、超时、
 stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处理。stdout 同时受
 32 字节和配置上限约束。已有显式结构化和原生协议行为不变。
-见[布尔脚本示例](../../../user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
+见[布尔脚本示例](native-agents.md#布尔判断脚本)。
 
 ## 原生命令与运行支持
 
@@ -84,7 +84,7 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 `replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。其他已识别事件、精确选择器、guard 和更强执行保证均不代表已有
 运行支持。Qoder、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 2.0.6 工厂均有启动 Adapter；
-受支持版本、入口及 after 事件覆盖见[使用指南](../../../user-guide/zh/user-entrypoint/aw.md)。
+受支持版本、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
 

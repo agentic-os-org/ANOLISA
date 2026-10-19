@@ -212,7 +212,7 @@ AW 来源范围为服务 generation。AgentSight 来源范围为配置
 `freeze_context`。Client、callback 二进制和 daemon 必须一起升级，旧 daemon
 由其 owner 重启。Provider stdio 仍为 `aw-provider/v1alpha1`。未配置
 `agents.<target>.evidence` 的旧配置继续有效。来源配置、限额和回退操作见
-[用户参考](../../../../docs/user-guide/zh/user-entrypoint/aw-agentsight.md)。
+[用户参考](../../../../docs/user-guide/zh/user-entrypoint/aw/observability.md)。
 
 #7411 最终版本中依据可信 Host 能力决定的 Qoder 顺序保持不变。Hermes 最终入口和
 OpenClaw replacement/completion 视图保留原始事件身份、deadline 与候选。

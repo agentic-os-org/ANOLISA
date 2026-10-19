@@ -46,7 +46,7 @@ process; it calls the existing daemon. Already-dispatched daemon work is bounded
 by sec-core and is not rolled back by terminating its client.
 
 The private configuration and runnable Host walkthrough are documented in the
-[user guide](../../../../docs/user-guide/en/user-entrypoint/aw-sec-core.md).
+[user guide](../../../../docs/user-guide/en/user-entrypoint/aw/security.md).
 The sample supplies an entire AWConfiguration; no common configuration schema
 changes are required. Deployment ownership, native Hook scheduling, effect
 adoption and persistent AW auditing remain responsibilities of the daemon and

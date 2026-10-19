@@ -254,7 +254,7 @@ AW 不改变外部 Hook 的顺序；外部改写 Hook 仍遵循宿主自己的�
 RTK 包装（Agent、Session、data 目录及绝对路径的 `rtk`），将
 `output_optimization: rtk` 传入 PostTool，并让此类重试通过 PreTool。
 识别时解码带引号或转义的字面量，并通过已存在祖先的规范路径比较状态目录，不创建目录。
-仅跳过[文档列明的执行前缀形式](../../../../docs/user-guide/zh/user-entrypoint/aw-tokenless.md#pretool-与权限行为)，
+仅跳过[文档列明的执行前缀形式](../../../../docs/developer-guide/zh/aw/tokenless.md#pretool-与权限行为)，
 其他命令的参数中出现归属包装并不足以确认 RTK 归属。
 裸 `rtk`、外部归属、未知或带额外选项的包装，以及复合 Shell 命令不推断 RTK 归属。这只是优化提示，不授予权限
 或恢复访问；不新增 AW 持久优化/恢复存储，也不复制压缩策略。

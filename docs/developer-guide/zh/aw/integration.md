@@ -7,7 +7,7 @@ Qoder、OpenClaw、QwenPaw 和 Hermes。简单规则优先使用布尔判断命�
 自有操作或结构化效果时，再实现完整 Provider。
 
 AW 当前为 Preview，尚未提供 `anolisa install aw` 或 RPM 分发。使用预编译二进制请
-参阅 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw-preview.md)。下述源码流程在
+参阅 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。下述源码流程在
 选择 sec-core 或原生 Agent 步骤之前，无需安装 sec-core 或配置模型账号。
 
 ## 1. 从源码构建
@@ -31,7 +31,7 @@ export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 ```
 
 debug 二进制位于 `src/aw/target/debug`，此步骤不安装系统服务。需要可分发的
-release 包时，按[打包构建说明](../../../user-guide/zh/user-entrypoint/aw-preview.md#构建产物开发者)
+release 包时，按[打包构建说明](building.md)
 使用 `aw-build`。core 可独立于 sec-core 构建。不要混装来自不同源码提交或包版本
 的 core 与 Provider 包。
 
@@ -39,7 +39,7 @@ release 包时，按[打包构建说明](../../../user-guide/zh/user-entrypoint/
 
 运行任何 `aw-package config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
 使用 Qoder/OpenClaw 时，通过 `aw-package configure` 创建；不传 `--provider` 就生成
-空策略配置。按[初始化与编辑流程](../../../user-guide/zh/user-entrypoint/aw-preview.md#编辑已有-provider-与-hook-配置)
+空策略配置。按[初始化与编辑流程](packages.md#编辑已有-provider-与-hook-配置)
 依次执行 `configure` → `add-provider` → `add-event` → `add-hook` → `validate`。
 `configure` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
 新文件，拒绝覆盖已有文件。
@@ -72,7 +72,7 @@ printf 'AW_BIN=%s\nAW_CONFIG=%s\nAW_DEMO=%s\n' "$AW_BIN" "$AW_CONFIG" "$AW_DEMO"
 | `spec.agents.<id>.argv` | 已安装且受支持的框架可执行文件及其入口参数 |
 
 下述合成检查不执行 Agent，可以暂时保留示例的 Agent 条目。原生启动前，确认所选
-命令解析到[受支持版本](../../../user-guide/zh/user-entrypoint/aw.md#当前支持范围)。Hermes
+命令解析到[受支持版本](native-agents.md#当前支持范围)。Hermes
 须使用已安装的 Python console script，并带绝对 Python shebang。保留示例中的
 `chat`、`app` 和 `gateway run` 参数。
 
@@ -82,7 +82,7 @@ printf 'AW_BIN=%s\nAW_CONFIG=%s\nAW_DEMO=%s\n' "$AW_BIN" "$AW_CONFIG" "$AW_DEMO"
 
 [配置参考](configuration.md)解释全部字段。当前 `aw-package configure` 只生成
 Qoder/OpenClaw 条目；四框架配置使用本 YAML 副本。
-[配置编辑器](../../../user-guide/zh/user-entrypoint/aw-preview.md#编辑已有-provider-与-hook-配置)
+[配置编辑器](packages.md#编辑已有-provider-与-hook-配置)
 可以增删 Provider 和 Hook 步骤，不修改 Agent 条目。
 
 ```bash
@@ -108,7 +108,7 @@ timeout 15s "$AW_HOST" "$AW_CONFIG" tool.after demo_shell '{"command":"printf AW
 依次应得到 `candidate_effects: []`、`block/demo_marker_denied` 和
 `observe/demo_tool_observed`，每次 `failure` 均为 null。`adoption: not_tested`
 是预期标记：这里验证 Hook，不执行原生工具，也不产生服务的持久审计。
-[本地服务演示](../../../user-guide/zh/user-entrypoint/aw.md#运行本地服务演示)使用另附的配置，
+[本地服务演示](native-agents.md#运行本地服务演示)使用另附的配置，
 单独演示 socket、服务客户端、审计查询和停止流程，同样无需模型。
 
 验证故障处置时，在 `AW_DEMO` 中将工作配置复制为 `aw.failure.yaml`，仅将
@@ -155,7 +155,7 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 Provider 无需修改 AW 或把组件 crate 引入 AW。可执行文件及其运行依赖须安装在
 Agent 运行的位置。AW 为每个方法启动新进程，长期运行的后端由组件自己管理。
 
-[sec-core 接入流程](../../../user-guide/zh/user-entrypoint/aw-sec-core.md)展示了如何桥接已有
+[sec-core 接入流程](../../../user-guide/zh/user-entrypoint/aw/security.md)展示了如何桥接已有
 CLI/daemon。需要为每个框架映射**实际工具名称和输入 JSON Pointer**；标准化事件
 结构不代表所有工具参数相同。Preview 生成的 sec-core 映射覆盖 Qoder `Bash` 和
 OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Hermes 扫描。
@@ -164,7 +164,7 @@ OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Herm
 ## 5. 验证原生效果并清理
 
 沿用本终端的 `AW_BIN`、`AW_CONFIG` 和 `AW_DEMO`，执行
-[共用配置启动与验收步骤](../../../user-guide/zh/user-entrypoint/aw.md#四框架使用同一份配置)。
+[共用配置启动与验收步骤](native-agents.md#四框架使用同一份配置)。
 保留各框架独立的模型 profile，起步时按受支持入口逐个测试。被拒绝的工具应同时
 有 AW 拒绝结果且没有工具副作用；模型拒绝或原生权限拒绝不能证明 AW 已执行。
 

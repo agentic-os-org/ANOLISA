@@ -6,7 +6,7 @@ ANOLISA is a server-side operating layer for AI Agent workloads. Install the
 CLI once, then enable only the capability that delivers the first result you
 want.
 
-For the experimental AW + sec-core bundle, see the [AW Preview guide](user-guide/en/user-entrypoint/aw-preview.md).
+For AW Preview packages, see [Install AW](user-guide/en/user-entrypoint/aw/installation.md).
 
 ## Install the CLI
 

@@ -6,9 +6,11 @@
 
 ## AW
 
-- [构建、配置与组件接入](./aw/integration.md)
-- [配置参考](./aw/configuration.md)
-- [四框架使用与运行维护](../../user-guide/zh/user-entrypoint/aw.md)
+- [开发与接入文档索引](aw/README.md)
+- [本地编译与打包](aw/building.md)
+- [组件接入教程](aw/integration.md)
+- [配置参考](aw/configuration.md)
+- [用户指南](../../user-guide/zh/user-entrypoint/aw/README.md)
 
 ## Copilot Shell
 

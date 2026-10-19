@@ -1,6 +1,9 @@
-# Install and use AW Preview
+# AW package and configuration reference
 
-[中文版](../../zh/user-entrypoint/aw-preview.md)
+[中文版](../../zh/aw/packages.md)
+
+This reference is for integration and maintenance. For installation and daily use,
+see the [user guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
 
 Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec-core or your own boolean policy command when needed, using one AW configuration. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
 
@@ -15,13 +18,13 @@ do not produce Preview packages. See the
 for manual dispatch and native acceptance boundaries.
 
 For source-to-integration steps, including a backend-free policy, see the
-[component walkthrough](../../../developer-guide/en/aw/integration.md). To use
+[component walkthrough](integration.md). To use
 QwenPaw or Hermes with the same Providers, copy the
-[four-framework configuration](aw.md#use-one-configuration-for-four-frameworks)
+[four-framework configuration](native-agents.md#use-one-configuration-for-four-frameworks)
 and set the installed binary paths. `aw-package configure` below generates
 Qoder/OpenClaw entries only; it does not initialize native Agent profiles.
 Container state and volume requirements are covered in the
-[runtime guide](aw.md#containers-and-persistent-data).
+[runtime guide](native-agents.md#containers-and-persistent-data).
 
 ## 1. Install the package
 
@@ -43,7 +46,7 @@ The installer verifies hashes, modes, architecture, version and source commit, r
 
 ## Use core without a Provider
 
-Install only the Agent you need: Qoder CLI >=1.1.64 retaining the [native command-Hook contract](aw.md#build-and-start-qoder), or OpenClaw **2026.9.6** with Node.js. For Qoder, generate a base configuration as your regular user:
+Install only the Agent you need: Qoder CLI >=1.1.64 retaining the [native command-Hook contract](native-agents.md#build-and-start-qoder), or OpenClaw **2026.9.6** with Node.js. For Qoder, generate a base configuration as your regular user:
 
 ```bash
 export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
@@ -64,12 +67,12 @@ a complete `aw.yaml` with Agent, daemon, execution and audit settings. Omitting
 `--provider` (or passing `--provider none`) leaves `providers` and `events` empty.
 It creates a new file and refuses to overwrite an existing one. To initialize a
 policy in one command, select `--provider command` as shown in the
-[boolean script guide](aw.md#boolean-policy-commands). To add rules later, follow
+[boolean script guide](native-agents.md#boolean-policy-commands). To add rules later, follow
 `configure` → `config add-provider` → `config add-event` → `config add-hook` →
 `config validate`. Every `config` action, including `add-*`, needs an existing
 valid file; it does not initialize one. Only an absent event needs `add-event`.
 For QwenPaw/Hermes or all four targets, copy the
-[shared template](../../../developer-guide/en/aw/integration.md#2-prepare-one-configuration-for-four-frameworks)
+[shared template](integration.md#2-prepare-one-configuration-for-four-frameworks)
 and fill its paths instead; `configure` currently generates Qoder/OpenClaw
 entries only and never initializes framework profiles.
 
@@ -182,7 +185,7 @@ The omitted Provider `protocol` selects `aw-hook/v1alpha1`, and the omitted step
 it needs no method dispatcher or response object. True requests the step's
 `block` effect and reason code; false requests no effect. Errors follow
 `on_error: block`. Replace the script with your own boolean rule. Existing
-native scripts use the explicit [native Hook form](aw.md#connect-your-programs).
+native scripts use the explicit [native Hook form](native-agents.md#connect-your-programs).
 Use the `aw run` command above with the edited configuration to test native
 behavior; offline validation does not execute the script.
 
@@ -240,14 +243,14 @@ receipt-covered official service/configuration reference assets. For a persisten
 backend, reuse the existing root system service or install the independently
 managed sec-core system package. AW install/uninstall does not change that
 service or `/etc`; do not register a root service against a user-writable prefix.
-See [backend ownership and health diagnostics](aw-sec-core.md#packaged-backend-and-explicit-health-diagnostics).
+See [backend ownership and health diagnostics](sec-core.md#packaged-backend-and-explicit-health-diagnostics).
 
 ## 3. Create one AW configuration
 
 Install Qoder CLI >=1.1.64, OpenClaw **2026.9.6** and a compatible Node.js runtime separately.
 Qoder must retain `--settings`, exec-form command Hooks with literal `args`,
 `PreToolUse`/`PostToolUse`, callback IDs/input and exit 2 for blocking, as described
-in the [Qoder support contract](aw.md#build-and-start-qoder). AW records its successfully
+in the [Qoder support contract](native-agents.md#build-and-start-qoder). AW records its successfully
 probed, nonempty version (at most 128 UTF-8 bytes) with 1.1.64 as the minimum semantic version; the
 version probe does not certify native effect adoption. OpenClaw retains its version
 check. Set the following absolute paths to your actual installations. Run the
@@ -351,5 +354,5 @@ CI / AW Integration runs nightly and can be dispatched manually for an exact sou
 includes it in `aw-all-in-one`. The extension contains its bridge, Tokenless CLI and pinned patched RTK,
 requires matching core, and follows the same receipt/integrity rules as sec-core.
 Use `configure --provider tokenless` or `--provider sec-core+tokenless --socket ABS_FILE`
-to enable compression explicitly. See the [Tokenless guide](aw-tokenless.md) for
+to enable compression explicitly. See the [Tokenless guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md) for
 four-framework configuration, native result slots and failure behavior.

@@ -1,6 +1,8 @@
-# 通过 AW 压缩模型可见的工具结果
+# Tokenless Provider 接入参考
 
-[English](../../en/user-entrypoint/aw-tokenless.md)
+[English](../../en/aw/tokenless.md)
+
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
@@ -9,7 +11,7 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK �
 
 ## 安装与启用
 
-使用 [AW Preview 包](aw-preview.md)。`aw-provider-tokenless` 包含从同一源码提交
+使用 [AW Preview 包](../../../user-guide/zh/user-entrypoint/aw/installation.md)。`aw-provider-tokenless` 包含从同一源码提交
 构建的桥接程序和 Tokenless CLI，以及固定到
 `b1c0dc00649c50fbe8930f849c800d4d6ca12091` 的 RTK v0.49.0，附带 Tokenless 的
 统计和 pytest 补丁。要求匹配的 `aw-core`；`aw-all-in-one` 将完全相同的组件内容
@@ -41,14 +43,14 @@ sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步�
 替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
 `PREFIX/.aw-packages/aw-provider-tokenless.json` 中 RTK 条目的 `sha256`，
 将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
-启动参数见 [AW 指南](aw.md#四框架使用同一份配置)。
+启动参数见 [AW 指南](native-agents.md#四框架使用同一份配置)。
 
 AgentScope SDK 的每个公共工厂都需通过 `AwBridge` 接线；
 [SDK 生命周期示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
 组合 sec-core 检查/观察与两项 Tokenless 操作。Python 和工厂设置见
-[SDK 启动合同](aw.md#启动-agentscope-sdk)。
+[SDK 启动合同](native-agents.md#启动-agentscope-sdk)。
 
-Pi 使用 [Pi 启动指南](aw.md#启动-pi-sdk-worker)中的 SDK 应用工厂；
+Pi 使用 [Pi 启动指南](native-agents.md#启动-pi-sdk-worker)中的 SDK 应用工厂；
 包配置生成器仍只面向 Qoder/OpenClaw。
 
 Provider 私有配置只接受 `{version: 1}`。固定 argv 为
@@ -153,7 +155,7 @@ Provider 消息沿用 AW 的 1 MiB 限制，包括原事件和投影文本。若
 停止 AW 后用新配置重新启动。已有会话不会
 热重载。外部 Tokenless state 目录按数据保留需求保留或删除。
 
-Claude SDK 使用 [AW 指南](aw.md#启动-claude-sdk-worker) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
+Claude SDK 使用 [AW 指南](native-agents.md#启动-claude-sdk-worker) 中的显式 worker 工厂。单个 AW callback 已按顺序等待步骤。仅原生 Bash stdout 可替换，通过 `PostToolUse` 的 `hookSpecificOutput.updatedToolOutput` 返回原生 envelope；MCP 状态不可靠，结果保持原样。配置 AW replacement 时拒绝既有原生 callback 的输出改写。
 
 ## Panel 只读查询
 

@@ -179,7 +179,7 @@ cargo build --locked -p aw-service --bin aw
 cargo build --locked -p aw-provider --example policy
 ```
 
-The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md#run-the-local-service-demo)
+The [user guide](../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
 walks through a foreground service and separate client, including state-directory
 and audit-history cleanup. The service uses the local `aw-service/v1alpha3`
 protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately.

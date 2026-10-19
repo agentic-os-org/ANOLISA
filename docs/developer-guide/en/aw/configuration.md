@@ -4,7 +4,7 @@
 
 This reference describes the fields accepted by the current configuration
 validator. For a starter file, current availability and the intended Agent
-workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
+workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
 
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships
@@ -75,7 +75,7 @@ correlation internally. Nonzero exit, timeout, incomplete stdin, invalid or
 oversized output remains a failure governed by `on_error`. Stdout is capped at
 32 bytes as well as the configured output ceiling. Existing explicitly declared
 structured and native protocols keep their behavior. See the
-[boolean script example](../../../user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+[boolean script example](native-agents.md#boolean-policy-commands).
 
 ## Native commands and runtime support
 
@@ -102,7 +102,7 @@ at these points. Boolean/native steps cannot request result replacement. Qoder C
 Other recognized events, exact selectors, guards and stronger execution guarantees
 are not runtime support. Qoder, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope 2.0.6 factories have launch Adapters;
 their supported versions, entrypoints and
-after-event coverage are listed in the [user guide](../../../user-guide/en/user-entrypoint/aw.md).
+after-event coverage are listed in the [native Agent reference](native-agents.md).
 
 ## Events, effects and tool selection
 
