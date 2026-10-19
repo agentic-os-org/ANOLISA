@@ -539,14 +539,26 @@ OPTIONS (all subcommands):
         --db <db>          Override database path
         --last <last>      Query last N hours (default: 168 = 7 days) [default: 168]
         --json             Output as JSON
+
+OPTIONS (all, hotness):
+        --granularity <granularity>    Bucket the hotness trend by day or week
+                                       [possible values: day, week] [default: week]
 ```
 
 ```bash
 sudo agentsight skill-metrics all --last 168
 sudo agentsight skill-metrics hotness --agent CoshNG --json
+
+# daily buckets instead of the weekly default
+sudo agentsight skill-metrics hotness --last 168 --granularity day
 ```
 
-The same numbers appear on the Dashboard's Skill Metrics page.
+The same numbers appear on the Dashboard's Skill Metrics page, which switches the same
+day/week granularity on its hotness chart. `--granularity` buckets only the hotness trend, so
+`all` and `hotness` accept it and the four metric-specific subcommands do not — passing it
+there is a usage error, the same refusal `GET /api/skill-metrics/downloads` and its siblings
+return. Without the flag the trend keeps its weekly buckets, and the text and JSON output are
+unchanged.
 
 ## Related pages
 
