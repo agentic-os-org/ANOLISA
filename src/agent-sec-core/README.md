@@ -95,6 +95,12 @@ the daemon with `--policy-admin-uid <UID>`; default authorization remains root-o
 assignments were not supported. Update scripts to select the intended processes
 with `--pid`, `--process-name`, or `--executable`.
 
+The source-built V2 **Secret Gateway preview** keeps a real GitHub token out of Agent processes. Agents start independently;
+root registers their existing UID and PID with `agent-sec-cli gateway register`. Agents load fake tokens
+and CA settings through their own configuration; the local gateway replaces fakes only on allowed
+GitHub API and HTTPS Git requests. Read-only queries are UID-scoped. See the
+[Secret Gateway guide](../../docs/user-guide/en/agent-sec-core/secret-gateway.md).
+
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables

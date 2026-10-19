@@ -5,7 +5,8 @@
 AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
 
 Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
-下文正式版本安装和 Agent 集成说明对应 V1；源码构建安装 V2 Rust CLI 和 daemon。
+下文正式版本安装和 Agent 集成说明对应 V1；源码构建安装 V2 Rust CLI 和 daemon，并提供默认关闭的
+[Secret Gateway](secret-gateway.md)，让真实 GitHub Token 不进入 Agent。
 
 ## 概述
 

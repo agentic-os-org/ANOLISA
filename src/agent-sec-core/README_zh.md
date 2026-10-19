@@ -83,6 +83,11 @@ Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清�
 **兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
 assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
 
+仅源码构建提供的 V2 **Secret Gateway 预览能力**让真实 GitHub Token 不进入 Agent 进程。Agent 独立启动，root 通过
+`agent-sec-cli gateway register` 登记其现有 UID 和 PID；Agent 用自身配置加载 fake Token 与 CA，
+本地网关仅在允许的 GitHub API 和 HTTPS Git 请求上替换为真实值。只读查询按 UID 隔离。
+参阅 [Secret Gateway 指南](../../docs/user-guide/zh/agent-sec-core/secret-gateway.md)。
+
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅

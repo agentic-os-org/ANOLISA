@@ -4,7 +4,7 @@
 | --- | --- |
 | 状态 | [TARGET V2][IMPLEMENTED] |
 | 范围 | 最小可用版本：内置 `github` preset |
-| 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2implemented-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2implemented-secret-gateway-管理) |
+| 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2implemented-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2implemented-secret-gateway-管理)、[用户指南](../../../../docs/user-guide/zh/agent-sec-core/secret-gateway.md) |
 
 ## 1. 目标与边界
 
@@ -423,6 +423,13 @@ HTTPS Git 由 Agent 自行配置 helper，以 fake 作为 Basic 密码。用户�
 | addon 黑盒 | `tests/v2/gateway/test_addon_blackbox.py`（需 `MITMDUMP` 指向 mitmdump） |
 | 控制面 | `asc-gateway-runtime/src/tests.rs`；部署契约 DPROC-GW-001～003 |
 | 安装态端到端 | `tests/v2/systemd/test_gateway.py`（DPROC-GW-004），需 root、systemd 和 `ASC_GATEWAY_E2E_USER` |
+| 默认关闭 | `tests/v2/e2e/test_daemon_process_e2e.py::test_default_start_and_restart_do_not_activate_gateway` |
+
+addon 黑盒和安装态端到端会改动宿主的 nftables、systemd 与系统账户，只能在允许这些改动的
+专用环境里人工执行：`test-e2e-rpm-v2` 用 `--ignore` 排除这两个文件，`tests/v2/conftest.py`
+在 `CI` 为 `true` 或 `1` 时再按文件路径跳过。自动化运行只保留只读的默认关闭校验：daemon
+首次启动和重启后 `gateway status` 为未启用且无域，`inet agent_sec_gateway` 表不存在，
+`/run/agent-sec-gateway` 与凭据目录都没有创建。
 
 端到端测试全部在本机闭环：在 `lo` 上增加 `198.18.0.1`，用临时 CA 签发 `api.github.com`、
 `github.com`、`example.com` 的证书并启动本地 mock 上游，通过 runtime drop-in 让网关只信任该 CA，

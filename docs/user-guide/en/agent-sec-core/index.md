@@ -6,7 +6,8 @@ AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on 
 
 For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
 Release installation and the Agent integrations below describe V1; source builds
-install the V2 Rust CLI and daemon.
+install the V2 Rust CLI and daemon. Source builds also ship the disabled-by-default
+[Secret Gateway](secret-gateway.md), which keeps real GitHub tokens out of Agents.
 
 ## Overview
 

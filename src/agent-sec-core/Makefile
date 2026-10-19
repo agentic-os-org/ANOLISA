@@ -113,6 +113,8 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
 	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 OBS_E2E_RUNTIME=v2 SEC_EVENTS_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=$(PII_HOOK_LAYOUT) SKILLSEC_HOOK_LAYOUT=$(SKILLSEC_HOOK_LAYOUT) python3 -m pytest tests/e2e/ tests/v2/ \
 		--import-mode=importlib -ra \
+		--ignore=tests/v2/systemd/test_gateway.py \
+		--ignore=tests/v2/gateway/test_addon_blackbox.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
 		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \

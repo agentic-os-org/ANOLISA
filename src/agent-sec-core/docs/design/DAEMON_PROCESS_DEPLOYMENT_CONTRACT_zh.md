@@ -797,3 +797,4 @@ unit 在启动前和停止后都删除 `status/health.json`，避免上一个进
 | DPROC-GW-001 | 方法清单、分发与访问级别一致 | `asc-daemon-protocol/tests/pap_contract.rs::gateway_method_inventory_matches_dispatch_and_access` |
 | DPROC-GW-002 | UID/PID 注册与后代快照、进程身份变化拒绝、UID 查询隔离、generation、撤销/enable 失败收敛、组隔离、运行目录权限 | `asc-gateway-runtime/src/tests.rs` |
 | DPROC-GW-003 | unit、drop-in 与数据面文件 staging | `tests/v2/packaging/test_systemd.py::test_gateway_stages_unit_drop_in_and_data_plane_files` |
+| DPROC-GW-004 | 安装态 root daemon、真实 systemd/nft、fake 下发；REST 与 Git clone/push 时上游实际收到真实 Token（Bearer 与 Git Basic）且回显改回 fake；越权 host/方法、明文、真实值、跨域与撤销后 fake 在上游之前被拒绝；域外流量与 UDP/443 行为；daemon 与网关重启后仍替换；撤销与关闭后无残留 | `tests/v2/systemd/test_gateway.py`；需 `ASC_GATEWAY_E2E_USER`；全部用例以 `lo` 上的 `198.18.0.1`、临时 CA 与本地 mock 上游闭环，使用生成的 dummy Token，不访问外网 |
