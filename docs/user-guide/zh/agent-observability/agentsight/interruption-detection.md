@@ -36,7 +36,7 @@
 | `sse_truncated` | high | 流式响应结束时没有正常的 `finish_reason`，且调用已持续 ≥ 1 秒 |
 | `empty_response` | high | HTTP 200 但既没有输出消息也没有错误 |
 | `resource_exhaustion` | high | HTTP 402，或错误体涉及配额/计费额度（区别于每分钟限流） |
-| `state_machine_error` | high | 响应格式非法，或 Agent 状态机发生非法跃迁 |
+| `state_machine_error` | high | 响应格式非法、Gemini 返回 `MALFORMED_FUNCTION_CALL`，或 Agent 状态机发生非法跃迁 |
 | `llm_error` | high | 其余 HTTP 状态码 >= 400 的兜底类型 |
 | `rate_limit` | medium | HTTP 429，或错误体含 `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` 且输出 Token ≥ `max_tokens` 的 95% |

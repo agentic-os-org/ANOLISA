@@ -443,7 +443,8 @@ impl InterruptionDetector {
     ///   5.5. ResourceExhaustion — quota/billing keywords
     ///   6. SafetyFilter    — finish_reason is a provider safety stop
     ///                        (`content_filter`, or Gemini's `SAFETY` family)
-    ///   6.5. StateMachineError — protocol/state keywords
+    ///   6.5. StateMachineError — protocol/state keywords, or a provider
+    ///                        malformed-tool-call finish reason
     ///   7. LlmError        — generic HTTP >= 400 fallback
     ///   8. SseTruncated    — SSE stream ended prematurely
     ///   9. TokenLimit      — finish_reason == "length" + ratio
@@ -722,18 +723,24 @@ impl InterruptionDetector {
         // ── 6.5 State machine / protocol error ──────────────────────────────
         // Agent received a response that violates expected protocol state,
         // e.g. malformed response structure or invalid state transition.
+        // Gemini reports a tool call it could not parse as a terminal finish
+        // reason (`MALFORMED_FUNCTION_CALL`) rather than an error body; that is
+        // the same protocol failure with no keyword to match on.
         let is_state_error = combined_error.contains("invalid state")
             || combined_error.contains("protocol error")
             || combined_error.contains("malformed")
             || combined_error.contains("unexpected response")
             || combined_error.contains("invalid transition")
             || combined_error.contains("parse error")
-            || combined_error.contains("deserialization");
+            || combined_error.contains("deserialization")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("malformed_function_call"));
         if is_state_error {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
                 "error": effective_error,
+                "finish_reason": finish_reason,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::StateMachineError,
@@ -1312,6 +1319,42 @@ mod tests {
         assert!(
             detector.detect(&call).is_empty(),
             "a normal last choice must not inherit the first choice's safety stop"
+        );
+    }
+
+    /// `MALFORMED_FUNCTION_CALL` is Gemini's way of saying the model emitted a
+    /// tool call the runtime could not parse — a protocol failure in the Agent
+    /// loop, not a safety decision and not a truncated stream. It is the one
+    /// Gemini reason that is neither a normal stop, nor a token limit, nor a
+    /// safety stop, so it fell to rule 8 and was reported as `sse_truncated`
+    /// (high), which sends the reader looking at the transport. Rule 6.5
+    /// (`state_machine_error`) is the type the rule set has for a response that
+    /// violates the expected protocol shape.
+    #[test]
+    fn test_gemini_malformed_function_call_is_a_state_machine_error() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("MALFORMED_FUNCTION_CALL".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::StateMachineError),
+            "a malformed function call stop is a protocol error, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the stream completed; only the tool call was malformed, got {events:?}"
         );
     }
 

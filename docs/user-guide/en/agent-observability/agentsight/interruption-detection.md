@@ -38,7 +38,7 @@ needed to enable any of it.
 | `sse_truncated` | high | A streamed response ends without a normal `finish_reason` and the call lasted at least 1 second |
 | `empty_response` | high | HTTP 200 with no output messages and no error |
 | `resource_exhaustion` | high | HTTP 402, or an error body about quota / billing limits (distinct from per-minute rate limiting) |
-| `state_machine_error` | high | Malformed provider response or an invalid Agent state transition |
+| `state_machine_error` | high | Malformed provider response, a Gemini `MALFORMED_FUNCTION_CALL` finish reason, or an invalid Agent state transition |
 | `llm_error` | high | Fallback for any other HTTP status >= 400 |
 | `rate_limit` | medium | HTTP 429 or an error containing `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` and output Tokens >= 95% of `max_tokens` |
