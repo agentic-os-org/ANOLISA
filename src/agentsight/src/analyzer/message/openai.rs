@@ -2319,6 +2319,34 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_responses_sse_truncated_tool_call_keeps_finish_unknown() {
+        // A cut stream can already hold a tool call. The old code reported
+        // "tool_calls" (a terminal reason) and evicted the anchor even though
+        // the call's arguments may be incomplete; the cut must win.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cut_tc", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "function_call", "id": "item_1", "call_id": "call_cut", "name": "read_file", "arguments": ""}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"path\":"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a truncated stream still aggregates");
+        assert_eq!(resp.choices[0].finish_reason, None);
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the captured call must stay");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("id").and_then(|v| v.as_str()),
+            Some("call_cut")
+        );
+    }
+
+    #[test]
     fn test_aggregate_responses_sse_completed_still_reports_stop() {
         // The terminal event is what makes "stop" authoritative.
         let chunks = vec![
