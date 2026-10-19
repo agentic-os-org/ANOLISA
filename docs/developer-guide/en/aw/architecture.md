@@ -101,3 +101,25 @@ and packaging scope.
 Follow the [design index](../../../../src/aw/docs/design/README.md) in call order
 for details. See [Contributing](../../../../src/aw/CONTRIBUTING.md) for the
 development environment and checks.
+
+## Schema ownership
+
+| Contract | Owner |
+| --- | --- |
+| Active capability, plan and evidence schemas | `aw-contracts/schemas/` |
+| Configuration | `aw-config/schemas/` |
+| Provider messages and View protocol | `aw-provider/schemas/` |
+| Provider private configuration and backend data | The concrete Provider directory |
+
+`aw-contracts/schemas/` contains only registered, tested contracts, currently 23.
+Plan, evidence and other v1 contracts remain active; the four capability profiles
+use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
+in this repository and were removed. Their contents remain in Git history.
+
+New Providers can declare operations within the existing events and effects,
+owning their private configuration and backend data. Adding a Core capability or
+contract version requires schemas, Registry entries, cross-record validation and
+valid and invalid examples together. Supported versions can coexist: give new
+versions distinct names and `$id` values, retaining the old contracts and tests
+until compatibility is explicitly retired. Relocating existing schemas must
+preserve their bytes, `$id`, registry names and canonical digest vectors.

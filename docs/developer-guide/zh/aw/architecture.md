@@ -86,3 +86,22 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 详细设计从[设计索引](../../../../src/aw/docs/design/README_zh.md)按调用顺序阅读。
 开发环境和检查命令见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。
+
+## Schema 归属
+
+| 契约 | 归属 |
+| --- | --- |
+| 活跃能力、计划与证据 Schema | `aw-contracts/schemas/` |
+| 配置 | `aw-config/schemas/` |
+| Provider 消息与 View 协议 | `aw-provider/schemas/` |
+| Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
+
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 23 份。
+计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
+此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
+
+新增 Provider 可在现有事件和效果范围内声明操作，私有配置和后端数据由自身管理。
+新增 Core 能力或合同版本时，须同时增加 Schema、Registry 注册项、跨记录校验和
+有效及无效样例。受支持的版本可以并存；新增版本使用独立的名称和 `$id`，保留旧版
+合同及其测试，直到明确结束兼容。迁移现有 Schema 时保持字节、`$id`、Registry 名称
+与跨语言摘要向量不变。

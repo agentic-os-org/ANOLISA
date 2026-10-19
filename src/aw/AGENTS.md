@@ -66,7 +66,13 @@ Results return to the Adapter for native adoption. The service uses
 Core plan API into this path or equate its `ProviderHost` port with `aw-host::Host`.
 Production framework code must not depend on concrete Provider implementations.
 
-Keep crate-local source, schemas and Rust tests together. Update the
+Keep crate-local source, schemas and Rust tests together. Every contract schema
+in `crates/aw-contracts/schemas/` must be registered and tested. Retain supported
+versions together; remove unused drafts and use Git history for reference. Do not
+remove a contract merely because its version is older. New Core capability
+profiles require explicit schemas, Registry entries and cross-record validation;
+Provider-private data belongs to its Provider. Schema moves must preserve active
+bytes, IDs, registered names and digest vectors. Update the
 [architecture overview](../../docs/developer-guide/en/aw/architecture.md) and
 [design index](docs/design/README.md) when ownership or call paths change.
 Show runtime flow in the overview; keep compilation dependencies in separate
