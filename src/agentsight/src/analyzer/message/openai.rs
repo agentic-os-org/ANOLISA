@@ -520,7 +520,8 @@ impl OpenAIParser {
 
         // Try standard response format first (has id and choices)
         if body.get("id").is_some() && body.get("choices").is_some() {
-            match serde_json::from_value::<OpenAIResponse>(body.clone()) {
+            let body = Self::normalize_legacy_completion_choices(body);
+            match serde_json::from_value::<OpenAIResponse>(body) {
                 Ok(response) => {
                     log::debug!(
                         "Parsed OpenAI response: id={}, model={}, choices={}",
@@ -553,6 +554,49 @@ impl OpenAIParser {
         }
 
         None
+    }
+
+    /// Project a legacy `/v1/completions` body onto the chat shape.
+    ///
+    /// The protocol is an admitted LLM path, but its answer rides
+    /// `choices[].text` instead of a `message` object, and `OpenAIChoice`
+    /// requires the message. Deserializing the raw body therefore failed and
+    /// the recorded response was dropped whole — no output message, no finish
+    /// reason. Rewrite each choice so the generated text becomes the message
+    /// content, leaving a choice that already carries a message untouched.
+    fn normalize_legacy_completion_choices(body: &serde_json::Value) -> serde_json::Value {
+        let Some(choices) = body.get("choices").and_then(|c| c.as_array()) else {
+            return body.clone();
+        };
+        if choices
+            .iter()
+            .all(|choice| choice.get("message").is_some() || choice.get("text").is_none())
+        {
+            return body.clone();
+        }
+
+        let mut body = body.clone();
+        let choices: Vec<serde_json::Value> = choices
+            .iter()
+            .map(|choice| {
+                if choice.get("message").is_some() {
+                    return choice.clone();
+                }
+                let Some(text) = choice.get("text").and_then(|t| t.as_str()) else {
+                    return choice.clone();
+                };
+                let mut choice = choice.clone();
+                if let Some(obj) = choice.as_object_mut() {
+                    obj.insert(
+                        "message".to_string(),
+                        serde_json::json!({"role": "assistant", "content": text}),
+                    );
+                }
+                choice
+            })
+            .collect();
+        body["choices"] = serde_json::Value::Array(choices);
+        body
     }
 
     fn normalize_responses_response(body: &serde_json::Value) -> Option<OpenAIResponse> {
@@ -1562,6 +1606,35 @@ mod tests {
 
         let response = OpenAIParser::parse_response(&json);
         assert!(response.is_none());
+    }
+
+    /// `/v1/completions` is an admitted LLM path, but its answer rides
+    /// `choices[].text` instead of a `message` object. `OpenAIChoice.message`
+    /// is a required field, so the whole response failed to deserialize and
+    /// `parse_response` returned `None`, dropping the recorded output.
+    #[test]
+    fn test_parse_response_legacy_completion_choice_text() {
+        let json = serde_json::json!({
+            "id": "cmpl-123",
+            "object": "text_completion",
+            "created": 1_677_652_288u64,
+            "model": "gpt-3.5-turbo-instruct",
+            "choices": [{
+                "index": 0,
+                "text": "The capital of France is Paris.",
+                "finish_reason": "stop"
+            }]
+        });
+
+        let resp =
+            OpenAIParser::parse_response(&json).expect("a legacy completion body must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => {
+                assert_eq!(text, "The capital of France is Paris.")
+            }
+            other => panic!("the generated text must reach the message: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]
