@@ -677,6 +677,51 @@ fn build_observation(
     }
 }
 
+/// Flatten a tool-result payload into the text downstream consumers read.
+///
+/// Anthropic writes `tool_result.content` as an array of content blocks as soon
+/// as a result carries more than one piece of text — an MCP server, or a
+/// command whose streams were captured separately, returns
+/// `[{"type":"text","text":…},{"type":"text","text":…}]` — and
+/// `GenAIBuilder::anthropic_content_block_to_part` passes that array through
+/// unchanged.
+///
+/// Serialising it whole left the observation as JSON punctuation:
+/// `outcome::classify_call` looks for a line that *starts* with an error token
+/// and saw `[{"type":"text"`, so a marked failure fell through to the weak text
+/// heuristics, and the evidence pool's haystack carried the encoding instead of
+/// the output, so a value the tool printed could not ground a later claim. The
+/// local collector's converter already flattens this shape in
+/// `flatten_tool_result_content`; both converters must produce the same text
+/// for the same capture.
+///
+/// Non-text blocks (an image, a document) have no textual form to contribute
+/// and are skipped rather than rendered as empty strings, so the joining
+/// newlines stay meaningful. Anything that is not a block array keeps its
+/// previous rendering, including a string payload, which is returned verbatim.
+fn flatten_result_content(payload: &serde_json::Value) -> String {
+    if let serde_json::Value::Array(blocks) = payload {
+        let texts: Vec<&str> = blocks
+            .iter()
+            .filter_map(|block| {
+                let block = block.as_object()?;
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
+    match payload {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 /// Scan input messages for ToolCallResponse parts, matching by tool_call_id.
 ///
 /// Role is deliberately not filtered. Agents disagree about where a tool result
@@ -765,10 +810,7 @@ fn collect_tool_responses(
                 } else {
                     response
                 };
-                let content_str = match payload {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
+                let content_str = flatten_result_content(payload);
                 pending.push((id.as_deref(), content_str, extra));
             }
         }
