@@ -36,10 +36,13 @@ fails, find the failing command in the job log and rerun it locally from `src/aw
 
 [tests/regression-matrix.json](tests/regression-matrix.json) maps each registered
 Agent, Hook event/effect and lifecycle to exact runnable Rust tests. The compiled
-Adapter catalog must match the matrix and configuration schema. Shared PreTool
-and PostTool cases iterate all matrix Agents with explicit native payloads;
-adding an Agent without its fixture, omitting a Hook cell, deleting a referenced
+Adapter catalog must match the matrix, configuration and Provider request schemas.
+Shared PreTool and PostTool cases select Agents declaring the relevant capability,
+with explicit native payloads; adding an Agent without its fixture, omitting a Hook cell, deleting a referenced
 test or marking it ignored fails the existing `AW / required` gate.
+
+Each row declares every cell under supported `events` or `unsupported`; the
+latter requires admission-rejection coverage. See the [expansion design](docs/design/agent-capability-expansion.md).
 
 Security coverage includes denial, scan errors, cancellation and offline
 observation. Tokenless coverage includes fresh-call retry ownership, rejection
@@ -98,7 +101,7 @@ migration. Native jobs reuse checksummed binaries from that exact build.
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
 Agent. The nightly job matrix is generated from this inventory. AgentScope,
-Claude SDK/CLI, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
+Claude SDK/CLI, DeepSeek Harness headless, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
 manual because CI has no provisioned native CLI/model environment; it appears as
 **MANUAL — not tested**, never as a native pass. OpenClaw covers official Hook
 runners. The QwenPaw suite covers native AgentScope middleware and AW plugin

@@ -230,7 +230,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-service/tests/fixtures/pi/package-lock.json') }}
+          key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-service/tests/fixtures/**/package-lock.json') }}
       - uses: actions/download-artifact@v4
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}

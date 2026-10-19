@@ -17,18 +17,24 @@ SHARED_CASES = {
         "aw-service/test/posttool",
         "adapters_keep_observers_and_user_hooks_before_one_final_replacement",
     ),
+    "capability-rejection": (
+        "aw-service/bin/aw",
+        "cli::adapter::catalog::tests::unsupported_capabilities_are_rejected_before_provider_discovery",
+    ),
+}
+
+# The runtime surface, not roadmap vocabulary. Expanding it requires every row
+# to declare support or tested rejection for each new cell.
+SURFACE = {
+    "tool.before": {"observe", "block"},
+    "tool.after": {"observe", "replace_result"},
 }
 
 
 def table(matrix: dict) -> str:
     """Render runtime event/effect declarations, not native SDK certification."""
     columns = sorted(
-        {
-            (event, effect)
-            for row in matrix["agents"].values()
-            for event, effects in row["events"].items()
-            for effect in effects
-        },
+        {(event, effect) for event, effects in SURFACE.items() for effect in effects},
         key=lambda cell: (
             {"tool.before": 0, "tool.after": 1}.get(cell[0], 2),
             cell[0],
@@ -50,7 +56,7 @@ def table(matrix: dict) -> str:
 
 def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
     """Fail on missing/ignored tests, uncovered cells, schema drift or stale README grids."""
-    if matrix.get("version") != 1 or not matrix.get("agents") or not matrix.get("cases"):
+    if matrix.get("version") != 2 or not matrix.get("agents") or not matrix.get("cases"):
         raise ValueError("missing or unsupported regression matrix")
     for name, (target, test) in SHARED_CASES.items():
         if matrix["cases"].get(name) != {"target": target, "test": test}:
@@ -68,21 +74,43 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
         if any(case not in matrix["cases"] for case in cases):
             raise ValueError(f"unknown regression case: {label}")
 
-    # These two tests iterate every matrix agent using explicit native fixtures.
-    shared = {"security": "security-retry", "tokenless": "final-replacement"}
     for agent, row in matrix["agents"].items():
-        for obligation in ("lifecycle", "security", "tokenless"):
+        for obligation in ("lifecycle", "security", "tokenless", "admission"):
             covered(row.get(obligation), f"{agent}/{obligation}")
-        for obligation, case in shared.items():
-            if case not in row[obligation]:
-                raise ValueError(f"{agent}: shared {obligation} regression is required")
+        if "capability-rejection" not in row["admission"]:
+            raise ValueError(f"{agent}: shared capability rejection is required")
         if not row.get("events"):
             raise ValueError(f"{agent}: missing hook coverage")
-        for event, effects in row["events"].items():
-            if not effects:
-                raise ValueError(f"{agent}/{event}: missing effect coverage")
-            for effect, cases in effects.items():
-                covered(cases, f"{agent}/{event}/{effect}")
+        if not isinstance(row.get("unsupported"), dict):
+            raise ValueError(f"{agent}: missing unsupported capability declaration")
+        declared = set()
+        for section in ("events", "unsupported"):
+            for event, effects in row[section].items():
+                if not effects:
+                    raise ValueError(f"{agent}/{event}: missing effect coverage")
+                for effect, cases in effects.items():
+                    cell = (event, effect)
+                    if effect not in SURFACE.get(event, set()) or cell in declared:
+                        raise ValueError(f"{agent}: unknown or overlapping capability {cell}")
+                    declared.add(cell)
+                    covered(cases, f"{agent}/{section}/{event}/{effect}")
+                    if section == "unsupported" and "capability-rejection" not in cases:
+                        raise ValueError(f"{agent}/{cell}: rejection coverage is required")
+        expected = {(event, effect) for event, effects in SURFACE.items() for effect in effects}
+        if declared != expected:
+            raise ValueError(f"{agent}: every capability needs support or rejection coverage")
+        before = row["events"].get("tool.before", {})
+        after = row["events"].get("tool.after", {})
+        security = "security-retry" if "block" in before else "capability-rejection"
+        tokenless = {"final-replacement"} if "replace_result" in after else set()
+        if "block" in before:
+            tokenless.add("security-retry")
+        if security not in row["security"] or not (tokenless or {"capability-rejection"}) <= set(
+            row["tokenless"]
+        ):
+            raise ValueError(
+                f"{agent}: applicable shared security/Tokenless regression is required"
+            )
     if set(matrix["providers"]) != {"sec-core", "tokenless"}:
         raise ValueError("sec-core and Tokenless provider contracts are required")
     for provider, cases in matrix["providers"].items():

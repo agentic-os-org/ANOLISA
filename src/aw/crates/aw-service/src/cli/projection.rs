@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 fn result<'a>(adapter: &str, native: &'a Value) -> &'a Value {
     match adapter {
+        "deepseek-harness" if native["nested"] != true => &native["tool_response"],
         "qoder" | "qwenpaw" | "pi" | "agentscope" => &native["tool_response"],
         "claude-sdk"
             if native["hook_event_name"] == "PostToolUse"
@@ -62,7 +63,7 @@ fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
             native["event"]["toolName"].as_str().unwrap_or(""),
             &native["event"]["params"],
         ),
-        "pi" => (
+        "pi" | "deepseek-harness" => (
             native["tool_call"]["name"].as_str().unwrap_or(""),
             &native["tool_call"]["input"],
         ),
@@ -209,7 +210,9 @@ pub(super) fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOut
         "hermes" => {
             json!({"aw_replacement": if let Some(text) = value.as_str() {text.to_owned()} else {serde_json::to_string(&value)?}})
         }
-        "openclaw" | "qwenpaw" | "pi" | "agentscope" => json!({"aw_replacement":value}),
+        "openclaw" | "qwenpaw" | "pi" | "agentscope" | "deepseek-harness" => {
+            json!({"aw_replacement":value})
+        }
         _ => return Err("unsupported result replacement adapter".into()),
     };
     Ok(HookOutput {
@@ -275,7 +278,15 @@ mod tests {
 
     #[test]
     fn empty_or_unbounded_replacements_are_rejected_for_every_adapter() {
-        for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi", "agentscope"] {
+        for adapter in [
+            "qoder",
+            "openclaw",
+            "qwenpaw",
+            "hermes",
+            "pi",
+            "agentscope",
+            "deepseek-harness",
+        ] {
             assert!(reply(adapter, &json!({}), "").is_err());
             assert!(reply(
                 adapter,
@@ -284,6 +295,39 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn deepseek_preserves_canonical_data_and_excludes_nested_or_multiblock_results() {
+        let mut native = json!({"nested":false, "tool_call":{"name":"bash","input":{"command":"ls"}},
+            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false,
+                "value":{"canonical":true},"meta":{"preserved":true}}});
+        assert_eq!(
+            project("deepseek-harness", &native).unwrap()["status"],
+            "success"
+        );
+        let replaced: Value = serde_json::from_slice(
+            &reply("deepseek-harness", &native, "compact")
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let mut expected = native["tool_response"].clone();
+        expected["content"][0]["text"] = json!("compact");
+        assert_eq!(replaced["aw_replacement"], expected);
+        native["tool_response"]["isError"] = json!(true);
+        assert_eq!(
+            project("deepseek-harness", &native).unwrap()["status"],
+            "error"
+        );
+        native["nested"] = json!(true);
+        assert!(project("deepseek-harness", &native).is_none());
+        assert!(reply("deepseek-harness", &native, "compact").is_err());
+        native["nested"] = json!(false);
+        native["tool_response"]["content"] =
+            json!([{"type":"text","text":"one"},{"type":"text","text":"two"}]);
+        assert!(project("deepseek-harness", &native).is_none());
+        assert!(reply("deepseek-harness", &native, "compact").is_err());
     }
 
     #[test]

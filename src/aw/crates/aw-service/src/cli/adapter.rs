@@ -88,11 +88,11 @@ pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) ->
     match adapter {
         "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
         "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
-        "openclaw" | "hermes" | "pi" => {
+        "openclaw" | "hermes" | "pi" | "deepseek-harness" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {
                 "blockReason"
-            } else if adapter == "pi" {
+            } else if matches!(adapter, "pi" | "deepseek-harness") {
                 "reason"
             } else {
                 "message"
@@ -218,6 +218,7 @@ mod tests {
             "pi",
             "claude-sdk",
             "agentscope",
+            "deepseek-harness",
         ] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
@@ -241,7 +242,7 @@ mod tests {
                         value,
                         serde_json::json!({"block":true,"blockReason":message})
                     );
-                } else if name == "pi" {
+                } else if matches!(name, "pi" | "deepseek-harness") {
                     assert_eq!(value, serde_json::json!({"block":true,"reason":message}));
                 } else {
                     assert_eq!(

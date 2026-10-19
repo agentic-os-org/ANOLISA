@@ -3,14 +3,15 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub fn agents() -> Vec<String> {
+pub fn agents(event: &str, effect: &str) -> Vec<String> {
     let matrix: Value =
         serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
     matrix["agents"]
         .as_object()
         .unwrap()
-        .keys()
-        .cloned()
+        .iter()
+        .filter(|(_, row)| row["events"][event].get(effect).is_some())
+        .map(|(name, _)| name.clone())
         .collect()
 }
 
@@ -34,9 +35,11 @@ pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path
         "agentscope" | "qwenpaw" => json!({"event":event,"invocation_id":call,
             "session_id":"session","tool_call":{"name":"exec","id":call,"input":input.to_string()},
             "effective_input":input,"tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"}}),
-        "pi" => json!({"event":event,"invocation_id":call,"session_id":"session",
+        "pi" | "deepseek-harness" => {
+            json!({"event":event,"invocation_id":call,"session_id":"session",
             "tool_call":{"name":"bash","id":call,"input":input},
-            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false}}),
+            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false}})
+        }
         "hermes" => json!({"hook_event_name":if before {"pre_tool_call"} else {"post_tool_call"},
             "cwd":cwd,"session_id":"session","tool_name":"terminal","tool_input":input,
             "extra":{"tool_call_id":call,"api_request_id":"api","status":"ok","duration_ms":3,

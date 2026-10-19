@@ -104,6 +104,45 @@ class MatrixTests(GateFixture):
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
 
+    def partial(self) -> dict:
+        matrix = copy.deepcopy(self.matrix)
+        row = matrix["agents"]["qoder"]
+        del row["events"]["tool.after"]["replace_result"]
+        row["unsupported"] = {"tool.after": {"replace_result": ["capability-rejection"]}}
+        row["tokenless"] = ["security-retry"]
+        for name in ("README.md", "README_zh.md"):
+            (self.root / name).write_text(f"{START}\n{table(matrix)}\n{END}\n")
+        return matrix
+
+    def test_partial_support_requires_explicit_rejection_and_keeps_security(self) -> None:
+        matrix = self.partial()
+        validate(matrix, self.runnable, self.root)
+        for mode in ("missing", "empty", "wrong-test", "overlap", "security", "tokenless"):
+            changed = copy.deepcopy(matrix)
+            row = changed["agents"]["qoder"]
+            if mode == "missing":
+                row["unsupported"] = {}
+            elif mode in {"empty", "wrong-test"}:
+                row["unsupported"]["tool.after"]["replace_result"] = (
+                    [] if mode == "empty" else ["catalog"]
+                )
+            elif mode == "overlap":
+                row["unsupported"]["tool.before"] = {"block": ["capability-rejection"]}
+            else:
+                row[mode] = ["catalog"]
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                validate(changed, self.runnable, self.root)
+
+    def test_observation_only_profile_cannot_claim_security_or_compression(self) -> None:
+        matrix = self.partial()
+        row = matrix["agents"]["qoder"]
+        del row["events"]["tool.before"]["block"]
+        row["unsupported"]["tool.before"] = {"block": ["capability-rejection"]}
+        row["security"] = row["tokenless"] = ["capability-rejection"]
+        for name in ("README.md", "README_zh.md"):
+            (self.root / name).write_text(f"{START}\n{table(matrix)}\n{END}\n")
+        validate(matrix, self.runnable, self.root)
+
     def test_each_required_case_must_exist_and_be_runnable(self) -> None:
         for name, case in self.matrix["cases"].items():
             with self.subTest(case=name):

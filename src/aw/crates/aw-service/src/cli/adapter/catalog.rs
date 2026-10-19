@@ -76,14 +76,88 @@ pub(in crate::cli) const AGENTSCOPE: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
-pub(in crate::cli) const PROFILES: &[Profile] =
-    &[QODER, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE];
+pub(in crate::cli) const DEEPSEEK: Profile = Profile {
+    name: "deepseek-harness",
+    adapter: &super::super::adapters::deepseek::DeepSeek,
+    events: TOOL_EVENTS,
+};
+
+pub(in crate::cli) const PROFILES: &[Profile] = &[
+    QODER, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, DEEPSEEK,
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn unsupported_capabilities_are_rejected_before_provider_discovery() {
+        use aw_provider::admission::{preflight, AdapterCapabilities};
+        use serde_json::json;
+        let validator = aw_config::Validator::new().unwrap();
+        let baseline = validator
+            .parse(include_bytes!(
+                "../../../../aw-config/examples/aw.minimal.yaml"
+            ))
+            .unwrap();
+        for profile in PROFILES {
+            let caps: AdapterCapabilities = profile.capabilities("fixture", "fixture").into();
+            for (event, effects) in TOOL_EVENTS {
+                for effect in *effects {
+                    let mut document = baseline.as_value().clone();
+                    document["spec"]["agents"] = json!({"target": {
+                        "adapter": profile.name, "argv": ["/must-not-start/agent"]
+                    }});
+                    document["spec"]["providers"] = json!({"policy": {
+                        "protocol":"aw-provider/v1alpha1", "config":{},
+                        "transport":{"type":"stdio", "location":"agent", "argv":["/must-not-start/provider"]},
+                        "timeout_ms":100, "max_output_bytes":4096
+                    }});
+                    document["spec"]["events"] = json!({(*event): {"enabled":true, "required":false,
+                        "match":{"tools":[format!("native:{}:tool", profile.name)]},
+                        "steps":[{"id":"test", "provider":"policy", "operation":"test",
+                            "effects":[effect], "on_error":"report"}]}});
+                    let config = validator
+                        .parse(&serde_json::to_vec(&document).unwrap())
+                        .unwrap();
+                    // Native selector names are configuration vocabulary; exact
+                    // selectors still fail runtime admission for every adapter.
+                    assert!(preflight(&config, "target", &caps).is_err());
+                    document["spec"]["events"][event]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("match");
+                    let config = validator
+                        .parse(&serde_json::to_vec(&document).unwrap())
+                        .unwrap();
+                    let supported = caps
+                        .events
+                        .get(*event)
+                        .is_some_and(|v| v.iter().any(|v| v == effect));
+                    assert_eq!(
+                        preflight(&config, "target", &caps).is_ok(),
+                        supported,
+                        "{}/{event}/{effect}",
+                        profile.name
+                    );
+                    let mut partial = caps.clone();
+                    if let Some(values) = partial.events.get_mut(*event) {
+                        values.retain(|value| value != effect);
+                    }
+                    assert!(preflight(&config, "target", &partial).is_err());
+                    partial.events.remove(*event);
+                    // Optional and empty enabled events must also fail admission.
+                    document["spec"]["events"][event]["steps"] = json!([]);
+                    let config = validator
+                        .parse(&serde_json::to_vec(&document).unwrap())
+                        .unwrap();
+                    assert!(preflight(&config, "target", &partial).is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn registered_capabilities_match_the_regression_matrix_and_config_schema() {
@@ -149,5 +223,20 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(names, actual.keys().copied().collect());
+        let wire: Value = serde_json::from_str(include_str!(
+            "../../../../aw-provider/schemas/request-v1alpha1.schema.json"
+        ))
+        .unwrap();
+        let wire_names: BTreeSet<_> = wire["oneOf"][2]["properties"]["event"]["properties"]
+            ["agent"]["properties"]["adapter"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names, wire_names,
+            "Provider wire schema must admit registered adapters"
+        );
     }
 }

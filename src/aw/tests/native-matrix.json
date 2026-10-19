@@ -453,6 +453,62 @@
       "mode": "manual",
       "reason": "Native Qoder CLI/model environment is not provisioned on CI runners. Follow the Preview native Agent acceptance guide before release; contract fixtures do not certify native adoption.",
       "guide": "../../docs/user-guide/en/user-entrypoint/aw-preview.md"
+    },
+    "deepseek-harness": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_fixture": "crates/aw-service/tests/fixtures/deepseek-harness",
+      "boundary": "Published DeepSeek Harness 0.2.1-rc.2 headless CLI, actual plugin loader and model/tool loop with real AW security and Tokenless Providers/CLI. Model, tool bodies, scanner and RTK execution are deterministic fixtures; no hosted model or Web/SDK/ACP acceptance. Text replacement covers successful single-text root results, not nested programmatic values or native value replacements.",
+      "cases": [
+        {
+          "name": "headless",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/deepseek-harness/native.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/headless"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/headless/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "security-deny",
+                  "security-error",
+                  "native-deny",
+                  "native-bypass",
+                  "native-override",
+                  "compress",
+                  "tool-error",
+                  "parallel",
+                  "nested-deny",
+                  "retry-denied",
+                  "retry-allowed",
+                  "post-content",
+                  "post-value",
+                  "post-block",
+                  "finalizer",
+                  "cancel"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

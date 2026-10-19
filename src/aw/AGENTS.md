@@ -34,15 +34,16 @@ Update these together in the same change:
 
 1. Register the Adapter and its event/effect profile in
    `crates/aw-service/src/cli/adapter/catalog.rs`; use that profile when building
-   launch capabilities. Keep the configuration schema aligned.
+   launch capabilities. Keep configuration and Provider request schemas aligned.
 2. Implement native normalization, registration, effect adoption and teardown in
    the Adapter. Keep process ownership in `aw-exec` and common lifecycle in the
    launcher. Reuse the existing admission and callback helpers.
 3. Add exact runnable case references to `tests/regression-matrix.json` for every
    event/effect and for lifecycle, security and Tokenless composition. Extend
    `crates/aw-service/tests/regression/native.rs` for new native payloads. The
-   shared PreTool and PostTool tests iterate the matrix without a fallback
-   dialect, so an unimplemented fixture fails.
+   shared PreTool and PostTool tests select rows declaring the relevant capability,
+   without a fallback dialect. Declare every other cell under `unsupported` with
+   admission-rejection coverage; omission must fail, not imply support.
 4. Run `python3 scripts/check_matrix.py --write-readmes` from this directory and
    document native adoption limits in both READMEs. Maintain the roadmap
    separately from supported capabilities.
