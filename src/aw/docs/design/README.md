@@ -3,10 +3,14 @@
 [中文版](README_zh.md)
 
 Start with the [architecture overview](../../../../docs/developer-guide/en/aw/architecture.md)
-for crate dependencies and source entry points. The current Hook path is:
+for crate dependencies and source entry points.
 
 Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
 internal interfaces and release work deferred from this migration.
+See [Unified Rust SDK and independent Provider delivery](provider-distribution.md)
+for the application SDK, Provider boundaries and distribution acceptance.
+
+The current Hook path is:
 
 ```mermaid
 flowchart LR
@@ -38,7 +42,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Integration | Design |
 | --- | --- |
 | Native Agent callbacks | [AgentScope](agentscope-adapter.md), [Claude SDK](claude-sdk-adapter.md), [Hermes](hermes-adapter.md), [OpenClaw](openclaw-adapter.md), [Pi](pi-adapter.md), [QwenPaw](qwenpaw-adapter.md); Qoder is covered by [Adapter dispatch](adapter-dispatch.md) and [Local service](local-service.md) |
-| Independent Provider development and contribution | [Shared directory](../../../../providers/README.md) and [distribution guide](../../../../docs/developer-guide/en/aw/providers.md) |
+| Independent Provider development and contribution | [Shared directory](../../../../providers/README.md), [development guide](../../../../docs/developer-guide/en/aw/providers.md) and [distribution contract](provider-distribution.md) |
 | Security Provider and backend readiness | [sec-core Provider](sec-core-provider.md), then [sec-core health](sec-core-health.md) |
 | Tokenless Provider | [Integration reference](../../../../docs/developer-guide/en/aw/tokenless.md) |
 | Packaging and configuration editing | [Build guide](../../../../docs/developer-guide/en/aw/building.md), then [Configuration editing](configuration-editing.md) |

@@ -3,9 +3,11 @@
 [English](README.md)
 
 先读[架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)，了解 crate 依赖和代码入口。
-当前 Hook 调用与审计经过以下路径。
 
 源码归属、内部接口与后续发布工作的范围见[架构边界](architecture-boundaries_zh.md)。
+统一应用 SDK、Provider 边界和分发验收见[统一 Rust SDK 与 Provider 独立分发](provider-distribution_zh.md)。
+
+当前 Hook 调用与审计经过以下路径。
 
 ```mermaid
 flowchart LR
@@ -37,7 +39,7 @@ flowchart LR
 | 接入对象 | 文档 |
 | --- | --- |
 | 原生 Agent 回调 | [AgentScope](agentscope-adapter_zh.md)、[Claude SDK](claude-sdk-adapter_zh.md)、[Hermes](hermes-adapter_zh.md)、[OpenClaw](openclaw-adapter_zh.md)、[Pi](pi-adapter_zh.md)、[QwenPaw](qwenpaw-adapter_zh.md)；Qoder 见 [Adapter 分发](adapter-dispatch_zh.md)与[本地服务](local-service_zh.md) |
-| Provider 独立开发与收录 | [协作目录](../../../../providers/README_zh.md)与[开发分发指南](../../../../docs/developer-guide/zh/aw/providers.md) |
+| Provider 独立开发与收录 | [协作目录](../../../../providers/README_zh.md)、[开发指南](../../../../docs/developer-guide/zh/aw/providers.md)与[分发契约](provider-distribution_zh.md) |
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](sec-core-provider_zh.md)，再读 [sec-core 健康检查](sec-core-health_zh.md) |
 | Tokenless Provider | [接入参考](../../../../docs/developer-guide/zh/aw/tokenless.md) |
 | 打包和配置编辑 | [构建指南](../../../../docs/developer-guide/zh/aw/building.md)，再读[配置编辑](configuration-editing_zh.md) |

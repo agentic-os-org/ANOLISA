@@ -52,9 +52,12 @@ out-of-tree Provider builds against pinned public AW libraries. Third parties
 need only the public process protocol and YAML, not a Rust SDK or OS checkout.
 The bundled implementations still use local SDK paths. Preview delivers one
 build set and checks matching versions and source commits for common origin.
-Independent SDK publication and installation compatibility changes are a later
-stage, including receipt migration tests. Preserve existing package and binary
-names when moving source directories. New Provider directories
+Independent SDK publication and artifact composition must satisfy the
+[distribution contract](docs/design/provider-distribution.md). It covers fresh
+installations and upgrades and rollback within the new distribution; legacy
+Preview installation and receipt migration are out of scope.
+Preserve existing package and binary names when moving source directories.
+New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
 
