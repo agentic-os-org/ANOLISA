@@ -97,14 +97,43 @@ migration. Native jobs reuse checksummed binaries from that exact build.
 
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
-Agent. The nightly job matrix is generated from this inventory. AgentScope,
-Claude SDK/CLI, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
-manual because CI has no provisioned native CLI/model environment; it appears as
-**MANUAL — not tested**, never as a native pass. OpenClaw covers official Hook
-runners. The QwenPaw suite covers native AgentScope middleware and AW plugin
-registration against a simulated API; QwenPaw plugin loading, App/API startup
-and model turns remain manual. Full OpenClaw Gateway model flows also require
-explicit acceptance. Deterministic local models need no cloud keys.
+Agent. The nightly job matrix is generated from this inventory. All seven Agents
+have automated suites. OpenClaw covers official Hook runners; full OpenClaw
+Gateway model flows still require explicit acceptance.
+
+Qoder CLI 1.1.64 and QwenPaw 2.2.2b4 / AgentScope 2.0.9 each require four real
+sec-core cases: `allow`, `scan-deny`, `backend-error` and `timeout-block`. The jobs
+reuse the candidate's checksummed `aw`, Provider, `agent-sec-cli` and
+`agent-sec-daemon` binaries. Each case starts a private Ubuntu 24.04 container,
+pinned by the inventory to a multi-platform manifest digest, with the real daemon.
+The container has no network and only its socket directory is writable on the
+host. The resolved platform image ID is also recorded. The scheduled run selects
+`github.sha` once; containers never fetch a moving branch or a separately built
+nightly image.
+
+The normal case must write its marker. The risk case must match the builtin
+`shell-recursive-delete` rule (`warn`, mapped to block), preserve its disposable
+deletion fixture and omit the marker. Stopping the actual container tests backend
+unavailability; pausing it tests the 2-second Provider deadline and `on_error:
+block`. Both must leave the marker absent, including after backend recovery.
+Native callbacks, sec-core events, AW audit and zero live bindings are checked
+together. QwenPaw's native approval API approves only the exact fixture command
+before AW rejects it. Every case stops its processes/container and checks socket,
+plugin and port cleanup; profiles and temporary state are removed, never uploaded.
+If a fixture exceeds its cleanup grace, the outer Linux subreaper kills and reaps
+adopted descendants across sessions and removes containers carrying that command's
+unique ownership label. It retains a cleanup report and fails the interrupted run.
+
+QwenPaw drives its stock App/API with a deterministic loopback OpenAI-compatible
+model, requiring no cloud key. Qoder uses its real hosted Performance model and
+the repository `QODER_PERSONAL_ACCESS_TOKEN` Secret, as documented in
+[Qoder authentication](https://docs.qoder.com/cli/authentication). Dependency
+installation does not receive the Secret. The Qoder launcher and its native
+callbacks inherit it during execution; backend probes, Docker commands and
+version checks explicitly remove it from their environments. Missing or expired
+credentials fail acceptance rather than skip it. Forks need their own Secret to run this nightly lane. Qoder downloads have
+fixed official URLs, archive checksums and a runtime version check; updates need
+an explicit inventory change. PR contract gates remain credential-free.
 
 Every native command declares a report contract: `unittest`/`tap` requires an exact
 test count; `json` requires result files with exact case names or observed counts.
@@ -116,18 +145,19 @@ Evidence artifacts retain the candidate SHA, component package manifests,
 installed SDK versions/npm locks, command/PID/deadline records and per-suite
 results. @kongche-jbw owns AW integration failures and routes backend contract
 failures to the component CODEOWNERS. Before release, rerun on the exact release
-commit and complete the documented manual native boundaries.
+commit and validate any additional release-specific native boundaries.
 
 The daily Rust cache is restored for PRs and written only by main pushes; the
 heavy build cache is written by nightly. Native Python/npm dependencies are
-cached separately, and native concurrency is capped at three jobs. To validate
-the new integration workflow on a branch before it reaches main, dispatch the
-existing AW workflow with `integration=true`:
+cached separately, and native concurrency is capped at three jobs. Dispatch from
+`main`; the candidate must belong to the fetched `origin/main` history before
+any candidate script runs or receives the Qoder Secret. Unmerged feature/release
+commits are rejected. Local native execution remains available for those commits
+with explicitly supplied local credentials.
 
 ```bash
-gh workflow run aw-ci.yml --ref <branch> -f integration=true
-# After the integration workflow is on the default branch:
-gh workflow run aw-preview.yml --ref <branch> -f candidate_sha=<40-character-SHA>
+gh workflow run aw-ci.yml --ref main -f integration=true
+gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 ```
 
 Local inventory planning and native execution use the same entrypoints as CI:
@@ -140,7 +170,10 @@ python3 -B scripts/native_acceptance.py --agent agentscope \
 ```
 
 The binary directory must contain the nightly bundle and checksums. Install the
-inventory's Python version, Node 24.15.0 and uv 0.11.13 first. Native execution
+inventory's Python version, Node 24.15.0 and uv 0.11.13 first. Qoder and QwenPaw
+also require a working local Docker daemon; Qoder requires its PAT in the
+environment. Select either Agent with `--agent qoder` or `--agent qwenpaw` in the
+same native entrypoint above. Native execution
 owns one short temporary directory for Linux Unix sockets and removes it on exit;
 retained evidence belongs under `target/`. Native jobs use standalone Python and
 private Hermes tools/environments so runner loader overrides or shared writable

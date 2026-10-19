@@ -15,6 +15,10 @@ on:
       candidate_sha:
         required: true
         type: string
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN:
+        description: Qoder account token for native hosted-model security acceptance
+        required: false
 
 permissions:
   contents: read
@@ -42,12 +46,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.candidate.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout: |
             src/aw
             providers/agent-sec-core
             providers/tokenless
             docs/developer-guide/en/aw
+      - name: Require a trusted candidate before executing repository code
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          test "$WORKFLOW_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
       - name: Validate native coverage and select pinned runtimes
         id: matrix
         env:
@@ -105,6 +118,7 @@ jobs:
           mkdir -p "$AW_PREVIEW_DIR/native"
           cp src/aw/target/release/{aw,rtk} providers/agent-sec-core/target/release/aw-provider-sec-core providers/tokenless/target/release/aw-provider-tokenless "$AW_PREVIEW_DIR/native/"
           cp src/aw/target/release/examples/policy src/tokenless/target/release/tokenless "$AW_PREVIEW_DIR/native/"
+          cp src/agent-sec-core/v2/target/release/{agent-sec-cli,agent-sec-daemon} "$AW_PREVIEW_DIR/native/"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/aw/Cargo.toml > "$AW_PREVIEW_DIR/native/aw-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/agent-sec-core/Cargo.toml > "$AW_PREVIEW_DIR/native/sec-core-provider-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/tokenless/Cargo.toml > "$AW_PREVIEW_DIR/native/tokenless-provider-packages.json"
@@ -112,7 +126,7 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/tokenless/Cargo.toml > "$AW_PREVIEW_DIR/native/tokenless-packages.json"
           rustc --version > "$AW_PREVIEW_DIR/native/rustc-version.txt"
           cd "$AW_PREVIEW_DIR/native"
-          sha256sum aw aw-provider-tokenless aw-provider-sec-core tokenless rtk policy > SHA256SUMS
+          sha256sum aw aw-provider-tokenless aw-provider-sec-core tokenless rtk policy agent-sec-cli agent-sec-daemon > SHA256SUMS
           printf '%s\n' "$CANDIDATE_SHA" > source-sha.txt
           tar -czf "$AW_PREVIEW_DIR/native.tar.gz" .
       - uses: actions/upload-artifact@v4
@@ -241,18 +255,24 @@ jobs:
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}
           path: src/aw/target/native-binaries
-      - name: Run pinned native acceptance
+      - name: Prepare native Python and candidate binaries
         env:
-          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
-          NATIVE_AGENT: ${{ matrix.agent }}
           NATIVE_PYTHON: ${{ matrix.python }}
         run: |
           # Standalone Python needs no loader overrides rejected by Hermes preflight.
           uv python install "$NATIVE_PYTHON"
           native_python="$(uv python find "$NATIVE_PYTHON")"
-          export PATH="$(dirname "$native_python"):$PATH"
+          echo "AW_NATIVE_PYTHON=$native_python" >> "$GITHUB_ENV"
+          dirname "$native_python" >> "$GITHUB_PATH"
           tar -xzf src/aw/target/native-binaries/native.tar.gz -C src/aw/target/native-binaries
-          "$native_python" -B src/aw/scripts/native_acceptance.py --agent "$NATIVE_AGENT" \
+      - name: Run pinned native acceptance
+        env:
+          CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
+          NATIVE_AGENT: ${{ matrix.agent }}
+          # Only the Qoder matrix entry uses a cloud account. Missing credentials fail it.
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ matrix.agent == 'qoder' && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
+        run: |
+          "$AW_NATIVE_PYTHON" -B src/aw/scripts/native_acceptance.py --agent "$NATIVE_AGENT" \
             --candidate-sha "$CANDIDATE_SHA" --bin src/aw/target/native-binaries \
             --output "src/aw/target/native-evidence/$NATIVE_AGENT"
       - uses: actions/upload-artifact@v4
@@ -270,9 +290,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Require a trusted integration plan
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: test "$PLAN_RESULT" = success
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.sha || github.sha }}
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
           sparse-checkout: |
             src/aw
@@ -281,8 +305,8 @@ jobs:
         with:
           pattern: aw-native-evidence-*-${{ needs.plan.outputs.sha }}
           path: src/aw/target/native-results
-      - name: Require all automated suites and report manual boundaries
-        if: always()
+      - name: Require all native suites and report acceptance boundaries
+        if: always() && needs.plan.result == 'success'
         env:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
           PLAN_RESULT: ${{ needs.plan.result }}

@@ -87,4 +87,8 @@ Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider�
 python3 src/aw/scripts/check.py
 ```
 
+Qoder CLI 和 QwenPaw App/API 各自通过临时容器中的真实 sec-core 验证正常放行、
+扫描拒绝、后端异常和超时阻断。Qoder 使用 nightly 账号 Secret，QwenPaw 使用
+本地确定性模型。完整验收边界见 [CI 看护](CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
+
 - [开发环境和测试](CONTRIBUTING_zh.md)

@@ -95,4 +95,9 @@ Run the AW CI checks from the repository root.
 python3 src/aw/scripts/check.py
 ```
 
+Qoder CLI and QwenPaw App/API each exercise real sec-core allow, scan denial,
+backend failure and timeout blocking in disposable containers. Qoder uses the
+nightly account Secret; QwenPaw uses a local deterministic model. See
+[CI coverage](CONTRIBUTING.md#daily-ci-and-nightly-integration) for the full boundary.
+
 - [Development environment and tests](CONTRIBUTING.md)

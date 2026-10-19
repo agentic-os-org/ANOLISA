@@ -440,7 +440,7 @@
         "qwenpaw==2.2.2b4",
         "agentscope==2.0.9"
       ],
-      "boundary": "Pinned native AgentScope middleware and AW plugin registration against a simulated API; QwenPaw plugin loading, App/API startup and model turns remain manual.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key.",
       "cases": [
         {
           "name": "middleware",
@@ -451,14 +451,115 @@
           "timeout_seconds": 180,
           "report": "unittest",
           "tests": 12
+        },
+        {
+          "name": "sec-core",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/sec_core/native.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/sec-core"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sec-core/results.json",
+              "values": {
+                "passed": true,
+                "runtime_removed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "scan-deny",
+                  "backend-error",
+                  "timeout-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
-      ]
+      ],
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
     },
     "qoder": {
       "owner": "@kongche-jbw",
-      "mode": "manual",
-      "reason": "Native Qoder CLI/model environment is not provisioned on CI runners. Follow the Preview native Agent acceptance guide before release; contract fixtures do not certify native adoption.",
-      "guide": "../../docs/developer-guide/en/aw/packages.md"
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "requirements": [],
+      "cases": [
+        {
+          "name": "sec-core",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/sec_core/native.py",
+            "--agent",
+            "qoder",
+            "--bin",
+            "{bin}",
+            "--agent-bin",
+            "{qoder}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/sec-core"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sec-core/results.json",
+              "values": {
+                "passed": true,
+                "runtime_removed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "scan-deny",
+                  "backend-error",
+                  "timeout-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "qoder_cli": {
+        "version": "1.1.64",
+        "downloads": {
+          "x86_64": {
+            "url": "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/1.1.64/qodercli-linux-x64.tar.gz",
+            "sha256": "ab66abe6893ecfcd8f0272a45a7aad86eed495d1206eeac6d0b6a6517f1f09d6"
+          },
+          "aarch64": {
+            "url": "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/1.1.64/qodercli-linux-arm64.tar.gz",
+            "sha256": "8036b71d8cb89dd5736aea3138b09b52fc1a9207f3e4f6db39e38404668bc1ca"
+          }
+        }
+      },
+      "boundary": "Pinned real Qoder CLI with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN; native Bash allow, scan denial, backend error and timeout blocking through the candidate sec-core daemon container.",
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
     }
   }
 }

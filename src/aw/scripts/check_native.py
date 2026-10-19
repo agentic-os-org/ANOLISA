@@ -7,6 +7,7 @@ from pathlib import Path
 
 from check import AW, git, output, sha
 from native_reports import validate_case
+from native_qoder import validate_pin
 
 
 def load(root: Path) -> dict:
@@ -18,17 +19,47 @@ def load(root: Path) -> dict:
     for agent, row in manifest["agents"].items():
         if not row.get("owner"):
             raise ValueError(f"{agent}: native acceptance needs an owner")
-        if row.get("mode") == "manual":
-            # This existing runtime needs an account/CLI that CI does not provision.
-            if agent != "qoder" or not row.get("reason") or not (root / row["guide"]).is_file():
-                raise ValueError(f"{agent}: new native coverage cannot silently become manual")
-            continue
         if row.get("mode") != "automated" or not row.get("boundary"):
             raise ValueError(f"{agent}: declare automated coverage and its native boundary")
         if not re.fullmatch(r"3\.\d+\.\d+", row.get("python", "")):
             raise ValueError(f"{agent}: pin the Python runtime")
-        if not any(row.get(key) for key in ("versions", "source", "npm_fixture", "npm_packages")):
+        if not any(
+            row.get(key)
+            for key in (
+                "versions",
+                "source",
+                "npm_fixture",
+                "npm_packages",
+                "qoder_cli",
+            )
+        ):
             raise ValueError(f"{agent}: pin the native runtime")
+        if "qoder_cli" in row:
+            validate_pin(row["qoder_cli"])
+        if agent in {"qoder", "qwenpaw"}:
+            security = [case for case in row.get("cases", []) if case["name"] == "sec-core"]
+            expected = {"allow", "scan-deny", "backend-error", "timeout-block"}
+            if len(security) != 1 or set(security[0]["results"][0]["cases"]["names"]) != expected:
+                raise ValueError(f"{agent}: require all four real sec-core native cases")
+            image = row.get("container", "")
+            if not re.fullmatch(r"ubuntu:24\.04@sha256:[0-9a-f]{64}", image):
+                raise ValueError(f"{agent}: pin the sec-core runtime container digest")
+            expected_argv = [
+                "{python}",
+                "crates/aw-service/tests/fixtures/sec_core/native.py",
+                "--agent",
+                agent,
+                "--bin",
+                "{bin}",
+                "--agent-bin",
+                "{qoder}" if agent == "qoder" else "{qwenpaw}",
+                "--image",
+                image,
+                "--output",
+                "{output}/sec-core",
+            ]
+            if security[0]["argv"] != expected_argv:
+                raise ValueError(f"{agent}: sec-core argv must use the pinned native fixture")
         for requirement in row.get("requirements", []):
             if "==" not in requirement or any(c in requirement for c in "*<>;"):
                 raise ValueError(f"{agent}: use exact Python dependency versions")

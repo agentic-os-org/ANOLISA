@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 import unittest
 
@@ -21,6 +22,66 @@ class NativeTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
         self.manifest = load(AW)
+
+    def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        step = workflow.split(
+            "      - name: Require a trusted candidate before executing repository code\n", 1
+        )[1].split("      - name: Validate native coverage", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+        def git(*args):
+            return subprocess.check_output(
+                ["git", *args], cwd=self.root, text=True, stderr=subprocess.PIPE, timeout=10
+            ).strip()
+
+        def commit(path, value):
+            (self.root / path).write_text(value)
+            git("add", ".")
+            git("commit", "-qm", "fixture")
+            return git("rev-parse", "HEAD")
+
+        git("init", "-q", "--initial-branch=main")
+        git("config", "user.name", "AW fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        base = commit("README.md", "base")
+        head = commit("README.md", "trusted main")
+        git("update-ref", "refs/remotes/origin/main", head)
+        git("checkout", "-qb", "feature", base)
+        feature = commit("candidate.py", "raise RuntimeError('untrusted')")
+        git("checkout", "-qb", "release/unmerged", head)
+        release = commit("candidate.py", "raise RuntimeError('unmerged release')")
+        for candidate, ref, passed in (
+            (base, "refs/heads/main", True),
+            (head, "refs/heads/main", True),
+            (feature, "refs/heads/main", False),
+            (release, "refs/heads/main", False),
+            (head, "refs/heads/feature", False),
+            (head, "refs/tags/release", False),
+        ):
+            with self.subTest(candidate=candidate, ref=ref):
+                git("checkout", "--detach", candidate)
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", script],
+                    cwd=self.root,
+                    env={**os.environ, "CANDIDATE_SHA": candidate, "WORKFLOW_REF": ref},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, passed, result.stderr)
+        result_job = workflow.split("  result:\n", 1)[1]
+        self.assertLess(
+            result_job.index("Require a trusted integration plan"),
+            result_job.index("uses: actions/checkout@v4"),
+        )
+        self.assertIn("if: always() && needs.plan.result == 'success'", result_job)
+        script = result_job.split("        run: ", 1)[1].splitlines()[0]
+        for outcome in ("success", "failure", "cancelled", "skipped"):
+            result = subprocess.run(
+                ["bash", "-euc", script], env={**os.environ, "PLAN_RESULT": outcome}, timeout=5
+            )
+            self.assertEqual(result.returncode == 0, outcome == "success")
 
     def test_new_agent_requires_native_accounting(self) -> None:
         (self.root / "tests").mkdir()
@@ -60,8 +121,6 @@ class NativeTests(GateFixture):
 
     def reports(self) -> None:
         for agent, row in self.manifest["agents"].items():
-            if row["mode"] == "manual":
-                continue
             directory = self.root / agent
             directory.mkdir(exist_ok=True)
             for case in row["cases"]:
@@ -255,7 +314,8 @@ class NativeTests(GateFixture):
         self.reports()
         text, passed = summarize(self.manifest, self.root, "a" * 40, outcomes)
         self.assertTrue(passed)
-        self.assertIn("MANUAL — not tested", text)
+        self.assertNotIn("MANUAL — not tested", text)
+        self.assertIn("| qoder | PASS |", text)
         for mode in ("missing", "stale", "empty", "failed-case", "failed-job", "skipped-job"):
             self.reports()
             jobs = dict(outcomes)
@@ -294,7 +354,7 @@ class NativeTests(GateFixture):
             os.kill(int(child_pid.read_text()), 0)
 
     def test_ledger_failures_bound_wait_and_reap_descendants(self) -> None:
-        for stage in ("open", "write", "flush"):
+        for stage in ("open", "write", "flush", "timeout", "interrupt", "no-children"):
             directory = self.root / stage
             directory.mkdir()
             with self.subTest(stage=stage):
@@ -312,6 +372,16 @@ class NativeTests(GateFixture):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue(json.loads(result.stdout.splitlines()[-1])["descendant_reaped"])
+
+    def test_runner_rejects_existing_children_without_signalling_them(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with self.assertRaisesRegex(RuntimeError, "already has an owned child"):
+                Commands(self.root, dict(os.environ)).run(["/bin/true"], self.root)
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
     def test_empty_reduced_and_skipped_native_suites_fail(self) -> None:
         case = {"name": "unit", "tests": 2, "report": "unittest"}
@@ -339,6 +409,8 @@ class NativeTests(GateFixture):
             "tokenless",
             "rtk",
             "policy",
+            "agent-sec-cli",
+            "agent-sec-daemon",
         )
         for name in names:
             file = self.root / name

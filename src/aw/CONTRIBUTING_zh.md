@@ -81,13 +81,33 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 原生任务复用该次构建的二进制，并校验提交 SHA 和文件摘要。
 
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
-版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。AgentScope、
-Claude SDK/CLI、Hermes、OpenClaw、Pi 和 QwenPaw 有自动验收；Qoder 因 CI 未配置
-原生 CLI/模型环境，明确显示 **MANUAL — not tested**，不会计为原生通过。
-OpenClaw 覆盖官方 Hook runner。QwenPaw 套件覆盖原生 AgentScope middleware，
-以及 AW plugin 对模拟 API 的注册契约；QwenPaw 插件加载、App/API 启动和模型
-流程仍需人工验收。完整 OpenClaw Gateway 模型流程也需单独验收。
-本地确定性模型无需云端密钥。
+版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。七种 Agent
+均有自动验收。OpenClaw 覆盖官方 Hook runner，完整 Gateway 模型流程仍需单独验收。
+
+Qoder CLI 1.1.64 和 QwenPaw 2.2.2b4 / AgentScope 2.0.9 各自必须完成四项真实
+sec-core 用例：`allow`、`scan-deny`、`backend-error` 和 `timeout-block`。任务复用
+候选提交的 `aw`、Provider、`agent-sec-cli` 和 `agent-sec-daemon`，并核对校验和。
+每个用例在独立 Ubuntu 24.04 容器中启动真实 daemon，清单通过多平台 manifest digest
+固定镜像。容器禁用网络，宿主仅挂载一个可写的 socket 目录，并记录实际平台镜像 ID。定时任务只选择一次 `github.sha`；
+容器不会另行拉取不断变化的分支或独立构建的 nightly 镜像。
+
+正常用例必须写出标记文件；风险用例必须命中内置 `shell-recursive-delete` 规则
+（`warn` 转为阻断），保留待删除的临时夹具，且不生成标记。停止真实容器模拟后端
+不可用，暂停容器验证 Provider 的 2 秒截止时间和 `on_error: block`。二者均须
+阻止标记生成，恢复后端后也不能补执行。检查同时核对原生回调、sec-core 事件、
+AW 审计和零存活绑定。QwenPaw 通过原生审批 API 仅批准那条确切的夹具命令，再由
+AW 拒绝执行。每项用例停止所属进程和容器，检查 socket、插件和端口清理；profile
+及临时状态在退出时删除，不上传。
+若夹具超过清理宽限期，外层 Linux subreaper 会终止并回收跨 session 的后代进程，
+并按本次命令的唯一归属标签删除容器，保留清理报告；被中断的运行仍判定为失败。
+
+QwenPaw 的真实 App/API 使用本地确定性 OpenAI 兼容模型，无需云端密钥。Qoder
+调用真实的 Performance 托管模型，使用仓库的 `QODER_PERSONAL_ACCESS_TOKEN`
+Secret，认证方式见 [Qoder 官方说明](https://docs.qoder.com/cli/authentication)。
+依赖安装不会接收 Secret。Qoder 启动器及其原生回调在执行时继承它；后端探测、
+Docker 命令和版本检查会从环境中明确移除它。凭据缺失或过期会使验收失败，不会跳过；fork 运行该 nightly 分支时需自行配置 Secret。Qoder 下载使用
+固定官方 URL、归档校验和及运行时版本检查，升级须明确修改清单。PR 合同门禁
+保持无凭据运行。
 
 每个原生命令都必须声明报告契约：`unittest`/`tap` 要求确切的测试数量；`json`
 要求结果文件及确切的用例名称或实际完成数量。执行端与最终汇总都会校验这些证据；
@@ -96,16 +116,16 @@ OpenClaw 覆盖官方 Hook runner。QwenPaw 套件覆盖原生 AgentScope middle
 缺少套件、SHA 过期或报告不完整都会使集成汇总失败。证据 artifact 保存候选 SHA、
 组件包清单、已安装 SDK 版本/npm lock、命令/PID/截止时间和逐套件结果。
 @kongche-jbw 负责 AW 集成失败，后端契约失败转对应组件 CODEOWNERS。发布前须
-对确切发布提交重新运行，并完成已注明的人工原生验收。
+对确切发布提交重新运行，并验收发布所需的其他原生边界。
 
 日常 Rust 缓存由 PR 读取，仅 main 推送写入；重型构建缓存由 nightly 写入。
-原生 Python/npm 依赖分别缓存，原生任务最多三个并行。工作流合入 main 前，
-可以通过已有 AW 工作流的 `integration=true` 在分支上验证：
+原生 Python/npm 依赖分别缓存，原生任务最多三个并行。须从 `main` 触发；
+候选提交须属于拉取到的 `origin/main` 历史，才能执行候选脚本或接收 Qoder Secret。
+未合入的 feature/release 提交会被拒绝；这些提交仍可显式提供本地凭据进行原生验证。
 
 ```bash
-gh workflow run aw-ci.yml --ref <branch> -f integration=true
-# After the integration workflow is on the default branch:
-gh workflow run aw-preview.yml --ref <branch> -f candidate_sha=<40-character-SHA>
+gh workflow run aw-ci.yml --ref main -f integration=true
+gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
 ```
 
 本地清单检查与原生执行使用和 CI 相同的入口：
@@ -118,7 +138,9 @@ python3 -B scripts/native_acceptance.py --agent agentscope \
 ```
 
 二进制目录须包含 nightly 的 bundle 和校验文件。先安装清单指定的 Python 版本、
-Node 24.15.0 和 uv 0.11.13。原生执行使用一个所属短临时目录容纳 Linux Unix
+Node 24.15.0 和 uv 0.11.13。Qoder 和 QwenPaw 还需要可用的本地 Docker daemon，
+Qoder 需在环境中配置 PAT。在上述统一原生入口使用 `--agent qoder` 或
+`--agent qwenpaw` 选择对应套件。原生执行使用一个所属短临时目录容纳 Linux Unix
 socket，并在退出时删除；保留证据放在 `target/`。原生任务使用独立 Python 和
 Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写缓存放宽原生
 准入规则。不能通过重试或省略框架将
