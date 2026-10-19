@@ -305,10 +305,21 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
 }
 
 fn traced_tool_failure(call: &LLMCall) -> Option<(&'static str, Option<String>, String)> {
+    // Only the trailing run of tool-result messages belongs to the turn this
+    // call answers. Earlier results stay in the replayed history, and scanning
+    // them blamed every later call for a failure that was already handled
+    // (unified stamps each call's interruption_type from this event).
     let request_parts = call
         .request
         .messages
         .iter()
+        .rev()
+        .take_while(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolCallResponse { .. }))
+        })
         .flat_map(|message| message.parts.iter());
     let response_parts = call
         .response
@@ -2015,6 +2026,108 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::UnauthorizedAction
         );
+    }
+
+    /// A failure that has already been answered stays in the replayed request
+    /// history. Scanning the whole history re-reported it for every later
+    /// call, stamping those calls with a `tool_failure` they did not have.
+    #[test]
+    fn test_historical_tool_failure_is_not_reported_for_a_later_call() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "inspect the file".to_string(),
+                }],
+                name: None,
+            },
+            InputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("call_old".to_string()),
+                    name: "read".to_string(),
+                    arguments: None,
+                }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("call_old".to_string()),
+                    response: serde_json::json!({
+                        "is_error": true,
+                        "content": "ENOENT: no such file or directory"
+                    }),
+                }],
+                name: None,
+            },
+            InputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("call_new".to_string()),
+                    name: "read".to_string(),
+                    arguments: None,
+                }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("call_new".to_string()),
+                    response: serde_json::json!({
+                        "is_error": false,
+                        "content": "ok"
+                    }),
+                }],
+                name: None,
+            },
+        ];
+
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "the file is missing".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "the answered failure must not follow the call: {events:?}"
+        );
+    }
+
+    /// Parallel results arrive as one trailing message; a failure in any of
+    /// them still belongs to the call being answered.
+    #[test]
+    fn test_trailing_parallel_tool_failure_is_still_reported() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![
+                MessagePart::ToolCallResponse {
+                    id: Some("call_a".to_string()),
+                    response: serde_json::json!({"is_error": true, "content": "ENOENT"}),
+                },
+                MessagePart::ToolCallResponse {
+                    id: Some("call_b".to_string()),
+                    response: serde_json::json!({"is_error": false, "content": "ok"}),
+                },
+            ],
+            name: None,
+        }];
+
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["tool_use_id"], "call_a");
     }
 
     #[test]
