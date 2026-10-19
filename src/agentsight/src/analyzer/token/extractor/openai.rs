@@ -750,6 +750,17 @@ fn is_closing_response_event(chunk: &Value) -> bool {
 /// A choice that carries `message` instead of `delta` speaks in cumulative
 /// snapshots: each frame repeats the answer so far rather than an increment.
 fn carries_message_snapshot(chunk: &Value) -> bool {
+    // The DashScope/Bailian native envelope is a snapshot too, and the most
+    // literal one: it has no `choices[].delta` at all, and by default every
+    // chunk repeats the cumulative text (`incremental_output=false`). Treating
+    // it as a fragment made a multi-chunk native stream concatenate the
+    // cumulative text once per chunk — "The The answer" — because the
+    // per-chunk read buffers are local to `extract_response_content` and start
+    // empty, so its own replace-or-append rule can never see the previous
+    // chunk. The fold across chunks has to happen here.
+    if chunk.get("output").is_some_and(Value::is_object) {
+        return true;
+    }
     chunk
         .get("choices")
         .and_then(|c| c.as_array())
@@ -1717,6 +1728,53 @@ mod tests {
         assert_eq!(content, "look here");
         assert_eq!(reasoning.as_deref(), Some("weighing it"));
         assert_eq!(tools, vec!["read_file: {\"p\":\"a\"}".to_string()]);
+    }
+
+    /// The merge across chunks, not the single-chunk read, is where a native
+    /// stream's cumulative repeats have to be folded. Native streaming
+    /// defaults to `incremental_output=false`, so every chunk repeats the whole
+    /// answer so far; appending each one counted the answer once per chunk.
+    #[test]
+    fn test_native_stream_cumulative_text_is_folded_once() {
+        let chunks = [
+            serde_json::json!({"output": {"text": "The "}}),
+            serde_json::json!({"output": {"text": "The answer"}}),
+        ];
+        assert_eq!(merge_response_output_text(&chunks).0, "The answer");
+
+        // The incremental form (`incremental_output=true`) appends instead.
+        let incremental = [
+            serde_json::json!({"output": {"text": "The "}}),
+            serde_json::json!({"output": {"text": "answer"}}),
+        ];
+        assert_eq!(merge_response_output_text(&incremental).0, "The answer");
+
+        // Reasoning rides the same rule.
+        let reasoning = [
+            serde_json::json!({"output": {"choices": [{"message": {"reasoning_content": "weigh"}}]}}),
+            serde_json::json!({"output": {"choices": [{"message": {"reasoning_content": "weighing"}}]}}),
+        ];
+        assert_eq!(merge_response_output_text(&reasoning).1, "weighing");
+    }
+
+    /// Native tool calls arrive whole on every chunk, so the last value per
+    /// slot wins; pushing each chunk's copy counted the same call once per
+    /// chunk.
+    #[test]
+    fn test_native_stream_repeated_tool_calls_are_not_duplicated() {
+        let call = |name: &str, args: &str| {
+            serde_json::json!({"output": {"choices": [{"message": {"tool_calls": [
+                {"index": 0, "function": {"name": name, "arguments": args}}
+            ]}}]}})
+        };
+        let chunks = [
+            call("read_file", "{\"p\":\"a\"}"),
+            call("read_file", "{\"p\":\"a\"}"),
+        ];
+        assert_eq!(
+            merge_response_output_text(&chunks).2,
+            vec!["read_file: {\"p\":\"a\"}".to_string()]
+        );
     }
 
     /// A native chunk that carries only its terminal state (`finish_reason`,
