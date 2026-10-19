@@ -327,6 +327,54 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // A gateway may put the whole block payload on
+            // `content_block_start` and send no deltas at all. The chatml
+            // reader seeds its buffers from that event, and the live analyzer
+            // does the same, but the manual counters recognised only the
+            // deltas — so such a capture counted zero output tokens for an
+            // answer that was fully present. The standard Anthropic stream
+            // starts every block with an empty payload, where seeding is a
+            // no-op; a tool_use's empty `input` object is the placeholder the
+            // deltas replace and is not a body.
+            "content_block_start" => {
+                if let Some(block) = resp.get("content_block") {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    return Some((text.to_string(), None, Vec::new()));
+                                }
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                                if !thinking.is_empty() {
+                                    return Some((
+                                        String::new(),
+                                        Some(thinking.to_string()),
+                                        Vec::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = block.get("input").filter(|input| {
+                                input.as_object().is_some_and(|object| !object.is_empty())
+                            });
+                            if !name.is_empty() {
+                                let arguments = input.map(|i| i.to_string()).unwrap_or_default();
+                                return Some((
+                                    String::new(),
+                                    None,
+                                    vec![format!("{name}: {arguments}")],
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // A Responses function call is announced by
             // `response.output_item.added` (which carries the name) and then
             // streamed as `response.function_call_arguments.delta` fragments.
@@ -1465,6 +1513,85 @@ mod tests {
             extract_response_content(Some(&chunk)).expect("should extract the tool input fragment");
         assert!(content.is_empty());
         assert_eq!(tools, vec!["{\"city\":".to_string()]);
+    }
+
+    /// A gateway may deliver the whole block on `content_block_start` and
+    /// send no delta at all. The chatml reader seeds its buffers from that
+    /// event and the live analyzer does too, but the manual counters read
+    /// only the deltas, so such a capture counted zero output tokens for a
+    /// fully captured answer.
+    #[test]
+    fn test_anthropic_content_block_start_payload_is_kept() {
+        let text = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": "the whole answer"},
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&text)).expect("a seeded text block is answer text");
+        assert_eq!(content, "the whole answer");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+
+        let thinking = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "weighing options"},
+        });
+        let (content, reasoning, tools) = extract_response_content(Some(&thinking))
+            .expect("a seeded thinking block is reasoning");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("weighing options"));
+        assert!(tools.is_empty());
+
+        let call = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "get_weather",
+                "input": {"city": "Paris"},
+            },
+        });
+        let (content, _, tools) =
+            extract_response_content(Some(&call)).expect("a seeded tool block is a call");
+        assert!(content.is_empty());
+        assert_eq!(tools, vec!["get_weather: {\"city\":\"Paris\"}".to_string()]);
+    }
+
+    /// The standard stream opens every block with an empty payload and lets
+    /// the deltas fill it. Seeding must stay a no-op there, or the same text
+    /// would be counted twice.
+    ///
+    /// A named tool_use is the exception: its name is the announcement's
+    /// whole contribution, exactly as the Responses `output_item.added` arm
+    /// contributes `name: `, and its empty `input` object is the placeholder
+    /// the deltas replace rather than a body.
+    #[test]
+    fn test_anthropic_content_block_start_without_payload_is_not_extracted() {
+        for chunk in [
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "", "input": {}},
+            }),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
     }
 
     #[test]
