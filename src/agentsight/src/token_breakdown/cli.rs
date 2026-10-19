@@ -2122,4 +2122,29 @@ mod tests {
             "the response total must use the joined count"
         );
     }
+    #[test]
+    fn sse_unindexed_tool_calls_are_allocated_within_their_choice() {
+        // Without a wire `index`, each choice owns its own growing slot
+        // sequence. Allocating from the global maximum interleaved the two
+        // choices' calls and made the output order depend on traffic from the
+        // other choice.
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"name":"a","arguments":"1"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":1,"delta":{"tool_calls":[{"function":{"name":"b","arguments":"2"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"name":"c","arguments":"3"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["a: 1".to_string(), "c: 3".to_string(), "b: 2".to_string()],
+            "calls stay grouped and ordered by their choice"
+        );
+    }
 }
