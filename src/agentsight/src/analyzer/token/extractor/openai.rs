@@ -800,6 +800,13 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
     let mut current: BTreeMap<u64, u64> = BTreeMap::new();
     let mut responses = ResponsesToolCalls::default();
     let mut compatible: Vec<String> = Vec::new();
+    // The DashScope/Bailian native envelope streams its whole value on every
+    // chunk (`incremental_output=false`), tool calls included, and its calls
+    // are only reachable through the fragment contract below. Keyed by slot,
+    // the last value per call wins, the same fold `extract_dashscope_native_parts`
+    // applies inside one chunk; without it a stream described its call once per
+    // chunk and the counters read the repeated arguments as separate calls.
+    let mut native: BTreeMap<u64, String> = BTreeMap::new();
     for chunk in chunks {
         responses.observe(chunk);
         if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
@@ -887,6 +894,13 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
         {
             continue;
         }
+        // The native envelope repeats its answer per chunk, so its calls are
+        // folded by slot instead of appended: an appended copy per chunk
+        // counted one call several times.
+        if chunk.get("output").is_some_and(Value::is_object) {
+            collect_native_call_slots(chunk, &mut native);
+            continue;
+        }
         // Retain the legacy fragment contract for other compatible providers;
         // Responses and Chat calls never pass through this unnamed stream.
         if let Some((_, _, fragments)) = extract_response_content(Some(chunk)) {
@@ -909,7 +923,63 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
                 .map(|(_, name, arguments)| format!("{name}: {arguments}")),
         )
         .chain(compatible)
+        .chain(native.into_values().filter(|call| !call.is_empty()))
         .collect()
+}
+
+/// Record the tool calls of one native DashScope/Bailian envelope chunk into
+/// `slots`, keyed by the call's `index`.
+///
+/// The envelope streams by repeating its whole value on every chunk
+/// (`incremental_output=false`), so the same call arrives again in each
+/// chunk. Keeping the last value per slot folds those repeats, which is what
+/// the single-chunk reader does within one payload.
+fn collect_native_call_slots(chunk: &Value, slots: &mut std::collections::BTreeMap<u64, String>) {
+    let Some(output) = chunk.get("output").filter(|output| output.is_object()) else {
+        return;
+    };
+    for (choice_pos, choice) in output
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|choices| choices.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let message = choice.get("message").or_else(|| choice.get("delta"));
+        let Some(message) = message else {
+            continue;
+        };
+        for (call_pos, call) in message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| calls.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let function = call.get("function");
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let arguments = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if name.is_empty() && arguments.is_empty() {
+                continue;
+            }
+            // A choice's calls are numbered within that choice, so the choice
+            // position keeps two choices' index 0 apart.
+            let slot = call
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(call_pos as u64)
+                .saturating_add((choice_pos as u64) << 32);
+            slots.insert(slot, format!("{name}: {arguments}"));
+        }
+    }
 }
 
 /// Extract role and content from OpenAI message JSON
@@ -1817,6 +1887,26 @@ mod tests {
         ];
         assert_eq!(
             merge_response_output_text(&chunks).2,
+            vec!["read_file: {\"p\":\"a\"}".to_string()]
+        );
+    }
+
+    /// Native streaming repeats the whole answer on every chunk
+    /// (`incremental_output=false`), and a tool call is part of that whole
+    /// value: each chunk carries the same call. The merge keeps the last value
+    /// per slot, so a two-chunk native stream must describe the call once.
+    #[test]
+    fn test_native_stream_repeated_tool_call_is_folded_once() {
+        let chunks = [
+            serde_json::json!({"output": {"choices": [{"message": {"tool_calls": [
+                {"index": 0, "function": {"name": "read_file", "arguments": "{\"p\":\"a\"}"}}
+            ]}}]}}),
+            serde_json::json!({"output": {"choices": [{"message": {"tool_calls": [
+                {"index": 0, "function": {"name": "read_file", "arguments": "{\"p\":\"a\"}"}}
+            ]}}]}}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
             vec!["read_file: {\"p\":\"a\"}".to_string()]
         );
     }
