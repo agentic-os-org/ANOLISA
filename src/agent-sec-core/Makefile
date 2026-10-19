@@ -478,6 +478,7 @@ SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
 SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
 SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
 SOURCE_SYSTEMD_SYSTEM_UNIT_DIR ?= /etc/systemd/system
+GATEWAY_DATADIR ?= $(SYSTEMD_SERVICE_DATADIR)/sec-core/gateway
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -704,6 +705,29 @@ install-systemd-system-source: ## Install V2 system unit for source builds
 	sed -e 's|{bindir}|$(BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
 		> $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
 	chmod 0644 $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+
+# The secret gateway is opt-in: its data plane (mitmproxy) is installed by
+# $(GATEWAY_DATADIR)/install-mitmproxy.sh, and the daemon drop-in grants the
+# CAP_NET_ADMIN the gateway's nftables table needs.
+.PHONY: install-gateway
+install-gateway: ## Stage the secret gateway addon, unit and daemon drop-in
+	install -d -m 0755 $(DESTDIR)$(GATEWAY_DATADIR)
+	install -m 0644 v2/gateway/addon/asc_gateway_addon.py \
+		v2/gateway/addon/asc_gateway_policy.py v2/gateway/mitmproxy.provenance \
+		$(DESTDIR)$(GATEWAY_DATADIR)/
+	install -m 0755 packaging/gateway/install-mitmproxy.sh $(DESTDIR)$(GATEWAY_DATADIR)/
+	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d
+	sed -e 's|{datadir}|$(GATEWAY_DATADIR)|g' packaging/gateway/agent-sec-gateway.service.in \
+		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service
+	install -m 0644 packaging/gateway/gateway.conf \
+		$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf
+
+.PHONY: uninstall-gateway
+uninstall-gateway: ## Remove the staged secret gateway files (keeps /opt/agent-sec-gateway and state)
+	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service
+	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf
+	rm -rf $(DESTDIR)$(GATEWAY_DATADIR)
 
 # =============================================================================
 # UNINSTALL

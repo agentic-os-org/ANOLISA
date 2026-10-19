@@ -4,6 +4,7 @@
 | --- | --- |
 | 状态 | [TARGET V2][IMPLEMENTED] |
 | 范围 | 最小可用版本：内置 `github` preset |
+| 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2implemented-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2implemented-secret-gateway-管理) |
 
 ## 1. 目标与边界
 
@@ -19,6 +20,8 @@ Agent 即使打印环境变量、写入文件或发往其他主机，泄露的�
 | Credential Store | `v2/crates/asc-credential-store` | 保存真实值，签发 fake，为网关生成快照 |
 | Gateway Plan | `v2/crates/asc-gateway-plan` | 把内置 preset 展开为每个 Agent 域的规则 plan |
 | 数据面 addon | `v2/gateway/addon/` | 在 mitmproxy 中按 plan 判定请求、替换凭据并改写响应 |
+| Gateway Runtime | `v2/crates/asc-gateway-runtime` | daemon 内的控制面：保存期望状态，下发 generation，管理 unit、scope 和 nftables |
+| CLI | `v2/apps/asc-cli/src/commands/gateway.rs` | root 登记已有 UID/PID 与管理 Key，按 UID 隔离的 fake/CA 查询 |
 
 ## 2. Credential Store
 
@@ -256,3 +259,172 @@ method、host 和不含 query 的 path；拒绝码为 `real_credential_exposed` 
   `response_encoding_invalid`；body 超过 8 MiB 返回 502 `response_too_large`。body 中的真实值
   改回 fake，改写后删除 `ETag` 和 `Content-MD5`。
 - 响应钩子内的任何异常都会断开连接，未经检查的响应不会交付给 Agent。
+
+## 5. 控制面（Gateway Runtime）
+
+控制面运行在 root daemon 内，进程、权限和目录契约见部署契约 §14，RPC 见协议 §18。
+
+### 5.1 期望状态
+
+`<数据目录>/gateway/state.json`（0600，目录 0700）保存期望状态，拒绝未知字段：
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "generation": 12,
+  "agents": { "dev-agent": { "uid": 1000, "port": 15001, "presets": ["github"] } }
+}
+```
+
+- 每个 Agent 域是一个 UID 下的进程子集，绑定 `15001`–`15008` 中的一个监听端口，最多 8 个域；
+  域名全局唯一。root 通过 `register` 创建域，Key 只关联已登记的域。`presets` 可为空，
+  移除最后一个 preset 不删除域；`unregister` 撤销其全部 Key 并删除登记，不停止 Agent 进程。
+- PID 是一次注册的接管目标，不是持久身份；状态不保存 PID，恢复时不按旧 PID 重新接管进程。
+- `generation` 是最后一次交给数据面的编号，无论成败都不复用：数据面按 generation 报告失败，
+  复用的编号可能匹配到过时的失败报告。
+
+### 5.2 Agent 域与隔离
+
+- Agent 域是 systemd scope `agentsec.slice/agent-sec-agent-<name>.scope`。Agent 独立启动，
+  root 提供目标 UID、PID；daemon 核验身份后通过 D-Bus `StartTransientUnit` 或
+  `AttachProcessesToUnit` 将目标进程及已有后代快照移入 scope。
+- 管理操作仅限内核认证的 peer UID 0；注册请求中的 UID/PID 是目标参数，不是调用者身份。
+  普通用户的 `status`、`credentials` 范围来自 peer UID，非 root 策略管理员也仅能查询所属 UID。
+- 域 UID 不能是 root 或网关账户，也不能属于网关组。网关账户 `agent-sec-gw` 的主组必须与账户
+  同名且没有成员，因为该组可以读取真实值快照。注册和每次下发均检查隔离条件。
+- 已登记域不能直接更换 UID，须先注销。不能将另一域中的进程接管到当前域。
+- cgroup 是流量分类边界，不是同 UID 进程之间的安全隔离；同 UID 下的多个域可以读取彼此的 fake。
+- 同一个真实值按 preset 共享：同一 preset 在多个域中使用同一个凭据，每个域各有自己的 fake。
+
+### 5.3 下发 generation
+
+`enable`、启用状态下的 key 变更以及 daemon 启动恢复都走同一流程：
+
+1. 网关账户必须存在，且所有域通过 5.2 的隔离检查。
+2. 分配新的 generation，并在尝试前持久化。
+3. 在运行目录写入 `secrets-<n>.json`、每个已配置 Key 的域的 `plan-<agent>-<n>.json`，最后写
+   `active.json`；无 preset 的登记域不生成 plan，也不引流。
+4. 启动 `agent-sec-gateway.service`，等待 `status/health.json` 的 `loadedGeneration` 等于 `n`，
+   最长 20 秒；若数据面报告该 generation 加载失败，立即返回其错误。
+5. 写入 `ca-bundle.pem`：系统信任库（`/etc/pki/tls/certs/ca-bundle.crt` 或
+   `/etc/ssl/certs/ca-certificates.crt`，取第一个存在的）加上网关 CA；网关 CA 必须由网关
+   账户拥有、只有一个硬链接且为 PEM 证书。
+6. 重写 nftables 表，然后删除其他 generation 的 plan 和快照。
+
+运行目录为 `root:agent-sec-gw 0751`，`status/` 归网关账户所有（0755）。manifest、plan 和
+快照为 0640、属组为网关组，`ca-bundle.pem` 为 0644。`status/` 下的文件由网关写入，
+daemon 按不可信输入读取，并限制大小。
+
+unit 在启动前和停止后都会删除 `status/health.json`。如果保留上一个进程的报告，新进程
+绑定监听端口之前，daemon 会误以为当前 generation 已加载。systemd 的 `active` 状态不代表
+网关已加载 generation。
+
+### 5.4 失败收敛
+
+- 普通变更失败时，数据面继续使用上一个已加载的 generation，期望状态已保存，下次 enable
+  或 daemon 启动会重试。
+- 撤销 key 时先保存期望状态，再修改 Credential Store。如果数据面无法加载新 generation，
+  旧 generation 中仍有被撤销的映射，因此停止 unit 并删除整个运行目录（旧快照也含被撤销的值）；
+  清理本身失败时，错误信息会提示管理员手动停止网关。
+- 首次 `enable` 失败、状态仍为未启用时，停止 unit、删除 nftables 表和运行目录，未启用的
+  网关不会继续服务。
+- `disable` 停止 unit、删除 nftables 表和运行目录，保留已配置的 key 供下次 enable。
+
+### 5.5 流量引导
+
+nftables 表 `inet agent_sec_gateway` 由控制面独占，每次整体替换：
+
+```
+table inet agent_sec_gateway {
+  chain redirect_out {
+    type nat hook output priority -100; policy accept;
+    ip daddr 127.0.0.0/8 return
+    ip6 daddr ::1 return
+    socket cgroupv2 level 2 "agentsec.slice/agent-sec-agent-dev-agent.scope" tcp dport { 80, 443 } counter redirect to :15001 comment "asc:agent:dev-agent"
+  }
+  chain filter_out {
+    type filter hook output priority 0; policy accept;
+    socket cgroupv2 level 2 "agentsec.slice/agent-sec-agent-dev-agent.scope" udp dport 443 counter drop comment "asc:agent:dev-agent"
+  }
+}
+```
+
+- 只有已配置 Key 且 cgroup 当前存在的域才会出现在表中。nft 在加载时把 cgroup 路径解析为 inode，
+  所以 scope 每次重新创建后都要重写表；启用状态下 `register` 移入进程后刷新引流。表加载时
+  如果某个 cgroup 恰好消失，整个事务失败，此时重试一次。
+- 发往回环地址的流量不重定向；IPv6 也会被重定向，但监听端口只在 `127.0.0.1` 上，
+  因此 IPv6 连接直接失败。丢弃 UDP/443，让客户端从 QUIC 回退到 TCP。
+
+### 5.6 已有进程注册
+
+`register` 接受 root 提供的 `{agent, uid, pid}`。目标 UID 非 0，且满足网关账户隔离要求。
+域首次登记时分配端口，重复登记允许接管同 UID 的新进程；UID 不符或目标已属于另一域时拒绝。
+注册可在网关未启用、没有 Key 时执行，不等待 Agent 启动。
+
+控制面获取目标及已有后代的有界快照，先核验各进程 UID 和实例，再逐个移入 scope 并复核。
+先迁移父进程，让其后续新建的子进程继承；随后迁移快照中的已有后代。进程消失或身份改变时返回错误，
+不把失败当作完整接管。迁移不是原子事务，已经迁移的进程不会被自动停止或恢复。
+
+注册前的流量和已经建立的连接不受追溯保护；快照之后在尚未迁移的后代中并发产生的进程可能漏在域外。
+管理员应在 Agent 空闲时登记，保护从注册和引流成功后的新连接开始。
+
+### 5.7 fake 与 CA 查询
+
+`credentials` 是只读操作，按 peer UID 授权：root 可读取任一域，其他调用者仅能读取所属 UID。
+返回 `{agent, scope, environment}`：
+
+- 每个 preset 的 fake：`github` 对应 `GITHUB_TOKEN` 和 `GH_TOKEN`；
+- `ca-bundle.pem` 的路径：`SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、
+  `GIT_SSL_CAINFO`、`NODE_EXTRA_CA_CERTS`、`DENO_CERT`。
+
+查询不迁移进程，不要求已启用或已加载 generation；CA 文件在 enable 成功后生成。
+Agent 通过自身配置或重载机制使用返回值，查询不会修改运行中进程的环境。返回结果包含 fake，
+其类型不实现 `Debug`。
+
+### 5.8 key 输入
+
+`gateway.key.add` 只传递 secret 文件的绝对路径，真实值不进入请求帧和进程参数。daemon
+以 `O_NOFOLLOW` 打开该文件，要求它是调用方拥有的普通文件且对 group/other 不可读，
+最多读取 514 字节，去掉一个结尾换行后作为真实值。
+
+## 6. CLI 与 Agent 自主配置
+
+`agent-sec-cli gateway` 的子命令对应协议 §18 的方法。root 通过
+`register --agent <name> --uid <uid> --pid <pid>` 登记已有进程，`key add` 仅传已登记域、preset 和
+secret 文件路径，不重复指定 UID。`--secret-file` 转为绝对路径后发给 daemon。CLI 默认超时为
+60 秒，大于 daemon 的 45 秒 dispatch 预算。
+
+Agent 和 gateway 分别启动，CLI 不 exec Agent。`credentials --agent <name>` 返回 fake 与 CA 的
+JSON 配置，不安装系统 CA、不写用户 profile、不清理代理变量、不替换 Git credential helper。
+
+Agent 用自身的凭据与 CA 配置或重载机制加载 `CredentialGrant.environment`。不能重载环境的
+Agent 需自行重启，再由 root 登记新 PID；仅更新启动环境文件不会改变已有进程的环境。
+HTTPS Git 由 Agent 自行配置 helper，以 fake 作为 Basic 密码。用户必须确保客户端不再携带真实 Token，
+也不通过其他端口上的代理绕过透明引流。
+
+## 7. 已知限制
+
+- 只引导 TCP 80 和 443；发往其他端口的 fake 原样离开主机，对接收方没有用途。
+- 网关只监听 IPv4 回环地址，Agent 域发出的 IPv6 HTTP(S) 连接会失败。
+- 隔离边界是 UID：同一用户的多个 Agent 域可以互相读取 fake，同一用户在域外运行的进程
+  不经过网关。
+- tombstone 永不清理，fake 总数（含 tombstone）上限 4096。
+- SSH Git 远端、GitHub Enterprise、`uploads.github.com` 和 raw 内容主机只会收到 fake。
+- 网关只识别 fake 和真实值，不检查其他内容，也不记录流量。
+
+## 8. 验证
+
+| 层级 | 证据 |
+| --- | --- |
+| Credential Store | `asc-credential-store/src/tests.rs` |
+| Plan 与 preset | `asc-gateway-plan/src/tests.rs`、`v2/fixtures/gateway/` |
+| addon 判定 | `tests/v2/gateway/test_policy.py`（无需 mitmproxy） |
+| addon 黑盒 | `tests/v2/gateway/test_addon_blackbox.py`（需 `MITMDUMP` 指向 mitmdump） |
+| 控制面 | `asc-gateway-runtime/src/tests.rs`；部署契约 DPROC-GW-001～003 |
+| 安装态端到端 | `tests/v2/systemd/test_gateway.py`（DPROC-GW-004），需 root、systemd 和 `ASC_GATEWAY_E2E_USER` |
+
+端到端测试全部在本机闭环：在 `lo` 上增加 `198.18.0.1`，用临时 CA 签发 `api.github.com`、
+`github.com`、`example.com` 的证书并启动本地 mock 上游，通过 runtime drop-in 让网关只信任该 CA，
+上游证书校验保持开启。测试使用随机生成的 dummy Token，直接断言上游收到的是真实值、
+Agent 看到的是 fake，不访问外网。

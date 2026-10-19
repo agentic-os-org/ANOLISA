@@ -1,0 +1,24 @@
+[package]
+name = "asc-gateway-runtime"
+description = "Control plane of the AgentSecCore V2 secret gateway: state, runtime files, nftables and Agent scopes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-credential-store = { workspace = true }
+asc-gateway-plan = { workspace = true }
+nix = { workspace = true }
+rustix = { workspace = true, features = ["event"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

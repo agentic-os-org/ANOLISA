@@ -758,3 +758,42 @@ obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒�
 组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
 `v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
 以上不替代安装态不同 UID/systemd 验收。
+
+## 14. [TARGET V2][IMPLEMENTED] Secret Gateway 进程、权限与数据目录（DPROC-GW）
+
+daemon 提供 9 个 `gateway.*` 方法。`enable`、`disable`、`register`、`unregister`、`key.add`、
+`key.remove`、`key.list` 仅允许 UDS peer UID 0；非 root PolicyAdministrator 也不得管理网关。
+`status`、`credentials` 为 LocalUser，沿用查询身份规则：root 为 All，非 root 固定为 Own(peer_uid)。
+普通用户不能读取其他 UID 的域或 fake，请求中的归属字段不参与调用者授权。
+
+Agent 独立启动；root 的 `register` 请求包含 `{agent, uid, pid}`，daemon 核验已有进程及后代快照的
+UID 和进程实例后移入该域的 scope。注册可在网关未启用、未配置 Key 时进行，不负责启动 Agent、
+修改环境或安装 CA。Agent 自行加载 `credentials` 返回的 fake/CA 配置。注册前的流量、已有连接以及
+快照外的并发后代不受追溯保护；迁移失败可能留下部分已迁移进程，须核查后重试。
+gateway 方法使用 45s dispatch 预算，CLI 默认超时 60s；数据面加载上限 20s。
+
+数据面是独立的 `agent-sec-gateway.service`，以无特权 `agent-sec-gw` 运行固定版本的
+mitmproxy standalone 构建，不继承 daemon 权限。daemon 仅经 drop-in
+`agent-sec-core.service.d/gateway.conf` 增加 `CAP_NET_ADMIN`，用于替换 nftables 表
+`inet agent_sec_gateway`；Agent 域的 scope 通过 systemd D-Bus 创建。网关账户的主组必须
+以账户同名且没有成员，任何 Agent 域用户不得属于该组，否则 key 添加和下发均被拒绝。
+
+持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
+`/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
+两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
+secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。disable 或撤销失败时
+删除整个运行目录。
+
+daemon 启动时在后台恢复已启用的网关，构造或恢复失败只报告，不影响其他能力 READY。
+generation 在每次尝试前持久化且不复用；新增失败保留旧 generation 继续服务，撤销失败则停止
+数据面；首次 enable 失败时停止 unit、删除 nft 表和运行目录。systemd `active` 不代表网关已
+加载，发布流程等待 `status/health.json` 的 loadedGeneration 等于当前 generation 后才更新引流。
+unit 在启动前和停止后都删除 `status/health.json`，避免上一个进程的报告在新进程绑定监听端口前被当作已加载。
+域登记与 Key 独立持久化；移除最后一个 Key 保留域，注销则撤销全部关联 Key 并删除域。
+目标 PID 不持久化，daemon 恢复仅使用已有 scope，不按旧 PID 接管进程。
+
+| ID | 必须验证 | 可执行证据 |
+|---|---|---|
+| DPROC-GW-001 | 方法清单、分发与访问级别一致 | `asc-daemon-protocol/tests/pap_contract.rs::gateway_method_inventory_matches_dispatch_and_access` |
+| DPROC-GW-002 | UID/PID 注册与后代快照、进程身份变化拒绝、UID 查询隔离、generation、撤销/enable 失败收敛、组隔离、运行目录权限 | `asc-gateway-runtime/src/tests.rs` |
+| DPROC-GW-003 | unit、drop-in 与数据面文件 staging | `tests/v2/packaging/test_systemd.py::test_gateway_stages_unit_drop_in_and_data_plane_files` |

@@ -271,6 +271,7 @@ dependencies = [
  "asc-daemon-service",
  "asc-event-sink",
  "asc-foundation-types",
+ "asc-gateway-runtime",
  "asc-model-client",
  "asc-observability",
  "asc-pap",
@@ -435,6 +436,20 @@ dependencies = [
  "asc-credential-store",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-gateway-runtime"
+version = "1.0.0"
+dependencies = [
+ "asc-credential-store",
+ "asc-gateway-plan",
+ "nix",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

@@ -235,11 +235,19 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
+    let mut dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
         .with_observability(asc_daemon_core::ObservabilityService::new(Arc::new(
             sinks::ObservabilitySinkAdapter(Arc::clone(&durable_sinks.observability)),
         )))
         .with_queries(queries);
+    // A broken gateway state disables only `gateway.*`, never the rest of the daemon.
+    match asc_daemon::gateway::GatewayAdapter::system(&gateway_data_dir()) {
+        Ok(gateway) => {
+            gateway.recover_in_background(telemetry.reporter());
+            dispatcher = dispatcher.with_gateway(Arc::new(gateway));
+        }
+        Err(problem) => report_error(telemetry, &problem),
+    }
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
         dispatcher,
         skillfs.clone(),
@@ -577,6 +585,14 @@ fn install_panic_hook() {
         );
         asc_observability::report_startup_error(&message);
     }));
+}
+
+/// Gateway state and the credential store live under `/var/lib`, never the
+/// daemon's `/var/log` data directory, which log collection may harvest.
+fn gateway_data_dir() -> std::path::PathBuf {
+    asc_security_events::config::DaemonDataDirEnv::from_process()
+        .override_dir
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/agent-sec"))
 }
 
 fn report_error(telemetry: &asc_observability::TelemetryRuntime, problem: &dyn std::error::Error) {

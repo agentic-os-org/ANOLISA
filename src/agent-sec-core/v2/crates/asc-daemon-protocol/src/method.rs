@@ -3,8 +3,12 @@
 //! PAP administration requires a Policy administrator. Action capabilities,
 //! observability ingestion, and read-only queries accept any authenticated
 //! local peer; the query family is additionally row-scoped to the caller's
-//! owner by the handler. The closed inventory rejects unregistered methods
-//! before authorization rather than defaulting into a family.
+//! owner by the handler. Secret-gateway administration retains Policy
+//! administrator metadata and additionally requires authenticated UID 0 in the
+//! gateway handler. Status and credentials accept local peers; the runtime
+//! scopes non-root queries to domains owned by the peer's UID. The closed
+//! inventory rejects unregistered methods before authorization rather than
+//! defaulting into a family.
 
 /// Create one Policy identity from an authored template.
 pub const POLICY_TEMPLATES_CREATE: &str = "policy.templates.create";
@@ -47,6 +51,38 @@ pub const ACTION_PROMPT_SCAN: &str = "action.prompt_scan";
 pub const ACTION_PROMPT_SCAN_WARMUP: &str = "action.prompt_scan.warmup";
 /// Manage Skill scanning, integrity, history and activation.
 pub const ACTION_SKILL_SEC: &str = "action.skill_sec";
+
+/// Start the secret gateway with the configured Agent domains.
+pub const GATEWAY_ENABLE: &str = "gateway.enable";
+/// Stop the secret gateway and remove its runtime files.
+pub const GATEWAY_DISABLE: &str = "gateway.disable";
+/// Report the secret gateway without credential values.
+pub const GATEWAY_STATUS: &str = "gateway.status";
+/// Protect a preset credential for an Agent domain.
+pub const GATEWAY_KEY_ADD: &str = "gateway.key.add";
+/// Withdraw a preset credential from an Agent domain.
+pub const GATEWAY_KEY_REMOVE: &str = "gateway.key.remove";
+/// List protected credentials without values.
+pub const GATEWAY_KEY_LIST: &str = "gateway.key.list";
+/// Register an already-running Agent process independently of gateway startup.
+pub const GATEWAY_REGISTER: &str = "gateway.register";
+/// Remove a registered Agent domain.
+pub const GATEWAY_UNREGISTER: &str = "gateway.unregister";
+/// Return an authorized Agent domain's fake credentials.
+pub const GATEWAY_CREDENTIALS: &str = "gateway.credentials";
+
+/// Complete secret-gateway method inventory for this protocol version.
+pub const GATEWAY_METHODS: [&str; 9] = [
+    GATEWAY_ENABLE,
+    GATEWAY_DISABLE,
+    GATEWAY_STATUS,
+    GATEWAY_KEY_ADD,
+    GATEWAY_KEY_REMOVE,
+    GATEWAY_KEY_LIST,
+    GATEWAY_REGISTER,
+    GATEWAY_UNREGISTER,
+    GATEWAY_CREDENTIALS,
+];
 
 /// Return the dashboard summary of the caller's own security events.
 pub const SEC_SUMMARY: &str = "sec.summary";
@@ -193,6 +229,29 @@ pub enum QueryMethod {
     EventsCountBy,
 }
 
+/// One secret-gateway operation resolved from its exact wire method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayMethod {
+    /// Start serving.
+    Enable,
+    /// Stop serving.
+    Disable,
+    /// Value-free report.
+    Status,
+    /// Protect a credential.
+    KeyAdd,
+    /// Withdraw a credential.
+    KeyRemove,
+    /// List credentials.
+    KeyList,
+    /// Register an already-running Agent process.
+    Register,
+    /// Remove a registered Agent domain.
+    Unregister,
+    /// Query an authorized domain's fake credentials.
+    Credentials,
+}
+
 /// Closed daemon method identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodId {
@@ -208,6 +267,8 @@ pub enum MethodId {
     ObservabilityRecord,
     /// Read-only owner-scoped query method.
     Query(QueryMethod),
+    /// Secret-gateway method.
+    Gateway(GatewayMethod),
 }
 
 /// Server-owned access policy for a method.
@@ -235,15 +296,26 @@ impl MethodId {
     /// Returns authorization metadata for this exact method.
     pub const fn metadata(self) -> Metadata {
         match self {
-            Self::Pap(_) => Metadata {
+            Self::Pap(_)
+            | Self::Gateway(
+                GatewayMethod::Enable
+                | GatewayMethod::Disable
+                | GatewayMethod::KeyAdd
+                | GatewayMethod::KeyRemove
+                | GatewayMethod::KeyList
+                | GatewayMethod::Register
+                | GatewayMethod::Unregister,
+            ) => Metadata {
                 access: AccessPolicy::PolicyAdministrator,
             },
             // Action capabilities, observability ingestion, and read-only
             // queries share one access policy: any kernel-authenticated local
             // peer. The query family adds row-level owner scoping inside its
             // handler, derived from the transport-authenticated principal
-            // rather than from the request.
+            // rather than from the request. Gateway query ownership is enforced
+            // by the runtime using the authenticated peer UID.
             Self::Health
+            | Self::Gateway(GatewayMethod::Status | GatewayMethod::Credentials)
             | Self::Action(_)
             | Self::ObservabilityRecord
             | Self::Query(_)
@@ -283,6 +355,15 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         ACTION_PROMPT_SCAN => Some(MethodId::Action(ActionMethod::PromptScan)),
         ACTION_PROMPT_SCAN_WARMUP => Some(MethodId::Action(ActionMethod::PromptScanWarmup)),
         ACTION_SKILL_SEC => Some(MethodId::Action(ActionMethod::SkillSec)),
+        GATEWAY_ENABLE => Some(MethodId::Gateway(GatewayMethod::Enable)),
+        GATEWAY_DISABLE => Some(MethodId::Gateway(GatewayMethod::Disable)),
+        GATEWAY_STATUS => Some(MethodId::Gateway(GatewayMethod::Status)),
+        GATEWAY_KEY_ADD => Some(MethodId::Gateway(GatewayMethod::KeyAdd)),
+        GATEWAY_KEY_REMOVE => Some(MethodId::Gateway(GatewayMethod::KeyRemove)),
+        GATEWAY_KEY_LIST => Some(MethodId::Gateway(GatewayMethod::KeyList)),
+        GATEWAY_REGISTER => Some(MethodId::Gateway(GatewayMethod::Register)),
+        GATEWAY_UNREGISTER => Some(MethodId::Gateway(GatewayMethod::Unregister)),
+        GATEWAY_CREDENTIALS => Some(MethodId::Gateway(GatewayMethod::Credentials)),
         SEC_SUMMARY => Some(MethodId::Query(QueryMethod::Summary)),
         SEC_EVENTS_LIST => Some(MethodId::Query(QueryMethod::EventsList)),
         SEC_EVENTS_GET => Some(MethodId::Query(QueryMethod::EventsGet)),
