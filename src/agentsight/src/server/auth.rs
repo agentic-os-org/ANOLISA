@@ -408,6 +408,11 @@ fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> 
                     | "/api/enforcement/file-bindings"
                     | "/api/enforcement/credential-bindings"
                     | "/api/optimize/config"
+                    // Rewrites the hookless runtime configuration file: the
+                    // value is re-read by every maintenance pass, so this is a
+                    // host mutation (0 disables the disk cap entirely), not a
+                    // dashboard preference.
+                    | "/api/storage/config"
             ) || path
                 .strip_prefix("/api/agent-health/")
                 .and_then(|rest| rest.strip_suffix("/restart"))

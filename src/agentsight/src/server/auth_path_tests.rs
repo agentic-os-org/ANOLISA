@@ -77,6 +77,47 @@ async fn case_review_mutation_fails_closed_without_credentials() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The storage setting rewrites the runtime configuration file and is
+/// re-read by every maintenance pass; zero disables the disk cap. It is a host
+/// mutation like the enforcement bindings, so loopback is not enough.
+#[actix_web::test]
+async fn storage_config_mutation_fails_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/storage/config",
+                web::post().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/api/storage/config")
+            .peer_addr(loopback)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The credential still reaches the route: the gate is additive.
+    let token = fixture.auth.token().unwrap_or_default().to_string();
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/api/storage/config")
+            .peer_addr(loopback)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[actix_web::test]
 async fn authenticated_encoded_mutations_only_reach_matching_routes() {
     let fixture = AuthFixture::new();
