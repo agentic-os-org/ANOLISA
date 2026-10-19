@@ -388,7 +388,11 @@ async fn get_record(
         return HttpResponse::BadRequest().finish();
     }
     let result = web::block(move || {
-        let Some(mut saved) = store.tokenless_record(*id).map_err(|_| 503u16)? else {
+        let Some(mut saved) = store.tokenless_record(*id).map_err(|error| match error {
+            crate::storage::sqlite::genai::TokenlessRecordError::Invalid(_) => 400u16,
+            _ => 503u16,
+        })?
+        else {
             return Err(404u16);
         };
         if query.include_content && saved.record["content_included"] != true {
