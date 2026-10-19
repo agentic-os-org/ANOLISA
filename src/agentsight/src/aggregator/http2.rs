@@ -485,11 +485,15 @@ impl Http2Stream {
     /// HTTP/2 keeps response DATA frames (and their source-event timestamps), so
     /// parse the uncompressed stream incrementally and attribute each completed
     /// SSE event to the DATA frame that made it observable. Compressed response
-    /// bodies cannot be mapped back to plaintext event boundaries safely.
+    /// bodies cannot be mapped back to plaintext event boundaries safely — but
+    /// the compact SSE path replaces those bytes with decoded event frames and
+    /// marks the stream `response_body_decoded`, so only undecoded frames need
+    /// the guard.
     pub fn first_output_timestamp_ns(&self) -> Option<u64> {
-        if self
-            .content_encoding()
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        if !self.response_body_decoded
+            && self
+                .content_encoding()
+                .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
         {
             return None;
         }
@@ -2052,6 +2056,52 @@ mod tests {
             0,
             payload,
             create_test_event(1234, 0x1000, 0, 500),
+        ));
+
+        assert_eq!(stream.first_output_timestamp_ns(), None);
+    }
+
+    /// Compact SSE stores already-decoded event frames in
+    /// `response_data_frames`, but the original `content-encoding` header
+    /// survives on the stream. Refusing every encoded stream skipped the
+    /// timestamp for every compressed HTTP/2 capture even though nothing
+    /// compressed remained.
+    #[test]
+    fn first_output_timestamp_reads_decoded_compressed_streams() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        stream.decoded_response_headers =
+            Some(vec![("content-encoding".to_string(), "gzip".to_string())]);
+        stream.response_body_decoded = true;
+        let mut payload = br#"data: {"type":"response.output_text.delta","delta":"hi"}"#.to_vec();
+        payload.extend_from_slice(&[10, 10]);
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            payload,
+            create_test_event(1234, 0x1000, 0, 300),
+        ));
+
+        assert_eq!(stream.first_output_timestamp_ns(), Some(300));
+    }
+
+    /// Undecoded frames still cannot be mapped back to event boundaries, so
+    /// the encoding guard must keep applying to them.
+    #[test]
+    fn first_output_timestamp_still_rejects_undecoded_compressed_frames() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        stream.decoded_response_headers =
+            Some(vec![("content-encoding".to_string(), "gzip".to_string())]);
+        let mut payload = br#"data: {"type":"response.output_text.delta","delta":"hi"}"#.to_vec();
+        payload.extend_from_slice(&[10, 10]);
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            payload,
+            create_test_event(1234, 0x1000, 0, 300),
         ));
 
         assert_eq!(stream.first_output_timestamp_ns(), None);
