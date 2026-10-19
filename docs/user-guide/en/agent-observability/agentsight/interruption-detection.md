@@ -42,7 +42,7 @@ needed to enable any of it.
 | `llm_error` | high | Fallback for any other HTTP status >= 400 |
 | `rate_limit` | medium | HTTP 429 or an error containing `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` and output Tokens >= 95% of `max_tokens` |
-| `safety_filter` | medium | `finish_reason = content_filter` from the provider's safety policy |
+| `safety_filter` | medium | A safety stop from the provider's policy: `finish_reason = content_filter` (OpenAI), or Gemini's `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY` |
 | `slow_response` | medium | The call succeeded but took at least 120 seconds |
 | `tool_failure` | medium | A tool or function result reports failure |
 | `unauthorized_action` | medium | A tool call was denied by a permission system or sandbox (`EPERM`, `EACCES`, sandbox denial) |

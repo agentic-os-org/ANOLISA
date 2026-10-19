@@ -40,7 +40,7 @@
 | `llm_error` | high | 其余 HTTP 状态码 >= 400 的兜底类型 |
 | `rate_limit` | medium | HTTP 429，或错误体含 `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` 且输出 Token ≥ `max_tokens` 的 95% |
-| `safety_filter` | medium | 供应商安全策略返回 `finish_reason = content_filter` |
+| `safety_filter` | medium | 供应商安全策略拦下这次生成：`finish_reason = content_filter`（OpenAI），或 Gemini 的 `SAFETY`、`RECITATION`、`BLOCKLIST`、`PROHIBITED_CONTENT`、`SPII`、`IMAGE_SAFETY` |
 | `slow_response` | medium | 调用成功但耗时 ≥ 120 秒 |
 | `tool_failure` | medium | 工具/函数返回失败结果 |
 | `unauthorized_action` | medium | 工具调用被权限系统或沙箱拒绝（`EPERM`、`EACCES`、sandbox denied） |

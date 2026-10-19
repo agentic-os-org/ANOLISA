@@ -47,6 +47,38 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
     })
 }
 
+/// Whether the finish reason is a provider safety stop that withheld the answer.
+///
+/// OpenAI spells it `content_filter`, which rule 6 matches separately. Gemini
+/// reports a whole family instead, all of them meaning the provider's safety
+/// policy stopped the generation rather than the transport: `SAFETY` (prompt
+/// or answer blocked), `RECITATION` (the answer would reproduce training data
+/// verbatim), `BLOCKLIST` (a blocked term), `PROHIBITED_CONTENT`, `SPII`
+/// (sensitive personally identifiable information) and `IMAGE_SAFETY`.
+///
+/// The others in Gemini's enum are not safety stops and stay out of this list:
+/// `MALFORMED_FUNCTION_CALL` is a tool-call formatting failure, `OTHER` and
+/// `LANGUAGE` are unspecific and language-related reasons.
+///
+/// Compared ASCII case-insensitively, like [`is_normal_finish`]: the casing is
+/// the provider's (`SAFETY`), not the protocol's.
+fn is_safety_stop_reason(reason: Option<&str>) -> bool {
+    /// The safety-class finish reasons, lower-cased for comparison.
+    const SAFETY: &[&str] = &[
+        "safety",
+        "recitation",
+        "blocklist",
+        "prohibited_content",
+        "spii",
+        "image_safety",
+    ];
+    reason.is_some_and(|reason| {
+        SAFETY
+            .iter()
+            .any(|known| reason.eq_ignore_ascii_case(known))
+    })
+}
+
 /// Whether the finish reason indicates a token-limit stop (handled by rule 9).
 ///
 /// Both spellings are in use: OpenAI and the DashScope native protocol report
@@ -409,7 +441,8 @@ impl InterruptionDetector {
     ///   4. ServiceUnavailable — 502/503
     ///   5. ContextOverflow — keywords in error body
     ///   5.5. ResourceExhaustion — quota/billing keywords
-    ///   6. SafetyFilter    — finish_reason == "content_filter"
+    ///   6. SafetyFilter    — finish_reason is a provider safety stop
+    ///                        (`content_filter`, or Gemini's `SAFETY` family)
     ///   6.5. StateMachineError — protocol/state keywords
     ///   7. LlmError        — generic HTTP >= 400 fallback
     ///   8. SseTruncated    — SSE stream ended prematurely
@@ -662,10 +695,14 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("content_filter")) {
+        // Gemini 用自己的一套安全类 finishReason（见 is_safety_stop_reason），
+        // 同样在 200 响应里表示「供应商安全策略拦下了这次生成」而非流被截断。
+        let is_content_filter =
+            finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("content_filter"));
+        if is_content_filter || is_safety_stop_reason(finish_reason) {
             let detail = serde_json::json!({
                 "model": call.model,
-                "finish_reason": "content_filter",
+                "finish_reason": finish_reason,
                 "error": effective_error,
             });
             events.push(InterruptionEvent::new(
@@ -1201,6 +1238,108 @@ mod tests {
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::TokenLimit),
             "an upper-case MAX_TOKENS stop must report TokenLimit, got {events:?}"
+        );
+    }
+
+    /// Gemini turns a generation away with a safety-class `finishReason`
+    /// instead of a `content_filter` spelling: `SAFETY` (prompt or answer
+    /// blocked by a safety policy) and its siblings `RECITATION`, `BLOCKLIST`,
+    /// `PROHIBITED_CONTENT`, `SPII` and `IMAGE_SAFETY`. Folding the case only
+    /// taught the detector the upper-case spelling of the words it already
+    /// knew, so these stops matched no rule and fell through to rule 8, which
+    /// reported a truncated stream (High) for a response the provider had
+    /// delivered in full and deliberately withheld. They are safety stops:
+    /// rule 6 owns them and rule 8 must not see them.
+    #[test]
+    fn test_gemini_safety_stop_is_a_safety_filter() {
+        for reason in [
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+        ] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.interruption_type == InterruptionType::SafetyFilter),
+                "{reason} is a safety stop and must report SafetyFilter, got {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} arrives on a complete stream and must not report \
+                 SseTruncated, got {events:?}"
+            );
+        }
+    }
+
+    /// The safety stop is a property of the last choice, like every other
+    /// finish-reason rule: an earlier choice that was blocked does not make a
+    /// response whose final choice finished normally a safety filter.
+    #[test]
+    fn test_safety_stop_follows_the_last_choice() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("SAFETY".to_string()),
+            },
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("STOP".to_string()),
+            },
+        ];
+        assert!(
+            detector.detect(&call).is_empty(),
+            "a normal last choice must not inherit the first choice's safety stop"
+        );
+    }
+
+    /// The detail keeps the provider's own spelling: a dashboard reader has to
+    /// tell `SAFETY` from `RECITATION`, and rule 6 used to hard-code the
+    /// OpenAI word for every provider.
+    #[test]
+    fn test_safety_filter_detail_keeps_the_reported_reason() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("RECITATION".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        let detail: serde_json::Value = serde_json::from_str(
+            events[0]
+                .detail
+                .as_deref()
+                .expect("the event carries a detail payload"),
+        )
+        .expect("the detail payload is JSON");
+        assert_eq!(
+            detail["finish_reason"], "RECITATION",
+            "the detail must keep the provider's finish reason, got {detail}"
         );
     }
 
