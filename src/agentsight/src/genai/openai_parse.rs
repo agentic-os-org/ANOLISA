@@ -263,10 +263,11 @@ impl GenAIBuilder {
             // `max_output_tokens`. Read whichever the request carries so
             // the token-limit interruption rules and the
             // `gen_ai.request.max_tokens` telemetry keep working.
+            // A null legacy `max_tokens` is not a cap and must not stop the
+            // search before a newer spelling that carries one.
             max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
                 .iter()
-                .find_map(|key| param(key))
-                .and_then(|v| v.as_u64())
+                .find_map(|key| param(key).and_then(|v| v.as_u64()))
                 .map(|v| v as u32),
             frequency_penalty: param("frequency_penalty").and_then(|v| v.as_f64()),
             presence_penalty: param("presence_penalty").and_then(|v| v.as_f64()),
@@ -1671,6 +1672,20 @@ mod tests {
             "max_completion_tokens": 2048
         }"#;
         let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.max_tokens, Some(2048));
+    }
+
+    /// A null legacy spelling is not a cap: the chain must keep looking so a
+    /// newer key carrying the real cap is not shadowed.
+    #[test]
+    fn test_parse_request_body_null_max_tokens_falls_back() {
+        let body = r#"{
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": null,
+            "max_completion_tokens": 2048
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
         assert_eq!(req.max_tokens, Some(2048));
     }
 

@@ -316,7 +316,12 @@ impl OpenAIParser {
         // instead reject a request carrying both spellings as a duplicate
         // field, losing the request.
         let mut body = body.clone();
-        if body.get("max_tokens").is_none() {
+        // An explicit null is not a cap: without this check it shadowed a
+        // valid `max_completion_tokens` and the typed field stayed None.
+        if body
+            .get("max_tokens")
+            .is_none_or(serde_json::Value::is_null)
+        {
             if let Some(cap) = body
                 .get("max_completion_tokens")
                 .and_then(|cap| cap.as_u64())
@@ -450,7 +455,10 @@ impl OpenAIParser {
         // Only a value the typed field can hold is copied, as for the chat
         // `max_completion_tokens`: anything else was an unknown key before and
         // must not turn the whole request into a parse failure.
-        if body.get("max_tokens").is_none() {
+        if body
+            .get("max_tokens")
+            .is_none_or(serde_json::Value::is_null)
+        {
             if let Some(cap) = body
                 .get("max_output_tokens")
                 .and_then(|cap| cap.as_u64())
@@ -1321,6 +1329,35 @@ mod tests {
 
         let request = OpenAIParser::parse_request(&json).expect("both spellings must parse");
         assert_eq!(request.max_tokens, Some(100));
+    }
+
+    /// A null legacy spelling is not a cap. Before this check it was "present"
+    /// to `Option::is_none`, so the newer key that carried the real cap was
+    /// never copied and `LLMRequest.max_tokens` stayed `None`.
+    #[test]
+    fn test_parse_request_null_max_tokens_falls_back_to_the_newer_spelling() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": null,
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must parse");
+        assert_eq!(request.max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn test_parse_responses_request_null_max_tokens_falls_back_to_max_output_tokens() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [{"role": "user", "content": "hi"}],
+            "max_tokens": null,
+            "max_output_tokens": 4096
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must parse");
+        assert_eq!(request.max_tokens, Some(4096));
     }
 
     /// A malformed cap used to be ignored as an unknown key; reading it must
