@@ -68,6 +68,11 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-5-mini", "Xenova/gpt-4o");
     m.insert("gpt-5-nano", "Xenova/gpt-4o");
     m.insert("gpt-5-chat-latest", "Xenova/gpt-4o");
+    // The production `gpt-5-` names outside the chat aliases. tiktoken routes
+    // the whole `gpt-5-` prefix to `o200k_base`, so `gpt-5-pro` and the Codex
+    // sibling `gpt-5-codex` take the same repo as the rest of the family.
+    m.insert("gpt-5-pro", "Xenova/gpt-4o");
+    m.insert("gpt-5-codex", "Xenova/gpt-4o");
     m.insert("gpt-4.1", "Xenova/gpt-4o");
     m.insert("gpt-4.1-mini", "Xenova/gpt-4o");
     m.insert("gpt-4.1-nano", "Xenova/gpt-4o");
@@ -645,6 +650,33 @@ mod tests {
             "codex-mini-latest",
             "codex-mini-2025-05-16",
             "openai/codex-mini-latest",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The production `gpt-5-` names outside the chat and mini aliases.
+    ///
+    /// tiktoken routes the whole `gpt-5-` prefix to `o200k_base`, which covers
+    /// `gpt-5-pro` and the Codex sibling `gpt-5-codex`. Neither was in the
+    /// table, so both took the unrelated Qwen fallback while their family
+    /// already resolved to the repo carrying that encoding.
+    #[test]
+    fn test_gpt_5_pro_and_codex_take_the_o200k_tokenizer() {
+        let names = [
+            "gpt-5-pro",
+            "gpt-5-pro-2025-10-06",
+            "gpt-5-codex",
+            "gpt-5-codex-2025-09-15",
+            "openai/gpt-5-pro",
+            "openai/gpt-5-codex",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
