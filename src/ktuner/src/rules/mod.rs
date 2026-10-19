@@ -9863,14 +9863,27 @@ fn eval_tcp_invalid_ratelimit_at(
 }
 
 fn eval_tcp_init_cwnd(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_init_cwnd";
+    eval_tcp_init_cwnd_at(info, recs, "/proc/sys/net/ipv4/tcp_init_cwnd")
+}
+
+/// Path-injectable form of [`eval_tcp_init_cwnd`] (the `eval_*_at` idiom) so the read is
+/// assertable against synthetic files.
+///
+/// The rule fires below 10, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below it. Only a value the reader could
+/// produce is evidence, so a masked or garbled proc entry (a container's,
+/// typically) neither reports a `current_value` the host does not have nor
+/// asks for a write it may not need.
+fn eval_tcp_init_cwnd_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 10 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_init_cwnd".to_string(),
@@ -10756,11 +10769,28 @@ fn blackhole_timeout_recommendation(
 }
 
 fn eval_max_queued_signals(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/rtsig-max";
+    eval_max_queued_signals_at(_info, recs, "/proc/sys/kernel/rtsig-max")
+}
+
+/// Path-injectable form of [`eval_max_queued_signals`] (the `eval_*_at` idiom) so the read is
+/// assertable against synthetic files.
+///
+/// The rule fires below 4096, and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to 0, which is below it. Only a value the reader could
+/// produce is evidence, so a masked or garbled proc entry (a container's,
+/// typically) neither reports a `current_value` the host does not have nor
+/// asks for a write it may not need.
+fn eval_max_queued_signals_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current < 4096 {
         recs.push(Recommendation {
             param: "kernel.rtsig-max".to_string(),
@@ -24343,6 +24373,66 @@ mod tests {
                 .all(|r| r.param != "net.ipv4.tcp_invalid_ratelimit"),
             "Should not trigger when ratelimit is already >= 500"
         );
+    }
+
+    #[test]
+    fn tcp_init_cwnd_advice_needs_a_readable_value() {
+        // The rule fires below 10, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("tcp_init_cwnd", b"10\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"4\n").unwrap();
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_init_cwnd_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 4 is below the floor");
+        assert_eq!(recs[0].current_value, "4");
+        assert!(advice(&high).is_empty(), "a readable 10 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn max_queued_signals_advice_needs_a_readable_value() {
+        // The rule fires below 4096, and read_sysctl_u64 maps an unreadable or
+        // unparseable file to 0, which is below it: a masked or garbled proc
+        // entry (a container's, typically) was reported as `current_value: "0"`
+        // and answered with a raise on a host whose value was never read.
+        let (_, high, others) = zero_switch_paths("max_queued_signals", b"4096\n");
+        let low = high.with_file_name("low");
+        std::fs::write(&low, b"2048\n").unwrap();
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_max_queued_signals_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 2048 is below the floor");
+        assert_eq!(recs[0].current_value, "2048");
+        assert!(advice(&high).is_empty(), "a readable 4096 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
