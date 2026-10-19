@@ -371,6 +371,12 @@ impl AnalyzeChatmlCommand {
         let mut responses_closing_reasoning = String::new();
 
         /// Answer text of a closing `message` output item, or `None`.
+        ///
+        /// A refusal part keeps the answer in `refusal` rather than `text` —
+        /// the shape the message parser and the token extractor read. Without
+        /// it a capture that attached after the refusal deltas, whose only
+        /// copy of the answer is the closing item, still rendered an empty
+        /// response here.
         fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
             let item = chunk.get("item")?;
             if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
@@ -380,7 +386,11 @@ impl AnalyzeChatmlCommand {
                 .get("content")?
                 .as_array()?
                 .iter()
-                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                .filter_map(|part| {
+                    part.get("text")
+                        .or_else(|| part.get("refusal"))
+                        .and_then(|t| t.as_str())
+                })
                 .collect();
             (!text.is_empty()).then_some(text)
         }
@@ -570,6 +580,10 @@ impl AnalyzeChatmlCommand {
                         Some("response.refusal.delta") => {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
+                                    // A refusal is answer text, so it counts
+                                    // as an answer delta: the closing events
+                                    // repeat it and must not be read again.
+                                    saw_responses_text_delta = true;
                                     content_parts.push(delta.to_string());
                                 }
                             }
@@ -2263,5 +2277,59 @@ mod tests {
         )];
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
         assert_eq!(resp.content, vec!["I can't help with that."]);
+    }
+
+    /// A refusal also arrives as a content part of the closing `message`
+    /// output item, typed `refusal` and carrying the text in `refusal` rather
+    /// than `text`. A capture that attached after the refusal deltas has this
+    /// part as its only copy of the answer, and the item reader took only the
+    /// `text` parts, so the response rendered empty.
+    #[test]
+    fn sse_responses_closing_item_refusal_part_fills_an_empty_answer() {
+        let only_item = vec![sse(
+            r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"I can't help with that."}]}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_item);
+        assert_eq!(resp.content, vec!["I can't help with that."]);
+    }
+
+    /// A capture that attached after the refusal deltas still sees both
+    /// closing events, `response.refusal.done` and then the closing item with
+    /// its refusal part. They carry the same answer, so it counts once.
+    #[test]
+    fn sse_responses_closing_refusal_and_item_count_once() {
+        let events = vec![
+            sse(r#"{"type":"response.refusal.done","refusal":"I can't help with that."}"#),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"I can't help with that."}]}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["I can't help with that."]);
+    }
+
+    /// The closing item repeats what the refusal deltas delivered; a complete
+    /// capture must count the answer once.
+    #[test]
+    fn sse_responses_closing_item_does_not_repeat_refusal_deltas() {
+        let events = vec![
+            sse(r#"{"type":"response.refusal.delta","delta":"I can't help with that."}"#),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"I can't help with that."}]}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["I can't help with that."]);
+    }
+
+    /// A message item mixes a `text` part and a `refusal` part; both belong
+    /// to the answer, in the order the item lists them.
+    #[test]
+    fn sse_responses_closing_item_reads_text_and_refusal_parts() {
+        let only_item = vec![sse(
+            r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"First. "},{"type":"refusal","refusal":"I can't help with that."}]}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_item);
+        assert_eq!(resp.content, vec!["First. I can't help with that."]);
     }
 }
