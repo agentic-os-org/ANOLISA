@@ -253,7 +253,7 @@ calls from an existing Agent without changing its framework.
 [Build from Source](https://agentic-os.sh/docs/building/) ·
 [Changelog](https://agentic-os.sh/changelog/)
 
-AW: [User guide](docs/user-guide/en/user-entrypoint/aw/README.md) ·
+AW: [Architecture](docs/developer-guide/en/aw/architecture.md) · [User guide](docs/user-guide/en/user-entrypoint/aw/README.md) ·
 [Build and package](docs/developer-guide/en/aw/building.md) ·
 [Developer guide](docs/developer-guide/en/aw/README.md)
 

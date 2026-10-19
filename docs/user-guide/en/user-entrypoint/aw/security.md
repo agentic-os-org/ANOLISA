@@ -8,8 +8,8 @@ other tools need explicit mappings. This uses native Hooks and does not provide 
 
 ## Prepare programs and backend
 
-Follow [installation](installation.md) to install core and the matching sec-core Provider, or all-in-one.
-For split packages, run from the extracted artifact directory.
+After [installing core](installation.md), install the sec-core extension from the extracted
+artifact directory. Skip this step if all-in-one is installed.
 
 ```bash
 export AW_VERSION=0.1.0-preview.1
@@ -18,7 +18,7 @@ tar -xzf "$AW_SEC_BUNDLE.tar.gz"
 sudo "./$AW_SEC_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
 ```
 
-Skip this step if all-in-one is already installed. AW does not start sec-core automatically.
+AW does not start sec-core automatically.
 Reuse an existing managed backend socket, such as `/run/agent-sec-core/daemon.sock`.
 For sustained use, follow the [sec-core system service guide](../../agent-security/agent-sec-core/QUICKSTART.md).
 

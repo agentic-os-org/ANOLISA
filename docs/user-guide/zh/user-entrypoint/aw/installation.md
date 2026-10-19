@@ -2,9 +2,8 @@
 
 [English](../../../en/user-entrypoint/aw/installation.md)
 
-本页从安装 AW 开始，带你启动一次 Qoder 会话。需要 Linux、已安装并登录的
-Qoder CLI 1.1.64 或更新版本。使用其他 Agent 时，先完成安装，再阅读
-[配置与 Agent 启动](configuration.md)。
+需要 Linux，以及已登录的 Qoder CLI 1.1.64 或更新版本。
+其他 Agent 见[配置与 Agent 启动](configuration.md)。
 
 ## 获取安装包
 
@@ -52,7 +51,7 @@ aw --help
 
 ## 创建配置
 
-以下操作使用普通用户。AW 配置与运行数据放在安装目录之外。
+以普通用户创建配置，数据保存在安装目录之外。
 
 ```bash
 export AW_HOME="$HOME/aw"
@@ -66,8 +65,7 @@ aw validate --config "$AW_HOME/aw.yaml"
 ```
 
 `AW_QODER` 应为真实可执行文件的绝对路径。`configure` 创建完整配置，不覆盖已有文件。
-这里没有启用 Provider，适合先确认启动正常。安全与压缩分别按
-[sec-core](security.md)和 [Tokenless](tokenless.md)页面启用。
+安全与压缩需另行启用，见 [sec-core](security.md)和 [Tokenless](tokenless.md)。
 
 ## 启动并验证
 
@@ -84,4 +82,4 @@ aw status --config "$AW_HOME/aw.yaml"
 aw stop --config "$AW_HOME/aw.yaml"
 ```
 
-这一步验证 AW 启动与原生工具调用。启用 Provider 后，还需要按对应页面检查能力是否生效。
+启用 Provider 后，按对应页面验证效果。

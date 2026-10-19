@@ -7,7 +7,9 @@
 
 | 任务 | 文档 |
 | --- | --- |
+| 看懂 crate 关系和请求流转 | [架构总览](architecture.md) |
 | 本地编译并交付安装包 | [从源码构建 AW](building.md) |
+| 开发、收录和分发 Provider | [Provider 协作](providers.md) |
 | 接入自己的检查脚本或 Provider | [组件接入教程](integration.md) |
 | 查询 YAML 字段与校验规则 | [配置参考](configuration.md) |
 | 接入框架、SDK worker 或排查 Hook 行为 | [原生 Agent 接入参考](native-agents.md) |

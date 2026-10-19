@@ -2,6 +2,8 @@
 
 [English](provider-host.md)
 
+[设计索引](README_zh.md) · [架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)
+
 `aw-host` 将已校验的配置和 `aw-provider/v1alpha1` 协议接到 Linux 命令执行层。
 它执行真实的 Provider 进程，返回已检查的候选效果与可关联的调用报告。
 Agent 启动、原生 Hook 安装、效果采用和审计持久化仍由接入方负责。

@@ -2,6 +2,8 @@
 
 [中文版](configuration_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-config` owns desired configuration parsing. `aw-contracts` continues to own
 capability wire schemas, canonical encodings and record invariants. Configuration
 must not change those schemas or make the existing registry accept arbitrary

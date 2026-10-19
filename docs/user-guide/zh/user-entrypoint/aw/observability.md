@@ -2,7 +2,7 @@
 
 [English](../../../en/user-entrypoint/aw/observability.md)
 
-AW 可以将一次 Agent 运行与 AgentSight 中的记录关联，便于查看活动和定位缺失信息。
+AW 将 Agent 运行与 AgentSight 记录关联，便于查看活动和观测缺口。
 当前自动观测支持 Qoder、OpenClaw、QwenPaw 和 Hermes。
 AgentSight 独立安装和运行，接入 AW 不会自动启动采集器。
 

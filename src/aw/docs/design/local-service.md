@@ -2,10 +2,12 @@
 
 [中文版](local-service_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-service` exposes prepared Provider execution through a standalone Linux
 process and a reusable synchronous Rust client. One service owns one immutable
 AW configuration snapshot, its live bindings and events, and durable execution
-metadata. The `aw run` client starts Qoder CLI with session-owned native
+metadata. The `aw run` client starts a configured Agent with session-owned native
 Hook entries; the daemon is independent of that foreground Agent. Service
 execution records do not certify that an Agent adopted a response.
 
@@ -18,7 +20,7 @@ execution records do not certify that an Agent adopted a response.
 | `aw-host` | Provider discovery, configuration validation, admission and once-only step invocation |
 | `aw-exec` | Child-process deadlines, output limits, cancellation and process-group cleanup |
 | `aw-core::journal::FileJournal` | Durable reservations and verified metadata record chains |
-| Qoder Adapter | Require CLI >=1.1.64 and record the probed version, normalize callbacks, retain native scheduling and apply supported effects |
+| Native Adapters | Check entrypoint versions, normalize callbacks, retain native scheduling and apply supported effects; see [Adapter dispatch](adapter-dispatch.md) |
 | `launch_service` | Resolve private paths, verify an existing configuration revision or start an on-demand service |
 
 The service reuses `FileJournal` as storage. It does not run Core plans or produce

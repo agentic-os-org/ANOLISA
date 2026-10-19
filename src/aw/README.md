@@ -73,6 +73,20 @@ call through security and native permission checks. Replacement applies only to
 supported text slots. AW does not provide an OS sandbox or cross-Agent approvals.
 See [Contributing](CONTRIBUTING.md) for real SDK and model-session acceptance coverage.
 
+## Code architecture
+
+![AW user workflow and component architecture](../../docs/images/aw/architecture.png)
+
+The root is a virtual workspace. `crates/` contains eight framework crates; `providers/`
+is the shared implementation space. Providers may also be developed and shipped
+from independent repositories; see [Provider collaboration](providers/README.md). Hook requests
+flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
+`aw-core` exposes a separate plan API; the service reuses only its Journal.
+
+The [architecture overview](../../docs/developer-guide/en/aw/architecture.md)
+explains crate ownership and runtime flow. The [design index](docs/design/README.md)
+organizes protocol details in call order.
+
 ## Development and validation
 
 Run the AW CI checks from the repository root.
@@ -82,6 +96,3 @@ python3 src/aw/scripts/check.py
 ```
 
 - [Development environment and tests](CONTRIBUTING.md)
-- [Provider protocol](docs/design/provider-protocol.md) and [Host](docs/design/provider-host.md)
-- [Local service and clients](docs/design/local-service.md)
-- [Execution and persistent Journal](docs/design/core-execution.md)

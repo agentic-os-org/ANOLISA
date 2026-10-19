@@ -23,8 +23,6 @@ Skip this step if all-in-one is installed. The package includes Tokenless CLI an
 There is no separate RTK, TOON, Python wheel or native Tokenless plugin to install.
 Avoid enabling an overlapping Tokenless plugin in the same session to prevent duplicate processing.
 
-Create a new configuration and launch Qoder.
-
 ```bash
 aw-package configure --prefix "$AW_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
@@ -86,7 +84,7 @@ Disabling recording does not delete history or disable compression. See
 
 ## Disable
 
-Exit the Agent and stop the service using this configuration.
+Exit the Agent, then stop the service.
 
 ```bash
 aw stop --config "$AW_HOME/tokenless.yaml"

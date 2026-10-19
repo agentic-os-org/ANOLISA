@@ -13,10 +13,8 @@ aw inspect --config "$HOME/aw/aw.yaml" --json
 aw stop --config "$HOME/aw/aw.yaml"
 ```
 
-`status` checks the service; `inspect` reads service and Provider summaries. Neither launches
-an Agent. Exiting an Agent releases that session while the AW service may keep running.
-`stop` requests shutdown; check with `status` afterwards. Manage independent sec-core and
-AgentSight services separately.
+`inspect` includes Provider summaries. The AW service can outlive the Agent; use `stop`
+to shut it down and `status` to confirm. Manage sec-core and AgentSight separately.
 
 ## Upgrade and uninstall
 

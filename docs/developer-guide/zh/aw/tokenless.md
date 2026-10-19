@@ -39,7 +39,7 @@ Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生
 sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。
 
-受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
+受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml)，
 替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
 `PREFIX/.aw-packages/aw-provider-tokenless.json` 中 RTK 条目的 `sha256`，
 将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架

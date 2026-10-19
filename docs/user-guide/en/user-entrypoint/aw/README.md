@@ -24,16 +24,14 @@ AW does not install frameworks or configure model accounts.
 
 ## Run a session
 
-After installation and configuration, launch from the directory where the Agent should work.
+After installation and configuration, launch from your working directory.
 
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
-The first command checks the configuration; the second opens Qoder's native interface.
-`qoder` names a target in the configuration. For other Agents, follow the
-[configuration guide](configuration.md).
+`qoder` names a configured target. For other Agents, see [Configuration](configuration.md).
 
 After the Agent exits, the AW service remains available for later sessions. Stop it when finished.
 
@@ -44,9 +42,8 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 ## Choose capabilities
 
-Core alone can launch an Agent. To enable safety checks or compression, install the corresponding
-Provider and select it in the configuration. The all-in-one package installs the components together;
-configuration still determines which capabilities run.
+Core can launch an Agent independently. For safety checks or compression, install the
+corresponding Provider or all-in-one, then enable it in configuration.
 
 AW can observe or block calls before tools execute and compress supported text results afterwards.
 Native permission checks remain in effect. Current Hook checks do not provide an OS sandbox.

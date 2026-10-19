@@ -28,6 +28,50 @@ final replacement step; preserve the native envelope, failure status and audit.
 Keep unsupported capabilities visible at admission. Configuration vocabulary
 and roadmap entries are not evidence of native support.
 
+## Provider collaboration and framework architecture
+
+**Concrete Providers MUST live in the independent collaboration directory
+`providers/<provider>/`. Reserve `crates/` for the reusable AW framework.**
+Backend-specific security, compression and other integrations belong in this
+Provider space, not in new `crates/aw-provider-<backend>/` directories or framework
+modules. The `aw-provider` crate is the shared protocol library, not an integration.
+
+`providers/` accepts first-party and community implementations, each with its own
+source, schemas, examples and tests. Providers may also live in independent
+repositories, use other languages and ship separately. Runtime integration uses
+`aw-provider/v1alpha1` over stdio and the configured `transport.argv`; it must not
+require a Provider to join this source tree. Follow the
+[Provider contribution guide](providers/README.md).
+
+The two bundled Rust Providers currently share the Cargo workspace for builds and
+tests; this does not change the directory or ownership boundary. Preserve existing
+package and binary names when moving source directories. New Provider directories
+do not automatically join the installer: inclusion requires explicit packaging
+and lifecycle validation.
+
+The root Cargo manifest is a virtual workspace. Present the eight framework
+crates separately from concrete Providers:
+
+| Responsibility | Framework crates | Boundary |
+| --- | --- | --- |
+| Build and install | `aw-package` | Package composition, installation and configuration generation |
+| Native entrypoint and local runtime | `aw-service` | CLI, Adapters, bindings, events and audit |
+| Hook execution | `aw-host`, `aw-exec` | Prepare Providers and execute steps; bound process lifetime and cleanup |
+| Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
+| Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
+
+The Hook path is Adapter -> service -> Host -> executor -> Provider process.
+Results return to the Adapter for native adoption. The service uses
+`aw-core::journal::FileJournal`, not `Core::prepare/execute`; do not insert the
+Core plan API into this path or equate its `ProviderHost` port with `aw-host::Host`.
+Production framework code must not depend on concrete Provider implementations.
+
+Keep crate-local source, schemas and Rust tests together. Update the
+[architecture overview](../../docs/developer-guide/en/aw/architecture.md) and
+[design index](docs/design/README.md) when ownership or call paths change.
+Show runtime flow in the overview; keep compilation dependencies in separate
+framework and Provider tables, with test-only dependencies identified.
+
 ## Adding an Agent or Hook
 
 Update these together in the same change:
@@ -63,9 +107,13 @@ matrix case. Package acceptance separately covers real Tokenless/RTK binaries.
 
 ## Layout and CI cost
 
+Keep workspace/native acceptance under `tests/` and runtime bridge assets under
+`adapters/`. When changing crate boundaries, update `scripts/check_layout.py`
+and its behavior tests alongside the architecture documentation.
+
 Rust, Python and JavaScript (`.js`, `.mjs`, `.cjs`) files share a 699-line ceiling,
 including tests and embedded fixtures; the gate reports files at 600 lines.
-The existing 711-line `src/validation.rs` allowance is fixed, not a precedent.
+The existing 711-line `crates/aw-contracts/src/validation.rs` allowance is fixed, not a precedent.
 Split by responsibility before crossing the ceiling. Keep related helpers in
 named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the

@@ -8,7 +8,9 @@ Providers. For installation and daily use, start with the
 
 | Task | Guide |
 | --- | --- |
+| Understand crate relationships and request flow | [Architecture](architecture.md) |
 | Build locally and deliver packages | [Build AW from source](building.md) |
+| Develop, contribute, and distribute Providers | [Provider collaboration](providers.md) |
 | Connect a check script or Provider | [Component integration tutorial](integration.md) |
 | Look up YAML fields and validation rules | [Configuration reference](configuration.md) |
 | Connect a framework or SDK worker, or troubleshoot Hooks | [Native Agent integration reference](native-agents.md) |

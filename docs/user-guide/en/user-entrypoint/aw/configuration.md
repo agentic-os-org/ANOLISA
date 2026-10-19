@@ -7,8 +7,7 @@ Model accounts remain in the Agent's own configuration. Complete [installation](
 
 ## Generate configuration
 
-These variables come from the installation page. Each `configure` command creates a new file.
-Back up existing configuration and edit it as described below.
+Reuse the installation variables. `configure` does not overwrite files; see the next section to edit one.
 
 ```bash
 aw-package configure --prefix "$AW_PREFIX" \
@@ -23,8 +22,7 @@ aw-package configure --prefix "$AW_PREFIX" \
 | Check tool safety | `--provider sec-core --socket /run/agent-sec-core/daemon.sock` |
 | Safety checks and compression | `--provider sec-core+tokenless --socket /run/agent-sec-core/daemon.sock` |
 
-Install the selected Providers first. The generator supplies managed executable paths;
-you do not need to enter an RTK digest manually.
+Install the selected Providers first; the generator supplies executable paths and integrity metadata.
 
 ## Edit existing configuration
 
@@ -41,8 +39,6 @@ Edit YAML directly or use `aw-package config` to add and remove Providers and Ho
 The file and its parent must belong to the current user and must not be writable by others.
 The editor requires an absolute path and rejects symlinks. `show` includes private configuration
 values; remove sensitive data before sharing its output.
-
-Validate your edits and start again.
 
 ```bash
 aw-package config validate --config "$AW_HOME/aw.yaml"

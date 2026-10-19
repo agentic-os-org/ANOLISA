@@ -186,9 +186,13 @@ class GateTests(GateFixture):
         from contextlib import chdir
 
         core = self.root / "crates/aw-core"
+        provider_directories = {
+            "aw-provider-sec-core": self.root / "providers/sec-core",
+            "aw-provider-tokenless": self.root / "providers/tokenless",
+        }
         packages = []
         for name, directory, dependencies in (
-            ("aw-contracts", self.root, ["serde_json"]),
+            ("aw-contracts", self.root / "crates/aw-contracts", ["serde_json"]),
             ("aw-core", core, ["aw-contracts", "serde_json", "thiserror"]),
             (
                 "aw-config",
@@ -210,7 +214,7 @@ class GateTests(GateFixture):
                 ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "semver", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
             (
-                "aw-provider-sec-core", self.root / "crates/aw-provider-sec-core",
+                "aw-provider-sec-core", self.root / "providers/sec-core",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"],
             ),
             (
@@ -218,7 +222,7 @@ class GateTests(GateFixture):
                 ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile"],
             ),
             (
-                "aw-provider-tokenless", self.root / "crates/aw-provider-tokenless",
+                "aw-provider-tokenless", self.root / "providers/tokenless",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"],
             ),
         ):
@@ -234,8 +238,8 @@ class GateTests(GateFixture):
                         {
                             "name": dependency,
                             "path": (
-                                str(self.root) if dependency == "aw-contracts" else
-                                str(self.root / "crates" / dependency) if dependency.startswith("aw-") else None
+                                str(provider_directories.get(dependency, self.root / "crates" / dependency))
+                                if dependency.startswith("aw-") else None
                             ),
                             "source": None if dependency.startswith("aw-") else "registry+fixture",
                         }
@@ -282,12 +286,31 @@ class GateTests(GateFixture):
         invalid["packages"][1]["targets"][0]["src_path"] = str(core / "lib.rs")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
+        for name, directory in (
+            ("aw-provider-sec-core", "crates/aw-provider-sec-core"),
+            ("aw-provider-tokenless", "crates/aw-provider-tokenless"),
+            ("aw-provider", "providers/protocol"),
+        ):
+            invalid = json.loads(json.dumps(metadata))
+            package = next(p for p in invalid["packages"] if p["name"] == name)
+            package["manifest_path"] = str(self.root / directory / "Cargo.toml")
+            with self.subTest(package=name), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
+        # Contracts must be a regular crate; root-level manifests and targets fail.
+        for field, value in (
+            ("manifest_path", str(self.root / "Cargo.toml")),
+            ("targets", [{"src_path": str(self.root / "src/lib.rs")}]),
+        ):
+            invalid = json.loads(json.dumps(metadata))
+            invalid["packages"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
         source = core / "src/lib.rs"
         source.write_text("// fixture\n" * 700, encoding="utf-8")
         with self.assertRaises(ValueError):
             gate.structure(metadata, self.root)
         source.write_text("// fixture\n" * 699, encoding="utf-8")
-        legacy = self.root / "src/validation.rs"
+        legacy = self.root / "crates/aw-contracts/src/validation.rs"
         legacy.write_text("// fixture\n" * 711, encoding="utf-8")
         gate.structure(metadata, self.root)
         legacy.write_text("// fixture\n" * 712, encoding="utf-8")
@@ -480,11 +503,12 @@ class GateTests(GateFixture):
             self._simulate_descendant_status("S")
 
     def test_canonical_vectors_fail_even_with_python_optimization(self) -> None:
-        script = self.root / "check_canonical.py"
+        script = self.root / "tests/check_canonical.py"
+        script.parent.mkdir()
         shutil.copyfile(AW / "tests/check_canonical.py", script)
-        fixtures = self.root / "fixtures"
-        fixtures.mkdir()
-        original = json.loads((AW / "tests/fixtures/canonical-vectors.json").read_text())
+        fixtures = self.root / "crates/aw-contracts/tests/fixtures"
+        fixtures.mkdir(parents=True)
+        original = json.loads((AW / "crates/aw-contracts/tests/fixtures/canonical-vectors.json").read_text())
         damaged = json.loads(json.dumps(original))
         damaged[0]["digest"] = "0" * 64
         for vector, valid in ((original, True), ([], False), ({}, False), (damaged, False)):

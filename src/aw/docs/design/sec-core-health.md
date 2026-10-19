@@ -9,7 +9,7 @@ Unix-socket peer and validates `daemon.health`. The caller selects a trusted,
 receipt-verified helper; the diagnostic is not an executable sandbox.
 
 The independent `aw-sec-core-health/v1alpha1` schema lives in
-`../../crates/aw-provider-sec-core/schemas/health-v1alpha1.schema.json`.
+`../../providers/sec-core/schemas/health-v1alpha1.schema.json`.
 `helper_installed` is file presence and `socket_configured` is an absolute input
 path, not verification of the AW configuration. Only a successful helper yields
 `authenticated_reachable`; missing components, helper errors, output limits and

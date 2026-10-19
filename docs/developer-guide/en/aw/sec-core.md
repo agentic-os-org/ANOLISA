@@ -90,7 +90,7 @@ unhealthy replies, a non-root peer, missing components and deadlines remain
 unavailable. Private helper output is not returned.
 
 The separate `aw-sec-core-health/v1alpha1` JSON schema is published at
-`src/aw/crates/aw-provider-sec-core/schemas/health-v1alpha1.schema.json` with
+`src/aw/providers/sec-core/schemas/health-v1alpha1.schema.json` with
 reachable/unavailable fixtures in `tests/fixtures/`. `helper_installed` means
 only that the helper file exists; `socket_configured` means an absolute socket
 path was supplied. Only successful authenticated health yields
@@ -108,7 +108,7 @@ has no automatic service installation, upgrade or removal bridge.
 
 ## Configure a Provider
 
-Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-sec-core/examples/aw.yaml)
+Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/sec-core/examples/aw.yaml)
 to `aw.sec-core.yaml` and replace its executable and socket paths. The sample
 starts in `mode: observe` with `on_error: report` so local evaluation does not
 request blocking. For blocking, set `mode: block` and admit `[observe, block]`

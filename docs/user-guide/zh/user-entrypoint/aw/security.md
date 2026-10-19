@@ -8,8 +8,8 @@ sec-core 在工具执行前检查命令。发现风险或必需检查失败时�
 
 ## 准备程序与后台
 
-先按[安装页](installation.md)安装 core 和匹配的 sec-core Provider，或直接安装 all-in-one。
-分包用户在解压后的 artifact 目录执行。
+先[安装 core](installation.md)，再在解压后的 artifact 目录安装 sec-core 扩展包。
+已安装 all-in-one 时跳过此步。
 
 ```bash
 export AW_VERSION=0.1.0-preview.1
@@ -18,7 +18,7 @@ tar -xzf "$AW_SEC_BUNDLE.tar.gz"
 sudo "./$AW_SEC_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
 ```
 
-已有 all-in-one 时跳过这一步。AW 不会自动启动 sec-core。
+AW 不会自动启动 sec-core。
 已有受管理后台时复用其 socket，例如 `/run/agent-sec-core/daemon.sock`。
 长期运行请使用 [sec-core 的系统服务](../../agent-security/agent-sec-core/QUICKSTART.md)。
 

@@ -2,8 +2,13 @@
 
 [English](core-execution.md)
 
+[设计索引](README_zh.md) · [架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)
+
 `aw-core` 通过可信接入端口执行已由策略确定的能力计划。它复用既有注册合同
 Schema 和校验器；`aw-contracts` 保持无副作用，也不依赖 Core。
+
+本地服务复用该 crate 的 FileJournal 保存审计。Hook 执行走 `aw-host`，
+不调用 `Core::prepare/execute`。以下 API 面向嵌入能力计划执行器的调用方。
 
 ## 准备与执行
 

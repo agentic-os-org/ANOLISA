@@ -8,7 +8,7 @@ Unix socket 的 root peer 凭据及 `daemon.health` 响应。调用方应选择�
 校验的 helper；诊断入口不提供可执行程序沙箱。
 
 独立 `aw-sec-core-health/v1alpha1` schema 位于
-`../../crates/aw-provider-sec-core/schemas/health-v1alpha1.schema.json`。
+`../../providers/sec-core/schemas/health-v1alpha1.schema.json`。
 `helper_installed` 表示文件存在，`socket_configured` 表示输入绝对路径，不验证 AW
 配置。只有 helper 成功才返回 `authenticated_reachable`；组件缺失、helper 错误、
 输出超限及进程超时均不可用。结果不含路径、环境和 helper 原始诊断。

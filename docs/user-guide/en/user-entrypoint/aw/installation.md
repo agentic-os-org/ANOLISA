@@ -2,8 +2,7 @@
 
 [中文版](../../../zh/user-entrypoint/aw/installation.md)
 
-This page installs AW and starts a Qoder session. You need Linux and an installed, signed-in
-Qoder CLI version 1.1.64 or later. For another Agent, install AW first, then follow
+Requires Linux and a signed-in Qoder CLI 1.1.64 or later. For other Agents, see
 [Configuration and Agent launch](configuration.md).
 
 ## Get a package
@@ -55,7 +54,7 @@ parent directory. A root backend needs a root-managed installation.
 
 ## Create configuration
 
-Run as your ordinary user. Keep AW configuration and runtime data outside the installation prefix.
+Create configuration as your ordinary user, keeping data outside the installation prefix.
 
 ```bash
 export AW_HOME="$HOME/aw"
@@ -69,8 +68,7 @@ aw validate --config "$AW_HOME/aw.yaml"
 ```
 
 `AW_QODER` must be the absolute path to the real executable. `configure` creates a complete file
-and refuses to overwrite it. This configuration enables no Provider, so you can check launch first.
-Enable [sec-core](security.md) or [Tokenless](tokenless.md) using their respective pages.
+and refuses to overwrite it. Enable [sec-core](security.md) or [Tokenless](tokenless.md) separately.
 
 ## Launch and verify
 
@@ -88,5 +86,4 @@ aw status --config "$AW_HOME/aw.yaml"
 aw stop --config "$AW_HOME/aw.yaml"
 ```
 
-This checks AW launch and native tool execution. After enabling a Provider, follow its guide to
-verify that the capability takes effect.
+After enabling a Provider, follow its guide to verify the effect.

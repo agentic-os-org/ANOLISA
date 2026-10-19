@@ -2,6 +2,8 @@
 
 [English](adapter-dispatch.md)
 
+[设计索引](README_zh.md) · [架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)
+
 `aw` 可执行程序负责发现服务、绑定实例、前台进程生命周期和清理。每个原生适配器负责
 版本与入口准入、注册文件、事件归一化和宿主返回格式。这些接口位于 CLI 私有模块，
 服务的 `invoke_step` 增加可选的原生命令环境快照；既有请求可以省略。

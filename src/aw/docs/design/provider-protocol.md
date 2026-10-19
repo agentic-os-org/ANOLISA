@@ -2,12 +2,14 @@
 
 [中文版](provider-protocol_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-provider` defines the experimental `aw-provider/v1alpha1` interface for
 external policy programs and checks their messages and requested capabilities
 offline. It connects the unified configuration to a Provider contract without
 starting a process, installing an Agent Hook or establishing a runtime binding.
-The same Provider interface is intended for QwenPaw, Qoder CLI, OpenClaw and
-Hermes; this delivery uses synthetic fixtures, not new native integration evidence.
+Native integration belongs to Adapters in the `aw-service` CLI; see the
+[component README](../../README.md#hook-support) for supported capabilities.
 
 ## Delivery boundary
 
@@ -17,7 +19,7 @@ Hermes; this delivery uses synthetic fixtures, not new native integration eviden
 | `aw-provider` | Validate protocol messages, correlate responses and check configured steps against supplied Provider and Adapter evidence |
 | `aw-contracts` / `aw-core` | Validate and execute their existing capability profiles through a trusted Host and Journal |
 | `aw-host` | Execute Provider commands, enforce deadlines and output limits, handle cancellation and return correlated call reports |
-| Future Adapter and service | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
+| Adapter and `aw-service` | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
 
 Configuration fields are unchanged. A named object under `spec.providers`
 selects `aw-provider/v1alpha1`, a literal `transport.argv` and private `config`.

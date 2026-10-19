@@ -760,7 +760,7 @@ target/debug/aw stop --config /absolute/aw.pi.yaml
 拒绝/参数修改、after 结果替换继续生效，AW after 观察最终结果。Pi 被拒绝、参数
 非法、提前取消的工具没有 after callback。
 
-Tokenless 使用[共享优化示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)中的 Pi SDK 目标。
+Tokenless 使用[共享优化示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml)中的 Pi SDK 目标。
 安全检查位于 `pre_tool` 之前，观察器/自定义 Hook 位于最后 `post_tool` 替换之前。
 重试理由进入模型，建议命令只能通过新工具调用执行。PostTool 替换成功结果的唯一
 文本块并保留 SDK metadata；report 故障保留原结果。原生 Hook 不能提供替换。
@@ -847,7 +847,7 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 
 ### 启用 Bash PreTool 与 PostTool 优化
 
-使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)，
+使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml)，
 选择 `claude` target，替换 executable、worker 与状态目录的绝对路径。源码示例
 `claude-worker.py` 除 echo 工具外显式开放并允许原生 Bash；组合业务工厂时保留应用
 自己的权限策略。Provider 安装、RTK 要求与统计设置见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。

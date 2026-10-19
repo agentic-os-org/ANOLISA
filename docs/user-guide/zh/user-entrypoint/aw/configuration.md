@@ -7,7 +7,7 @@
 
 ## 生成配置
 
-以下变量沿用安装页。每条 `configure` 命令创建新文件，已有配置请先备份，再按下一节编辑。
+沿用安装页的变量。`configure` 不覆盖已有文件；修改配置见下一节。
 
 ```bash
 aw-package configure --prefix "$AW_PREFIX" \
@@ -22,7 +22,7 @@ aw-package configure --prefix "$AW_PREFIX" \
 | 工具安全检查 | `--provider sec-core --socket /run/agent-sec-core/daemon.sock` |
 | 安全检查和压缩 | `--provider sec-core+tokenless --socket /run/agent-sec-core/daemon.sock` |
 
-先安装所选 Provider。生成器会填入受管理程序的路径，无需手工填写 RTK 摘要。
+先安装所选 Provider；生成器会填入程序路径和校验信息。
 
 ## 修改已有配置
 
@@ -37,8 +37,6 @@ aw-package config show --config "$AW_HOME/aw.yaml"
 可以直接编辑 YAML，也可以用 `aw-package config` 增删 Provider 和 Hook。
 文件与父目录应属于当前用户，且不能被其他用户写入；配置编辑器要求绝对路径，
 不接受符号链接。`show` 会显示配置中的私有值，分享输出前请自行删去敏感内容。
-
-编辑后检查并重新启动。
 
 ```bash
 aw-package config validate --config "$AW_HOME/aw.yaml"

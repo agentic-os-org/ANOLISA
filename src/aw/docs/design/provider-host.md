@@ -2,6 +2,8 @@
 
 [中文版](provider-host_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-host` connects validated configuration and the `aw-provider/v1alpha1`
 protocol to Linux command execution. It executes real Provider processes and
 returns checked candidate effects and correlated call reports. Agent startup,

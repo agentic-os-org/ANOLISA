@@ -2,9 +2,11 @@
 
 [English](local-service.md)
 
+[设计索引](README_zh.md) · [架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)
+
 `aw-service` 通过独立 Linux 进程和可复用的同步 Rust 客户端提供 Provider 执行
 能力。一个服务持有一份不可变的 AW 配置快照，管理绑定和事件，并持久保存执行
-元数据。`aw run` 客户端通过本次会话专用的原生 Hook 条目启动 Qoder CLI，
+元数据。`aw run` 客户端通过本次会话专用的原生 Hook 条目启动所选 Agent，
 daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响应。
 
 ## 组件职责
@@ -16,7 +18,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `aw-host` | Provider 发现、配置校验、准入及事件步骤的单次调用 |
 | `aw-exec` | 子进程截止时间、输出限制、取消及进程组清理 |
 | `aw-core::journal::FileJournal` | 持久预留和可验证的元数据记录链 |
-| Qoder Adapter | 要求 CLI >=1.1.64 并记录探测版本、归一化回调、保留原生调度并采用支持的效果 |
+| 原生 Adapter | 检查入口版本、归一化回调、保留原生调度并采用支持的效果，见 [Adapter 分发](adapter-dispatch_zh.md) |
 | `launch_service` | 解析私有路径，核实已有配置版本或按需启动服务 |
 
 服务将 `FileJournal` 作为存储复用，不执行 Core 计划，也不产生 Core 执行或采用

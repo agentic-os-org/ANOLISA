@@ -2,6 +2,8 @@
 
 [中文版](bounded-execution_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-exec` runs one command with byte limits, an absolute deadline and cancellation.
 It provides the process transport shared by native hook commands and the
 [local Provider Host](provider-host.md). It does not depend on `aw-config`,

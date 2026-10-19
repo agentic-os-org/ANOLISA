@@ -156,7 +156,7 @@ PID reuse. This limitation is reported as `process_identity_unavailable`.
 
 ## Executable evidence contract
 
-[`evidence-v1.schema.json`](../../schemas/evidence-v1.schema.json) is the
+[`evidence-v1.schema.json`](../../crates/aw-contracts/schemas/evidence-v1.schema.json) is the
 authoritative shape. It rejects unknown fields; metadata uses the AW canonical
 domain. Every record has:
 
@@ -202,7 +202,7 @@ their distinct source references instead of being merged by text or model IDs.
 
 ## Snapshot selection and lifetime
 
-[`evidence-context-v1.schema.json`](../../schemas/evidence-context-v1.schema.json)
+[`evidence-context-v1.schema.json`](../../crates/aw-contracts/schemas/evidence-context-v1.schema.json)
 defines the result. It includes the subject, original candidate revision, a
 constraints content reference, selected evidence, content objects, source status,
 gaps, limits, cutoff and the original monotonic deadline as a decimal string.

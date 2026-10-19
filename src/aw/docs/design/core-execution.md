@@ -2,9 +2,15 @@
 
 [中文版](core-execution_zh.md)
 
+[Design index](README.md) · [Architecture](../../../../docs/developer-guide/en/aw/architecture.md)
+
 `aw-core` executes policy-resolved capability plans through trusted embedding
 ports. It reuses the existing registered contract schemas and validators;
 `aw-contracts` remains side-effect-free and does not depend on Core.
+
+The local service uses this crate's FileJournal for audit storage. Its Hook
+execution goes through `aw-host`, not `Core::prepare/execute`. The API below is
+for callers embedding the capability-plan executor.
 
 ## Prepare and execute
 

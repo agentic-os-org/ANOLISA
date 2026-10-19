@@ -14,7 +14,7 @@ trusted `transport` using the existing stdio shape. Its executable must be
 absolute. Registration is separate from the event transport and opaque private
 configuration. It is supported by both the offline validator and package-generated
 Tokenless profiles. It does not change event admission or grant native effects.
-The shared [example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml) registers
+The shared [example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml) registers
 the same CLI/data directory for both entries.
 
 `aw-provider-view/v1alpha1` is independent of `aw-provider/v1alpha1` and

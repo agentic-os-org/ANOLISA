@@ -12,9 +12,8 @@ aw inspect --config "$HOME/aw/aw.yaml" --json
 aw stop --config "$HOME/aw/aw.yaml"
 ```
 
-`status` 查看服务，`inspect` 查看服务和 Provider 摘要；两者都不会启动 Agent。
-退出 Agent 会释放该次会话，AW 服务可以继续运行。`stop` 请求服务退出，
-收到响应后再用 `status` 确认。独立的 sec-core 与 AgentSight 服务分别管理。
+`inspect` 包含 Provider 摘要。退出 Agent 后 AW 服务仍可运行，用 `stop` 停止，
+再用 `status` 确认。sec-core 和 AgentSight 服务需分别管理。
 
 ## 升级与卸载
 

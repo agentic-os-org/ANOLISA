@@ -10,7 +10,7 @@ import json
 import subprocess
 from pathlib import Path
 
-vectors = Path(__file__).parent / "fixtures" / "canonical-vectors.json"
+vectors = Path(__file__).resolve().parents[1] / "crates/aw-contracts/tests/fixtures/canonical-vectors.json"
 loaded = json.loads(vectors.read_text(encoding="utf-8"))
 if not isinstance(loaded, list) or not loaded:
     raise ValueError("canonical vectors must be a nonempty list")

@@ -2,7 +2,7 @@
 
 [中文版](../../../zh/user-entrypoint/aw/observability.md)
 
-AW can associate an Agent run with AgentSight records to help inspect activity and missing information.
+AW associates Agent runs with AgentSight records to inspect activity and observation gaps.
 Automatic observation currently supports Qoder, OpenClaw, QwenPaw and Hermes.
 AgentSight is installed and managed independently; connecting AW does not start a collector.
 

@@ -22,8 +22,6 @@ sudo "./$AW_TOKENLESS_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
 无需另外安装 RTK、TOON、Python wheel 或 Tokenless 原生插件。
 不要在同一会话叠加功能相同的 Tokenless 插件，以免重复处理。
 
-生成新配置并启动 Qoder。
-
 ```bash
 aw-package configure --prefix "$AW_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
@@ -82,7 +80,7 @@ export TOKENLESS_SLS_ENABLED=0
 
 ## 停用
 
-退出 Agent，再停止使用这份配置的服务。
+退出 Agent 后停止服务。
 
 ```bash
 aw stop --config "$AW_HOME/tokenless.yaml"

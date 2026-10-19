@@ -128,7 +128,7 @@ Qoder 系统采集器报告小写 ID，本地 discovery 报告显示名。Hermes
 
 ## 可执行证据合同
 
-[`evidence-v1.schema.json`](../../schemas/evidence-v1.schema.json) 定义正式结构，
+[`evidence-v1.schema.json`](../../crates/aw-contracts/schemas/evidence-v1.schema.json) 定义正式结构，
 拒绝未知字段；元数据遵循 AW canonical 域。每条记录包含：
 
 | 字段 | 含义 |
@@ -167,7 +167,7 @@ AW 来源范围为服务 generation。AgentSight 来源范围为配置
 
 ## 快照选取与生命周期
 
-[`evidence-context-v1.schema.json`](../../schemas/evidence-context-v1.schema.json)
+[`evidence-context-v1.schema.json`](../../crates/aw-contracts/schemas/evidence-context-v1.schema.json)
 定义结果结构，包括主体、原始候选版本、约束内容引用、选取证据、内容对象、来源
 状态、缺口、限额、截止点，以及用十进制字符串表示的原始单调时钟 deadline。
 

@@ -11,7 +11,7 @@ AW 通过 `aw inspect --config ABS_FILE --json` 提供单个桌面快照，不�
 可选的 `spec.providers.<id>.view` 包含 `protocol`、`implementation` 和受信任的
 `transport`，沿用现有 stdio 结构，要求绝对可执行路径。登记独立于事件 transport 和
 不透明私有配置，由离线校验器和生成 Tokenless 配置的包工具支持，不改变事件准入，
-也不授予原生效果。[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml)
+也不授予原生效果。[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml)
 为两种入口登记相同 CLI/数据目录。
 
 `aw-provider-view/v1alpha1` 独立于 `aw-provider/v1alpha1` 和

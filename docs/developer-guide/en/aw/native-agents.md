@@ -890,7 +890,7 @@ factory result gets the same Hook composition. Existing before denial/mutation
 and after replacement remain authoritative; AW after observes the final result.
 Blocked or invalid/pre-aborted tools have no after callback in Pi.
 
-For Tokenless, use the Pi SDK target in the [shared optimization example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml).
+For Tokenless, use the Pi SDK target in the [shared optimization example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml).
 Keep security checks before `pre_tool` and observers/custom Hooks before the final
 `post_tool` replacement. Retry reasons reach the model; only a fresh tool call can
 execute the suggested command. PostTool replaces one successful text block while
@@ -993,7 +993,7 @@ overrides are unsupported.
 
 ### Enable Bash PreTool and PostTool optimization
 
-Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider-tokenless/examples/aw.yaml),
+Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml),
 select its `claude` target, and replace the absolute executable, worker and state
 paths. The source `claude-worker.py` example explicitly exposes and allows native
 Bash in addition to its echo tool. Keep your application's own permission policy

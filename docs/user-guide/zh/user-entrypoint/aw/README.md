@@ -23,15 +23,14 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 
 ## 一次运行
 
-完成安装和配置后，从希望 Agent 使用的工作目录启动。
+安装并配置后，从工作目录启动。
 
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
-第一条检查配置，第二条打开 Qoder 的原生界面。`qoder` 是配置中的目标名称。
-换用其他 Agent 时，按[配置指南](configuration.md)准备对应入口。
+`qoder` 是配置中的目标名称。其他 Agent 见[配置指南](configuration.md)。
 
 退出 Agent 后，AW 本地服务仍可被后续会话复用。不再使用时停止它。
 
@@ -42,8 +41,8 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 ## 选择需要的能力
 
-只安装 core 就能启动 Agent。启用安全检查或压缩，需要安装对应 Provider 并在配置中
-选用它。all-in-one 包便于一次安装，安装后仍由配置决定哪些能力生效。
+core 可独立启动 Agent。安全检查和压缩需安装对应 Provider，或直接安装 all-in-one，
+再通过配置启用。
 
 工具执行前可以检查或阻断调用，执行后可以压缩受支持的文本结果。
 原生权限判断始终保留；AW 当前的 Hook 检查不提供 OS 沙箱隔离。

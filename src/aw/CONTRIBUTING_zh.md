@@ -48,7 +48,7 @@ Agent，并使用明确的原生输入；新增 Agent 缺少 fixture、Hook 单�
 不会根据修改了哪个 Adapter 而跳过共享安全或 Tokenless 回归。
 
 Rust、Python 和 JavaScript（`.js`、`.mjs`、`.cjs`）源码、脚本和 fixture
-统一限制为 699 行，达到 600 行提示。仅已有 `src/validation.rs` 保留固定的
+统一限制为 699 行，达到 600 行提示。仅已有 `crates/aw-contracts/src/validation.rs` 保留固定的
 711 行上限。按职责拆分并保留入口与断言，不给测试 fixture 豁免。
 依赖/布局检查位于 [check_layout.py](scripts/check_layout.py)，编译测试清单位于
 [check_inventory.py](scripts/check_inventory.py)，矩阵与 README 一致性检查位于
@@ -124,27 +124,17 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 准入规则。不能通过重试或省略框架将
 全量失败改报为成功。
 
-## Crate 职责
+## Crate 边界
 
-| Crate | 职责 |
-| --- | --- |
-| `aw-contracts` | 版本化能力 Schema 及记录间关系校验 |
-| `aw-config` | 期望配置解析与静态校验 |
-| `aw-provider` | 外部 Provider 协议和能力准入；依赖 `aw-config` |
-| `aw-core` | 通过可信运行时端口执行计划；依赖 `aw-contracts` |
-| `aw-exec` | Linux 有界命令传输与所属进程组清理；独立于 Provider 协议 |
-| `aw-host` | 组合配置、Provider 准入和有界传输，提供本地准备与调用；依赖 `aw-config`、`aw-provider` 和 `aw-exec` |
-| `aw-service` | 独立服务、可复用客户端与原生启动器；通过 `aw-host` 执行 Hook，`aw-exec` 管理前台进程，`aw-core` Journal 保存元数据 |
-| `aw-provider-tokenless` | 使用公开 Tokenless v2 CLI 的 PostTool Provider 二进制，不依赖 Tokenless crate |
-| `aw-provider-sec-core` | 具体 Provider 二进制，通过 `aw-exec` 调用公开 sec-core CLI，不依赖 sec-core crate |
-| `aw-package` | Rust Preview 构建、清单、安装及双 Agent 配置；`aw-service` 仅用于测试 |
+通用框架位于 `crates/<name>/`，具体 Provider 位于 `providers/<provider>/`；
+根清单只组织 workspace。[Provider 协作约定](providers/README_zh.md)说明如何收录和分发。
+包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
+协议阅读顺序见[设计索引](docs/design/README_zh.md)。
 
-原生框架接入不属于这些库或服务；进程执行属于 `aw-exec`。
-Provider 消息解析和离线准入保留在 `aw-provider`；`aw-host` 负责它们的执行边界，
-不向原始命令传输加入 Provider 语义，也不替代 Core 的 Host/Journal 合同。
-依赖及源码布局检查位于 [scripts/check_layout.py](scripts/check_layout.py)，
-回归测试位于 [tests/test_ci_checks.py](tests/test_ci_checks.py)。
-调整 crate 边界时需要同步更新检查和测试。
+原生 Adapter 放在 CLI 中；服务和 Host 保持框架无关。
+`aw-provider` 负责离线协议校验，进程执行统一使用 `aw-exec`。
+修改 crate 边界时，同时更新 [check_layout.py](scripts/check_layout.py)
+和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](../../docs/developer-guide/zh/aw/architecture.md)。
 
 ## 构建服务
 

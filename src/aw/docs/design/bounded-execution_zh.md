@@ -2,6 +2,8 @@
 
 [English](bounded-execution.md)
 
+[设计索引](README_zh.md) · [架构总览](../../../../docs/developer-guide/zh/aw/architecture.md)
+
 `aw-exec` 为单条命令提供字节上限、绝对截止时间和取消能力。原生 Hook 命令及
 [本地 Provider Host](provider-host_zh.md) 共用这一进程传输层。
 它不依赖 `aw-config`、`aw-core` 或 `aw-provider`。
