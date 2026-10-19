@@ -449,10 +449,13 @@ impl InterruptionDetector {
         // Bound here rather than at the safety-filter rule below: the
         // context-overflow rule needs it too, and it has to run before the
         // stream rules that read the same value.
+        // Multi-choice responses (`n > 1`) carry one message per choice; the
+        // last choice is decisive, matching the turn-terminal probe in
+        // `call_builder` and the SSE aggregation that takes the final chunk.
         let finish_reason = call
             .response
             .messages
-            .first()
+            .last()
             .and_then(|m| m.finish_reason.as_deref());
 
         let is_context_overflow = combined_error.contains("context_length_exceeded")
@@ -2766,5 +2769,68 @@ mod tests {
         let events = detector.detect_tool_use(&tool, None, None);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+    #[test]
+    fn multi_choice_uses_the_last_finish_reason() {
+        // OpenAI's `n > 1` responses carry one message per choice and the
+        // pipeline treats the last choice as decisive (call_builder's
+        // turn-terminal probe does the same). Reading only the first choice
+        // missed a cap on the last one and reported an earlier safety stop as
+        // the outcome of a call that finished normally.
+        let detector = InterruptionDetector::default();
+        let mut capped = make_base_call();
+        capped
+            .metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        capped.duration_ns = 2_000_000_000;
+        capped.request.max_tokens = Some(4096);
+        capped.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 3900,
+            total_tokens: 4000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        capped.response.messages = vec![
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            },
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("length".to_string()),
+            },
+        ];
+        let events = detector.detect(&capped);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "the capped last choice must raise TokenLimit"
+        );
+
+        let mut normal = make_base_call();
+        normal.response.messages = vec![
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("content_filter".to_string()),
+            },
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            },
+        ];
+        assert!(
+            detector.detect(&normal).is_empty(),
+            "a normal last choice must not inherit the first choice's safety stop"
+        );
     }
 }
