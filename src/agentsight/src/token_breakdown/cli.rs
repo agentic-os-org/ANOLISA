@@ -2049,4 +2049,46 @@ mod tests {
             AnalyzeChatmlCommand::parse_trace_relaxed("[\n]\n").expect("empty pretty array");
         assert!(empty_pretty.is_empty());
     }
+
+    /// Streamed deltas are fragments of one answer. The fixture knows
+    /// `hello` as one word and knows neither `hel` nor `lo`, so counting the
+    /// fragments one by one reports two tokens for a one-token answer.
+    #[test]
+    fn streamed_fragments_are_counted_as_one_answer() {
+        let tokenizer = fixture_tokenizer();
+        let blocks = vec![crate::token_breakdown::types::ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "hello".to_string(),
+        }];
+        let response = crate::token_breakdown::types::ResponseData {
+            content: vec!["hel".to_string(), "lo".to_string()],
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+        };
+        let doc = classify_document(&blocks, Some(response));
+        let breakdown =
+            compute_breakdown(&doc, &tokenizer, "qwen3.5-plus").expect("breakdown computes");
+        let response_event = breakdown
+            .events
+            .iter()
+            .find(|event| event.event_type == "response")
+            .expect("response event present");
+        let content = response_event
+            .children
+            .iter()
+            .find(|child| child.name == "content")
+            .expect("content child present");
+        let joined = tokenizer
+            .count_with_special_tokens("hello")
+            .expect("fixture counts");
+        assert_eq!(
+            content.tokens, joined,
+            "the joined answer must be counted once, not once per delta"
+        );
+        assert_eq!(content.char_count, 5);
+        assert_eq!(
+            response_event.tokens, joined,
+            "the response total must use the joined count"
+        );
+    }
 }
