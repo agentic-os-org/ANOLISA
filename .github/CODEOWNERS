@@ -53,6 +53,9 @@
 /src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs
 /src/aw/                                @kongche-jbw                # auto-label: component:aw
 
+# Shared Provider collaboration is separate from component source roots.
+/providers/                             @kongche-jbw
+
 # ws-ckpt prebuilt build and packaging ownership
 /.github/actions/build-ws-ckpt-prebuilt/ @yummypeng
 /.github/workflows/ws-ckpt-prebuilt-ci.yaml @yummypeng

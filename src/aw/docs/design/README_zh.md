@@ -35,7 +35,7 @@ flowchart LR
 | 接入对象 | 文档 |
 | --- | --- |
 | 原生 Agent 回调 | [AgentScope](agentscope-adapter_zh.md)、[Claude SDK](claude-sdk-adapter_zh.md)、[Hermes](hermes-adapter_zh.md)、[OpenClaw](openclaw-adapter_zh.md)、[Pi](pi-adapter_zh.md)、[QwenPaw](qwenpaw-adapter_zh.md)；Qoder 见 [Adapter 分发](adapter-dispatch_zh.md)与[本地服务](local-service_zh.md) |
-| Provider 独立开发与收录 | [协作目录](../../providers/README_zh.md)与[开发分发指南](../../../../docs/developer-guide/zh/aw/providers.md) |
+| Provider 独立开发与收录 | [协作目录](../../../../providers/README_zh.md)与[开发分发指南](../../../../docs/developer-guide/zh/aw/providers.md) |
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](sec-core-provider_zh.md)，再读 [sec-core 健康检查](sec-core-health_zh.md) |
 | Tokenless Provider | [接入参考](../../../../docs/developer-guide/zh/aw/tokenless.md) |
 | 打包和配置编辑 | [构建指南](../../../../docs/developer-guide/zh/aw/building.md)，再读[配置编辑](configuration-editing_zh.md) |

@@ -71,8 +71,8 @@ Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经�
 
 ![AW 用户流程与组件架构](../../docs/images/aw/architecture_zh.png)
 
-根目录是纯 workspace。`crates/` 保存 8 个框架 crate，`providers/` 收录可独立协作的
-具体实现。Provider 也可以在外部仓库开发、单独分发，见[协作入口](providers/README_zh.md)。
+根目录是纯 workspace。`crates/` 保存 8 个框架 crate，仓库根 `providers/` 收录可独立协作的
+具体实现。Provider 也可以在外部仓库开发、单独分发，见[协作入口](../../providers/README_zh.md)。
 Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider；
 `aw-core` 提供独立的计划执行接口，服务只复用它的 Journal。
 

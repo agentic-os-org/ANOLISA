@@ -23,7 +23,7 @@ ignored、向量错误及命令失败均返回非零。每条命令都有超时�
 依赖，Schema 校验只读取随包资源。检查入口、本地服务、Provider Host 执行、命令执行及 FileJournal 要求 Linux；
 本门禁不认证其他操作系统或最低支持版本。
 
-仅 PR 修改 `src/aw/**` 时，[AW CI](../../.github/workflows/aw-ci.yml)
+仅 PR 修改 `src/aw/**` 或 `providers/**` 时，[AW CI](../../.github/workflows/aw-ci.yml)
 会对候选合并提交运行上述检查。提交 AW 改动前，请先在 Linux 上运行上面的命令。
 CI 失败时，从任务日志中找到失败的命令，再到本地 `src/aw` 目录单独运行，定位问题。
 
@@ -69,7 +69,7 @@ python3 -B -m unittest discover -s tests -p 'test_ci_*.py'
 
 ## 日常 CI 与 nightly 集成
 
-只有改动 `src/aw/**` 的 PR 才运行 AW 检查。日常门禁保留全部无需凭证的安全、
+只有改动 `src/aw/**` 或 `providers/**` 的 PR 才运行 AW 检查。日常门禁保留全部无需凭证的安全、
 Tokenless、生命周期、Agent/Hook 矩阵契约，以及原生验收清单和文件大小检查。
 其他组件的内部改动由各自 CI 负责；AW 消费的公开契约发生变化时，需要对候选
 SHA 显式运行兼容性验证。
@@ -126,8 +126,8 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 
 ## Crate 边界
 
-通用框架位于 `crates/<name>/`，具体 Provider 位于 `providers/<provider>/`；
-根清单只组织 workspace。[Provider 协作约定](providers/README_zh.md)说明如何收录和分发。
+通用框架位于 `crates/<name>/`，具体 Provider 位于仓库根 `providers/<provider>/`，各自构建；
+根清单只组织 workspace。[Provider 协作约定](../../providers/README_zh.md)说明如何收录和分发。
 包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
 协议阅读顺序见[设计索引](docs/design/README_zh.md)。
 
@@ -167,7 +167,7 @@ cargo test --locked -p aw-service
 
 ```bash
 cargo test --locked -p aw-host
-cargo test --locked -p aw-provider-sec-core
+cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 ```
 
 这些测试使用本地 fixture 进程检查准备、请求绑定、失败报告、共享截止时间、取消和

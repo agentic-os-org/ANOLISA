@@ -77,9 +77,9 @@ See [Contributing](CONTRIBUTING.md) for real SDK and model-session acceptance co
 
 ![AW user workflow and component architecture](../../docs/images/aw/architecture.png)
 
-The root is a virtual workspace. `crates/` contains eight framework crates; `providers/`
+The root is a virtual workspace. `crates/` contains eight framework crates; repository-root `providers/`
 is the shared implementation space. Providers may also be developed and shipped
-from independent repositories; see [Provider collaboration](providers/README.md). Hook requests
+from independent repositories; see [Provider collaboration](../../providers/README.md). Hook requests
 flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
 `aw-core` exposes a separate plan API; the service reuses only its Journal.
 

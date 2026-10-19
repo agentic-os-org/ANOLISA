@@ -69,13 +69,24 @@ def structure(metadata: dict, root: Path) -> None:
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
     }
-    if members.keys() != allowed.keys():
+    providers = {"aw-provider-sec-core": "agent-sec-core", "aw-provider-tokenless": "tokenless"}
+    if members.keys() != allowed.keys() - providers.keys():
         raise ValueError("AW workspace members changed; review the crate boundaries")
+    independent = metadata.get("provider_workspaces", [])
+    if len(independent) != len(providers):
+        raise ValueError("each concrete Provider needs an independent workspace")
+    for workspace in independent:
+        packages = [p for p in workspace["packages"] if p["id"] in workspace["workspace_members"]]
+        if len(packages) != 1 or packages[0]["name"] not in providers:
+            raise ValueError("Provider workspace must own exactly one concrete implementation")
+        package = packages[0]
+        name = package["name"]
+        directory = root.parents[1] / "providers" / providers[name]
+        if name in members or Path(workspace["workspace_root"]).resolve() != directory.resolve():
+            raise ValueError("Provider workspace is duplicated or outside the collaboration directory")
+        members[name] = package
     locations = {name: root / "crates" / name for name in allowed}
-    locations.update({
-        "aw-provider-sec-core": root / "providers/sec-core",
-        "aw-provider-tokenless": root / "providers/tokenless",
-    })
+    locations.update({name: root.parents[1] / "providers" / directory for name, directory in providers.items()})
     for name, package in members.items():
         directory = locations[name]
         if Path(package["manifest_path"]).resolve() != (directory / "Cargo.toml").resolve():
@@ -101,6 +112,8 @@ def structure(metadata: dict, root: Path) -> None:
             ):
                 raise ValueError(f"{name}: dependency must come from the locked registry")
     source_sizes(root)
+    for name in providers:
+        source_sizes(locations[name])
 
 
 def source_sizes(root: Path) -> None:

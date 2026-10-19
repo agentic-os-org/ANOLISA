@@ -266,6 +266,7 @@ legacy code; it does not rename installed commands, packages, or release tags.
 | Directory | Contents |
 |---|---|
 | [`src/`](src/) | Runtime components, including AW, cosh-ng, observability, security, memory, and sandbox capabilities. Each component keeps its own build and test entry points. |
+| [`providers/`](providers/README.md) | AW Provider collaboration: independent implementation workspaces, examples and contract tests. |
 | [`distribution/`](distribution/) | Distribution tooling. `anolisa/` owns the installation CLI, component manifests, and packaging resources. |
 | [`benchmark/`](benchmark/) | Cross-component evaluation runners: ClawEval, SWE, and Terminal Bench. Component-specific benchmarks stay with their components. |
 | [`deprecated/`](deprecated/) | Retained legacy implementations. `copilot-shell/` is deprecated for new development; its existing build, install, CI, and release paths remain available until a separate retirement. |

@@ -43,7 +43,9 @@ AW 响应数据返回。Host 独立处理 `on_error`。
 
 ## 验收边界
 
-`cargo test --locked -p aw-provider-sec-core` 覆盖公开 CLI fixture、请求绑定、离线
+从仓库根目录执行。
+
+`cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml` 覆盖公开 CLI fixture、请求绑定、离线
 操作、配置拒绝、精确 argv、判定与故障映射、预算和输出上限，以及 Host 取消时
 内层 CLI 的终止，以及 stdin 保持打开、Provider 等待 EOF 时的外层期限清理。
 常规 AW gate 同时运行这些测试与既有 Provider/Host/Core 测试。

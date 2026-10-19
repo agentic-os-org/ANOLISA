@@ -38,12 +38,12 @@ on `aw-service`.
 
 | Cargo package and binary | Directory | Responsibility | Framework dependencies |
 | --- | --- | --- | --- |
-| `aw-provider-sec-core` | `providers/sec-core/` | Bridge the sec-core CLI for security checks | exec, provider |
+| `aw-provider-sec-core` | `providers/agent-sec-core/` | Bridge the sec-core CLI for security checks | exec, provider |
 | `aw-provider-tokenless` | `providers/tokenless/` | Bridge the Tokenless CLI for output compression | exec, provider |
 
-These implementations currently share the framework's Cargo workspace for builds
-and tests, but connect as separate processes and are not part of the eight framework
-crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
+These implementations each own an independent Cargo workspace and lockfile at
+the repository root. They connect as separate processes and are not part of the
+eight framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](providers.md).
 
 ## One Hook request
@@ -78,8 +78,8 @@ contracts and are not interchangeable call layers.
 ## Directories and source entry points
 
 `src/aw/Cargo.toml` defines only the workspace. Eight framework crates live in
-`crates/`; two concrete Providers live in `providers/`, each with its own source
-and tests. The former root `src/` contracts code now lives in `crates/aw-contracts/`.
+`crates/`; two concrete Providers live in the repository-root `providers/`, each
+with its own workspace, source and tests. The former root `src/` contracts code now lives in `crates/aw-contracts/`.
 
 `providers/` is a collaboration space for first-party and community implementations.
 Providers can also ship independently and connect through the process protocol.
@@ -93,7 +93,7 @@ and packaging scope.
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
 | `crates/aw-core/src/journal.rs` | Durable audit storage |
 | `crates/aw-contracts/src/registry.rs` | Contract schemas embedded in the program |
-| `providers/sec-core/`, `providers/tokenless/` | Concrete Providers, configuration examples, and tests |
+| `../../providers/agent-sec-core/`, `../../providers/tokenless/` | Concrete Providers, configuration examples, and tests |
 | `adapters/` | Packaged Python/JavaScript native bridge assets |
 | `scripts/`, `tests/` | Workspace checks, cross-language vectors, and native acceptance |
 | `docs/design/` | Protocol contracts, boundaries, and design rationale |

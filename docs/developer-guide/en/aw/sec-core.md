@@ -38,11 +38,11 @@ Build the AW Provider and local Host example from source:
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-provider-sec-core
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 cargo build --locked -p aw-host --example host
 ```
 
-The Provider binary is `target/debug/aw-provider-sec-core`. Its invocation is:
+The Provider binary is `../../providers/agent-sec-core/target/debug/aw-provider-sec-core`. Its invocation is:
 
 ```text
 aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
@@ -90,7 +90,7 @@ unhealthy replies, a non-root peer, missing components and deadlines remain
 unavailable. Private helper output is not returned.
 
 The separate `aw-sec-core-health/v1alpha1` JSON schema is published at
-`src/aw/providers/sec-core/schemas/health-v1alpha1.schema.json` with
+`providers/agent-sec-core/schemas/health-v1alpha1.schema.json` with
 reachable/unavailable fixtures in `tests/fixtures/`. `helper_installed` means
 only that the helper file exists; `socket_configured` means an absolute socket
 path was supplied. Only successful authenticated health yields
@@ -108,7 +108,7 @@ has no automatic service installation, upgrade or removal bridge.
 
 ## Configure a Provider
 
-Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/sec-core/examples/aw.yaml)
+Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)
 to `aw.sec-core.yaml` and replace its executable and socket paths. The sample
 starts in `mode: observe` with `on_error: report` so local evaluation does not
 request blocking. For blocking, set `mode: block` and admit `[observe, block]`

@@ -10,8 +10,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: &str) -> Self {
-        let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tokenless-validation");
+        let build =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
         fs::create_dir_all(&build).unwrap();
         let root = tempfile::tempdir_in(fs::canonicalize(build).unwrap()).unwrap();
         let cli = root.path().join("tokenless");

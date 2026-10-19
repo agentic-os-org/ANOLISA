@@ -16,3 +16,15 @@ thiserror = { workspace = true }
 [dev-dependencies]
 libc = { workspace = true }
 jsonschema = { workspace = true }
+
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+aw-exec = { path = "../../src/aw/crates/aw-exec" }
+aw-provider = { path = "../../src/aw/crates/aw-provider" }
+jsonschema = { version = "0.53", default-features = false }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

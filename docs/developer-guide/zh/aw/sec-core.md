@@ -32,11 +32,11 @@ AW 不向 sec-core 添加命令或依赖。
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-provider-sec-core
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 cargo build --locked -p aw-host --example host
 ```
 
-Provider 二进制位于 `target/debug/aw-provider-sec-core`，启动参数为：
+Provider 二进制位于 `../../providers/agent-sec-core/target/debug/aw-provider-sec-core`，启动参数为：
 
 ```text
 aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
@@ -76,7 +76,7 @@ AW 移除 sec-core 测试绕过环境变量。helper 非零退出、无效/不�
 后台、组件缺失和超时均保持 unavailable；不返回 helper 私有输出。
 
 独立 `aw-sec-core-health/v1alpha1` JSON schema 位于
-`src/aw/providers/sec-core/schemas/health-v1alpha1.schema.json`，
+`providers/agent-sec-core/schemas/health-v1alpha1.schema.json`，
 `tests/fixtures/` 包含可达和不可用 fixture。`helper_installed` 只说明文件存在；
 `socket_configured` 只说明传入了绝对 socket 路径。认证健康成功后才返回
 `backend: authenticated_reachable`。`admission` 和 `check_result` 保持
@@ -90,7 +90,7 @@ AW 卸载只移除本包回执拥有的 helper/模板，保留独立管理的系
 
 ## 配置 Provider
 
-复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/sec-core/examples/aw.yaml)为
+复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)为
 `aw.sec-core.yaml`，替换可执行文件与 socket 路径。示例使用 `mode: observe` 和
 `on_error: report`，本地评估不会请求阻断。需要阻断时，将 `mode` 改为 `block`，
 并在 before 步骤中准入 `[observe, block]`。`on_error: block` 单独控制执行故障时

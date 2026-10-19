@@ -4,9 +4,10 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_ci_checks import GateFixture, gate
-from check_inventory import collect, inventory
+from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
 from check_matrix import END, START, table, validate
 
@@ -103,6 +104,50 @@ class MatrixTests(GateFixture):
 
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
+
+    def test_independent_workspaces_preserve_the_complete_matrix(self) -> None:
+        names = {target.split("/", 1)[0] for target in self.runnable}
+        names.update(target.split("/", 1)[0] for target in self.matrix["opt_in_targets"])
+        providers = {"aw-provider-sec-core", "aw-provider-tokenless"}
+
+        def workspace(packages: set[str], root: Path) -> dict:
+            return {
+                "workspace_root": str(root),
+                "workspace_members": sorted(packages),
+                "packages": [{"id": name, "name": name} for name in sorted(packages)],
+            }
+
+        metadata = workspace(names - providers, self.root)
+        metadata["provider_workspaces"] = [
+            workspace({name}, self.root / name) for name in sorted(providers)
+        ]
+        (self.root / "tests").mkdir()
+        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+            matrix = copy.deepcopy(self.matrix)
+            if mode == "unknown-opt-in":
+                matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
+            (self.root / "tests/regression-matrix.json").write_text(json.dumps(matrix))
+
+            def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
+                owned = set(data["workspace_members"])
+                self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
+                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                    return {}
+                result = {
+                    target: tests for target, tests in self.runnable.items()
+                    if target.split("/", 1)[0] in owned
+                }
+                if mode == "duplicate-target":
+                    result["duplicate/test/target"] = {"case"}
+                return result
+
+            with self.subTest(mode=mode), patch("check_inventory.collect", side_effect=collected) as build:
+                if mode == "valid":
+                    check_inventory(self.root, metadata, object())
+                    self.assertEqual(build.call_count, 3)
+                else:
+                    with self.assertRaises(ValueError):
+                        check_inventory(self.root, metadata, object())
 
     def test_each_required_case_must_exist_and_be_runnable(self) -> None:
         for name, case in self.matrix["cases"].items():

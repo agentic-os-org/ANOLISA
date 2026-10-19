@@ -5,10 +5,12 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'src/aw/**'
+      - 'providers/**'
       - '.github/workflows/aw-ci.yml'
   pull_request:
     paths:
       - 'src/aw/**'
+      - 'providers/**'
   merge_group:
   workflow_dispatch:
     inputs:
@@ -74,7 +76,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.selected == 'true'
         with:
-          workspaces: src/aw
+          workspaces: |
+            src/aw
+            providers/agent-sec-core
+            providers/tokenless
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks

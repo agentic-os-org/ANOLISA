@@ -18,8 +18,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let target =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
         fs::create_dir_all(&target).unwrap();
         let root = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
         let fixture = Self { root };

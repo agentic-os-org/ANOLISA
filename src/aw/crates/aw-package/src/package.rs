@@ -151,20 +151,22 @@ impl Selection {
         if matches!(self, Self::Core | Self::All) {
             aw.push("aw-service");
         }
-        if matches!(self, Self::SecCore | Self::All) {
-            aw.push("aw-provider-sec-core");
-        }
-        if matches!(self, Self::Tokenless | Self::All) {
-            aw.push("aw-provider-tokenless");
-        }
         let mut builds = vec![(repo.join("src/aw"), aw)];
         if matches!(self, Self::SecCore | Self::All) {
+            builds.push((
+                repo.join("providers/agent-sec-core"),
+                vec!["aw-provider-sec-core"],
+            ));
             builds.push((
                 repo.join("src/agent-sec-core/v2"),
                 vec!["asc-cli", "asc-daemon"],
             ));
         }
         if matches!(self, Self::Tokenless | Self::All) {
+            builds.push((
+                repo.join("providers/tokenless"),
+                vec!["aw-provider-tokenless"],
+            ));
             builds.push((repo.join("src/tokenless"), vec!["tokenless-cli"]));
         }
         builds
@@ -304,6 +306,7 @@ fn stage(
         .tempdir_in(output)?;
     let aw = repo.join("src/aw/target/release");
     let sec = repo.join("src/agent-sec-core/v2/target/release");
+    let sec_provider = repo.join("providers/agent-sec-core/target/release");
     let mut components = Vec::new();
     for name in selection.components() {
         let root = stage.path().join(name);
@@ -321,7 +324,10 @@ fn stage(
             }
         } else if *name == "aw-provider-tokenless" {
             for (binary, directory) in [
-                ("aw-provider-tokenless", aw.clone()),
+                (
+                    "aw-provider-tokenless",
+                    repo.join("providers/tokenless/target/release"),
+                ),
                 ("tokenless", repo.join("src/tokenless/target/release")),
                 ("rtk", aw.clone()),
             ] {
@@ -336,7 +342,7 @@ fn stage(
             }
         } else {
             for (binary, directory) in [
-                ("aw-provider-sec-core", &aw),
+                ("aw-provider-sec-core", &sec_provider),
                 ("agent-sec-cli", &sec),
                 ("agent-sec-daemon", &sec),
                 ("agent-sec-daemon-health", &sec),

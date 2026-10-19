@@ -6,8 +6,6 @@ members = [
     "crates/aw-exec",
     "crates/aw-host",
     "crates/aw-provider",
-    "providers/sec-core",
-    "providers/tokenless",
     "crates/aw-service",
     "crates/aw-package",
 ]
@@ -24,7 +22,6 @@ aw-contracts = { path = "crates/aw-contracts" }
 aw-exec = { path = "crates/aw-exec" }
 aw-host = { path = "crates/aw-host" }
 aw-provider = { path = "crates/aw-provider" }
-aw-provider-sec-core = { path = "providers/sec-core" }
 jsonschema = { version = "0.53", default-features = false }
 libc = "0.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }

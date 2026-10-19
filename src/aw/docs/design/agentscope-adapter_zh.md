@@ -204,9 +204,13 @@ Protocol v2 Tokenless CLI。scanner 使用 fixture；Toolkit 记录执行，不�
 保留。middleware 单测另验证 streaming 对象身份、响应封装保留和无效替换回退。
 
 ```bash
-cargo build --locked --workspace
+cargo build --locked -p aw-service --bin aw
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
+cargo build --locked --manifest-path ../../providers/tokenless/Cargo.toml
 python -B crates/aw-service/tests/fixtures/agentscope/middleware.py
 python -B crates/aw-service/tests/agentscope_lifecycle.py \
   --aw target/debug/aw --tokenless /absolute/path/to/tokenless \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless \
   --output target/agentscope-lifecycle
 ```

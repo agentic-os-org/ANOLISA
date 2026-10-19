@@ -39,7 +39,7 @@ Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生
 sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。
 
-受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml)，
+受支持的 target 接入时复制[共用示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
 替换可执行路径，并将 `RTK_SHA256_FROM_RECEIPT` 替换为
 `PREFIX/.aw-packages/aw-provider-tokenless.json` 中 RTK 条目的 `sha256`，
 将两个 state 目录都放到不可变安装前缀之外。原生 profile 和各框架
@@ -217,10 +217,10 @@ view 失败只影响对应卡片。每 Provider 最多两秒，完整快照最�
 在 Linux 上从仓库根目录执行：
 
 ```bash
-cargo build --locked --manifest-path src/aw/Cargo.toml -p aw-provider-tokenless
+cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 ```
 
-将生成的 `src/aw/target/debug/aw-provider-tokenless` 和
+将生成的 `providers/tokenless/target/debug/aw-provider-tokenless` 和
 `src/tokenless/target/debug/tokenless` 路径填入共用示例。干净源码的 Preview 构建器
 支持 `--component tokenless` 或 `--component all`。

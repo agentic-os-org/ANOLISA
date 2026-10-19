@@ -50,7 +50,7 @@ compression after the existing after steps. Installing a component
 does not enable it. The existing plain `sec-core` selection retains its behavior.
 
 For supported targets, copy the
-[shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/providers/tokenless/examples/aw.yaml),
+[shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
 replace its executable paths and `RTK_SHA256_FROM_RECEIPT` with the RTK entry's
 `sha256` from `PREFIX/.aw-packages/aw-provider-tokenless.json`, and keep both state
 directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
@@ -269,10 +269,10 @@ registration, errors and correlation.
 From the repository root on Linux:
 
 ```bash
-cargo build --locked --manifest-path src/aw/Cargo.toml -p aw-provider-tokenless
+cargo build --locked --manifest-path providers/tokenless/Cargo.toml
 cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 ```
 
-Use the resulting `src/aw/target/debug/aw-provider-tokenless` and
+Use the resulting `providers/tokenless/target/debug/aw-provider-tokenless` and
 `src/tokenless/target/debug/tokenless` paths in the shared example. The clean-source
 Preview builder accepts `--component tokenless` or `--component all`.

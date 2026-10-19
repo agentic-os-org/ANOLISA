@@ -19,3 +19,18 @@ sha2 = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 aw-provider-sec-core = { workspace = true }
+
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+aw-exec = { path = "../../src/aw/crates/aw-exec" }
+aw-provider = { path = "../../src/aw/crates/aw-provider" }
+aw-provider-sec-core = { path = "../agent-sec-core" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+shlex = "1"
+tempfile = "3"
+thiserror = "2"

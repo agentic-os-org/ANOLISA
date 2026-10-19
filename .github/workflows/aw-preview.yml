@@ -45,6 +45,8 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             src/aw
+            providers/agent-sec-core
+            providers/tokenless
             docs/developer-guide/en/aw
       - name: Validate native coverage and select pinned runtimes
         id: matrix
@@ -80,6 +82,8 @@ jobs:
           save-if: ${{ github.event_name == 'schedule' }}
           workspaces: |
             src/aw
+            providers/agent-sec-core
+            providers/tokenless
             src/agent-sec-core/v2
             src/tokenless
       - name: Test installer and build the four artifacts
@@ -99,9 +103,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           cargo build --locked --release --manifest-path src/aw/Cargo.toml -p aw-provider --example policy
           mkdir -p "$AW_PREVIEW_DIR/native"
-          cp src/aw/target/release/{aw,aw-provider-tokenless,aw-provider-sec-core,rtk} "$AW_PREVIEW_DIR/native/"
+          cp src/aw/target/release/{aw,rtk} providers/agent-sec-core/target/release/aw-provider-sec-core providers/tokenless/target/release/aw-provider-tokenless "$AW_PREVIEW_DIR/native/"
           cp src/aw/target/release/examples/policy src/tokenless/target/release/tokenless "$AW_PREVIEW_DIR/native/"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/aw/Cargo.toml > "$AW_PREVIEW_DIR/native/aw-packages.json"
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/agent-sec-core/Cargo.toml > "$AW_PREVIEW_DIR/native/sec-core-provider-packages.json"
+          cargo metadata --locked --no-deps --format-version 1 --manifest-path providers/tokenless/Cargo.toml > "$AW_PREVIEW_DIR/native/tokenless-provider-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/agent-sec-core/v2/Cargo.toml > "$AW_PREVIEW_DIR/native/sec-core-packages.json"
           cargo metadata --locked --no-deps --format-version 1 --manifest-path src/tokenless/Cargo.toml > "$AW_PREVIEW_DIR/native/tokenless-packages.json"
           rustc --version > "$AW_PREVIEW_DIR/native/rustc-version.txt"
@@ -119,7 +125,7 @@ jobs:
         env:
           AW_SEC_HEALTH_TEST_HELPER: ${{ github.workspace }}/src/agent-sec-core/v2/target/release/agent-sec-daemon-health
         run: |
-          cargo test --locked --manifest-path src/aw/Cargo.toml \
+          cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml \
             -p aw-provider-sec-core --test health -- --ignored
       - name: Verify Tokenless PreTool and PostTool contracts
         env:
@@ -131,9 +137,9 @@ jobs:
           export AW_TOKENLESS_TEST_RTK="$GITHUB_WORKSPACE/src/aw/target/release/rtk"
           test -x "$AW_TOKENLESS_TEST_CLI"
           test -x "$AW_TOKENLESS_TEST_RTK"
-          cargo test --locked --manifest-path src/aw/Cargo.toml \
+          cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
             -p aw-provider-tokenless --test provider --test pretool --test managed_rtk -- --ignored
-          cargo test --locked --manifest-path src/aw/Cargo.toml \
+          cargo test --locked --manifest-path providers/tokenless/Cargo.toml \
             -p aw-provider-tokenless --test views -- --ignored
       - name: Verify installed packages and service lifecycle
         shell: bash
@@ -162,7 +168,7 @@ jobs:
           AW_TOKENLESS_TEST_CLI="$root/combined/libexec/aw/providers/tokenless/tokenless" \
           AW_TOKENLESS_TEST_RTK="$root/combined/libexec/aw/providers/tokenless/rtk" \
           TOKENLESS_STATS_ENABLED=0 TOKENLESS_SLS_ENABLED=0 \
-            timeout 120 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \
+            timeout 120 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/providers/tokenless/Cargo.toml" \
             -p aw-provider-tokenless --test managed_rtk -- --ignored
           umask 0002
           AW_TEST_PREFIX="$root/combined" AW_TEST_WORK_DIR="$runtime/demo" \

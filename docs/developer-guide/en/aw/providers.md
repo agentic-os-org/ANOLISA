@@ -4,17 +4,17 @@
 
 Providers connect capabilities such as safety checks and compression to AW through
 a process protocol. They can be developed, distributed, and upgraded independently,
-or contributed to the [Provider directory](../../../../src/aw/providers/README.md).
+or contributed to the [Provider directory](../../../../providers/README.md).
 
 ## Directories and responsibilities
 
 ```text
-src/aw/
-├── crates/                  # AW framework
-│   └── aw-provider/         # Protocol and capability admission library
-└── providers/               # Implementations and collaboration
-    ├── sec-core/            # Security Provider
-    └── tokenless/           # Compression Provider
+ANOLISA/
+├── src/aw/crates/           # AW framework
+│   └── aw-provider/         # Shared protocol and admission
+└── providers/               # Independent implementation workspaces
+    ├── agent-sec-core/
+    └── tokenless/
 ```
 
 `aw-provider` is the protocol library shared by the Host and implementations.
@@ -41,16 +41,23 @@ continues to manage the user's Agent and model configuration.
 ## Contribute an implementation
 
 Submit under `providers/<provider>/` with a maintainer, source and license,
-bilingual instructions, and offline tests. Rust packages join the workspace and
+bilingual instructions, and offline tests. Each Rust package owns its workspace and lockfile and follows the
 [layout checks](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/scripts/check_layout.py). Wire new tests into
-the AW gate; see the [contribution contract](../../../../src/aw/providers/README.md).
+the AW gate; see the [contribution contract](../../../../providers/README.md).
 
-Build and test the first-party Providers separately from `src/aw`:
+Build and test the first-party Providers from the repository root:
 
 ```bash
-cargo build --locked -p aw-provider-sec-core -p aw-provider-tokenless
-cargo test --locked -p aw-provider-sec-core -p aw-provider-tokenless
+cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
+cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
+cargo build --locked --manifest-path providers/tokenless/Cargo.toml
+cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 ```
+
+The bundled workspaces currently use repository-local AW SDK paths; Tokenless
+composition tests also depend on the sec-core bridge. Independent SDK publication
+and artifact-based composition are deferred. Existing Preview packages retain
+their matching-version and matching-source installation rules.
 
 `aw-build` and `aw-package` currently package and install built-in components only;
 they do not automatically install arbitrary community Providers. Independent

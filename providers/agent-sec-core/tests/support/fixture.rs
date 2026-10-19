@@ -15,8 +15,7 @@ pub struct Directory(pub PathBuf);
 
 impl Directory {
     pub fn new(case: Value) -> Self {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/sec-core-provider-tests");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/sec-core-provider-tests");
         fs::create_dir_all(&root).unwrap();
         let path = root.join(format!(
             "{}-{}",

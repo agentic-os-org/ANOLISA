@@ -11,8 +11,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(mode: &str) -> Self {
-        let build =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
+        let build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
         fs::create_dir_all(&build).unwrap();
         let root = tempfile::tempdir_in(build).unwrap();
         let cli = root.path().join("tokenless");
@@ -178,7 +177,7 @@ fn bundled_cli_compresses_losslessly_without_a_recovery_entry() {
         std::env::var_os("AW_TOKENLESS_TEST_CLI")
             .expect("set AW_TOKENLESS_TEST_CLI to the built CLI"),
     );
-    let build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
+    let build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
     fs::create_dir_all(&build).unwrap();
     let root = tempfile::tempdir_in(build).unwrap();
     let state = root.path().join("state");

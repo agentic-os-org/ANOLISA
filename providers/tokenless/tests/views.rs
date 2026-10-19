@@ -21,7 +21,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: &str, store: bool) -> Self {
-        let build = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/panel-validation");
+        let build = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/panel-validation");
         fs::create_dir_all(&build).unwrap();
         let root = tempfile::tempdir_in(build).unwrap();
         let cli = root.path().join("tokenless");

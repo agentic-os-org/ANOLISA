@@ -96,4 +96,23 @@ def check_inventory(root: Path, metadata: dict, run: Callable) -> None:
         not isinstance(reason, str) or not reason.strip() for reason in opt_in.values()
     ):
         raise ValueError("opt-in test targets require an explicit acceptance rationale")
-    validate(matrix, collect(root, metadata, run, frozenset(opt_in)), root)
+    workspaces = [(root, metadata)] + [
+        (Path(provider["workspace_root"]), provider)
+        for provider in metadata.get("provider_workspaces", [])
+    ]
+    targets = set()
+    runnable = {}
+    for directory, workspace in workspaces:
+        names = {
+            p["name"] for p in workspace["packages"]
+            if p["id"] in workspace["workspace_members"]
+        }
+        selected = frozenset(key for key in opt_in if key.split("/")[0] in names)
+        inventory = collect(directory, workspace, run, selected)
+        if runnable.keys() & inventory.keys():
+            raise ValueError("test target belongs to multiple workspaces")
+        runnable.update(inventory)
+        targets.update(selected)
+    if targets != opt_in.keys():
+        raise ValueError(f"unknown opt-in test targets: {sorted(opt_in.keys() - targets)}")
+    validate(matrix, runnable, root)

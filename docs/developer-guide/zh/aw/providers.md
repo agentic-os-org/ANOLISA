@@ -3,17 +3,17 @@
 [English](../../en/aw/providers.md)
 
 Provider 将安全检查、输出压缩等能力接入 AW。它通过进程协议工作，可以独立开发、
-分发和升级，也可以收录到 [Provider 协作目录](../../../../src/aw/providers/README_zh.md)。
+分发和升级，也可以收录到 [Provider 协作目录](../../../../providers/README_zh.md)。
 
 ## 目录与职责
 
 ```text
-src/aw/
-├── crates/                  # AW 通用框架
-│   └── aw-provider/         # 协议与能力准入库
-└── providers/               # 具体实现与协作入口
-    ├── sec-core/            # 安全 Provider
-    └── tokenless/           # 压缩 Provider
+ANOLISA/
+├── src/aw/crates/           # AW 通用框架
+│   └── aw-provider/         # 通用协议与准入
+└── providers/               # 各实现独立 workspace
+    ├── agent-sec-core/
+    └── tokenless/
 ```
 
 `aw-provider` 是供 Host 和实现方复用的协议库。`providers/` 中的每个目录则对应一项
@@ -35,15 +35,21 @@ Provider 返回候选效果；Adapter 负责在原生框架中采用。自定义
 ## 收录到协作目录
 
 按 `providers/<provider>/` 提交代码，附维护人、来源和许可证、双语使用说明及离线测试。
-Rust 包加入 workspace，并更新[布局检查](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/scripts/check_layout.py)。
-新测试应接入 AW 门禁；完整贡献约定见[协作目录](../../../../src/aw/providers/README_zh.md)。
+每个 Rust 包自带 workspace 和锁文件，并更新[布局检查](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/scripts/check_layout.py)。
+新测试应接入 AW 门禁；完整贡献约定见[协作目录](../../../../providers/README_zh.md)。
 
-现有第一方 Provider 可分别构建、测试。以下命令从 `src/aw` 执行。
+以下命令从仓库根目录执行。
 
 ```bash
-cargo build --locked -p aw-provider-sec-core -p aw-provider-tokenless
-cargo test --locked -p aw-provider-sec-core -p aw-provider-tokenless
+cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
+cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
+cargo build --locked --manifest-path providers/tokenless/Cargo.toml
+cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 ```
+
+目前两个 workspace 通过仓库内路径复用 AW SDK，Tokenless 组合测试还依赖 sec-core
+桥接库。SDK 独立发布和基于产物的组合测试留待后续。现有 Preview 包继续要求
+core 与 Provider 使用相同版本和源码提交。
 
 `aw-build` 和 `aw-package` 当前只打包、安装内置组件，不能自动安装任意社区 Provider。
 独立安装不影响协议接入；加入统一安装包需另补打包清单和安装验收。

@@ -34,10 +34,10 @@ AW 框架包含 `crates/` 下的 8 个 crate。具体 Provider 在 `providers/` 
 
 | Cargo 包与二进制 | 目录 | 职责 | 依赖的框架 crate |
 | --- | --- | --- | --- |
-| `aw-provider-sec-core` | `providers/sec-core/` | 桥接 sec-core CLI，提供安全检查 | exec、provider |
+| `aw-provider-sec-core` | `providers/agent-sec-core/` | 桥接 sec-core CLI，提供安全检查 | exec、provider |
 | `aw-provider-tokenless` | `providers/tokenless/` | 桥接 Tokenless CLI，提供输出压缩 | exec、provider |
 
-这两个实现目前与框架共用 Cargo workspace，便于统一构建和测试，但通过独立进程
+这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
 接入，不计入 8 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
 其他团队可独立开发、分发 Provider，见[协作指南](providers.md)。
 
@@ -66,7 +66,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 ## 目录与代码入口
 
 `src/aw/Cargo.toml` 只定义 workspace。8 个通用框架 crate 位于 `crates/`，
-2 个具体 Provider 位于 `providers/`，各自保存源码和测试。原来根目录 `src/`
+2 个具体 Provider 位于仓库根 `providers/`，各自拥有 workspace、源码和测试。原来根目录 `src/`
 中的 contracts 代码已迁入 `crates/aw-contracts/`。
 
 `providers/` 是协作入口，允许收录第一方与社区实现；Provider 也可以独立发布，
@@ -79,7 +79,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
 | `crates/aw-core/src/journal.rs` | 持久审计实现 |
 | `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
-| `providers/sec-core/`、`providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
+| `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
 | `adapters/` | 随包分发的 Python/JavaScript 原生桥接资源 |
 | `scripts/`、`tests/` | workspace 检查、跨语言向量检查和原生验收 |
 | `docs/design/` | 协议约定、边界与设计理由 |

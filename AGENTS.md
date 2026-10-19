@@ -363,7 +363,8 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **anolisa** | [`distribution/anolisa/AGENTS.md`](distribution/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
-| **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Independent Provider collaboration directory, eight framework crates and native Hook gates |
+| **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
+| **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
 
 ## 11.1 File Placement & Documentation Structure
 

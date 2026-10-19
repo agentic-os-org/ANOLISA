@@ -100,7 +100,6 @@ Its pinned npm lock records package integrity and transitive dependencies:
 ```bash
 cd src/aw
 cargo build --locked -p aw-service --bin aw
-cargo build --locked -p aw-provider-tokenless
 mkdir -p target/pi-sdk-validation
 cp crates/aw-service/tests/fixtures/pi/package*.json target/pi-sdk-validation/
 npm ci --prefix target/pi-sdk-validation --ignore-scripts --no-audit --no-fund
@@ -120,14 +119,15 @@ CLI, business deployment, model or remote-executor acceptance.
 Use the same pinned SDK directory and build the actual Tokenless CLI and Providers:
 
 ```bash
-cargo build --locked -p aw-provider-tokenless -p aw-provider-sec-core
+cargo build --locked --manifest-path ../../providers/tokenless/Cargo.toml
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 cargo build --locked --manifest-path ../tokenless/Cargo.toml \
   --target-dir target/t -p tokenless-cli
 python3 crates/aw-service/tests/fixtures/pi/tokenless-smoke.py \
   --aw target/debug/aw --root target/pi-sdk-validation \
-  --tokenless-provider target/debug/aw-provider-tokenless \
+  --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless \
   --tokenless-cli target/t/debug/tokenless \
-  --sec-core-provider target/debug/aw-provider-sec-core
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core
 ```
 
 This runs the real SDK, AW, Tokenless Provider and Protocol v2 CLI. The model

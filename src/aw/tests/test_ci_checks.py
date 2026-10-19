@@ -1,5 +1,6 @@
 """Exercise the AW gate's failure boundaries without compiling Rust."""
 
+from copy import deepcopy
 import importlib.util
 import json
 import os
@@ -144,6 +145,16 @@ class ScopeTests(GateFixture):
             with self.assertRaises(ValueError):
                 gate.sha(invalid)
 
+    def test_provider_only_changes_select_the_gate(self) -> None:
+        base = self.init_git()
+        head = self.commit("providers/tokenless/src/lib.rs", "Provider change")
+        event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+        self.assertTrue(gate.scope("pull_request", event, head, self.root))
+        self.git("rm", "providers/tokenless/src/lib.rs")
+        self.git("commit", "-qm", "remove Provider")
+        removed = self.git("rev-parse", "HEAD")
+        self.assertTrue(gate.scope("push", {"before": head, "after": removed}, removed, self.root))
+
     def test_merge_group_selects_only_aw_changes(self) -> None:
         base = self.init_git()
         head = self.commit("src/tokenless/unrelated.txt", "unrelated")
@@ -185,10 +196,12 @@ class GateTests(GateFixture):
     def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
         from contextlib import chdir
 
+        self.root = self.root / "src/aw"
+        self.root.mkdir(parents=True)
         core = self.root / "crates/aw-core"
         provider_directories = {
-            "aw-provider-sec-core": self.root / "providers/sec-core",
-            "aw-provider-tokenless": self.root / "providers/tokenless",
+            "aw-provider-sec-core": self.root.parents[1] / "providers/agent-sec-core",
+            "aw-provider-tokenless": self.root.parents[1] / "providers/tokenless",
         }
         packages = []
         for name, directory, dependencies in (
@@ -214,7 +227,7 @@ class GateTests(GateFixture):
                 ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "semver", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
             (
-                "aw-provider-sec-core", self.root / "providers/sec-core",
+                "aw-provider-sec-core", self.root.parents[1] / "providers/agent-sec-core",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"],
             ),
             (
@@ -222,7 +235,7 @@ class GateTests(GateFixture):
                 ["aw-config", "aw-exec", "aw-service", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile"],
             ),
             (
-                "aw-provider-tokenless", self.root / "providers/tokenless",
+                "aw-provider-tokenless", self.root.parents[1] / "providers/tokenless",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"],
             ),
         ):
@@ -247,20 +260,40 @@ class GateTests(GateFixture):
                     ],
                 }
             )
-        metadata = {"packages": packages, "workspace_members": [p["id"] for p in packages]}
+        metadata = {
+            "packages": packages,
+            "workspace_members": [p["id"] for p in packages if p["name"] not in provider_directories],
+            "provider_workspaces": [
+                {"packages": [p], "workspace_members": [p["id"]],
+                 "workspace_root": str(provider_directories[p["name"]])}
+                for p in packages if p["name"] in provider_directories
+            ],
+        }
         gate.structure(metadata, self.root)
+        for workspaces in ([], metadata["provider_workspaces"][:1],
+                           metadata["provider_workspaces"][:1] * 2):
+            with self.assertRaises(ValueError):
+                gate.structure({**metadata, "provider_workspaces": workspaces}, self.root)
+        invalid = deepcopy(metadata)
+        invalid["workspace_members"].append("aw-provider-sec-core")
+        with self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
+        invalid = deepcopy(metadata)
+        invalid["provider_workspaces"][0]["workspace_root"] = str(self.root)
+        with self.assertRaises(ValueError):
+            gate.structure(invalid, self.root)
         for package, dependency in (
             (0, "aw-core"), (1, "tokio"), (1, "semver"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
-            (6, "aw-contracts"), (6, "tokio"),
+            (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),
             (7, "asc-daemon-client"), (7, "aw-core"),
         ):
-            invalid = json.loads(json.dumps(metadata))
+            invalid = deepcopy(metadata)
             invalid["packages"][package]["dependencies"].append({"name": dependency})
             with self.assertRaises(ValueError):
                 gate.structure(invalid, self.root)
-        invalid = json.loads(json.dumps(metadata))
+        invalid = deepcopy(metadata)
         invalid["packages"][1]["dependencies"][0]["path"] = str(self.root / "other-contracts")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
@@ -270,19 +303,19 @@ class GateTests(GateFixture):
         }
         with chdir(self.root), self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
-        invalid = json.loads(json.dumps(metadata))
+        invalid = deepcopy(metadata)
         invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
         for dependency in ("aw-config", "aw-exec", "aw-provider"):
-            invalid = json.loads(json.dumps(metadata))
+            invalid = deepcopy(metadata)
             local = next(d for d in invalid["packages"][5]["dependencies"] if d["name"] == dependency)
             local["path"] = str(self.root / "other-local-crate")
             with self.subTest(dependency=dependency), self.assertRaises(ValueError):
                 gate.structure(invalid, self.root)
         with self.assertRaises(ValueError):
             gate.structure({**metadata, "workspace_members": ["aw-contracts"]}, self.root)
-        invalid = json.loads(json.dumps(metadata))
+        invalid = deepcopy(metadata)
         invalid["packages"][1]["targets"][0]["src_path"] = str(core / "lib.rs")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
@@ -291,7 +324,7 @@ class GateTests(GateFixture):
             ("aw-provider-tokenless", "crates/aw-provider-tokenless"),
             ("aw-provider", "providers/protocol"),
         ):
-            invalid = json.loads(json.dumps(metadata))
+            invalid = deepcopy(metadata)
             package = next(p for p in invalid["packages"] if p["name"] == name)
             package["manifest_path"] = str(self.root / directory / "Cargo.toml")
             with self.subTest(package=name), self.assertRaises(ValueError):
@@ -301,7 +334,7 @@ class GateTests(GateFixture):
             ("manifest_path", str(self.root / "Cargo.toml")),
             ("targets", [{"src_path": str(self.root / "src/lib.rs")}]),
         ):
-            invalid = json.loads(json.dumps(metadata))
+            invalid = deepcopy(metadata)
             invalid["packages"][0][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 gate.structure(invalid, self.root)

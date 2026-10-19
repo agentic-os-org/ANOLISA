@@ -82,8 +82,8 @@ fn staging_cancellation_removes_partial_archives_and_allows_retry() {
     for (name, source) in [
         ("aw", "src/aw"),
         ("aw-package", "src/aw"),
-        ("aw-provider-sec-core", "src/aw"),
-        ("aw-provider-tokenless", "src/aw"),
+        ("aw-provider-sec-core", "providers/agent-sec-core"),
+        ("aw-provider-tokenless", "providers/tokenless"),
         ("tokenless", "src/tokenless"),
         ("rtk", "src/aw"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
@@ -323,7 +323,7 @@ fn sec_core_selection_stages_only_extension_with_matching_core_requirement() {
     let repo = directory.path().canonicalize().unwrap();
     for (name, source) in [
         ("aw-package", "src/aw"),
-        ("aw-provider-sec-core", "src/aw"),
+        ("aw-provider-sec-core", "providers/agent-sec-core"),
         ("agent-sec-cli", "src/agent-sec-core/v2"),
         ("agent-sec-daemon", "src/agent-sec-core/v2"),
         ("agent-sec-daemon-health", "src/agent-sec-core/v2"),
@@ -406,7 +406,7 @@ fn tokenless_extension_stages_without_sec_core_or_native_plugins() {
     let repo = directory.path().canonicalize().unwrap();
     for (name, source) in [
         ("aw-package", "src/aw"),
-        ("aw-provider-tokenless", "src/aw"),
+        ("aw-provider-tokenless", "providers/tokenless"),
         ("tokenless", "src/tokenless"),
         ("rtk", "src/aw"),
     ] {

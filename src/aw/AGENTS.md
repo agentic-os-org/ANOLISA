@@ -31,9 +31,9 @@ and roadmap entries are not evidence of native support.
 ## Provider collaboration and framework architecture
 
 **Concrete Providers MUST live in the independent collaboration directory
-`providers/<provider>/`. Reserve `crates/` for the reusable AW framework.**
+at the repository root, `providers/<provider>/`. Reserve `src/aw/crates/` for the reusable AW framework.**
 Backend-specific security, compression and other integrations belong in this
-Provider space, not in new `crates/aw-provider-<backend>/` directories or framework
+Provider space, not in new `src/aw/crates/aw-provider-<backend>/` directories or framework
 modules. The `aw-provider` crate is the shared protocol library, not an integration.
 
 `providers/` accepts first-party and community implementations, each with its own
@@ -41,10 +41,11 @@ source, schemas, examples and tests. Providers may also live in independent
 repositories, use other languages and ship separately. Runtime integration uses
 `aw-provider/v1alpha1` over stdio and the configured `transport.argv`; it must not
 require a Provider to join this source tree. Follow the
-[Provider contribution guide](providers/README.md).
+[Provider contribution guide](../../providers/README.md).
 
-The two bundled Rust Providers currently share the Cargo workspace for builds and
-tests; this does not change the directory or ownership boundary. Preserve existing
+Each bundled Rust Provider owns its Cargo workspace, lockfile and toolchain.
+The AW workspace contains framework packages only; the gate combines independent
+test inventories without adding Provider members or dependencies to AW. Preserve existing
 package and binary names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
@@ -125,7 +126,7 @@ named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the
 repository-approved `tests/common/mod.rs` convention.
 
-Only PRs changing `src/aw/**` automatically run AW CI. Component internals belong
+Only PRs changing `src/aw/**` or `providers/**` automatically run AW CI. Component internals belong
 in component CI; explicitly validate public contract changes consumed by AW.
 Keep daily checks credential-free. The nightly integration workflow builds all
 Preview packages once and reuses checksummed candidate-SHA binaries for pinned

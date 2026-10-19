@@ -55,7 +55,9 @@ aw-provider` command must switch their Provider argv to this standalone bridge.
 
 ## Validation boundary
 
-`cargo test --locked -p aw-provider-sec-core` exercises public CLI fixtures,
+Run from the repository root.
+
+`cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml` exercises public CLI fixtures,
 request binding, offline operations, config rejection, exact argv, decision and
 failure mapping, budget/output limits, Host cancellation of the nested CLI and
 external deadline cleanup while the Provider waits for EOF on an open stdin.

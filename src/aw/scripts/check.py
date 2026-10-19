@@ -119,7 +119,7 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
             )
         )
     return any(
-        path.startswith("src/aw/")
+        path.startswith(("src/aw/", "providers/"))
         or (
             event_name != "pull_request"
             and path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-preview.yml"}
@@ -184,12 +184,23 @@ def check() -> None:
             capture=True,
         )
     )
+    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    metadata["provider_workspaces"] = []
+    for root in provider_roots:
+        run(["cargo", "fmt", "--all", "--", "--check"], root)
+        metadata["provider_workspaces"].append(json.loads(run(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            root, capture=True,
+        )))
     structure(metadata, AW)
-    run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
     check_inventory(metadata)
-    run(["cargo", "test", "--workspace", "--locked"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "test", "--workspace", "--locked"], root)
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
-    run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], AW)
+    for root in [AW, *provider_roots]:
+        run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)
     if candidate() != actual:
         raise ValueError("checkout changed during validation")
     output(tested_sha=actual)

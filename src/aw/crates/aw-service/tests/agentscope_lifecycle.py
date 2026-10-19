@@ -57,6 +57,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--aw", type=Path, required=True)
     parser.add_argument("--tokenless", type=Path, required=True)
+    parser.add_argument("--tokenless-provider", type=Path, required=True)
+    parser.add_argument("--sec-core-provider", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     assert version("agentscope") == "2.0.6"
@@ -97,7 +99,7 @@ def main() -> None:
             (
                 "security",
                 [
-                    str(aw.parent / "aw-provider-sec-core"),
+                    str(args.sec_core_provider.resolve()),
                     "--cli",
                     str(scanner),
                     "--socket",
@@ -113,7 +115,7 @@ def main() -> None:
             (
                 "tokenless",
                 [
-                    str(aw.parent / "aw-provider-tokenless"),
+                    str(args.tokenless_provider.resolve()),
                     "--cli",
                     str(args.tokenless.resolve()),
                     "--data-dir",

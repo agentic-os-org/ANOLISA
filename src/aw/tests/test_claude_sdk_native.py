@@ -24,7 +24,12 @@ from claude_sdk_callbacks import (
 
 
 def document(
-    python: str, worker: Path, state: Path, mode: str, aw: Path, tokenless: Path | None = None
+    python: str,
+    worker: Path,
+    state: Path,
+    mode: str,
+    tokenless: Path | None = None,
+    tokenless_provider: Path | None = None,
 ) -> dict[str, Any]:
     value = {
         "apiVersion": "aw/v1alpha1",
@@ -99,13 +104,15 @@ def document(
         if mode == "native-hook-invalid-chain":
             value["spec"]["execution"]["default_event_budget_ms"] = 55000
     if tokenless is not None:
+        if tokenless_provider is None:
+            raise ValueError("Tokenless acceptance requires an explicit Provider executable")
         value["spec"]["providers"]["tokenless"] = {
             "protocol": "aw-provider/v1alpha1",
             "transport": {
                 "type": "stdio",
                 "location": "agent",
                 "argv": [
-                    str(aw.parent / "aw-provider-tokenless"),
+                    str(tokenless_provider),
                     "--cli",
                     str(
                         tokenless
@@ -143,7 +150,12 @@ def document(
 
 
 def run_case(
-    aw: Path, worker: Path, output: Path, mode: str, tokenless: Path | None = None
+    aw: Path,
+    worker: Path,
+    output: Path,
+    mode: str,
+    tokenless: Path | None = None,
+    tokenless_provider: Path | None = None,
 ) -> dict[str, Any]:
     state_parent = Path(tempfile.mkdtemp(prefix="s-", dir=output))
     state = state_parent / "s"
@@ -155,7 +167,9 @@ def run_case(
         )
     case = Path(tempfile.mkdtemp(prefix=mode + "-", dir=output))
     config = case / "aw.json"
-    config.write_text(json.dumps(document(sys.executable, worker, state, mode, aw, tokenless)))
+    config.write_text(
+        json.dumps(document(sys.executable, worker, state, mode, tokenless, tokenless_provider))
+    )
     if mode in {"bash-pretool", "bash-pretool-deny"}:
         subprocess.run(["git", "init", "-q", str(case)], check=True, timeout=10)
     env = {
@@ -454,7 +468,10 @@ def main() -> None:
         type=Path,
         help="Also verify Bash optimization using a built Protocol v2 CLI and RTK on PATH",
     )
+    parser.add_argument("--tokenless-provider", type=Path, help="Tokenless Provider executable")
     args = parser.parse_args()
+    if (args.tokenless is None) != (args.tokenless_provider is None):
+        parser.error("--tokenless and --tokenless-provider must be supplied together")
     args.output.mkdir(parents=True, exist_ok=True)
     asyncio.run(check_callback_timeouts(args.output.resolve()))
     asyncio.run(check_callback_payloads(args.output.resolve()))
@@ -510,7 +527,12 @@ def main() -> None:
         ):
             results.append(
                 run_case(
-                    args.aw.resolve(), worker, args.output.resolve(), mode, args.tokenless.resolve()
+                    args.aw.resolve(),
+                    worker,
+                    args.output.resolve(),
+                    mode,
+                    args.tokenless.resolve(),
+                    args.tokenless_provider.resolve(),
                 )
             )
     sessions = [result["session_id"] for result in results if "session_id" in result]

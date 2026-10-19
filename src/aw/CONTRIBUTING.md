@@ -27,7 +27,7 @@ downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
 this gate does not certify other operating systems or minimum supported versions.
 
-For pull requests that change `src/aw/**`,
+For pull requests that change `src/aw/**` or `providers/**`,
 [AW CI](../../.github/workflows/aw-ci.yml) runs these checks against the candidate
 merge commit. Run the command above on Linux before submitting AW changes. If CI
 fails, find the failing command in the job log and rerun it locally from `src/aw`.
@@ -81,7 +81,7 @@ python3 -B -m unittest discover -s tests -p 'test_ci_*.py'
 
 ## Daily CI and nightly integration
 
-PRs run AW checks only when `src/aw/**` changes. The daily gate retains all
+PRs run AW checks only when `src/aw/**` or `providers/**` changes. The daily gate retains all
 credential-free security, Tokenless, lifecycle and Agent/Hook matrix contracts,
 including native-inventory validation and source-size checks. Other components'
 internal changes are owned by their own CI. An externally changed public contract
@@ -149,9 +149,9 @@ success by retrying or omitting a framework.
 
 ## Crate boundaries
 
-Framework crates live in `crates/<name>/`, concrete Providers in
-`providers/<provider>/`; the root manifest only organizes the workspace. See
-[Provider collaboration](providers/README.md) for contribution and distribution,
+Framework crates live in `src/aw/crates/<name>/`, concrete Providers in
+the repository-root `providers/<provider>/` with independent workspaces; the root manifest only organizes the workspace. See
+[Provider collaboration](../../providers/README.md) for contribution and distribution,
 [Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
 dependencies, and the [design index](docs/design/README.md) for protocol reading order.
 
@@ -195,7 +195,7 @@ For focused Provider Host checks, run from `src/aw` on Linux:
 
 ```bash
 cargo test --locked -p aw-host
-cargo test --locked -p aw-provider-sec-core
+cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 ```
 
 These tests use local fixture processes to check preparation, request binding,

@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn ownership_matches_canonical_state_paths_without_creating_them() {
-        let build = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
+        let build = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
         std::fs::create_dir_all(&build).unwrap();
         let root = tempfile::tempdir_in(build.canonicalize().unwrap()).unwrap();
         let real = root.path().join("real");
