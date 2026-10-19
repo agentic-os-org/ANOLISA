@@ -156,3 +156,70 @@ def test_thinking_only_assistant_record_keeps_its_step():
     assert agent_steps[0]["reasoning_content"] == "weigh the options"
     assert agent_steps[0]["message"] is None
     assert agent_steps[1]["message"] == "the answer is 4"
+
+
+def test_usage_shared_by_split_assistant_records_counts_once():
+    """Claude Code splits one API message into per-block records that repeat
+    the same usage. Counting each record doubled the cost input."""
+    lines = [
+        '{"type":"assistant","message":{"id":"msg_1","role":"assistant",'
+        '"content":[{"type":"text","text":"hello"}],'
+        '"usage":{"input_tokens":1000,"output_tokens":100}}}',
+        '{"type":"assistant","message":{"id":"msg_1","role":"assistant",'
+        '"content":[{"type":"tool_use","id":"t1","name":"read","input":{}}],'
+        '"usage":{"input_tokens":1000,"output_tokens":100}}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 2, "both content blocks must keep their step"
+    with_metrics = [s for s in agent_steps if "metrics" in s]
+    assert len(with_metrics) == 1, "the shared usage must be counted once"
+    assert with_metrics[0]["metrics"] == {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+    }
+
+
+def test_cumulative_usage_uses_the_last_snapshot():
+    """A later record for the same message carries the fuller usage; the last
+    snapshot is the one the collector uses."""
+    lines = [
+        '{"type":"assistant","message":{"id":"msg_2","role":"assistant",'
+        '"content":[{"type":"text","text":"hello"}],'
+        '"usage":{"input_tokens":1000,"output_tokens":10}}}',
+        '{"type":"assistant","message":{"id":"msg_2","role":"assistant",'
+        '"content":[{"type":"tool_use","id":"t1","name":"read","input":{}}],'
+        '"usage":{"input_tokens":1000,"output_tokens":20}}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert agent_steps[0].get("metrics") is None
+    assert agent_steps[1]["metrics"]["completion_tokens"] == 20
+
+
+def test_usage_without_message_id_stays_with_its_step():
+    """Records with no message id cannot share usage; each keeps its own."""
+    lines = [
+        '{"type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"one"}],'
+        '"usage":{"input_tokens":10,"output_tokens":1}}}',
+        '{"type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"two"}],'
+        '"usage":{"input_tokens":20,"output_tokens":2}}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert agent_steps[0]["metrics"]["prompt_tokens"] == 10
+    assert agent_steps[1]["metrics"]["prompt_tokens"] == 20

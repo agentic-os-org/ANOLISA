@@ -106,6 +106,28 @@ def _call_id_keys(identifier: str) -> tuple[tuple[str, str], tuple[str, str]]:
     return case_key, (kind, normalized)
 
 
+def usage_to_metrics(usage) -> dict:
+    """Map a provider usage object onto ATIF metric names."""
+    if not isinstance(usage, dict):
+        return {}
+    counters = {
+        key: value for key, value in usage.items() if type(value) is int and value >= 0
+    }
+    metrics = {}
+    for source, target in (
+        ("input_tokens", "prompt_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("cache_read_input_tokens", "cached_tokens"),
+    ):
+        if source in counters:
+            metrics[target] = counters[source]
+    if "prompt_tokens" in metrics:
+        # Anthropic reports uncached, read, and created input separately.
+        metrics["prompt_tokens"] += counters.get("cache_read_input_tokens", 0)
+        metrics["prompt_tokens"] += counters.get("cache_creation_input_tokens", 0)
+    return metrics
+
+
 def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
     entries = []
@@ -135,6 +157,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     steps = []
     tool_call_steps = {}
     tool_call_aliases = {}
+    usage_records = []
     step_id = 0
 
     for entry in entries:
@@ -227,28 +250,31 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             if thinking:
                 step["reasoning_content"] = thinking[:3000]
 
-            # Extract usage metrics if present
-            usage = msg.get("usage", {})
+            # Usage is attached after the walk: Claude Code splits one API
+            # message into several assistant records that repeat (or
+            # cumulatively advance) the same usage, so counting each record
+            # doubles the cost input.
+            usage = msg.get("usage")
             if isinstance(usage, dict):
-                metrics = {}
-                counters = {
-                    key: value for key, value in usage.items() if type(value) is int and value >= 0
-                }
-                for source, target in (
-                    ("input_tokens", "prompt_tokens"),
-                    ("output_tokens", "completion_tokens"),
-                    ("cache_read_input_tokens", "cached_tokens"),
-                ):
-                    if source in counters:
-                        metrics[target] = counters[source]
-                if "prompt_tokens" in metrics:
-                    # Anthropic reports uncached, read, and created input separately.
-                    metrics["prompt_tokens"] += counters.get("cache_read_input_tokens", 0)
-                    metrics["prompt_tokens"] += counters.get("cache_creation_input_tokens", 0)
-                if metrics:
-                    step["metrics"] = metrics
+                message_id = msg.get("id")
+                if not isinstance(message_id, str) or not message_id:
+                    message_id = None
+                usage_records.append((step, message_id, usage))
 
             steps.append(step)
+
+    # One message id may span several records; the last snapshot is the most
+    # complete. Records without an id keep their own usage, as before.
+    last_usage_index = {}
+    for index, (_, message_id, _) in enumerate(usage_records):
+        if message_id is not None:
+            last_usage_index[message_id] = index
+    for index, (step, message_id, usage) in enumerate(usage_records):
+        if message_id is not None and last_usage_index[message_id] != index:
+            continue
+        metrics = usage_to_metrics(usage)
+        if metrics:
+            step["metrics"] = metrics
 
     if not steps:
         return None
