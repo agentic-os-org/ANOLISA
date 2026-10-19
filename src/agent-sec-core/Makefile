@@ -158,6 +158,11 @@ test-python-coverage: ## Run Python tests with coverage report
 		--ignore=tests/v2 \
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
 
+.PHONY: test-gateway-addon
+test-gateway-addon: ## Run secret gateway addon tests (black-box suite needs MITMDUMP=<standalone mitmdump>)
+	@echo "🧪 Running secret gateway addon tests..."
+	cd tests/v2/gateway && python3 -m unittest -v test_policy test_addon_blackbox
+
 .PHONY: test-rust
 test-rust: ## Run Rust tests (agent-sec-cli + V2; linux-sandbox on Linux only)
 	@echo "🧪 Running agent-sec-cli workspace Rust tests..."

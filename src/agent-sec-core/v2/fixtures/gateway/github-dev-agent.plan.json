@@ -1,0 +1,115 @@
+{
+  "format": "agent-sec-gateway-plan/v1",
+  "subject": {
+    "kind": "agent",
+    "name": "dev-agent"
+  },
+  "source": {
+    "kind": "presets",
+    "presets": [
+      "github@1"
+    ]
+  },
+  "credentials": [
+    {
+      "id": "github-token"
+    }
+  ],
+  "credentialRequestDefault": "block",
+  "requestDefault": "allow",
+  "rules": [
+    {
+      "index": 0,
+      "phase": "request",
+      "effect": "allow",
+      "match": {
+        "scheme": "https",
+        "host": "api.github.com",
+        "path": "/**",
+        "method": {
+          "in": [
+            "GET",
+            "HEAD",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        },
+        "credential": {
+          "in": [
+            "github-token"
+          ]
+        }
+      },
+      "responseRewrite": "buffered",
+      "because": "GitHub REST API with github-token"
+    },
+    {
+      "index": 1,
+      "phase": "request",
+      "effect": "allow",
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/info/refs",
+        "method": {
+          "in": [
+            "GET"
+          ]
+        },
+        "credential": {
+          "in": [
+            "github-token"
+          ]
+        }
+      },
+      "responseRewrite": "buffered",
+      "because": "Git ref discovery with github-token"
+    },
+    {
+      "index": 2,
+      "phase": "request",
+      "effect": "allow",
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/git-upload-pack",
+        "method": {
+          "in": [
+            "POST"
+          ]
+        },
+        "credential": {
+          "in": [
+            "github-token"
+          ]
+        }
+      },
+      "responseRewrite": "none",
+      "because": "Git fetch with github-token"
+    },
+    {
+      "index": 3,
+      "phase": "request",
+      "effect": "allow",
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/git-receive-pack",
+        "method": {
+          "in": [
+            "POST"
+          ]
+        },
+        "credential": {
+          "in": [
+            "github-token"
+          ]
+        }
+      },
+      "responseRewrite": "buffered",
+      "because": "Git push with github-token"
+    }
+  ]
+}

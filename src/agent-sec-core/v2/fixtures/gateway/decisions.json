@@ -1,0 +1,1062 @@
+{
+  "comment": "Synthetic values only. Shared by the Rust plan tests and the gateway addon tests.",
+  "plan": "github-dev-agent.plan.json",
+  "listeners": [
+    {
+      "port": 15001,
+      "agent": "dev-agent"
+    },
+    {
+      "port": 15002,
+      "agent": "other-agent"
+    }
+  ],
+  "secrets": {
+    "version": 1,
+    "generation": 1,
+    "entries": [
+      {
+        "fake": "tkn_FakeDevAgent1FakeDevAgent1FakeDevAge",
+        "credential": "github-token",
+        "agent": "dev-agent",
+        "real": "tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "carriers": [
+          "header_token",
+          "basic_password"
+        ]
+      },
+      {
+        "fake": "tkn_FakeOtherAgent2FakeOtherAgent2FakeOt",
+        "credential": "github-token",
+        "agent": "other-agent",
+        "real": "tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "carriers": [
+          "header_token",
+          "basic_password"
+        ]
+      }
+    ],
+    "retired": [
+      {
+        "fake": "tkn_RetiredFake3RetiredFake3RetiredFake3",
+        "credential": "github-token",
+        "agent": "dev-agent"
+      }
+    ]
+  },
+  "values": {
+    "real": "tkn_SyntheticReal0SyntheticReal0Syntheti",
+    "fake": "tkn_FakeDevAgent1FakeDevAgent1FakeDevAge",
+    "otherFake": "tkn_FakeOtherAgent2FakeOtherAgent2FakeOt",
+    "retiredFake": "tkn_RetiredFake3RetiredFake3RetiredFake3"
+  },
+  "cases": [
+    {
+      "name": "api bearer is injected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 0,
+        "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "api token scheme keeps its word",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "token tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 0,
+        "authorization": "token tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "api delete is injected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "DELETE",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 0,
+        "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "host compares case-insensitively",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "API.GitHub.com:443",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 0,
+        "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "api options is not allowed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "OPTIONS",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "info refs basic password is injected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/o/r.git/info/refs?service=git-upload-pack",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic eC1hY2Nlc3MtdG9rZW46dGtuX0Zha2VEZXZBZ2VudDFGYWtlRGV2QWdlbnQxRmFrZURldkFnZQ=="
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 1,
+        "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "upload pack streams",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "POST",
+        "path": "/o/r.git/git-upload-pack",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic eC1hY2Nlc3MtdG9rZW46dGtuX0Zha2VEZXZBZ2VudDFGYWtlRGV2QWdlbnQxRmFrZURldkFnZQ=="
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 2,
+        "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
+        "responseRewrite": "none"
+      }
+    },
+    {
+      "name": "receive pack is buffered",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "POST",
+        "path": "/o/r.git/git-receive-pack",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic eC1hY2Nlc3MtdG9rZW46dGtuX0Zha2VEZXZBZ2VudDFGYWtlRGV2QWdlbnQxRmFrZURldkFnZQ=="
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 3,
+        "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "github web path is not allowed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "uploads host is not allowed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "uploads.github.com",
+        "authority": "uploads.github.com",
+        "targetAuthority": null,
+        "method": "POST",
+        "path": "/repos/o/r/releases/1/assets",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "non-443 port is not allowed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com:8443",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "encoded slash is not matched",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/o/r.git%2Finfo/refs",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic eC1hY2Nlc3MtdG9rZW46dGtuX0Zha2VEZXZBZ2VudDFGYWtlRGV2QWdlbnQxRmFrZURldkFnZQ=="
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "dot segment is not matched",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/../user",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "credential_not_allowed"
+      }
+    },
+    {
+      "name": "request without credential is forwarded",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "example.com",
+        "authority": "example.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "forward",
+        "code": "no_credential"
+      }
+    },
+    {
+      "name": "unknown token is forwarded",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_notmanaged0000000000000000000000000000"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "forward",
+        "code": "no_credential"
+      }
+    },
+    {
+      "name": "other domain fake is a subject mismatch",
+      "facts": {
+        "port": 15002,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "subject_mismatch"
+      }
+    },
+    {
+      "name": "retired fake is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_RetiredFake3RetiredFake3RetiredFake3"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "retired_credential"
+      }
+    },
+    {
+      "name": "real in authorization is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "real in another header is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "X-Token",
+            "tkn_SyntheticReal0SyntheticReal0Syntheti"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "real in query is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/user?access_token=tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "percent-encoded real in path is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/x/%74kn_SyntheticReal0SyntheticReal0Syntheti",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "real in body is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "POST",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": "{\"token\":\"tkn_SyntheticReal0SyntheticReal0Syntheti\"}"
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "real in basic password is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ=="
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "fake in basic username is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/o/r.git/info/refs",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic dGtuX0Zha2VEZXZBZ2VudDFGYWtlRGV2QWdlbnQxRmFrZURldkFnZTp4LW9hdXRoLWJhc2lj"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "fake_in_username"
+      }
+    },
+    {
+      "name": "duplicate authorization is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ],
+          [
+            "Authorization",
+            "Bearer x"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "duplicate_authorization"
+      }
+    },
+    {
+      "name": "malformed basic is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Basic not*base64"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "malformed_authorization"
+      }
+    },
+    {
+      "name": "plaintext fake is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": false,
+        "sni": null,
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "plaintext_credential"
+      }
+    },
+    {
+      "name": "plaintext real is exposed",
+      "facts": {
+        "port": 15001,
+        "tls": false,
+        "sni": null,
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "real_credential_exposed"
+      }
+    },
+    {
+      "name": "plaintext without credential is forwarded",
+      "facts": {
+        "port": 15001,
+        "tls": false,
+        "sni": null,
+        "authority": "example.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "forward",
+        "code": "no_credential"
+      }
+    },
+    {
+      "name": "sni differing from host is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "sni_host_mismatch"
+      }
+    },
+    {
+      "name": "sni differing from host without credential is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "example.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "sni_host_mismatch"
+      }
+    },
+    {
+      "name": "fake without sni is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": null,
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "sni_missing"
+      }
+    },
+    {
+      "name": "unloaded listener is not ready",
+      "facts": {
+        "port": 15009,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "gateway_not_ready"
+      }
+    },
+    {
+      "name": "unloaded listener without credential is not ready",
+      "facts": {
+        "port": 15009,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "gateway_not_ready"
+      }
+    },
+    {
+      "name": "absolute-form target to another host is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": "uploads.github.com",
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "authority_mismatch"
+      }
+    },
+    {
+      "name": "absolute-form target to the same host is injected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": "api.github.com:443",
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "inject",
+        "code": "credential_injected",
+        "rule": 0,
+        "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
+        "responseRewrite": "buffered"
+      }
+    },
+    {
+      "name": "upgrade with credential is rejected",
+      "facts": {
+        "port": 15001,
+        "tls": true,
+        "sni": "api.github.com",
+        "authority": "api.github.com",
+        "targetAuthority": null,
+        "method": "GET",
+        "path": "/repos/o/r",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "Authorization",
+            "Bearer tkn_FakeDevAgent1FakeDevAgent1FakeDevAge"
+          ],
+          [
+            "Upgrade",
+            "websocket"
+          ],
+          [
+            "Connection",
+            "Upgrade"
+          ]
+        ],
+        "body": ""
+      },
+      "expect": {
+        "action": "reject",
+        "code": "upgrade_not_allowed"
+      }
+    }
+  ]
+}

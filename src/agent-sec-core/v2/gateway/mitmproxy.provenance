@@ -1,0 +1,11 @@
+# Pinned upstream mitmproxy standalone (PyInstaller) build used as the secret
+# gateway data plane. Shell-sourceable; the installer verifies the archive
+# against the checksum for the host architecture before extracting it.
+# Upstream publishes no checksum files: these digests were computed from the
+# official downloads and must be re-derived when the version changes.
+MITMPROXY_VERSION=12.2.3
+MITMPROXY_LICENSE=MIT
+MITMPROXY_URL_X86_64=https://downloads.mitmproxy.org/12.2.3/mitmproxy-12.2.3-linux-x86_64.tar.gz
+MITMPROXY_SHA256_X86_64=2e95286b618fa6fd33e5e62a78c2e5112571d85f42ec2bac29b97ee242bdb5c5
+MITMPROXY_URL_AARCH64=https://downloads.mitmproxy.org/12.2.3/mitmproxy-12.2.3-linux-aarch64.tar.gz
+MITMPROXY_SHA256_AARCH64=b358643a6c4f4b39e33d985350f660b724fece95687d7daa899ef0c4e211f681

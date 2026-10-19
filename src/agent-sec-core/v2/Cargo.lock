@@ -429,6 +429,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-gateway-plan"
+version = "1.0.0"
+dependencies = [
+ "asc-credential-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "asc-model-client"
 version = "1.1.1"
 dependencies = [

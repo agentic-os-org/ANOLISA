@@ -1,0 +1,41 @@
+{
+  "name": "github",
+  "version": 1,
+  "credential": {
+    "id": "github-token",
+    "carriers": ["header_token", "basic_password"],
+    "fakePrefixes": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+  },
+  "credentialRequestDefault": "block",
+  "requestDefault": "allow",
+  "rules": [
+    {
+      "host": "api.github.com",
+      "path": "/**",
+      "method": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+      "responseRewrite": "buffered",
+      "because": "GitHub REST API with github-token"
+    },
+    {
+      "host": "github.com",
+      "path": "/**/info/refs",
+      "method": ["GET"],
+      "responseRewrite": "buffered",
+      "because": "Git ref discovery with github-token"
+    },
+    {
+      "host": "github.com",
+      "path": "/**/git-upload-pack",
+      "method": ["POST"],
+      "responseRewrite": "none",
+      "because": "Git fetch with github-token"
+    },
+    {
+      "host": "github.com",
+      "path": "/**/git-receive-pack",
+      "method": ["POST"],
+      "responseRewrite": "buffered",
+      "because": "Git push with github-token"
+    }
+  ]
+}

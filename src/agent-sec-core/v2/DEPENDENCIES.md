@@ -81,6 +81,17 @@ its AgentSight Client and bundled SQLite through event persistence. The V2 RPM
 spec (`agent-sec-core.spec.v2.in`) builds this workspace independently of V1.
 A developer workspace build does not establish RPM/systemd acceptance.
 
+## Secret gateway data plane
+
+The gateway data plane is not a Cargo dependency. It runs the official
+mitmproxy standalone build, a PyInstaller bundle that carries its own Python
+interpreter, OpenSSL and Python packages; none of it links into the daemon.
+`gateway/mitmproxy.provenance` pins the version, download URLs and SHA-256
+digests per architecture. Upstream publishes no checksum files, so the digests
+were computed from the official downloads and must be re-derived on every
+version change. The addon under `gateway/addon/` uses only the Python standard
+library and the mitmproxy addon API; its tests run against the pinned binary.
+
 ## Release checks
 
 - Keep `Cargo.lock` reviewed; inspect new dependencies, enabled features, licenses,
