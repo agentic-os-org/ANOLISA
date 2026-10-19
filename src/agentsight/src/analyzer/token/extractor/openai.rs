@@ -901,6 +901,13 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
             collect_native_call_slots(chunk, &mut native);
             continue;
         }
+        // Gemini's stream chunks repeat a candidate's parts, calls included,
+        // the same way; its calls are whole objects per chunk rather than
+        // deltas, so they fold by the same last-value-per-slot rule.
+        if chunk.get("candidates").is_some_and(Value::is_array) {
+            collect_gemini_call_slots(chunk, &mut native);
+            continue;
+        }
         // Retain the legacy fragment contract for other compatible providers;
         // Responses and Chat calls never pass through this unnamed stream.
         if let Some((_, _, fragments)) = extract_response_content(Some(chunk)) {
@@ -977,6 +984,46 @@ fn collect_native_call_slots(chunk: &Value, slots: &mut std::collections::BTreeM
                 .and_then(Value::as_u64)
                 .unwrap_or(call_pos as u64)
                 .saturating_add((choice_pos as u64) << 32);
+            slots.insert(slot, format!("{name}: {arguments}"));
+        }
+    }
+}
+
+/// Record the `functionCall` parts of one Gemini stream chunk into `slots`.
+///
+/// Gemini streams by repeating a candidate's parts as whole objects, so a
+/// call arrives again in every chunk. The candidate position and the part
+/// position identify the call; the last value per slot folds the repeats.
+fn collect_gemini_call_slots(chunk: &Value, slots: &mut std::collections::BTreeMap<u64, String>) {
+    for (candidate_pos, candidate) in chunk
+        .get("candidates")
+        .and_then(Value::as_array)
+        .map(|candidates| candidates.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        for (part_pos, part) in candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .map(|parts| parts.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let Some(call) = part.get("functionCall") else {
+                continue;
+            };
+            let name = call.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let arguments = call
+                .get("args")
+                .map(|args| args.to_string())
+                .unwrap_or_default();
+            let slot = (candidate_pos as u64) << 32 | part_pos as u64;
             slots.insert(slot, format!("{name}: {arguments}"));
         }
     }
@@ -1887,6 +1934,25 @@ mod tests {
         ];
         assert_eq!(
             merge_response_output_text(&chunks).2,
+            vec!["read_file: {\"p\":\"a\"}".to_string()]
+        );
+    }
+
+    /// Gemini's `streamGenerateContent` repeats a candidate's parts as whole
+    /// `functionCall` objects. Reaching the merge through the fragment
+    /// contract appended one copy per chunk.
+    #[test]
+    fn test_gemini_stream_repeated_tool_call_is_folded_once() {
+        let chunks = [
+            serde_json::json!({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "read_file", "args": {"p": "a"}}}
+            ]}}]}),
+            serde_json::json!({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "read_file", "args": {"p": "a"}}}
+            ]}}]}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
             vec!["read_file: {\"p\":\"a\"}".to_string()]
         );
     }
