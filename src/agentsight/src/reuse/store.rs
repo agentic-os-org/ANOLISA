@@ -32,7 +32,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 /// Schema version recorded in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Errors produced by [`ReuseStore`].
 #[derive(Debug, thiserror::Error)]
@@ -280,6 +280,31 @@ impl ReuseStore {
                 identity.started_at,
                 identity.is_subagent as i64,
             ],
+        )?;
+        if changed == 0 {
+            return Err(ReuseStoreError::UnknownSession(session_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Records that batch triage verified `session_id`'s content unchanged.
+    ///
+    /// The argument is the collector timestamp of the version that was read,
+    /// not the current time: using the current time could mark a re-collection
+    /// that landed after the window was filled as already checked. The value
+    /// only moves forward, so an older verification cannot regress a newer one.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::UnknownSession`] when the row is gone, or a SQL
+    /// error on failure.
+    pub fn mark_triage_checked(&self, session_id: &str, collected_at_ns: i64) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE session_labels
+             SET triage_checked_at_ns =
+                 MAX(COALESCE(triage_checked_at_ns, ?2), ?2)
+             WHERE session_id = ?1",
+            params![session_id, collected_at_ns],
         )?;
         if changed == 0 {
             return Err(ReuseStoreError::UnknownSession(session_id.to_string()));
@@ -698,6 +723,7 @@ fn ensure_schema(conn: &mut Connection) -> Result<()> {
             // v4 created the fragment store, v5 drops it again; both steps
             // funnel here so a v3 database never materialises the table.
             3 | 4 => migrate_4_to_5(&tx)?,
+            5 => migrate_5_to_6(&tx)?,
             // Future steps insert here, each bumping `at` by one.
             n => return Err(ReuseStoreError::MissingMigration(n)),
         }
@@ -790,6 +816,17 @@ fn migrate_4_to_5(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Remembers the collector timestamp a batch triage verified unchanged.
+///
+/// Without it the unchanged path could not mark its work as done: the next run
+/// compared `collected_at_ns` against `updated_at_ns`, saw the re-collection,
+/// and re-examined the same row — filling the `limit` window forever and
+/// starving older trajectories.
+fn migrate_5_to_6(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch("ALTER TABLE session_labels ADD COLUMN triage_checked_at_ns INTEGER;")?;
+    Ok(())
+}
+
 /// Adds the identity columns so a reviewer can recognise a trajectory without
 /// opening it.
 ///
@@ -816,7 +853,7 @@ const SELECT_COLUMNS: &str = "session_id, auto_label, auto_reason, auto_rules_js
      max_agent_len, n_findings, source_content_hash, triage_version,
      created_at_ns, updated_at_ns, llm_label, llm_reason, llm_cited_steps_json,
      llm_downgraded, llm_at_ns, title, project, source, agent_name, started_at,
-     is_subagent";
+     is_subagent, triage_checked_at_ns";
 
 fn read_label(conn: &Connection, session_id: &str) -> Result<Option<SessionLabel>> {
     let found = conn
@@ -870,6 +907,7 @@ fn build_label(row: &Row<'_>) -> Result<SessionLabel> {
         triage_version: row.get(16)?,
         created_at_ns: row.get(17)?,
         updated_at_ns: row.get(18)?,
+        triage_checked_at_ns: row.get(30)?,
         llm_label: row
             .get::<_, Option<String>>(19)?
             .as_deref()
@@ -909,10 +947,10 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             max_agent_len, n_findings, source_content_hash, triage_version,
             created_at_ns, updated_at_ns, llm_label, llm_reason,
             llm_cited_steps_json, llm_downgraded, llm_at_ns, title, project,
-            source, agent_name, started_at, is_subagent
+            source, agent_name, started_at, is_subagent, triage_checked_at_ns
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                    ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                   ?27, ?28, ?29, ?30)
+                   ?27, ?28, ?29, ?30, ?31)
          ON CONFLICT(session_id) DO UPDATE SET
             auto_label = ?2, auto_reason = ?3, auto_rules_json = ?4,
             human_label = ?5, human_reason = ?6, confirm_state = ?7,
@@ -922,7 +960,8 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             source_content_hash = ?16, triage_version = ?17, updated_at_ns = ?19,
             llm_label = ?20, llm_reason = ?21, llm_cited_steps_json = ?22,
             llm_downgraded = ?23, llm_at_ns = ?24, title = ?25, project = ?26,
-            source = ?27, agent_name = ?28, started_at = ?29, is_subagent = ?30",
+            source = ?27, agent_name = ?28, started_at = ?29, is_subagent = ?30,
+            triage_checked_at_ns = ?31",
         params![
             label.session_id,
             label.auto_label.as_str(),
@@ -954,6 +993,7 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             label.identity.agent_name,
             label.identity.started_at,
             label.identity.is_subagent as i64,
+            label.triage_checked_at_ns,
         ],
     )?;
     Ok(())

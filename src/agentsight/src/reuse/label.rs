@@ -263,6 +263,13 @@ pub struct SessionLabel {
     pub triage_version: String,
     pub created_at_ns: i64,
     pub updated_at_ns: i64,
+    /// Collector timestamp of the content a batch triage verified unchanged.
+    ///
+    /// Kept apart from `updated_at_ns` because it records verification, not a
+    /// verdict change: moving `updated_at_ns` would also reorder the recency
+    /// listings. A later re-collection has a larger `collected_at_ns`, so it
+    /// still fails the freshness check.
+    pub triage_checked_at_ns: Option<i64>,
 }
 
 impl SessionLabel {
@@ -298,6 +305,7 @@ impl SessionLabel {
             triage_version: triage_version.into(),
             created_at_ns: now_ns,
             updated_at_ns: now_ns,
+            triage_checked_at_ns: None,
         }
     }
 
@@ -451,6 +459,7 @@ impl SessionLabel {
             // unresolved, not "the latest recompute changed something".
         }
         self.updated_at_ns = now_ns;
+        self.triage_checked_at_ns = Some(now_ns);
     }
 }
 
