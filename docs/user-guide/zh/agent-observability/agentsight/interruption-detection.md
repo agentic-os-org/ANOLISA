@@ -33,7 +33,7 @@
 | `network_timeout` | high | HTTP 408/504，或网关层超时错误 |
 | `service_unavailable` | high | HTTP 502/503，或错误体含 `overloaded` / `service_unavailable` |
 | `context_overflow` | high | `context_length_exceeded` 或同类上下文超限错误 |
-| `sse_truncated` | high | 流式响应结束时没有正常的 `finish_reason`，且调用已持续 ≥ 1 秒 |
+| `sse_truncated` | high | 流式响应结束时没有终止性的 `finish_reason`，且调用已持续 ≥ 1 秒。Gemini 的 `STOP`、`OTHER`、`LANGUAGE`、`FINISH_REASON_UNSPECIFIED` 都算终止；安全类终止归 `safety_filter`，`MAX_TOKENS` 归 `token_limit` |
 | `empty_response` | high | HTTP 200 但既没有输出消息也没有错误 |
 | `resource_exhaustion` | high | HTTP 402，或错误体涉及配额/计费额度（区别于每分钟限流） |
 | `state_machine_error` | high | 响应格式非法、Gemini 返回 `MALFORMED_FUNCTION_CALL`，或 Agent 状态机发生非法跃迁 |

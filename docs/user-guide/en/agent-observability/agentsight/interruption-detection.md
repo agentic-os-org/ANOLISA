@@ -35,7 +35,7 @@ needed to enable any of it.
 | `network_timeout` | high | HTTP 408/504, or a gateway-level timeout error |
 | `service_unavailable` | high | HTTP 502/503, or an error body mentioning `overloaded` / `service_unavailable` |
 | `context_overflow` | high | `context_length_exceeded` or a comparable context-bound error |
-| `sse_truncated` | high | A streamed response ends without a normal `finish_reason` and the call lasted at least 1 second |
+| `sse_truncated` | high | A streamed response ends without a terminal `finish_reason` and the call lasted at least 1 second. Gemini `STOP`, `OTHER`, `LANGUAGE` and `FINISH_REASON_UNSPECIFIED` are terminal; `SAFETY` family stops are `safety_filter`, `MAX_TOKENS` is `token_limit` |
 | `empty_response` | high | HTTP 200 with no output messages and no error |
 | `resource_exhaustion` | high | HTTP 402, or an error body about quota / billing limits (distinct from per-minute rate limiting) |
 | `state_machine_error` | high | Malformed provider response, a Gemini `MALFORMED_FUNCTION_CALL` finish reason, or an invalid Agent state transition |

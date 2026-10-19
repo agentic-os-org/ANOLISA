@@ -25,6 +25,15 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// `tool_calls`: the model finished its turn by emitting a function call and
 /// the client executes it before asking again, so the stream completed
 /// normally and must not be treated as truncation.
+///
+/// `other` and `language` (Gemini) are terminal stops the provider does not
+/// explain further: the turn ended for a reason the enum has no specific value
+/// for, or in an unsupported language. `finish_reason_unspecified` is the
+/// enum's placeholder, reported when a gateway omits the reason altogether.
+/// None of them says the stream was cut, so none of them is truncation. Stops
+/// that carry a meaning the rule set has a better home for stay out of this
+/// list: a token cap is rule 9, a safety stop is rule 6, a malformed tool call
+/// is rule 6.5.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     /// The stop reasons a completed turn may report. Compared ASCII
     /// case-insensitively: the casing is the provider's, not the protocol's,
@@ -39,6 +48,9 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
         "stop_sequence",
         "pause_turn",
         "refusal",
+        "other",
+        "language",
+        "finish_reason_unspecified",
     ];
     reason.is_some_and(|reason| {
         NORMAL
@@ -782,6 +794,8 @@ impl InterruptionDetector {
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
         // 正常终止标志：finish_reason 为
         // stop/tool_calls/function_call/end_turn/tool_use/stop_sequence/pause_turn/refusal
+        // 以及 Gemini 的 other/language/finish_reason_unspecified（终止了但没有
+        // 更具体的归类，不代表流被截断）
         // token-limit (length/max_tokens) 由 rule 9 单独处理（rule 10 只处理
         // `length` 下的输入溢出启发式）
         if is_sse
@@ -1355,6 +1369,74 @@ mod tests {
                 .iter()
                 .all(|e| e.interruption_type != InterruptionType::SseTruncated),
             "the stream completed; only the tool call was malformed, got {events:?}"
+        );
+    }
+
+    /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
+    /// provider finished the turn and declined to say more (`OTHER`), or the
+    /// requested language is unsupported (`LANGUAGE`). Neither is a token cap
+    /// and neither says the stream was cut, so rule 8 reported `sse_truncated`
+    /// (high) on a stream that had ended. They are terminal stops without a
+    /// more specific rule, the same way the whitelist already treats
+    /// `stop_sequence`. The enum's own placeholder
+    /// (`FINISH_REASON_UNSPECIFIED`, reported when a gateway omits the reason)
+    /// belongs in that class too: "the provider gave no reason" is not
+    /// evidence of truncation.
+    #[test]
+    fn test_gemini_unspecific_stop_is_not_truncation() {
+        for reason in ["OTHER", "LANGUAGE", "FINISH_REASON_UNSPECIFIED"] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} is a terminal stop, not a cut stream, got {events:?}"
+            );
+        }
+    }
+
+    /// The builder records `incomplete` on every output message when the
+    /// capture was abandoned mid-turn — the call stopped being observed before
+    /// the provider finished (process exited, buffer evicted, budget exceeded)
+    /// — and `abandon_reason` says which. The stream really was cut, so
+    /// `sse_truncated` is the right verdict, but it has to fire from the
+    /// metadata rather than from the finish-reason lists: the word is not a
+    /// provider stop reason, so a fix that whitelists it would suppress the
+    /// one report that is correct. This pins the two together.
+    #[test]
+    fn test_incomplete_capture_still_reports_truncation() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("incomplete".to_string(), "true".to_string());
+        call.metadata
+            .insert("abandon_reason".to_string(), "evicted".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("incomplete".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated),
+            "an abandoned capture is a cut stream and must stay flagged, got {events:?}"
         );
     }
 
