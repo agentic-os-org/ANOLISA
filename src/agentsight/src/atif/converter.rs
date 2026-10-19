@@ -1373,6 +1373,76 @@ pub(crate) mod tests {
         }
     }
 
+    /// Anthropic writes `tool_result.content` as an array of content blocks
+    /// whenever a result has more than one piece of text: MCP servers, a
+    /// command whose stdout and stderr were captured separately, and Claude
+    /// Code's own multi-block results all arrive as
+    /// `[{"type":"text","text":…},{"type":"text","text":…}]`.
+    ///
+    /// `GenAIBuilder::anthropic_content_block_to_part` passes that array
+    /// through unchanged, so the converter is the only place left to read it.
+    /// Serialising the array whole turned the observation into
+    /// `[{"type":"text","text":"command failed"},…]`, which loses the text the
+    /// downstream consumers read: `outcome::classify_call` looks for a line
+    /// that *starts* with an error token and found `[{"type":"text"`, and the
+    /// evidence pool haystack carried JSON punctuation instead of the output,
+    /// so a value the tool actually printed could not ground anything.
+    ///
+    /// The local collector's converter already flattens this shape
+    /// (`flatten_tool_result_content`, "flatten array tool results in the
+    /// local ATIF converter"), and the ATIF schema says the content is the
+    /// result text. Read the same blocks here.
+    #[test]
+    fn a_multi_block_tool_result_reaches_the_classifier_as_its_text() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-blocks".into()),
+                name: "Bash".into(),
+                arguments: Some(serde_json::json!({"command": "false"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        // The shape Anthropic returns for a failed multi-block result.
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-blocks".into()),
+                response: serde_json::json!({
+                    "content": [
+                        {"type": "text", "text": "command failed"},
+                        {"type": "text", "text": "exit 1"}
+                    ],
+                    "is_error": true
+                }),
+            }],
+            name: None,
+        }];
+
+        let doc = convert_trace_to_atif(
+            "trace-blocks",
+            vec![
+                call_event(1, 1_000_000_000, Some(agent_turn), None, Some("run it")),
+                call_event(2, 3_000_000_000, None, Some(replayed), None),
+            ],
+        )
+        .unwrap();
+        let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
+        let text = result
+            .content
+            .as_ref()
+            .and_then(|c| c.as_str())
+            .expect("content is flattened to a string");
+        assert_eq!(text, "command failed\nexit 1", "got {text:?}");
+        assert_eq!(result.is_error(), Some(true));
+
+        let index = build_index(&doc, 0..doc.steps.len());
+        assert_eq!(index.call_verdicts[0].verdict.status, CallStatus::Failed);
+    }
+
     /// A tool result can spell its failure flag `isError` (the camelCase real
     /// agent traces carry) or report an `error` status instead. The ATIF
     /// converter read only `is_error`, so such a result reached the grounding
