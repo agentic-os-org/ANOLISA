@@ -1431,6 +1431,11 @@ fn test_list_agent_names_excludes_auxiliary_by_default() {
         for (call_id, agent, kind) in [
             ("aux-main", "main-agent", "main"),
             ("aux-search", "search-helper", "web_search"),
+            // Recap can form a session on its own (#7271), so the session
+            // predicate keeps it; analyzer-only background sessions stay
+            // hidden.
+            ("aux-recap", "recap-agent", "recap"),
+            ("aux-analyzer", "bg-analyzer", "analyzer"),
         ] {
             conn.execute(
                 "INSERT INTO genai_events
@@ -1446,12 +1451,15 @@ fn test_list_agent_names_excludes_auxiliary_by_default() {
     let names = store
         .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
-    assert_eq!(names, vec!["main-agent"]);
+    assert_eq!(names, vec!["main-agent", "recap-agent"]);
 
     let all = store
         .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, true)
         .unwrap();
-    assert_eq!(all, vec!["main-agent", "search-helper"]);
+    assert_eq!(
+        all,
+        vec!["bg-analyzer", "main-agent", "recap-agent", "search-helper"]
+    );
     cleanup_db(&path);
 }
 
