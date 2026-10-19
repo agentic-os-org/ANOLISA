@@ -250,6 +250,21 @@ fn http_error_counts_only_at_line_start() {
     let at_start = classify(&plain_call(), "HTTP 503 Service Unavailable");
     assert_eq!(at_start.status, CallStatus::Failed);
 
+    // The standard status line carries a version: `curl -i`, fetch output and
+    // every raw HTTP response spell it `HTTP/1.1 500 ...`, not `HTTP 500 ...`.
+    for line in [
+        "HTTP/1.1 500 Internal Server Error",
+        "HTTP/2 404 Not Found",
+        "HTTP/1.1 503 Service Unavailable\ncontent-type: text/plain",
+    ] {
+        let standard = classify(&plain_call(), line);
+        assert_eq!(
+            standard.status,
+            CallStatus::Failed,
+            "a standard status line is an HTTP failure: {line:?}"
+        );
+    }
+
     let inline = classify(&plain_call(), "the guide says HTTP 404 means not found");
     assert_eq!(inline.status, CallStatus::Ok);
 }

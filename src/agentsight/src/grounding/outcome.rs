@@ -409,7 +409,13 @@ fn http_error_line(text: &str) -> Option<usize> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("HTTP ") {
+        // Both spellings are status lines: a raw HTTP response (and `curl -i`)
+        // starts `HTTP/1.1 500 ...`, while some tool wrappers drop the version.
+        let status = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|rest| rest.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        if let Some(rest) = status {
             let mut digits = rest.chars();
             let first = digits.next();
             if matches!(first, Some('4') | Some('5'))
