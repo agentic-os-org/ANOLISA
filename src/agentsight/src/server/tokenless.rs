@@ -388,10 +388,9 @@ async fn get_record(
         return HttpResponse::BadRequest().finish();
     }
     let result = web::block(move || {
-        let Some(mut saved) = store.tokenless_record(*id).map_err(|error| match error {
-            crate::storage::sqlite::genai::TokenlessRecordError::Invalid(_) => 400u16,
-            _ => 503u16,
-        })?
+        let Some(mut saved) = store
+            .tokenless_record(*id)
+            .map_err(|error| detail_store_error_status(&error))?
         else {
             return Err(404u16);
         };
@@ -498,6 +497,17 @@ pub(super) fn capabilities(client: Option<&QueryClient>) -> Vec<&'static str> {
         capabilities.push("token_savings");
     }
     capabilities
+}
+
+/// HTTP status for a failed detail-store read.
+///
+/// A stored record that violates the record contract is a client-visible 400,
+/// like the list endpoint; a lock or database failure stays a 503.
+fn detail_store_error_status(error: &crate::storage::sqlite::genai::TokenlessRecordError) -> u16 {
+    match error {
+        crate::storage::sqlite::genai::TokenlessRecordError::Invalid(_) => 400,
+        _ => 503,
+    }
 }
 
 #[cfg(test)]
