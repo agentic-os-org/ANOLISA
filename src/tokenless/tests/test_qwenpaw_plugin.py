@@ -353,6 +353,77 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0], "stream-chunk")
         self.assertEqual(items[1].content, [_TextBlock(text="small")])
 
+    async def test_post_tool_constructor_failure_preserves_original_response(self) -> None:
+        original = core.PostToolRequest
+        seen = {}
+
+        def released_request(
+            *,
+            result_kind,
+            tool_name,
+            content,
+            status,
+            content_origin,
+            output_optimization,
+            capabilities,
+            attribution,
+        ):
+            return original(
+                result_kind=result_kind,
+                tool_name=tool_name,
+                content=content,
+                status=status,
+                content_origin=content_origin,
+                output_optimization=output_optimization,
+                capabilities=capabilities,
+                attribution=attribution,
+            )
+
+        async def post_tool(request):
+            seen["request"] = request
+            return _post_response("small")
+
+        self.sdk.post_tool = post_tool
+        response = _ToolResponse(content=[_TextBlock(text="big output")])
+        with mock.patch.object(core, "PostToolRequest", released_request):
+            with self.assertLogs(plugin.logger, level="ERROR"):
+                result = await self.middleware._after_response(
+                    response,
+                    "execute_shell_command",
+                    "command_output",
+                    core.OutputOptimization.NONE,
+                    core.Attribution("qwenpaw", "session-1", "call-1"),
+                    "cat output.txt",
+                )
+        self.assertIs(result, response)
+        self.assertNotIn("request", seen)
+        self.assertEqual(self.middleware.post_tool_failures, 1)
+
+    async def test_post_tool_failure_preserves_all_original_blocks(self) -> None:
+        calls = 0
+
+        async def post_tool(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise core.TokenlessError("invalid JSON")
+            return _post_response("short")
+
+        self.sdk.post_tool = post_tool
+        response = _ToolResponse(content=[_TextBlock(text="first"), _TextBlock(text="second")])
+        with self.assertLogs(plugin.logger, level="ERROR"):
+            result = await self.middleware._after_response(
+                response,
+                "execute_shell_command",
+                "command_output",
+                core.OutputOptimization.NONE,
+                core.Attribution("qwenpaw", "session-1", "call-1"),
+                "cat output.txt",
+            )
+        self.assertIs(result, response)
+        self.assertEqual(result.content, [_TextBlock(text="first"), _TextBlock(text="second")])
+        self.assertEqual(self.middleware.post_tool_failures, 1)
+
     async def test_non_object_shell_arguments_fail_open(self) -> None:
         """Non-object args are forwarded untransformed instead of raising.
 
