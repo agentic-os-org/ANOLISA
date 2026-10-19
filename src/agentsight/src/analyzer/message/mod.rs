@@ -930,4 +930,61 @@ mod tests {
             );
         }
     }
+
+    /// A Gemini `streamGenerateContent` stream is the highest-frequency Gemini
+    /// shape. The SSE path already hands the parser the decoded chunk array, so
+    /// the assistant answer must come out of it rather than being decoded and
+    /// then dropped.
+    #[test]
+    fn test_parse_by_path_with_sse_parses_gemini() {
+        let parser = MessageParser::new();
+        let request = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "What is 2+2?"}]}]
+        });
+        let events = vec![
+            make_sse_event(
+                &serde_json::json!({
+                    "candidates": [{"content": {"role": "model", "parts": [{"text": "4"}]}, "index": 0}]
+                })
+                .to_string(),
+            ),
+            make_sse_event(
+                &serde_json::json!({
+                    "candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+                    "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11}
+                })
+                .to_string(),
+            ),
+        ];
+
+        let result = parser.parse_by_path_with_sse(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            Some(&request),
+            &events,
+        );
+
+        match result {
+            Some(ParsedApiMessage::GeminiMessage {
+                request: Some(request),
+                response: Some(response),
+            }) => {
+                assert_eq!(request.model, "gemini-2.5-pro");
+                assert!(request.stream);
+                assert_eq!(response.finish_reason(), Some("STOP"));
+                let text: String = response.candidates[0]
+                    .content
+                    .as_ref()
+                    .map(|content| {
+                        content
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.text.as_deref())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(text, "4");
+            }
+            other => panic!("expected GeminiMessage with request and response, got {other:?}"),
+        }
+    }
 }

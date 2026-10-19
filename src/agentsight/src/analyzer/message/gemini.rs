@@ -339,8 +339,13 @@ impl GeminiParser {
 
     /// Parse a Gemini response body.
     ///
-    /// Reads the single-object answer of `:generateContent`.
+    /// Accepts the single-object answer of `:generateContent` and the JSON
+    /// array of chunk payloads that `parse_by_path_with_sse` reduces a
+    /// `:streamGenerateContent` stream to.
     pub fn parse_response(body: &serde_json::Value) -> Option<GeminiResponse> {
+        if let Some(chunks) = body.as_array() {
+            return Self::aggregate_sse_chunks(chunks);
+        }
         if body.get("candidates").is_none() && body.get("usageMetadata").is_none() {
             return None;
         }
@@ -353,6 +358,100 @@ impl GeminiParser {
             response.finish_reason(),
         );
         Some(response)
+    }
+
+    /// Merge the chunk payloads of a `streamGenerateContent` stream.
+    ///
+    /// Each chunk repeats the response envelope with one increment: text parts
+    /// carry the delta (`parts[].text`), function calls arrive as whole
+    /// objects, only the terminal chunk carries a `finishReason`, and
+    /// `usageMetadata` is a cumulative snapshot. Candidates are merged by
+    /// `index` (position when absent) so a multi-candidate stream keeps its
+    /// choices apart. Returns `None` when no chunk is Gemini-shaped, leaving
+    /// the other providers' parsers to try.
+    fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<GeminiResponse> {
+        let mut merged = GeminiResponse::default();
+        let mut saw_gemini = false;
+
+        for chunk in chunks {
+            if merged.response_id.is_none() {
+                merged.response_id = chunk
+                    .get("responseId")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+            }
+            if let Some(version) = chunk
+                .get("modelVersion")
+                .and_then(serde_json::Value::as_str)
+                .filter(|version| !version.is_empty())
+            {
+                merged.model_version = Some(version.to_string());
+            }
+            if let Some(usage) = chunk.get("usageMetadata") {
+                saw_gemini = true;
+                merged.usage_metadata = serde_json::from_value(usage.clone())
+                    .ok()
+                    .or(merged.usage_metadata);
+            }
+            let Some(candidates) = chunk.get("candidates").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            saw_gemini = true;
+            for (position, candidate) in candidates.iter().enumerate() {
+                let index = candidate
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(position as u64) as usize;
+                while merged.candidates.len() <= index {
+                    merged.candidates.push(GeminiCandidate::default());
+                }
+                let slot = &mut merged.candidates[index];
+                if slot.index.is_none() {
+                    slot.index = Some(index as u32);
+                }
+                if let Some(reason) = candidate
+                    .get("finishReason")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    slot.finish_reason = Some(reason.to_string());
+                }
+                if let Some(role) = candidate
+                    .get("content")
+                    .and_then(|content| content.get("role"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    let entry = slot.content.get_or_insert_with(GeminiContent::default);
+                    if entry.role.is_none() {
+                        entry.role = Some(role.to_string());
+                    }
+                }
+                let Some(parts) = candidate
+                    .get("content")
+                    .and_then(|content| content.get("parts"))
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                let entry = slot.content.get_or_insert_with(GeminiContent::default);
+                for part in parts {
+                    if let Ok(part) = serde_json::from_value::<GeminiPart>(part.clone()) {
+                        entry.parts.push(part);
+                    }
+                }
+            }
+        }
+
+        if !saw_gemini {
+            return None;
+        }
+        // A slot only allocated to hold a position with no content and no
+        // finish reason of its own is not an answer.
+        merged
+            .candidates
+            .retain(|candidate| candidate.content.is_some() || candidate.finish_reason.is_some());
+        Some(merged)
     }
 }
 
@@ -507,6 +606,86 @@ mod tests {
         ]});
         let response = GeminiParser::parse_response(&body).expect("response");
         assert_eq!(response.finish_reason(), Some("STOP"));
+    }
+
+    #[test]
+    fn aggregates_streaming_chunks_into_one_response() {
+        let chunks = serde_json::json!([
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "hel"}]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "lo"}]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "lookup", "args": {"q": "x"}}}
+            ]}, "finishReason": "STOP", "index": 0}],
+             "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 2, "totalTokenCount": 11},
+             "responseId": "resp-stream"}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+
+        assert_eq!(response.candidates.len(), 1);
+        assert_eq!(response.finish_reason(), Some("STOP"));
+        let parts = &response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts;
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "hello");
+        assert_eq!(
+            parts[2]
+                .function_call
+                .as_ref()
+                .map(|call| call.name.as_str()),
+            Some("lookup")
+        );
+        assert_eq!(
+            response.usage_metadata.expect("usage").prompt_token_count,
+            9
+        );
+        assert_eq!(response.response_id.as_deref(), Some("resp-stream"));
+    }
+
+    #[test]
+    fn a_stream_keeps_its_candidates_apart_and_takes_the_last_reason() {
+        let chunks = serde_json::json!([
+            {"candidates": [
+                {"content": {"parts": [{"text": "a"}]}, "index": 0},
+                {"content": {"parts": [{"text": "b"}]}, "index": 1}
+            ]},
+            {"candidates": [
+                {"content": {"parts": [{"text": "!"}]}, "finishReason": "SAFETY", "index": 0},
+                {"content": {"parts": [{"text": "?"}]}, "finishReason": "STOP", "index": 1}
+            ]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+        assert_eq!(response.candidates.len(), 2);
+        assert_eq!(
+            response.finish_reason(),
+            Some("STOP"),
+            "the last candidate's reason is decisive"
+        );
+        let texts: Vec<String> = response
+            .candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .content
+                    .as_ref()
+                    .map(|content| {
+                        content
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.text.as_deref())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(texts, vec!["a!".to_string(), "b?".to_string()]);
     }
 
     #[test]
