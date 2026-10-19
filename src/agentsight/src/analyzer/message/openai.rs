@@ -482,12 +482,15 @@ impl OpenAIParser {
                             // `content` must be text: the chat content type is
                             // string-or-parts, so a structured output is carried
                             // as its JSON text and re-parsed by the consumer.
+                            // An explicit null carries no text at all, so it
+                            // must not become the four-character string "null".
                             let output = match item
                                 .get("output")
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Null)
                             {
                                 serde_json::Value::String(text) => text,
+                                serde_json::Value::Null => String::new(),
                                 other => other.to_string(),
                             };
                             messages.push(serde_json::json!({
@@ -1466,6 +1469,39 @@ mod tests {
         let request = request.unwrap();
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 1);
+    }
+
+    /// An explicit `null` output on a replayed Responses tool result means
+    /// the tool produced no text, not the four-character string "null".
+    ///
+    /// The normalizer carries a structured output as its JSON text because the
+    /// chat content type is string-or-parts, but a null has no text to carry:
+    /// the old fallthrough made the tool message read `"null"`, which the
+    /// detectors and the grader then scanned as real output. The shared
+    /// trajectory reader maps an explicit null message to the empty string the
+    /// same way.
+    #[test]
+    fn test_responses_null_function_call_output_is_empty() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "read_log",
+                 "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": null}
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("Responses request normalizes");
+        let tool = request
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::Tool))
+            .expect("the tool result becomes a tool message");
+        assert_eq!(
+            tool.content.as_ref().map(|c| c.as_text()),
+            Some(String::new()),
+            "a null output records no text"
+        );
     }
 
     /// Modern chat clients send the output cap as `max_completion_tokens`
