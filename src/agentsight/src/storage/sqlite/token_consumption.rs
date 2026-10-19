@@ -107,6 +107,24 @@ pub struct TokenConsumptionStore {
 }
 
 impl TokenConsumptionStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
     /// Create store with default table name
     pub fn new(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Self::with_table(path, "token_consumption")
@@ -173,22 +191,20 @@ impl TokenConsumptionStore {
         );
 
         self.conn
-            .execute(
-                &sql,
-                params![
-                    timestamp_ns as i64,
-                    pid as i64,
-                    comm,
-                    breakdown.provider,
-                    breakdown.model,
-                    breakdown.total_input_tokens as i64,
-                    breakdown.total_output_tokens as i64,
-                    breakdown.tools_tokens as i64,
-                    breakdown.system_prompt_tokens as i64,
-                    by_role_json,
-                    output_by_type_json,
-                ],
-            )
+            .prepare_cached(&sql)?
+            .execute(params![
+                timestamp_ns as i64,
+                pid as i64,
+                comm,
+                breakdown.provider,
+                breakdown.model,
+                breakdown.total_input_tokens as i64,
+                breakdown.total_output_tokens as i64,
+                breakdown.tools_tokens as i64,
+                breakdown.system_prompt_tokens as i64,
+                by_role_json,
+                output_by_type_json,
+            ])
             .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())

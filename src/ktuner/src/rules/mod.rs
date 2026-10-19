@@ -295,11 +295,7 @@ pub fn evaluate_with_workload(info: &SystemInfo, workload: &WorkloadType) -> Res
     checked += eval_max_queued_signals(info, &mut recs);
     checked += eval_keys_maxbytes(info, &mut recs);
     checked += eval_pipe_max_size(info, &mut recs);
-    checked += eval_shmall(info, &mut recs, current_page_size, |path| {
-        std::path::Path::new(path)
-            .exists()
-            .then(|| read_sysctl_u64(path))
-    });
+    checked += eval_shmall(info, &mut recs, current_page_size, read_shmall);
     checked += eval_tcp_app_win(info, &mut recs);
     checked += eval_ip_default_ttl(info, &mut recs);
     checked += eval_tcp_frto(info, &mut recs);
@@ -460,6 +456,38 @@ fn eval_swappiness(
     workload: &WorkloadType,
     recs: &mut Vec<Recommendation>,
 ) -> usize {
+    eval_swappiness_at(
+        info,
+        workload,
+        recs,
+        "/proc/swaps",
+        "/sys/kernel/mm/numa/demotion_enabled",
+    )
+}
+
+/// Path-injectable form of [`eval_swappiness`] (the `eval_*_at` idiom) so the
+/// swap gate is assertable against a synthetic /proc/swaps.
+///
+/// `vm.swappiness` only weighs anonymous against file pages when reclaim can
+/// take anonymous pages at all: v6.6 `get_scan_count()` (mm/vmscan.c:3038-3042)
+/// scans file pages alone when `can_reclaim_anon_pages()` is false — no swap
+/// space and no demotion target (:605-627) — and the multi-gen LRU's
+/// `get_swappiness()` (:3300-3313) returns 0 under the same two conditions.
+/// On a host with no swap area and demotion off, the write changes nothing,
+/// so the promised reduction in swapping cannot happen there — the same
+/// "never recommend a no-op" gate the page-cluster rule applies to the same
+/// table. Demotion that is on keeps the advice, since it can make anonymous
+/// pages reclaimable without swap.
+fn eval_swappiness_at(
+    info: &SystemInfo,
+    workload: &WorkloadType,
+    recs: &mut Vec<Recommendation>,
+    swaps_path: &str,
+    demotion_path: &str,
+) -> usize {
+    if !swap_configured(swaps_path) && read_sysctl_string(demotion_path) != "true" {
+        return 1;
+    }
     let is_db = info.has_process("postgres")
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
@@ -476,7 +504,16 @@ fn eval_swappiness(
         // cache workload, so the redis-server gates must count it too.
         || info.has_process("valkey-server");
 
-    let (target, reason) = if is_db
+    // TiKV checks the knob at startup and accepts exactly 0 ("vm.swappiness
+    // shoud be 0", TiKV 8.1 components/tikv_util/src/config.rs
+    // `check_kernel`), so the database floor of 1 left a TiKV node with the
+    // warning this rule exists to clear.
+    let (target, reason) = if info.has_process("tikv-server") {
+        (
+            0,
+            "TiKV 启动检查要求 vm.swappiness=0，swap 会导致严重的延迟抖动",
+        )
+    } else if is_db
         || *workload == WorkloadType::IoLatency
         || *workload == WorkloadType::MemoryIntensive
     {
@@ -509,10 +546,15 @@ fn eval_swappiness(
 
 fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // Databases and caches whose latency profile THP's collapse/split stalls
-    // hurt. mongod sits in every sibling db list (eval_swappiness,
-    // eval_dirty_ratio, the readahead rule, the classify gate) and MongoDB's
-    // production notes ask for THP to be off outright; etcd is the
-    // coordination store of the same cache family redis/memcached belong to.
+    // hurt; etcd is the coordination store of the same cache family
+    // redis/memcached belong to. mongod is left out on purpose although it is
+    // a database everywhere else: its own startup check wants the opposite of
+    // this advice depending on the build. MongoDB 8.0 with its default Google
+    // TCMalloc warns unless THP is `always` (`kWronglyDisabledOnSystem`), and
+    // the legacy allocator, like 7.0, warns when it is (8.0.4
+    // src/mongo/db/startup_warnings_mongod.cpp `getTHPEnablementWarningCase`).
+    // Nothing on the host tells the two apart, so either answer is wrong for
+    // some mongod, and mongod's own warning names the setting it needs.
     // oracle is the one OLTP database is_database_present already counts for
     // the IPC gates; its own Linux guidance asks for THP off outright too
     // (MOS 1557478.1 "Disabling Transparent Hugepages", and the 19c
@@ -544,7 +586,6 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
-        || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("oracle")
         || info.has_process("etcd")
@@ -713,10 +754,16 @@ fn eval_somaxconn(
         4096
     };
 
-    if info.sysctl.somaxconn < threshold as u64 {
+    // A value that could not be read says nothing about the backlog: the 0
+    // it used to fall back to sits below both floors, so the rule reported a
+    // limit the host never showed and asked to raise it.
+    let Some(somaxconn) = info.sysctl.somaxconn else {
+        return 1;
+    };
+    if somaxconn < threshold as u64 {
         recs.push(Recommendation {
             param: "net.core.somaxconn".to_string(),
-            current_value: info.sysctl.somaxconn.to_string(),
+            current_value: somaxconn.to_string(),
             recommended_value: "65535".to_string(),
             reason: "检测到监听端口，增大 listen backlog 避免高并发时连接被拒绝".to_string(),
             confidence: Confidence::Medium,
@@ -2208,19 +2255,39 @@ fn eval_max_map_count_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
         // `nodejs`, which the detector's own runtime list already knows
         // (`is_generic_runtime`). An exact match either way, so
         // `node_exporter` is still not the runtime.
-        || info.has_node_runtime();
+        || info.has_node_runtime()
+        // mongod checks the knob itself: it warns "vm.max_map_count is too
+        // low" below twice its connection limit (MongoDB 7.0
+        // src/mongo/db/startup_warnings_mongod.cpp, 8.0
+        // src/mongo/transport/transport_layer_manager_impl.cpp; SERVER-51233),
+        // and the 64000-file limit its own service unit sets admits 51200
+        // connections (80% of the soft limit,
+        // src/mongo/transport/service_entry_point_impl.cpp), so the 65530
+        // default is already short of the 102400 it asks for.
+        || info.has_process("mongod");
     if !needs_high {
         return 1;
     }
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 262144 {
+    // Cassandra maps its SSTables and asks for four times the JVM floor: its
+    // startup check warns below 1048575 whenever a disk access mode is mmap,
+    // the default (`StartupChecks.checkMaxMapCount`, Cassandra 4.1 and 5.0),
+    // so 262144 left it short and silenced the rule on a host Cassandra still
+    // warns about.
+    let target: u64 = if info.has_process("cassandra") {
+        1048575
+    } else {
+        262144
+    };
+    if current < target {
         recs.push(Recommendation {
             param: "vm.max_map_count".to_string(),
             current_value: current.to_string(),
-            recommended_value: "262144".to_string(),
-            reason: "JVM/Node 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败".to_string(),
+            recommended_value: target.to_string(),
+            reason: "JVM/Node/MongoDB 进程需要大量内存映射，max_map_count 过低会导致 mmap 失败"
+                .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
             writable: true,
@@ -2401,9 +2468,11 @@ fn eval_overcommit_memory(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 /// so the switch read is assertable against synthetic files.
 ///
 /// The rule fires on a zero — the kernel guesses, which is the mode the
-/// fork-based persistence of Redis and Valkey can fail under — and
-/// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0.
-/// Only a zero the reader could produce is evidence of the guessing mode, so a
+/// fork-based persistence of Redis and Valkey can fail under — and on strict
+/// accounting (2) where [`strict_overcommit_refused`] holds, and
+/// [`read_sysctl_u64`] maps an
+/// unreadable or unparseable file to that same 0. Only a zero the reader
+/// could produce is evidence of the guessing mode, so a
 /// masked or garbled proc entry (a container's, typically) neither reports a
 /// `current_value` the host does not have nor asks for a write it may not
 /// need.
@@ -2416,28 +2485,67 @@ fn eval_overcommit_memory_at(
         return 1;
     }
     // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
-    // `valkey-server` binary that carries the same startup warning
-    // ("WARNING overcommit_memory is set to 0! Background save may fail
-    // under low memory condition"), because fork-based RDB/AOF persistence
-    // is unchanged.
-    let needs_overcommit = info.has_process("redis-server") || info.has_process("valkey-server");
-    if !needs_overcommit {
+    // `valkey-server` binary that carries the same startup check ("Memory
+    // overcommit must be enabled! Without it, a background save or
+    // replication may fail under low memory condition"), because fork-based
+    // RDB/AOF persistence is unchanged.
+    let forks = info.has_process("redis-server") || info.has_process("valkey-server");
+    let refuses_strict = strict_overcommit_refused(info);
+    if !forks && !refuses_strict {
         return 1;
     }
-    if read_switch(path) == Some(0) {
-        recs.push(Recommendation {
-            param: "vm.overcommit_memory".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason:
-                "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory=0 可能导致 fork 失败"
-                    .to_string(),
-            confidence: Confidence::High,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    // Redis 7 and Valkey check for exactly 1 ("Memory overcommit must be
+    // enabled!", src/syscheck.c `checkOvercommit`), and strict accounting (2)
+    // charges the fork for a full copy of the dataset, so it fails sooner than
+    // the guessing mode. MongoDB and ClickHouse accept the guessing mode but
+    // warn on strict accounting; see [`strict_overcommit_refused`] for when the
+    // strict mode is left to a database that asks for it.
+    let current = match read_switch(path) {
+        Some(0) if forks => 0,
+        Some(2) if refuses_strict => 2,
+        _ => return 1,
+    };
+    let reason = if forks {
+        format!(
+            "Redis/Valkey 使用 fork 进行 RDB/AOF 持久化，overcommit_memory={current} 可能导致 fork 失败"
+        )
+    } else {
+        "MongoDB/ClickHouse 在严格超额模式（overcommit_memory=2）下内存分配易失败，二者启动检查均建议改为 1"
+            .to_string()
+    };
+    recs.push(Recommendation {
+        param: "vm.overcommit_memory".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "1".to_string(),
+        reason,
+        confidence: Confidence::High,
+        category: Category::Performance,
+        writable: true,
+    });
     1
+}
+
+/// Whether strict overcommit accounting (`vm.overcommit_memory = 2`) is refused
+/// by a service on this host and wanted by none, so the plan should move the
+/// host to 1.
+///
+/// Redis and Valkey require exactly 1 (src/syscheck.c `checkOvercommit`,
+/// Redis 7.2.4 and Valkey 8.0.1). mongod warns on 2 ("Journaling and memory
+/// allocation work best if overcommit_memory is set to 1", MongoDB 8.0.4
+/// src/mongo/db/startup_warnings_mongod.cpp; 7.0 asks for 0 or 1), and
+/// ClickHouse warns "Linux memory overcommit is disabled" on 2 (24.8
+/// programs/server/Server.cpp). PostgreSQL is the one database here that
+/// documents strict mode as its recommended setting (PostgreSQL 16, 19.4.4
+/// "Linux Memory Overcommit"), so a host running it keeps the mode, and
+/// `overcommit_ratio_recommendation` sizes it. Both rules read this one
+/// predicate, so the plan never pairs a switch to 1 with ratio advice that
+/// the switch would make a no-op.
+fn strict_overcommit_refused(info: &SystemInfo) -> bool {
+    let refuses = info.has_process("redis-server")
+        || info.has_process("valkey-server")
+        || info.has_process("mongod")
+        || info.has_process("clickhouse");
+    refuses && !info.has_process("postgres")
 }
 
 // ─── IO/Disk Rules ───────────────────────────────────────────────────────────
@@ -2780,12 +2888,19 @@ fn eval_numa_balancing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
     if !is_db {
         return 1;
     }
+    // Since 6.0 the knob is a bitmask (Documentation/admin-guide/sysctl/
+    // kernel.rst): bit 0 is the normal page-fault sampling, bit 1 the
+    // memory-tiering promotion. Top-tier pages are unmapped for hinting faults
+    // only while the normal bit is set (v6.6 mm/mprotect.c), so a tiered host
+    // running both (3) has the same stalls as 1; clearing that bit alone keeps
+    // the promotion the operator turned on.
+    const NUMA_BALANCING_NORMAL: u64 = 1;
     let current = read_sysctl_u64(path);
-    if current == 1 {
+    if current & NUMA_BALANCING_NORMAL != 0 {
         recs.push(Recommendation {
             param: "kernel.numa_balancing".to_string(),
-            current_value: "1".to_string(),
-            recommended_value: "0".to_string(),
+            current_value: current.to_string(),
+            recommended_value: (current & !NUMA_BALANCING_NORMAL).to_string(),
             reason: "数据库进程自行管理内存亲和性，内核 NUMA balancing 的页面迁移会引发延迟抖动"
                 .to_string(),
             confidence: Confidence::Medium,
@@ -2904,25 +3019,48 @@ fn eval_sched_migration_cost_at(
     let Some(current) = read_switch_i64(path) else {
         return 1;
     };
-    // Every negative value is the pinned side of the comparison (see above):
-    // there is no migration tendency left for the target to raise.
-    if current < 0 {
-        return 1;
-    }
-    if current < 5000000 {
-        recs.push(Recommendation {
-            param: "kernel.sched_migration_cost_ns".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "5000000".to_string(),
-            reason: format!(
-                "{}核机器线程迁移开销大，增大 migration_cost 让调度器倾向于保持线程在同一 CPU 上运行",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance, writable: true,
-        });
+    if let Some(rec) =
+        sched_migration_cost_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_migration_cost_ns` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the migration cost this
+/// reason sizes has had no `/proc/sys` node since: the variable is exported as
+/// `/sys/kernel/debug/sched/migration_cost_ns` (v6.6 kernel/sched/debug.c),
+/// which the rule's own path can never reach. A node under the old name exists
+/// only where a tree re-registered the name for another class, and nothing in
+/// such a tree reads that variable, so the write lands nowhere while the report
+/// claims the scheduler was made stickier. Silence the rule from 5.13 on, the
+/// way the other knobs whose reader moved are silenced.
+///
+/// Every negative value is the pinned side of the comparison above: there is no
+/// migration tendency left for the target to raise.
+fn sched_migration_cost_recommendation(
+    current: i64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || !(0..5_000_000).contains(&current) {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_migration_cost_ns".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "5000000".to_string(),
+        reason: format!(
+            "{cpu_cores}核机器线程迁移开销大，增大 migration_cost 让调度器倾向于保持线程在同一 CPU 上运行"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 // ─── Additional Security Rules ───────────────────────────────────────────────
@@ -3954,10 +4092,11 @@ fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// /proc/meminfo, so injecting both is the only way to assert either branch on
 /// any host.
 ///
-/// The gate is the shared boundary-aware database predicate, not the
-/// hand-rolled `postgres || mysqld` list: MariaDB 10.4+ runs as `mariadbd`
-/// (the daemon comm Debian and Ubuntu ship), so a MariaDB-only host missed
-/// the rule while the sibling SysV IPC sizing rules already counted it.
+/// The gate is [`hugetlb_database_present`], the databases that can map the
+/// pool, not every database: reserved huge pages "cannot be used for other
+/// purposes" (v6.6 Documentation/admin-guide/mm/hugetlbpage.rst), so a quarter
+/// of memory reserved for a server that never maps it is a quarter of memory
+/// taken away from it.
 ///
 /// The count is also read as a switch here: the rule fires on a zero, and
 /// [`read_sysctl_u64`] maps an unreadable or unparseable file to that same 0,
@@ -3972,7 +4111,7 @@ fn eval_nr_hugepages_at(
     if !info.param_exists(path) {
         return 1;
     }
-    if !is_database_present(info) {
+    if !hugetlb_database_present(info) {
         return 1;
     }
     let recommended = quarter_memory_hugepages(info.memory_total_gb, hugepage_kb);
@@ -3990,6 +4129,19 @@ fn eval_nr_hugepages_at(
         });
     }
     1
+}
+
+/// Whether a database that maps the hugetlb pool runs: PostgreSQL
+/// (`huge_pages`, on by default as `try`), MySQL and MariaDB (`large_pages`)
+/// and Oracle (SGA huge pages). [`is_database_present`] also counts mongod,
+/// ClickHouse, TiDB and TiKV, which offer no option to map the pool; a
+/// reservation sized for them only takes memory from them. Boundary-aware like that predicate, so
+/// `postgres: writer` counts and `mysqldump` does not.
+fn hugetlb_database_present(info: &SystemInfo) -> bool {
+    info.has_process("postgres")
+        || info.has_process("mysqld")
+        || info.has_process("mariadbd")
+        || info.has_process("oracle")
 }
 
 fn eval_shmmax(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5392,8 +5544,26 @@ fn eval_busy_read_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &s
 }
 
 fn eval_nmi_watchdog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/nmi_watchdog";
+    eval_nmi_watchdog_at(info, recs, "/proc/sys/kernel/nmi_watchdog")
+}
+
+/// Path-injectable form of [`eval_nmi_watchdog`] (the `eval_*_at` idiom) so
+/// the switch is assertable against synthetic files.
+fn eval_nmi_watchdog_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    // Since 6.5 the kernel registers the switch read-only when no hard-lockup
+    // detector could be started, while it still reads its default 1, and
+    // refuses a write with -ENOTSUPP (v6.6 kernel/watchdog.c
+    // `watchdog_sysctl_init`, `proc_nmi_watchdog`). No detector runs then, so
+    // there is no counter or interrupt for the advice to save. Only the mode
+    // bits tell: a read-only mount or an unprivileged caller says nothing
+    // about the detector.
+    let registered_writable = std::fs::metadata(path).is_ok_and(|metadata| {
+        std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o222 != 0
+    });
+    if !registered_writable {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -6103,45 +6273,101 @@ fn eval_sched_nr_migrate_at(
     let Some(current) = read_switch(path) else {
         return 1;
     };
-    if current < 128 {
-        recs.push(Recommendation {
-            param: "kernel.sched_nr_migrate".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "128".to_string(),
-            reason: format!(
-                "{}核 CPU 每次负载均衡仅迁移 {} 个任务，增大可加速核间负载均衡收敛",
-                info.cpu_cores, current
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_nr_migrate_recommendation(current, info.cpu_cores, &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
 }
 
+/// Emit the `kernel.sched_nr_migrate` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the batch size this
+/// reason sizes has had no `/proc/sys` node since: the variable is exported as
+/// `/sys/kernel/debug/sched/nr_migrate` (v6.6 kernel/sched/debug.c), which the
+/// rule's own path can never reach. A node under the old name exists only where
+/// a tree re-registered the name for another class, and nothing in such a tree
+/// reads that variable, so the write lands nowhere while the report claims the
+/// idle balancer converges faster. Silence the rule from 5.13 on, the way the
+/// other knobs whose reader moved are silenced.
+fn sched_nr_migrate_recommendation(
+    current: u64,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current >= 128 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_nr_migrate".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "128".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 每次负载均衡仅迁移 {current} 个任务，增大可加速核间负载均衡收敛"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
+}
+
 fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_notsent_lowat";
+    eval_tcp_notsent_lowat_at(info, recs, "/proc/sys/net/ipv4/tcp_notsent_lowat")
+}
+
+/// Path-injectable form of [`eval_tcp_notsent_lowat`] (the `eval_*_at` idiom)
+/// so the read is assertable against a synthetic file.
+///
+/// The old reason claimed the default "caches a large amount of unsent data
+/// and wastes memory" and that 128KB "lowers memory use". Neither is what the
+/// knob does: it is a wake-up threshold, not a cap. Its only reader is
+/// `tcp_stream_memory_free()` (v6.6 net/ipv4/tcp_ipv4.c:3096-3104), which
+/// `sk_stream_is_writeable()` consults (include/net/sock.h:1388-1395) to
+/// answer one question — whether `poll()`/`epoll()` should report `POLLOUT`
+/// — and it never queues or drops a byte:
+///
+/// ```text
+///   return (notsent_bytes << wake) < tcp_notsent_lowat(tp);
+/// ```
+///
+/// `sendmsg()` is bounded by `sk_sndbuf` (the same predicate returns false as
+/// soon as `sk_wmem_queued >= sk_sndbuf`), which the write does not change,
+/// and the socket value always wins over this global
+/// (`val ?: READ_ONCE(net->ipv4.sysctl_tcp_notsent_lowat)`,
+/// include/net/tcp.h:2087-2095). So the memory a connection may hold back is
+/// untouched, while a lower threshold makes a busy sender report itself
+/// unwritable sooner — the opposite of the advice's stated benefit for
+/// throughput-sensitive hosts.
+///
+/// The recommendation is therefore withdrawn: there is no memory to reclaim
+/// by lowering it, and what the write does change (when `POLLOUT` fires) is a
+/// latency/throughput trade the engine has no evidence to make.
+fn eval_tcp_notsent_lowat_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 131072 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_notsent_lowat".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "131072".to_string(),
-            reason: "默认值过大导致每个 TCP 连接可能缓存大量未发送数据浪费内存，设为 128KB 可降低内存占用并减少延迟".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    // Read so a masked or garbled entry still counts as checked, then judge
+    // the value inert for the reason above: no value of this knob is a
+    // finding.
+    let _current = read_sysctl_u64(path);
+    let _ = recs;
     1
 }
 
 fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_dsack_at(info, recs, "/proc/sys/net/ipv4/tcp_dsack")
+    eval_tcp_dsack_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_dsack",
+        "/proc/sys/net/ipv4/tcp_sack",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_dsack`] (the `eval_*_at` idiom).
@@ -6156,8 +6382,27 @@ fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 /// (`proc_dou8vec_minmax`, no extra1/extra2; v6.6) rejects negatives at
 /// write time; the signed reader keeps the truthiness contract correct on
 /// both registrations.
-fn eval_tcp_dsack_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+///
+/// The switch alone is not enough to make it matter: both writers of a
+/// duplicate SACK test `tcp_is_sack(tp)` before the sysctl (v6.6
+/// net/ipv4/tcp_input.c:4473 in `tcp_dsack_set`, :4520 in `tcp_send_dupack`),
+/// and `tcp_is_sack()` is `tp->rx_opt.sack_ok` (include/net/tcp.h:1188-1191),
+/// which `tcp_parse_options()` sets from the SACK-permitted option only while
+/// `net.ipv4.tcp_sack` is on (net/ipv4/tcp_input.c:4127-4129). With a
+/// readable `tcp_sack` 0 no connection reaches the bookkeeping this knob
+/// turns on, so the advice waits for SACK to be on — the dependency gate the
+/// TIME_WAIT-reuse rule applies to `tcp_timestamps`. A switch that cannot be
+/// read keeps the advice: it is not evidence that SACK is off.
+fn eval_tcp_dsack_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    sack_path: &str,
+) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    if read_switch_i64(sack_path) == Some(0) {
         return 1;
     }
     // The reader maps a file it cannot interpret to 0 as well; only a
@@ -6454,23 +6699,51 @@ fn eval_tcp_retries1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_limit_output_bytes_at(info, recs, "/proc/sys/net/ipv4/tcp_limit_output_bytes")
+    eval_tcp_limit_output_bytes_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_limit_output_bytes",
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+        "/proc/sys/net/ipv4/tcp_available_congestion_control",
+        running_module_tree().as_deref(),
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_limit_output_bytes`] (the `eval_*_at`
-/// idiom) so the read is assertable against synthetic files.
+/// idiom) so the read and the congestion control are assertable against
+/// synthetic files.
 ///
 /// The rule fires below a floor, and [`read_sysctl_u64`] maps an unreadable or
 /// unparseable file to 0, which is below every floor. Only a value the reader
 /// could produce is evidence that the limit is low, so a masked or garbled
 /// proc entry (a container's, typically) neither reports a `current_value`
 /// the host does not have nor asks for a write it may not need.
+///
+/// The congestion control this rule judges is the one the run's *plan* leaves
+/// in force: the sibling `net.ipv4.tcp_congestion_control` rule raises a
+/// non-BBR host to bbr whenever bbr is registered or loadable
+/// ([`bbr_will_be_in_force`]), and BBR is the algorithm that makes this knob
+/// unread anyway. `tcp_small_queue_check()` applies the sysctl only to an
+/// unpaced socket (`sk->sk_pacing_status == SK_PACING_NONE`, v6.6
+/// net/ipv4/tcp_output.c:2677-2679), while BBR's init marks every socket it
+/// owns as paced (`cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE,
+/// SK_PACING_NEEDED)`, net/ipv4/tcp_bbr.c:1077). Judging the pre-plan value
+/// let one plan carry `cc = bbr` and a raised `tcp_limit_output_bytes`
+/// together — the promise "limits single-connection throughput" cannot hold for
+/// the connections that plan creates, the same no-op the slow_start_after_idle,
+/// pacing-ratio and min_tso_segs gates were fixed to refuse.
 fn eval_tcp_limit_output_bytes_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    congestion_control_path: &str,
+    avail_path: &str,
+    module_tree: Option<&std::path::Path>,
 ) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    if bbr_will_be_in_force(info, congestion_control_path, avail_path, module_tree) {
         return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
@@ -6739,7 +7012,11 @@ fn eval_admin_reserve_kbytes_at(
     if info.memory_total_gb < 64 {
         return 1;
     }
-    if !overcommit_reserves_are_live(overcommit_path) {
+    // A host the overcommit_memory rule moves off strict mode in the same plan
+    // needs no reserve: __vm_enough_memory() returns in mode 1 before either
+    // reserve is subtracted, so the write would be inert. The ratio rule
+    // already keys on the same predicate.
+    if !overcommit_reserves_are_live(overcommit_path) || strict_overcommit_refused(info) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -7061,21 +7338,47 @@ fn eval_sched_tunable_scaling_at(
     if info.cpu_cores <= 16 {
         return 1;
     }
-    if read_switch(path) == Some(0) {
-        recs.push(Recommendation {
-            param: "kernel.sched_tunable_scaling".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: format!(
-                "{}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数",
-                info.cpu_cores
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = sched_tunable_scaling_recommendation(
+        read_switch(path),
+        info.cpu_cores,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_tunable_scaling` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+///
+/// Linux 5.13 moved every SCHED_DEBUG tunable out of sysctl into debugfs
+/// ("sched: Move SCHED_DEBUG sysctl to debugfs"), so the scaling selector this
+/// reason sizes has had no `/proc/sys` node since: it is exported as
+/// `/sys/kernel/debug/sched/tunable_scaling` (v6.6 kernel/sched/debug.c), which
+/// the rule's own path can never reach. A node under the old name exists only
+/// where a tree re-registered the name for another class, and nothing in such a
+/// tree reads that variable, so a write of 1 lands nowhere while the report
+/// claims the kernel scales its tunables again. Silence the rule from 5.13 on,
+/// the way the other knobs whose reader moved are silenced.
+fn sched_tunable_scaling_recommendation(
+    current: Option<u64>,
+    cpu_cores: usize,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 5, 13) || current != Some(0) {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_tunable_scaling".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: format!(
+            "{cpu_cores}核 CPU 禁用了调度器自动缩放，内核无法根据 CPU 数量调整调度参数"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_panic_on_oops(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -7461,7 +7764,9 @@ fn eval_hardlockup_panic_at(
 ///
 /// Hard-lockup detection rides on the NMI watchdog, so the panic setting only
 /// matters while that watchdog runs — and ktuner itself turns it off: the perf
-/// rule writes `kernel.nmi_watchdog = 0` on every host that reads 1. Judging
+/// rule writes `kernel.nmi_watchdog = 0` on every host that reads 1 and runs a
+/// detector (a read-only switch has none, and then there is no hard lockup
+/// for the panic setting to act on either). Judging
 /// the current value alone therefore let a plan contain both
 /// `nmi_watchdog = 0` (Medium, Performance) and `hardlockup_panic = 1`
 /// (High, Security), where the first write disarms the detector the second
@@ -7500,9 +7805,37 @@ fn hardlockup_panic_recommendation(
 // work); rebooting the whole server on one is too aggressive a default for the
 // beginners ktuner targets.
 
-fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_rt_runtime_us";
-    if !std::path::Path::new(path).exists() {
+fn eval_sched_rt_runtime(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_sched_rt_runtime_at(
+        info,
+        recs,
+        "/proc/sys/kernel/sched_rt_runtime_us",
+        "/proc/sys/kernel/sched_rt_period_us",
+    )
+}
+
+/// Path-injectable form of [`eval_sched_rt_runtime`] (the `eval_*_at` idiom) so
+/// both reads are assertable against synthetic files.
+///
+/// The two knobs share one hand-written handler, and it validates the pair after
+/// parsing and *undoes* the write when the pair is invalid: a runtime other than
+/// -1 that exceeds the period is rejected with -EINVAL and the previous values
+/// are restored (v6.6 kernel/sched/rt.c, `sched_rt_global_validate` and the
+/// `undo:` label in `sched_rt_handler`). The literal 950000 - 95% of the default
+/// 1000000 us period - is therefore refused outright on a host whose period was
+/// shortened: the write fails, the old value stays, and the report still counts
+/// the High-confidence security fix as available.
+///
+/// The target keeps the same 95% of whatever period the host runs. When the
+/// period cannot be read, no target can be shown to be acceptable, so the rule
+/// stays silent rather than asking for a write the kernel would refuse.
+fn eval_sched_rt_runtime_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    period_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     let current = std::fs::read_to_string(path)
@@ -7510,17 +7843,33 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
         .trim()
         .parse::<i64>()
         .unwrap_or(950000);
-    if current == -1 {
-        recs.push(Recommendation {
-            param: "kernel.sched_rt_runtime_us".to_string(),
-            current_value: "-1".to_string(),
-            recommended_value: "950000".to_string(),
-            reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
+    if current != -1 {
+        return 1;
     }
+    // A read failure parses to 0, which is not a period any host runs: only a
+    // value the kernel could have produced justifies a target.
+    let period = std::fs::read_to_string(period_path)
+        .unwrap_or_default()
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0);
+    if period <= 0 {
+        return 1;
+    }
+    let target = if period >= 950_000 {
+        950_000
+    } else {
+        period - period / 20
+    };
+    recs.push(Recommendation {
+        param: "kernel.sched_rt_runtime_us".to_string(),
+        current_value: "-1".to_string(),
+        recommended_value: target.to_string(),
+        reason: "实时任务可无限占用 CPU（无上限），可能导致普通进程饿死系统无响应".to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    });
     1
 }
 
@@ -7979,7 +8328,12 @@ fn orphan_retries_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
 }
 
 fn eval_tcp_early_retrans(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_early_retrans_at(info, recs, "/proc/sys/net/ipv4/tcp_early_retrans")
+    eval_tcp_early_retrans_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_early_retrans",
+        "/proc/sys/net/ipv4/tcp_sack",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_early_retrans`] (the `eval_*_at`
@@ -7991,12 +8345,29 @@ fn eval_tcp_early_retrans(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 /// a masked or garbled proc entry (a container's, typically) neither reports a
 /// `current_value` the host does not have nor asks for a write it may not
 /// need.
+///
+/// The switch alone is not enough to make it matter. The only reader in v6.6
+/// is `tcp_schedule_loss_probe()` (net/ipv4/tcp_output.c:2812), which schedules
+/// the probe for 3 or 4 only when `tcp_is_sack(tp)` holds (:2816-2817). That
+/// flag is `tp->rx_opt.sack_ok` (include/net/tcp.h:1188-1191), set from the
+/// SACK-permitted option only while `net.ipv4.tcp_sack` is on
+/// (net/ipv4/tcp_input.c:4126-4129). With a readable `tcp_sack` 0 no
+/// connection uses SACK, so a read of 0 here cannot be answered by the write
+/// the advice asks for. A SACK switch that cannot be read keeps the advice: it
+/// is not evidence that SACK is off, and the engine's own `tcp_sack` rule
+/// raises a readable 0 to 1 in the same plan.
 fn eval_tcp_early_retrans_at(
     _info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    sack_path: &str,
 ) -> usize {
     if !std::path::Path::new(path).exists() {
+        return 1;
+    }
+    // tcp_sack was a plain proc_dointvec int through v5.10, where -1 means
+    // enabled; only a signed 0 turns every connection's SACK off.
+    if read_switch_i64(sack_path) == Some(0) {
         return 1;
     }
     // The reader maps a file it cannot interpret to 0 as well; only a
@@ -8265,7 +8636,11 @@ fn eval_user_reserve_kbytes_at(
     if info.memory_total_gb < 64 {
         return 1;
     }
-    if !overcommit_reserves_are_live(overcommit_path) {
+    // A host the overcommit_memory rule moves off strict mode in the same plan
+    // needs no reserve: __vm_enough_memory() returns in mode 1 before either
+    // reserve is subtracted, so the write would be inert. The ratio rule
+    // already keys on the same predicate.
+    if !overcommit_reserves_are_live(overcommit_path) || strict_overcommit_refused(info) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -8562,9 +8937,46 @@ fn eval_tcp_reordering_at(
     1
 }
 
-fn eval_sched_energy_aware(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_energy_aware";
+fn eval_sched_energy_aware(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_sched_energy_aware_at(
+        info,
+        recs,
+        "/proc/sys/kernel/sched_energy_aware",
+        "/sys/devices/system/cpu/smt/active",
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+    )
+}
+
+/// Path-injectable form of [`eval_sched_energy_aware`] (the `eval_*_at` idiom)
+/// so the EAS preconditions are assertable against synthetic files.
+///
+/// The knob only lets the scheduler build energy-aware perf domains, and the
+/// kernel refuses to build them on most servers whatever it says: v6.6
+/// `build_perf_domains()` (kernel/sched/topology.c), the knob's only reader
+/// (:383), gives up while SMT is active (`sched_smt_active()`, :396-399) and
+/// when a CPU has no cpufreq policy or a governor other than schedutil
+/// (:416-425); 6.12 `sched_is_eas_possible()` applies the same tests. There a
+/// write of 0 changes nothing, so the promised performance gain cannot happen
+/// (the "never recommend a no-op" rule of the page-cluster and
+/// hardlockup_panic gates).
+///
+/// `smt/active` prints `sched_smt_active()` itself (v6.6 kernel/cpu.c:3005).
+/// cpu0's governor stands for the set: one CPU without schedutil is enough to
+/// rule EAS out, and a missing or unreadable file means no policy to check.
+fn eval_sched_energy_aware_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    smt_active_path: &str,
+    governor_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
+        return 1;
+    }
+    if read_switch(smt_active_path) == Some(1) {
+        return 1;
+    }
+    if read_sysctl_string(governor_path) != "schedutil" {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -8809,22 +9221,26 @@ fn eval_tcp_recovery_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path:
 /// detection algorithm" (Documentation/networking/ip-sysctl.rst, v6.17 on).
 /// The bitmap's remaining readers are the other two bits —
 /// `TCP_RACK_STATIC_REO_WND` (net/ipv4/tcp_input.c) and
-/// `TCP_RACK_NO_DUPTHRESH` (net/ipv4/tcp_recovery.c) — and writing `1` leaves
-/// both clear rather than setting them, so from 6.17 on this recommendation
-/// changes no behavior while its reason claims RACK loss detection is off.
+/// `TCP_RACK_NO_DUPTHRESH` (net/ipv4/tcp_recovery.c), so this rule tests and
+/// sets bit 0x1 alone and preserves whatever else the administrator
+/// configured.
 fn tcp_recovery_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
     // The bit lost its last readers in 6.17; kernels up to 6.16 still consume
     // it, so only they get the advice.
     if kernel_at_least(kernel_version, 6, 17) {
         return None;
     }
-    if current != 0 {
+    // The knob is a bitmap, not a boolean: `tcp_is_rack()` tests bit 0x1, so
+    // a value like 2 or 4 also leaves RACK off. Keeping the other bits is
+    // required because the sysctl is written as a whole word.
+    const TCP_RACK_LOSS_DETECTION: u64 = 0x1;
+    if current & TCP_RACK_LOSS_DETECTION != 0 {
         return None;
     }
     Some(Recommendation {
         param: "net.ipv4.tcp_recovery".to_string(),
-        current_value: "0".to_string(),
-        recommended_value: "1".to_string(),
+        current_value: current.to_string(),
+        recommended_value: (current | TCP_RACK_LOSS_DETECTION).to_string(),
         reason: "未启用 RACK 丢包检测，RACK 比传统 dupthresh 更准确地检测丢包和乱序".to_string(),
         confidence: Confidence::Medium,
         category: Category::Performance,
@@ -8919,12 +9335,68 @@ fn skb_defer_max_recommendation(current: u64, kernel_version: &str) -> Option<Re
     })
 }
 
-fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/neigh/default/proxy_delay";
+fn eval_neigh_proxy_delay(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_neigh_proxy_delay_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/neigh/default/proxy_delay",
+        Path::new("/proc/sys/net/ipv4/conf"),
+        Path::new("/proc/sys/net/ipv6/conf"),
+    )
+}
+
+/// Path-injectable form of [`eval_neigh_proxy_delay`] (the `eval_*_at` idiom)
+/// so the proxy precondition is assertable against synthetic conf trees.
+///
+/// `proxy_delay` is read in exactly one place, `neigh_proxy_delay()`
+/// (v6.6 net/core/neighbour.c:1652-1658), whose only caller is
+/// `pneigh_enqueue()` (:1661) — the queue that holds a proxied solicitation
+/// back for a random fraction of the delay. Both of that function's call
+/// sites sit behind a forwarding *and* a proxy test:
+///
+/// ```text
+///   } else if (IN_DEV_FORWARD(in_dev)) {                    // net/ipv4/arp.c:855
+///           if (addr_type == RTN_UNICAST &&
+///               (arp_fwd_proxy(in_dev, dev, rt) ||              // :858
+///                arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||    // :859
+///                (rt->dst.dev != dev &&
+///                 pneigh_lookup(&arp_tbl, net, &tip, dev, 0)))) // :861
+///                   ... pneigh_enqueue(&arp_tbl, in_dev->arp_parms, skb); // :877
+/// ```
+///
+/// and the IPv6 twin guards the same queue with
+/// `idev->cnf.forwarding && (net->ipv6.devconf_all->proxy_ndp ||
+/// idev->cnf.proxy_ndp)` (v6.6 net/ipv6/ndisc.c:906-908, queue at :922).
+/// `arp_fwd_proxy()` (arp.c:470-497) starts with `if (!IN_DEV_PROXY_ARP(in_dev))
+/// return 0;` and `arp_fwd_pvlan()` (:518-534) with `IN_DEV_PROXY_ARP_PVLAN`,
+/// both `IN_DEV_ORCONF` tests of the `all` template and the device slot
+/// (include/linux/inetdevice.h:109-110).
+///
+/// A host that forwards nowhere, or that leaves every proxy slot at zero,
+/// therefore never reads the value, and the old rule still advised writing the
+/// template to 0 on it — the default template is what every new device inherits
+/// (`neigh_parms_alloc()` kmemdups `tbl->parms`, neighbour.c:1709). The gate
+/// fails open: a conf tree that cannot be listed, or a slot that cannot be
+/// parsed, is not evidence that the proxy path is unreachable.
+fn eval_neigh_proxy_delay_at(
+    _info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    ipv4_conf: &std::path::Path,
+    ipv6_conf: &std::path::Path,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    if !proxy_delay_is_ever_read(ipv4_conf, ipv6_conf) {
+        return 1;
+    }
+    // The knob's unit is USER_HZ (NEIGH_SYSCTL_USERHZ_JIFFIES_ENTRY,
+    // neighbour.c:3740), so the value the file shows is the one the reason
+    // speaks in.
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current > 80 {
         recs.push(Recommendation {
             param: "net.ipv4.neigh.default.proxy_delay".to_string(),
@@ -8937,6 +9409,56 @@ fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
         });
     }
     1
+}
+
+/// Whether any device could reach `pneigh_enqueue()` for its family — a device
+/// whose own `forwarding` slot is on and whose proxy mode is on through the
+/// `all` template or its own slot (see [`eval_neigh_proxy_delay_at`]).
+///
+/// `forwarding` is the device's own slot only (`IN_DEV_FORWARD` is
+/// `IN_DEV_CONF_GET`, not an ORCONF, include/linux/inetdevice.h:98). A slot
+/// that cannot be read is not evidence of a zero, so an unparseable value keeps
+/// the advice instead of guessing the proxy path away.
+fn proxy_delay_is_ever_read(ipv4_conf: &std::path::Path, ipv6_conf: &std::path::Path) -> bool {
+    fn any_device_proxies(conf_root: &std::path::Path, proxy_slots: &[&str]) -> bool {
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i64>().ok())
+        };
+        // `all` is the ORCONF half of every device; an unreadable one is not
+        // evidence of a zero.
+        let all_on = proxy_slots
+            .iter()
+            .any(|slot| read(conf_root.join("all").join(slot)) != Some(0));
+        let Ok(entries) = std::fs::read_dir(conf_root) else {
+            // A tree that cannot be listed proves nothing, so the advice stays.
+            return true;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let name = entry.file_name();
+            // Both are templates: `all` is folded in above, and `default` only
+            // seeds devices created later.
+            if name == *"all" || name == *"default" {
+                continue;
+            }
+            if read(entry.path().join("forwarding")) == Some(0) {
+                continue;
+            }
+            if all_on
+                || proxy_slots
+                    .iter()
+                    .any(|slot| read(entry.path().join(slot)) != Some(0))
+            {
+                return true;
+            }
+        }
+        false
+    }
+    // `arp_fwd_proxy` needs IN_DEV_PROXY_ARP and `arp_fwd_pvlan`
+    // IN_DEV_PROXY_ARP_PVLAN; the IPv6 half needs proxy_ndp.
+    any_device_proxies(ipv4_conf, &["proxy_arp", "proxy_arp_pvlan"])
+        || any_device_proxies(ipv6_conf, &["proxy_ndp"])
 }
 
 fn eval_tcp_pacing_ca_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -9393,28 +9915,69 @@ fn eval_tcp_retrans_collapse_at(
 }
 
 fn eval_tcp_app_win(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_app_win";
+    eval_tcp_app_win_at(info, recs, "/proc/sys/net/ipv4/tcp_app_win")
+}
+
+/// Path-injectable form of [`eval_tcp_app_win`] (the `eval_*_at` idiom) so
+/// the read is assertable against synthetic files.
+///
+/// The rule fires above 31, and `read_sysctl_u64` maps an unreadable or
+/// unparseable file to 0, which is below every ceiling. Only a value the
+/// reader could produce is evidence of a too-large reserve.
+fn eval_tcp_app_win_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 31 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_app_win".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "31".to_string(),
-            reason: format!(
-                "TCP 应用窗口保留比例 1/{current} 过高，减小可让更多缓冲区用于实际传输"
-            ),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_app_win_recommendation(read_sysctl_u64(path), &info.kernel_version) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_app_win` recommendation for an already-read value;
+/// split from the file probe so the version gate is testable anywhere.
+///
+/// The knob reserves `max(window/2^tcp_app_win, mss)` of the window for the
+/// application buffer (`Documentation/networking/ip-sysctl.rst`: "Reserve
+/// max(window/2^tcp_app_win, mss) of window for application buffer. Value 0
+/// is special, it means that nothing is reserved. ... Default: 31"), which
+/// `tcp_init_buffer_space()` applies as
+/// `window_clamp = max(maxwin - (maxwin >> tcp_app_win), 4*advmss)`
+/// (v6.6 net/ipv4/tcp_input.c:572-578). A LARGER exponent holds back a
+/// SMALLER share, so the recommended 31 is the most generous reserve the
+/// range offers, not a reduction of one: from `1/{current}` ("reserve one
+/// {current}th") the old reason drew the opposite conclusion, and on a host
+/// it had just written, the reserve would have grown rather than shrunk.
+///
+/// There is nothing above 31 to reduce anyway. Linux 6.3 bounded the entry
+/// with `extra1 = SYSCTL_ZERO` and `extra2 = &tcp_app_win_max`, where
+/// `tcp_app_win_max` is 31, registered as a u8
+/// (`net/ipv4/sysctl_net_ipv4.c`, "tcp: restrict net.ipv4.tcp_app_win",
+/// which fixed a shift-out-of-bounds in `tcp_init_buffer_space()`): a write
+/// above 31 is rejected, and since v5.13 the slot is a u8 that cannot carry
+/// one. Reading a file that still holds a larger value is possible only on
+/// a kernel that accepted it — 6.2 and older, where the entry was a plain
+/// `proc_dointvec` int with no bounds — and there the advice is wrong for
+/// the reason above. Keep the rule only where the kernel could hold such a
+/// value and the reserve really is excessive.
+fn tcp_app_win_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
+    if kernel_at_least(kernel_version, 6, 3) || current <= 31 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_app_win".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "31".to_string(),
+        reason: format!(
+            "TCP 应用缓冲区保留按窗口 >> tcp_app_win 计算，取值 {current} 超出内核支持的 [0, 31]；范围内 31 保留得最少，写入可把保留压到最小"
+        ),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_ip_default_ttl(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -9694,7 +10257,12 @@ fn eval_numa_stat(info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
 // incoherent; keep only the precision-oriented one.
 
 fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_tcp_base_mss_at(info, recs, "/proc/sys/net/ipv4/tcp_base_mss")
+    eval_tcp_base_mss_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_base_mss",
+        "/proc/sys/net/ipv4/tcp_mtu_probing",
+    )
 }
 
 /// Path-injectable form of [`eval_tcp_base_mss`] (the `eval_*_at` idiom) so the read is
@@ -9705,11 +10273,33 @@ fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// could produce is evidence that the limit is low, so a masked or garbled
 /// proc entry (a container's, typically) neither reports a `current_value`
 /// the host does not have nor asks for a write it may not need.
-fn eval_tcp_base_mss_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+///
+/// The floor only matters while MTU probing is enabled: `tcp_mtup_init()`
+/// arms `icsk_mtup.enabled` from `net.ipv4.tcp_mtu_probing > 1` (v6.6
+/// net/ipv4/tcp_output.c:1766) and takes `tcp_base_mss` as the initial
+/// `search_low` (:1769), `tcp_sync_mss()` consults that floor only when
+/// enabled (:1812-1813), `tcp_mtu_probe()` returns -1 without it (:2403),
+/// and the black-hole path in `tcp_mtu_probing()` returns immediately for a
+/// zero `tcp_mtu_probing` (net/ipv4/tcp_timer.c:168-176). The documentation
+/// says the same: "If MTU probing is enabled, this is the initial MSS used
+/// by the connection" (Documentation/networking/ip-sysctl.rst:364-367),
+/// with mode 0 meaning "Disabled" (:587-593). With a readable 0 no MSS
+/// decision reads the value, so the advice waits for probing to be on — the
+/// way the TFO blackhole rule waits for its client bit. A switch that cannot
+/// be read keeps the advice: it is not evidence that probing is off.
+fn eval_tcp_base_mss_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    mtu_probing_path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
+        return 1;
+    }
+    if read_switch_i64(mtu_probing_path) == Some(0) {
         return 1;
     }
     let Some(current) = read_switch(path) else {
@@ -10118,6 +10708,19 @@ fn shmall_target_pages(memory_total_gb: u64, page_size: u64) -> u64 {
     (memory_total_gb * 1024 * 1024 * 1024 / page_size) / 2
 }
 
+/// The value [`eval_shmall`] reads in production: `None` for a missing file
+/// and for one that could not be read or parsed.
+///
+/// The rule fires below half of RAM, and [`read_sysctl_u64`] maps an
+/// unreadable or unparseable file to 0, which is below every target. Only a
+/// value the reader could produce is evidence that the limit is low, so a
+/// masked or garbled proc entry (a container's, typically) neither reports a
+/// `current_value` the host does not have nor asks for a write it may not
+/// need.
+fn read_shmall(path: &str) -> Option<u64> {
+    read_switch(path)
+}
+
 fn eval_shmall(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -10389,14 +10992,27 @@ fn eval_protected_regular_at(
 }
 
 fn eval_bpf_jit_enable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/bpf_jit_enable";
+    eval_bpf_jit_enable_at(info, recs, "/proc/sys/net/core/bpf_jit_enable")
+}
+
+/// Path-injectable form of [`eval_bpf_jit_enable`] (the `eval_*_at` idiom) so the read is
+/// assertable against synthetic files.
+///
+/// The rule fires on 0 (the JIT off), and [`read_sysctl_u64`] maps an unreadable or
+/// unparseable file to the same 0. Only a value the reader could produce is
+/// evidence, so a masked or garbled proc entry (a container's, typically)
+/// neither reports a `current_value` the host does not have nor asks for a
+/// write it may not need.
+fn eval_bpf_jit_enable_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
     if current == 0 {
         recs.push(Recommendation {
             param: "net.core.bpf_jit_enable".to_string(),
@@ -10756,6 +11372,7 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
         recs,
         "/proc/sys/kernel/softlockup_all_cpu_backtrace",
         "/proc/sys/kernel/soft_watchdog",
+        "/proc/sys/kernel/watchdog_thresh",
     )
 }
 
@@ -10785,11 +11402,22 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
 /// kernel's default is the soft detector *on*, and so does one the reader
 /// cannot interpret: the same "a failed read leaves the kernel default, which
 /// does use the knob" rule the core_uses_pid gate follows.
+///
+/// `watchdog_thresh = 0` disables lockup detection altogether
+/// (`Documentation/admin-guide/sysctl/kernel.rst`: "Setting this tunable to
+/// zero will disable lockup detection altogether"), but `soft_watchdog` keeps
+/// reporting the user-enabled bit: `lockup_detector_update_enable()`
+/// (`kernel/watchdog.c`, v6.6 :341-353) builds `watchdog_enabled` from the
+/// user flags alone, and `__lockup_detector_reconfigure()` only starts the
+/// soft timers when `watchdog_enabled && watchdog_thresh` (v6.6 :1176-1198).
+/// So a readable 0 there also leaves the knob with no report to extend; a
+/// missing or unreadable thresh keeps the advice under the kernel default.
 fn eval_softlockup_all_cpu_backtrace_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
     soft_watchdog_path: &str,
+    watchdog_thresh_path: &str,
 ) -> usize {
     if !info.param_exists(path) {
         return 1;
@@ -10799,6 +11427,11 @@ fn eval_softlockup_all_cpu_backtrace_at(
     }
     // No soft-lockup report, no place for the all-CPU backtrace to fire.
     if !soft_lockup_detector_is_live(soft_watchdog_path) {
+        return 1;
+    }
+    // watchdog_thresh=0 stops the soft-lockup timers even though
+    // soft_watchdog still reads the user-enabled bit.
+    if read_switch(watchdog_thresh_path) == Some(0) {
         return 1;
     }
     // read_sysctl_u64 maps a file it could not read or parse to the same 0
@@ -10867,15 +11500,35 @@ fn eval_compact_unevictable_at(
 }
 
 fn eval_perf_cpu_time_max_percent(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/perf_cpu_time_max_percent";
+    eval_perf_cpu_time_max_percent_at(info, recs, "/proc/sys/kernel/perf_cpu_time_max_percent")
+}
+
+/// Path-injectable form of [`eval_perf_cpu_time_max_percent`] (the `eval_*_at`
+/// idiom) so the read is assertable against synthetic files.
+///
+/// 0 is not a tighter limit than 5 but no limit at all: v6.6
+/// `perf_cpu_time_max_percent_handler()` (kernel/events/core.c:484-488)
+/// treats 0 exactly like 100 and sets `perf_sample_allowed_ns` to 0, which
+/// makes `perf_sample_event_took()` return before any throttling (:521-527),
+/// and `sysctl/kernel.rst` documents 0 as "Disable the mechanism". The rule
+/// already fires on 100, so it fires on 0 too. The value is read with
+/// [`read_switch`], so a file that cannot be read or parsed is not taken for
+/// that 0.
+fn eval_perf_cpu_time_max_percent_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 5 {
+    let Some(current) = read_switch(path) else {
+        return 1;
+    };
+    if current == 0 || current > 5 {
         recs.push(Recommendation {
             param: "kernel.perf_cpu_time_max_percent".to_string(),
             current_value: current.to_string(),
@@ -10983,7 +11636,9 @@ fn eval_overcommit_ratio_at(
     } else {
         0
     };
-    overcommit_ratio_recommendation(oc_mode, ratio, kbytes, is_database_present(info), recs);
+    // A host the overcommit_memory rule moves off strict mode needs no ratio.
+    let sized_db = is_database_present(info) && !strict_overcommit_refused(info);
+    overcommit_ratio_recommendation(oc_mode, ratio, kbytes, sized_db, recs);
     1
 }
 
@@ -11157,6 +11812,55 @@ fn congestion_algo_available(available: &str, algo: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rt_runtime_target_follows_the_hosts_period() {
+        // `sched_rt_handler` rejects (and undoes) a runtime above the period, so
+        // the literal 950000 is not applicable on a host that shortened its
+        // period; the target keeps the default pair's ratio instead.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_rt_runtime_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("runtime");
+        let period = dir.join("period");
+        std::fs::write(&runtime, b"-1\n").unwrap();
+
+        let info = make_test_info();
+        let advice = |period_value: &[u8]| {
+            std::fs::write(&period, period_value).unwrap();
+            let mut recs = Vec::new();
+            eval_sched_rt_runtime_at(
+                &info,
+                &mut recs,
+                runtime.to_str().unwrap(),
+                period.to_str().unwrap(),
+            );
+            recs
+        };
+
+        // The default pair: the historical target, unchanged.
+        let recs = advice(b"1000000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "950000");
+
+        // A shortened period: 95% of it, a value the kernel accepts.
+        let recs = advice(b"500000\n");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "475000");
+
+        // An unreadable period is not a period: no target can be shown valid.
+        let recs = advice(b"");
+        assert!(recs.is_empty(), "an unreadable period must not be guessed");
+
+        // A bounded runtime is not the finding, whatever the period says.
+        std::fs::write(&runtime, b"950000\n").unwrap();
+        assert!(advice(b"1000000\n").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn bbr_availability_requires_an_exact_algorithm_token() {
@@ -11574,6 +12278,40 @@ mod tests {
         info
     }
 
+    /// TiKV refuses any swappiness but 0 at startup (`check_kernel`), while the
+    /// rule's database floor is 1: a TiKV node at 1 got no advice and at 60
+    /// was told to go to 1, which TiKV still warns about.
+    #[test]
+    fn swappiness_meets_tikvs_own_check() {
+        let (swap_on, _) = swappiness_swap_tables();
+        let demotion_off = std::path::Path::new(&swap_on)
+            .parent()
+            .unwrap()
+            .join("demotion_off");
+        std::fs::write(&demotion_off, "false\n").unwrap();
+        let advice = |procs: &[&str], current: u64| {
+            let mut info = info_with_processes(procs);
+            info.sysctl.swappiness = current;
+            let mut recs = Vec::new();
+            eval_swappiness_at(
+                &info,
+                &WorkloadType::IoLatency,
+                &mut recs,
+                &swap_on,
+                demotion_off.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| r.recommended_value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(advice(&["tikv-server"], 60), ["0"]);
+        assert_eq!(advice(&["tikv-server"], 1), ["0"]);
+        assert!(advice(&["tikv-server"], 0).is_empty());
+        // The other latency workloads keep the floor of 1.
+        assert_eq!(advice(&["tidb-server"], 60), ["1"]);
+        assert!(advice(&["tidb-server"], 1).is_empty());
+    }
+
     #[test]
     fn mariadb_daemon_gates_the_database_tuning_rules() {
         // MariaDB 10.4+ runs as mariadbd — the comm Debian and Ubuntu ship for
@@ -11591,7 +12329,7 @@ mod tests {
         info.disks[0].read_ahead_kb = Some(512);
 
         let mut recs = Vec::new();
-        eval_swappiness(&info, &WorkloadType::Mixed, &mut recs);
+        swappiness_on_a_swap_host(&info, &WorkloadType::Mixed, &mut recs);
         assert!(
             recs.iter().any(|r| r.param == "vm.swappiness"),
             "mariadbd must gate the swappiness rule in"
@@ -11621,6 +12359,91 @@ mod tests {
         );
     }
 
+    /// [`eval_swappiness`] on a host with one swap area, so the database and
+    /// memory gates are asserted whatever the test machine's own swap is.
+    fn swappiness_on_a_swap_host(
+        info: &SystemInfo,
+        workload: &WorkloadType,
+        recs: &mut Vec<Recommendation>,
+    ) -> usize {
+        let (swaps, _) = swappiness_swap_tables();
+        eval_swappiness_at(info, workload, recs, &swaps, "/nonexistent")
+    }
+
+    /// A /proc/swaps with one area and one with the header alone.
+    fn swappiness_swap_tables() -> (String, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_swappiness_swaps_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n";
+        let on = dir.join("swaps_on");
+        std::fs::write(
+            &on,
+            format!("{header}/dev/sdb2 partition\t8388604\t0\t-2\n"),
+        )
+        .unwrap();
+        let off = dir.join("swaps_off");
+        std::fs::write(&off, header).unwrap();
+        (
+            on.to_str().unwrap().to_string(),
+            off.to_str().unwrap().to_string(),
+        )
+    }
+
+    /// With no swap area and demotion off, reclaim never takes anonymous pages
+    /// (`get_scan_count()` scans file pages alone), so vm.swappiness weighs
+    /// nothing and the write the rule asked for changed nothing. Demotion that
+    /// is on keeps the advice: it makes anonymous pages reclaimable.
+    #[test]
+    fn swappiness_advice_needs_swap_or_demotion() {
+        let (swap_on, swap_off) = swappiness_swap_tables();
+        let dir = std::path::Path::new(&swap_on)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let demotion_on = dir.join("demotion_on");
+        std::fs::write(&demotion_on, "true\n").unwrap();
+        let demotion_off = dir.join("demotion_off");
+        std::fs::write(&demotion_off, "false\n").unwrap();
+        let mut info = info_with_processes(&["postgres"]);
+        info.sysctl.swappiness = 60;
+        let advice = |swaps: &str, demotion: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_swappiness_at(
+                &info,
+                &WorkloadType::Mixed,
+                &mut recs,
+                swaps,
+                demotion.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice(&swap_on, &demotion_off);
+        assert_eq!(recs.len(), 1, "a swap area makes the knob matter");
+        assert_eq!(recs[0].recommended_value, "1");
+        assert_eq!(
+            advice(&swap_off, &demotion_on).len(),
+            1,
+            "demotion does too"
+        );
+        assert!(
+            advice(&swap_off, &demotion_off).is_empty(),
+            "no swap, no demotion"
+        );
+        assert!(
+            advice(&swap_off, &dir.join("missing")).is_empty(),
+            "no demotion control"
+        );
+        assert!(
+            advice(dir.join("no_swaps").to_str().unwrap(), &demotion_off).is_empty(),
+            "an unreadable swap table counts as no swap"
+        );
+    }
+
     #[test]
     fn oracle_gates_the_database_tuning_rules() {
         // oracle is the one OLTP database is_database_present already counts
@@ -11641,7 +12464,7 @@ mod tests {
         info.disks[0].read_ahead_kb = Some(512);
 
         let mut recs = Vec::new();
-        eval_swappiness(&info, &WorkloadType::Mixed, &mut recs);
+        swappiness_on_a_swap_host(&info, &WorkloadType::Mixed, &mut recs);
         let swap = recs
             .iter()
             .find(|r| r.param == "vm.swappiness")
@@ -11669,7 +12492,7 @@ mod tests {
         let mut big = info_with_processes(&["oracle"]);
         big.memory_total_gb = 64;
         let mut recs = Vec::new();
-        eval_swappiness(&big, &WorkloadType::Mixed, &mut recs);
+        swappiness_on_a_swap_host(&big, &WorkloadType::Mixed, &mut recs);
         let swap = recs
             .iter()
             .find(|r| r.param == "vm.swappiness")
@@ -11874,6 +12697,42 @@ mod tests {
             recs.iter().all(|r| r.param != "kernel.numa_balancing"),
             "a build job is not a database"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Since Linux 6.0 `kernel.numa_balancing` is a bitmask: 1 is the normal
+    /// page-fault sampling the rule turns off, 2 the memory-tiering promotion.
+    /// A tiered host running both reads 3, and its top-tier pages are still
+    /// unmapped for hinting faults (v6.6 mm/mprotect.c skips them only when
+    /// the normal bit is clear), yet the rule only fired on an exact 1.
+    #[test]
+    fn numa_balancing_rule_clears_the_normal_bit_of_a_tiered_mode() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_numa_mask_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("numa_balancing");
+        let mut info = info_with_processes(&["postgres"]);
+        info.numa_nodes = 2;
+        let advice = |content: &str| {
+            std::fs::write(&path, content).unwrap();
+            let mut recs = Vec::new();
+            eval_numa_balancing_at(&info, &mut recs, path.to_str().unwrap());
+            recs.into_iter()
+                .find(|r| r.param == "kernel.numa_balancing")
+                .map(|r| (r.current_value, r.recommended_value))
+        };
+
+        // Normal and tiering: drop the normal bit, keep the promotion.
+        assert_eq!(advice("3\n"), Some(("3".to_string(), "2".to_string())));
+        // Normal alone: unchanged advice.
+        assert_eq!(advice("1\n"), Some(("1".to_string(), "0".to_string())));
+        // Tiering alone or off: top-tier pages are not scanned, nothing to do.
+        assert_eq!(advice("2\n"), None);
+        assert_eq!(advice("0\n"), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -12901,7 +13760,7 @@ mod tests {
                 swappiness: 60,
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
-                somaxconn: 128,
+                somaxconn: Some(128),
                 thp_enabled: "always".to_string(),
             },
             processes: vec![ProcessInfo {
@@ -12926,6 +13785,10 @@ mod tests {
         let info = make_test_info();
         let recs = evaluate(&info).unwrap().recommendations;
         let swap_rec = recs.iter().find(|r| r.param == "vm.swappiness");
+        // The rule reads the live swap table; a swapless runner gets no advice.
+        if !swap_configured("/proc/swaps") {
+            return;
+        }
         assert!(swap_rec.is_some());
         assert_eq!(swap_rec.unwrap().recommended_value, "1");
     }
@@ -12959,22 +13822,31 @@ mod tests {
 
     #[test]
     fn test_thp_with_mongod_and_etcd() {
-        // mongod is a database in every sibling list (swappiness, dirty_ratio,
-        // classify) and MongoDB's production notes ask for THP off outright;
-        // etcd is the coordination store of the same cache family. Both must
-        // get the always->madvise recommendation; a streaming workload must not.
-        for name in ["mongod", "etcd"] {
-            let mut info = make_test_info();
-            info.processes = vec![ProcessInfo {
-                name: name.to_string(),
-            }];
-            let recs = evaluate(&info).unwrap().recommendations;
-            let thp_rec = recs
-                .iter()
-                .find(|r| r.param.contains("hugepage"))
-                .unwrap_or_else(|| panic!("{name} must get the THP recommendation"));
-            assert_eq!(thp_rec.recommended_value, "madvise");
-        }
+        // etcd is the coordination store of the same cache family and must get
+        // the always->madvise recommendation; a streaming workload must not.
+        // mongod must not either: MongoDB 8.0's default build asks for THP
+        // `always` while the legacy allocator and 7.0 ask for it off, and the
+        // host does not say which one runs.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "mongod".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "transparent_hugepage/enabled"),
+            "mongod's THP needs depend on its build"
+        );
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "etcd".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let thp_rec = recs
+            .iter()
+            .find(|r| r.param.contains("hugepage"))
+            .unwrap_or_else(|| panic!("etcd must get the THP recommendation"));
+        assert_eq!(thp_rec.recommended_value, "madvise");
         let mut info = make_test_info();
         info.processes = vec![ProcessInfo {
             name: "kafka".to_string(),
@@ -13218,6 +14090,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// mongod warns "vm.max_map_count is too low" below twice its connection
+    /// limit (SERVER-51233), which its stock 64000-file limit puts at 102400,
+    /// above the kernel's 65530 default; the gate never counted it.
+    #[test]
+    fn max_map_count_counts_mongod() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_mongod_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        std::fs::write(&knob, "65530\n").unwrap();
+        let advice = |name: &str| {
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(&[name]),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs
+        };
+
+        let recs = advice("mongod");
+        assert_eq!(recs.len(), 1, "mongod must get the max_map_count advice");
+        assert_eq!(recs[0].recommended_value, "262144");
+        // The shell is a client, not the daemon.
+        assert!(advice("mongosh").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cassandra's startup check (`StartupChecks.checkMaxMapCount`) warns below
+    /// 1048575 under its default mmap disk access mode, so the JVM floor of
+    /// 262144 is not enough for it: the rule stopped at 262144 on a host
+    /// Cassandra still warns about.
+    #[test]
+    fn max_map_count_sizes_cassandra_to_its_own_check() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_max_map_count_cassandra_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("max_map_count");
+        let advice = |procs: &[&str], value: &str| {
+            std::fs::write(&knob, value).unwrap();
+            let mut recs = Vec::new();
+            eval_max_map_count_at(
+                &info_with_processes(procs),
+                &mut recs,
+                knob.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| r.recommended_value)
+                .collect::<Vec<_>>()
+        };
+
+        // The JVM marker and the resolved service name, as read_processes
+        // pushes them for a Cassandra node.
+        let cassandra = ["java", "cassandra"];
+        assert_eq!(advice(&cassandra, "65530\n"), ["1048575"]);
+        assert_eq!(advice(&cassandra, "262144\n"), ["1048575"]);
+        assert!(advice(&cassandra, "1048575\n").is_empty());
+        // Other JVMs keep the existing floor.
+        assert_eq!(advice(&["java"], "65530\n"), ["262144"]);
+        assert!(advice(&["java"], "262144\n").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_no_false_positive_when_optimal() {
         let mut info = make_test_info();
@@ -13227,7 +14170,7 @@ mod tests {
         info.sysctl.thp_enabled = "madvise".to_string();
         info.sysctl.dirty_ratio = 10;
         info.sysctl.dirty_background_ratio = 5;
-        info.sysctl.somaxconn = 65535;
+        info.sysctl.somaxconn = Some(65535);
         info.processes = vec![];
         info.network = vec![];
 
@@ -13883,9 +14826,73 @@ mod tests {
             disk_type: DiskType::SSD,
             scheduler: "cfq".to_string(),
             available_schedulers: vec!["noop".to_string(), "cfq".to_string()],
+<<<<<<< HEAD
             nr_requests: 256,
             read_ahead_kb: 128,
             rq_affinity: 1,
+=======
+            nr_requests: Some(256),
+            read_ahead_kb: Some(128),
+            rq_affinity: Some(1),
+            hidden: false,
+            holders: vec![],
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let rec = recs.iter().find(|r| r.param.contains("scheduler"));
+        assert!(rec.is_some(), "Should recommend changing cfq on SSD");
+        assert_eq!(rec.unwrap().recommended_value, "noop");
+    }
+
+    #[test]
+    fn test_ssd_scheduler_bfq_is_the_modern_sorting_elevator() {
+        // 5.0 dropped `cfq` and renamed the pass-through names, so the state
+        // the arm exists for is an SSD running `bfq` (cfq's successor) with the
+        // 5.x list `none mq-deadline kyber bfq`.
+        let mut info = make_test_info();
+        info.disks = vec![DiskInfo {
+            name: "sda".to_string(),
+            disk_type: DiskType::SSD,
+            scheduler: "bfq".to_string(),
+            available_schedulers: vec![
+                "none".to_string(),
+                "mq-deadline".to_string(),
+                "kyber".to_string(),
+                "bfq".to_string(),
+            ],
+            nr_requests: Some(256),
+            read_ahead_kb: Some(128),
+            rq_affinity: Some(1),
+            hidden: false,
+            holders: vec![],
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let rec = recs.iter().find(|r| r.param == "block/sda/scheduler");
+        assert_eq!(
+            rec.map(|r| r.recommended_value.as_str()),
+            Some("none"),
+            "an SSD running bfq must be advised the pass-through"
+        );
+    }
+
+    #[test]
+    fn test_ssd_scheduler_leaves_the_light_elevators_alone() {
+        // `mq-deadline` is not the queuing overhead the reason describes, and
+        // the arm must not claim every 5.x elevator is a problem.
+        let mut info = make_test_info();
+        info.disks = vec![DiskInfo {
+            name: "sda".to_string(),
+            disk_type: DiskType::SSD,
+            scheduler: "mq-deadline".to_string(),
+            available_schedulers: vec![
+                "none".to_string(),
+                "mq-deadline".to_string(),
+                "kyber".to_string(),
+                "bfq".to_string(),
+            ],
+            nr_requests: Some(256),
+            read_ahead_kb: Some(128),
+            rq_affinity: Some(1),
+>>>>>>> origin/main
             hidden: false,
             holders: vec![],
         }];
@@ -14225,13 +15232,44 @@ mod tests {
     #[test]
     fn test_somaxconn_not_triggered_without_listen() {
         let mut info = make_test_info();
-        info.sysctl.somaxconn = 128;
+        info.sysctl.somaxconn = Some(128);
         info.processes = vec![];
         // has_listen_sockets() reads live /proc, so on this machine it may or may not trigger
         // We just verify the rule exists and has the right recommended value when triggered
         let recs = evaluate(&info).unwrap().recommendations;
         if let Some(rec) = recs.iter().find(|r| r.param == "net.core.somaxconn") {
             assert_eq!(rec.recommended_value, "65535");
+        }
+    }
+
+    #[test]
+    fn somaxconn_advice_needs_a_readable_value() {
+        // somaxconn fell back to 0 when it could not be read or parsed, and 0
+        // sits below both backlog floors: a masked or garbled proc entry (a
+        // container's, typically) was reported as `current_value: "0"` and
+        // answered with a raise on a host whose limit was never read.
+        let (low, high, others) = zero_switch_paths("somaxconn_read", b"65535\n");
+        let mut info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut advice = |path: &std::path::Path| {
+            info.sysctl.somaxconn = read_somaxconn_from(path);
+            let mut recs = Vec::new();
+            eval_somaxconn(&info, &WorkloadType::Mixed, &mut recs);
+            recs
+        };
+
+        std::fs::write(&low, b"128\n").unwrap();
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 128 is below the floor");
+        assert_eq!(recs[0].current_value, "128");
+        assert!(advice(&high).is_empty(), "a readable 65535 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
         }
     }
 
@@ -14358,6 +15396,10 @@ mod tests {
             .unwrap()
             .recommendations;
         let rec = recs.iter().find(|r| r.param == "vm.swappiness");
+        // The rule reads the live swap table; a swapless runner gets no advice.
+        if !swap_configured("/proc/swaps") {
+            return;
+        }
         assert!(
             rec.is_some(),
             "IoLatency workload should recommend swappiness=1 even when current is 10"
@@ -14805,6 +15847,45 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "5000000");
             }
         }
+    }
+
+    /// 5.13 moved every SCHED_DEBUG tunable into debugfs, so the three knobs
+    /// these rules size have had no /proc/sys node since; the siblings whose
+    /// reader moved were silenced the same way, these three were not.
+    #[test]
+    fn sched_migration_cost_advice_stops_where_its_reader_moved() {
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.4.0-150").is_some());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "5.13.0").is_none());
+        assert!(sched_migration_cost_recommendation(500_000, 64, "6.6.87.2").is_none());
+        // Unparseable versions keep the legacy behaviour, and the value gates
+        // are unchanged: a pinned negative and a tuned host keep their silence.
+        assert!(sched_migration_cost_recommendation(500_000, 64, "").is_some());
+        assert!(sched_migration_cost_recommendation(-1, 64, "5.10.0").is_none());
+        assert!(sched_migration_cost_recommendation(5_000_000, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_nr_migrate_advice_stops_where_its_reader_moved() {
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.4.0-150").is_some());
+        assert!(sched_nr_migrate_recommendation(8, 64, "5.13.0").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "6.6.87.2").is_none());
+        assert!(sched_nr_migrate_recommendation(8, 64, "").is_some());
+        assert!(sched_nr_migrate_recommendation(128, 64, "5.10.0").is_none());
+    }
+
+    #[test]
+    fn sched_tunable_scaling_advice_stops_where_its_reader_moved() {
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.10.0-26-amd64").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.4.0-150").is_some());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "5.13.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "6.6.87.2").is_none());
+        assert!(sched_tunable_scaling_recommendation(Some(0), 64, "").is_some());
+        // The switch gate is unchanged: an enabled selector or an unreadable
+        // file is not the disabled state.
+        assert!(sched_tunable_scaling_recommendation(Some(1), 64, "5.10.0").is_none());
+        assert!(sched_tunable_scaling_recommendation(None, 64, "5.10.0").is_none());
     }
 
     #[test]
@@ -17064,6 +18145,46 @@ mod tests {
         }
     }
 
+    /// Since Linux 6.5 the kernel registers `nmi_watchdog` read-only when no
+    /// hard-lockup detector could be started (a guest without a virtual PMU,
+    /// typically), while the switch still reads its default 1 (v6.6
+    /// kernel/watchdog.c). Nothing runs to disable then, and a write is refused
+    /// with -ENOTSUPP, so the advice must not appear.
+    #[test]
+    fn nmi_watchdog_advice_needs_a_running_detector() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_nmi_watchdog_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let switch = |name: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"1\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let running = switch("running", 0o644);
+        let unavailable = switch("unavailable", 0o444);
+        let info = make_test_info();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_nmi_watchdog_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&running);
+        assert_eq!(recs.len(), 1, "a running detector is disabled");
+        assert_eq!(recs[0].recommended_value, "0");
+        assert!(
+            advice(&unavailable).is_empty(),
+            "a read-only switch has no detector behind it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn stat_interval_advice_needs_a_readable_value() {
         // The rule fires below 2, and read_sysctl_u64 maps an unreadable or
@@ -17335,6 +18456,37 @@ mod tests {
         );
     }
 
+    /// Reserved huge pages cannot be used for anything but hugetlb mappings
+    /// (v6.6 hugetlbpage.rst), and mongod, ClickHouse, TiDB and TiKV never map
+    /// them, so the quarter of memory the rule reserves was taken from those
+    /// servers instead of serving them.
+    #[test]
+    fn nr_hugepages_advice_is_for_databases_that_map_the_pool() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_hugetlb_dbs_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("nr_hugepages");
+        std::fs::write(&knob, "0\n").unwrap();
+        let advised = |name: &str| {
+            let mut info = info_with_processes(&[name]);
+            info.memory_total_gb = 64;
+            let mut recs = Vec::new();
+            eval_nr_hugepages_at(&info, &mut recs, knob.to_str().unwrap(), 2048);
+            !recs.is_empty()
+        };
+
+        for name in ["postgres", "mysqld", "mariadbd", "oracle"] {
+            assert!(advised(name), "{name} maps the hugetlb pool");
+        }
+        for name in ["mongod", "clickhouse", "tidb-server", "tikv-server"] {
+            assert!(!advised(name), "{name} cannot use reserved huge pages");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn test_arp_ignore_multi_nic() {
         let mut info = make_test_info();
@@ -18265,7 +19417,8 @@ mod tests {
     #[test]
     fn hardlockup_panic_defers_to_the_watchdog_the_plan_disables() {
         // The perf rule writes kernel.nmi_watchdog = 0 on EVERY host that
-        // reads 1 (eval_nmi_watchdog), and the hardlockup detector is driven
+        // reads 1 and runs a detector (eval_nmi_watchdog_at), and the
+        // hardlockup detector is driven
         // by that watchdog: with the two entries in one plan the first write
         // disarms the detector the second one needs, so the High-confidence
         // security advice could never fire. The guard must therefore read the
@@ -18946,17 +20099,43 @@ mod tests {
         );
     }
 
+    /// `tcp_notsent_lowat` is a wake-up threshold, not a memory cap: its only
+    /// reader, `tcp_stream_memory_free()` (v6.6 net/ipv4/tcp_ipv4.c:3096-3104),
+    /// decides whether `poll()` reports `POLLOUT`, and `sk_stream_is_writeable()`
+    /// separately rejects a full `sk_sndbuf` (include/net/sock.h:1388-1395) —
+    /// the limit the old reason said 128KB would lower. Nothing is queued or
+    /// dropped by the value, so there is no memory to reclaim and no finding.
     #[test]
-    fn test_tcp_notsent_lowat() {
+    fn tcp_notsent_lowat_is_a_wakeup_threshold_not_a_cap() {
         let info = make_test_info();
-        let mut recs = Vec::new();
-        eval_tcp_notsent_lowat(&info, &mut recs);
-        if let Some(rec) = recs
-            .iter()
-            .find(|r| r.param == "net.ipv4.tcp_notsent_lowat")
-        {
-            assert_eq!(rec.recommended_value, "131072");
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_notsent_lowat_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("tcp_notsent_lowat");
+
+        // The kernel default is UINT_MAX (ip-sysctl.rst "Default: UINT_MAX"),
+        // and the old rule fired on it; so did every other large value.
+        for value in ["4294967295", "1048576", "131073", "131072", "0"] {
+            std::fs::write(&knob, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_notsent_lowat_at(&info, &mut recs, knob.to_str().unwrap());
+            assert_eq!(checked, 1);
+            assert!(
+                recs.is_empty(),
+                "{value}: the knob caps no memory, so it is never a finding"
+            );
         }
+
+        // A file the process cannot read is not a reason to advise either.
+        let mut recs = Vec::new();
+        eval_tcp_notsent_lowat_at(&info, &mut recs, dir.join("absent").to_str().unwrap());
+        assert!(recs.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -19447,8 +20626,15 @@ mod tests {
         // entry (a container's, typically) was reported as `current_value: "0"`
         // and answered with a raise on a host whose value was never read.
         let (_, high, others) = zero_switch_paths("tcp_limit_output_bytes_read", b"1048576\n");
+        let dir = high.parent().expect("the fixture directory").to_path_buf();
         let low = high.with_file_name("low");
         std::fs::write(&low, b"262144\n").unwrap();
+        // A congestion control the plan does not move to BBR, so these cases
+        // exercise the value read alone.
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        std::fs::write(&cc, b"cubic\n").unwrap();
+        std::fs::write(&available, b"reno cubic\n").unwrap();
         let mut info = make_test_info();
         info.network = vec![NetInfo {
             name: "eth0".to_string(),
@@ -19456,7 +20642,14 @@ mod tests {
         }];
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_limit_output_bytes_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_limit_output_bytes_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                None,
+            );
             recs
         };
 
@@ -19471,6 +20664,67 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_limit_output_bytes_vanishes_under_bbr() {
+        // tcp_small_queue_check() applies the sysctl only to an unpaced socket
+        // (sk->sk_pacing_status == SK_PACING_NONE, tcp_output.c:2677-2679) and
+        // BBR's init paces the sockets it owns (cmpxchg(... SK_PACING_NEEDED),
+        // tcp_bbr.c:1077), so the plan that switches the host to BBR cannot
+        // deliver the reason's promise for the connections it creates - the
+        // same no-op the slow_start_after_idle, pacing-ratio and min_tso_segs
+        // siblings already refuse.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_tsq_bbr_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let limit = dir.join("tcp_limit_output_bytes");
+        let cc = dir.join("tcp_congestion_control");
+        let available = dir.join("tcp_available_congestion_control");
+        std::fs::write(&limit, b"262144\n").unwrap();
+        std::fs::write(&cc, b"cubic\n").unwrap();
+
+        let mut info = make_test_info();
+        info.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 10000,
+        }];
+        let advice = |available_body: &[u8], cc_body: &[u8]| {
+            std::fs::write(&available, available_body).unwrap();
+            std::fs::write(&cc, cc_body).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_limit_output_bytes_at(
+                &info,
+                &mut recs,
+                limit.to_str().unwrap(),
+                cc.to_str().unwrap(),
+                available.to_str().unwrap(),
+                None,
+            );
+            recs
+        };
+
+        // A registered bbr: the sibling rule moves the host onto it, so the
+        // raise is not carried.
+        assert!(
+            advice(b"reno cubic bbr\n", b"cubic\n").is_empty(),
+            "the plan switches this host to BBR"
+        );
+        // BBR already selected is the same no-op.
+        assert!(
+            advice(b"reno cubic bbr\n", b"bbr\n").is_empty(),
+            "an unpaced socket is not what BBR leaves behind"
+        );
+        // No BBR on the host: the raise still belongs to the plan.
+        assert_eq!(
+            advice(b"reno cubic\n", b"cubic\n").len(),
+            1,
+            "a host the plan cannot move to BBR keeps the advice"
+        );
     }
 
     #[test]
@@ -20107,6 +21361,32 @@ mod tests {
         );
         assert!(recs.is_empty(), "an adequate reserve stays untouched");
 
+        // A host the overcommit_memory rule moves off strict mode in the same
+        // plan: Redis/Valkey/mongod/ClickHouse refuse mode 2 and no PostgreSQL
+        // asks for it, so the plan writes vm.overcommit_memory = 1. Mode 1
+        // returns from __vm_enough_memory() before either reserve is read, so
+        // both reserve writes would be inert. The ratio rule already withholds
+        // its advice for exactly this population.
+        let mut strict_service = info_with_processes(&["redis-server"]);
+        strict_service.memory_total_gb = 128;
+        let mut recs = Vec::new();
+        eval_admin_reserve_kbytes_at(
+            &strict_service,
+            &mut recs,
+            admin.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        eval_user_reserve_kbytes_at(
+            &strict_service,
+            &mut recs,
+            user.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "the plan leaves the mode that reads either reserve: {recs:?}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -20140,9 +21420,32 @@ mod tests {
         let info = make_test_info();
         let mut recs = Vec::new();
         eval_sem(&info, &mut recs);
-        if let Some(rec) = recs.iter().find(|r| r.param == "kernel.sem") {
-            assert_eq!(rec.recommended_value, "1024 65536 256 4096");
-            assert_eq!(rec.category, Category::Performance);
+        // eval_sem reads the live kernel.sem and the recommendation is
+        // raise-only per field, so the expectation has to be recomputed from
+        // the live tuple: the fixed quadruple this test used to pin is what
+        // the raise-only fix replaced, and a host with a field the
+        // administrator raised above its floor (issue #4054's shape) fails
+        // against it.
+        let live: Vec<u64> = std::fs::read_to_string("/proc/sys/kernel/sem")
+            .map(|raw| {
+                raw.split_whitespace()
+                    .filter_map(|field| field.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match sem_recommendation(&live) {
+            Some(want) => {
+                let rec = recs
+                    .iter()
+                    .find(|r| r.param == "kernel.sem")
+                    .expect("a tuple below its floors is a finding");
+                assert_eq!(rec.recommended_value, want);
+                assert_eq!(rec.category, Category::Performance);
+            }
+            None => assert!(
+                recs.iter().all(|r| r.param != "kernel.sem"),
+                "a tuple that already meets the floors needs no advice"
+            ),
         }
     }
 
@@ -20398,6 +21701,34 @@ mod tests {
         // Unparseable strings keep the caller's legacy behavior.
         assert!(!kernel_at_least("", 4, 15));
         assert!(!kernel_at_least("custom-kernel", 4, 15));
+    }
+
+    /// The knob's ceiling has been 31 since 6.3, and 31 is the value that
+    /// reserves the LEAST of the window, so above it there is neither a value
+    /// to fire on nor a direction that shrinks the reserve.
+    #[test]
+    fn tcp_app_win_advice_stops_where_the_ceiling_landed() {
+        // 6.3 bounded the entry to [0, 31] ("tcp: restrict net.ipv4.tcp_app_win"),
+        // so a larger value cannot be written there, and since 5.13 the u8 slot
+        // cannot even hold one.
+        assert!(tcp_app_win_recommendation(64, "6.3.0").is_none());
+        assert!(tcp_app_win_recommendation(64, "6.6.87.2").is_none());
+        assert!(tcp_app_win_recommendation(64, "6.2.16").is_some());
+        assert!(tcp_app_win_recommendation(64, "5.4.0-150").is_some());
+        // An unparseable version keeps the legacy behaviour.
+        assert!(tcp_app_win_recommendation(64, "").is_some());
+        // The value gate is unchanged: 31 is the top of the range.
+        assert!(tcp_app_win_recommendation(31, "5.4.0").is_none());
+        assert!(tcp_app_win_recommendation(0, "5.4.0").is_none());
+        // Where it does fire, the reason must describe the reserve the kernel
+        // computes (window >> tcp_app_win) rather than one over the value.
+        let rec = tcp_app_win_recommendation(64, "5.4.0").expect("pre-6.3 kernels accept it");
+        assert_eq!(rec.recommended_value, "31");
+        assert!(
+            !rec.reason.contains("1/64"),
+            "the divisor is 2^tcp_app_win, not the value itself: {}",
+            rec.reason
+        );
     }
 
     #[test]
@@ -20693,6 +22024,62 @@ mod tests {
             assert_eq!(rec.recommended_value, "0");
             assert_eq!(rec.category, Category::Performance);
         }
+    }
+
+    /// The knob only matters where the kernel can build energy-aware perf
+    /// domains: `build_perf_domains()` gives up while SMT is active and when a
+    /// CPU's governor is not schedutil, so on such a host the write of 0
+    /// changed nothing although the rule promised a performance gain.
+    #[test]
+    fn sched_energy_aware_advice_needs_eas_to_be_possible() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_energy_aware_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let knob = file("sched_energy_aware", b"1\n");
+        let knob_off = file("sched_energy_aware_off", b"0\n");
+        let smt_on = file("smt_on", b"1\n");
+        let smt_off = file("smt_off", b"0\n");
+        let schedutil = file("schedutil", b"schedutil\n");
+        let performance = file("performance", b"performance\n");
+        let missing = dir.join("missing").to_str().unwrap().to_string();
+        let info = make_test_info();
+        let advice = |knob: &str, smt: &str, governor: &str| {
+            let mut recs = Vec::new();
+            eval_sched_energy_aware_at(&info, &mut recs, knob, smt, governor);
+            recs
+        };
+
+        let recs = advice(&knob, &smt_off, &schedutil);
+        assert_eq!(recs.len(), 1, "EAS can run: the knob decides");
+        assert_eq!(recs[0].recommended_value, "0");
+        assert!(
+            advice(&knob, &missing, &schedutil).len() == 1,
+            "no SMT control"
+        );
+        assert!(
+            advice(&knob, &smt_on, &schedutil).is_empty(),
+            "SMT is active"
+        );
+        assert!(
+            advice(&knob, &smt_off, &performance).is_empty(),
+            "not schedutil"
+        );
+        assert!(
+            advice(&knob, &smt_off, &missing).is_empty(),
+            "no cpufreq policy"
+        );
+        assert!(
+            advice(&knob_off, &smt_off, &schedutil).is_empty(),
+            "already 0"
+        );
     }
 
     #[test]
@@ -21451,12 +22838,42 @@ mod tests {
     }
 
     #[test]
+    fn bpf_jit_enable_advice_needs_a_readable_value() {
+        // The rule fires on 0, and read_sysctl_u64 mapped an unreadable or
+        // unparseable file to the same 0: a masked or garbled proc entry (a
+        // container's, typically) was reported as `current_value: "0"` and
+        // answered with a write on a host whose value was never read.
+        let (off, on, others) = zero_switch_paths("bpf_jit_enable_read", b"1\n");
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_bpf_jit_enable_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        let recs = advice(&off);
+        assert_eq!(recs.len(), 1, "a readable 0 is the JIT off");
+        assert_eq!(recs[0].current_value, "0");
+        assert!(advice(&on).is_empty(), "a readable 1 is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
     fn tcp_base_mss_advice_needs_a_readable_value() {
         // The rule fires below a floor, and read_sysctl_u64 maps an unreadable
         // or unparseable file to 0, which is below it: a masked or garbled proc
         // entry (a container's, typically) was reported as `current_value: "0"`
         // and answered with a raise on a host whose value was never read.
         let (_, high, others) = zero_switch_paths("base_mss_read", b"1024\n");
+        let (_, probing_on, _) = zero_switch_paths("base_mss_read_probing", b"1\n");
         let low = high.with_file_name("low");
         std::fs::write(&low, b"512\n").unwrap();
         let info = make_test_info();
@@ -21464,7 +22881,12 @@ mod tests {
         let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_base_mss_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_base_mss_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                probing_on.to_str().unwrap(),
+            );
             recs
         };
 
@@ -21479,6 +22901,64 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_base_mss_advice_needs_mtu_probing() {
+        // tcp_base_mss only sizes the search_low the packetization-layer PMTU
+        // probe starts from: tcp_mtup_init() arms icsk_mtup from
+        // tcp_mtu_probing (v6.6 net/ipv4/tcp_output.c:1766) and tcp_sync_mss()
+        // consults the floor only when enabled (:1812-1813), while
+        // tcp_mtu_probe() and the black-hole path return without it
+        // (:2403, net/ipv4/tcp_timer.c:168-176). With a readable 0 here no
+        // write to the floor changes any MSS decision.
+        let (_, base_high, _) = zero_switch_paths("base_mss_probing_base", b"1024\n");
+        let (probing_off, probing_on, probing_others) =
+            zero_switch_paths("base_mss_probing_switch", b"1\n");
+        let low = base_high.with_file_name("low");
+        std::fs::write(&low, b"512\n").unwrap();
+        let always = probing_on.with_file_name("always");
+        std::fs::write(&always, b"2\n").unwrap();
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP.
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let advice = |base: &std::path::Path, probing: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_base_mss_at(
+                &info,
+                &mut recs,
+                base.to_str().unwrap(),
+                probing.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&low, &probing_on).len(),
+            1,
+            "probing on: the floor decides"
+        );
+        assert_eq!(
+            advice(&low, &always).len(),
+            1,
+            "mode 2 starts probing from tcp_base_mss"
+        );
+        assert!(
+            advice(&low, &probing_off).is_empty(),
+            "probing off: nothing reads tcp_base_mss"
+        );
+        for path in &probing_others {
+            assert_eq!(
+                advice(&low, path).len(),
+                1,
+                "{}: an unreadable probing switch is not 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&base_high, &probing_on).is_empty(),
+            "a readable 1024 is not below the floor"
+        );
     }
 
     #[test]
@@ -21684,6 +23164,40 @@ mod tests {
         );
         assert_eq!(checked, 1);
         assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn shmall_advice_needs_a_readable_value() {
+        // The production reader mapped an unreadable or unparseable file to
+        // Some(0), which is below every target: a masked or garbled proc entry
+        // (a container's, typically) was reported as `current_value: "0"` and
+        // answered with a raise on a host whose limit was never read.
+        let (low, high, others) = zero_switch_paths("shmall_read", b"18446744073692774399\n");
+        std::fs::write(&low, b"1024\n").unwrap();
+        let mut info = make_test_info();
+        info.memory_total_gb = 256;
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_shmall(
+                &info,
+                &mut recs,
+                || 4096,
+                |_| read_shmall(path.to_str().unwrap()),
+            );
+            recs
+        };
+
+        let recs = advice(&low);
+        assert_eq!(recs.len(), 1, "a readable 1024 is below the target");
+        assert_eq!(recs[0].current_value, "1024");
+        assert!(advice(&high).is_empty(), "the kernel default is not");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -21974,6 +23488,15 @@ mod tests {
         let recs = advice(&off);
         assert_eq!(recs.len(), 1, "a readable 0 leaves RACK off");
         assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].recommended_value, "1");
+        // Bit 0 is the RACK gate; the other bitmap bits are independent
+        // options and must survive the write (`tcp_is_rack()` tests 0x1).
+        let bits = on.with_file_name("bits_set");
+        std::fs::write(&bits, b"2\n").unwrap();
+        let recs = advice(&bits);
+        assert_eq!(recs.len(), 1, "a readable 2 leaves the RACK bit clear");
+        assert_eq!(recs[0].current_value, "2");
+        assert_eq!(recs[0].recommended_value, "3");
         assert!(advice(&on).is_empty(), "a readable 1 does not");
         for path in &others {
             assert!(
@@ -22209,10 +23732,16 @@ mod tests {
         // container's, typically) was reported as `current_value: "0"` and
         // answered with a write on a host whose switch was never read.
         let (off, on, others) = switch_fixture("tcp_early_retrans");
+        let (_, sack_on, _) = switch_fixture("tcp_early_retrans_sack");
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_early_retrans_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_early_retrans_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack_on.to_str().unwrap(),
+            );
             recs
         };
         let recs = advice(&off);
@@ -22226,6 +23755,53 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_early_retrans_advice_needs_sack_enabled() {
+        // v6.6 net/ipv4/tcp_output.c:2812 reads net.ipv4.tcp_early_retrans in
+        // tcp_schedule_loss_probe(), and the probe is scheduled for 3 or 4
+        // only when tcp_is_sack(tp) holds (:2816-2817). That flag is
+        // tp->rx_opt.sack_ok (include/net/tcp.h:1188-1191), set from the
+        // SACK-permitted option only while net.ipv4.tcp_sack is on
+        // (net/ipv4/tcp_input.c:4126-4129). With a readable tcp_sack 0 no
+        // connection uses SACK, so raising tcp_early_retrans to 3 changes
+        // nothing and the advice was a no-op.
+        let (sack_off, sack_on, sack_others) = switch_fixture("tcp_early_retrans_needs_sack");
+        let (early_off, early_on, _) = switch_fixture("tcp_early_retrans_switch");
+        let info = make_test_info();
+        let advice = |early: &std::path::Path, sack: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_early_retrans_at(
+                &info,
+                &mut recs,
+                early.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&early_off, &sack_on).len(),
+            1,
+            "SACK on: the early-retransmit switch decides"
+        );
+        assert!(
+            advice(&early_off, &sack_off).is_empty(),
+            "SACK off: nothing reads tcp_early_retrans"
+        );
+        for path in &sack_others {
+            assert_eq!(
+                advice(&early_off, path).len(),
+                1,
+                "{}: an unreadable SACK switch is not the value 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&early_on, &sack_off).is_empty(),
+            "an enabled early retransmit is not a finding either way"
+        );
     }
 
     #[test]
@@ -22486,6 +24062,119 @@ mod tests {
             advice(&other, &off).is_empty(),
             "the Redis/Valkey precondition is untouched"
         );
+    }
+
+    /// Redis 7 and Valkey refuse every mode but 1 ("Memory overcommit must be
+    /// enabled!", src/syscheck.c `checkOvercommit`): strict accounting (2)
+    /// charges the fork for a full copy of the dataset, the failure the rule
+    /// exists for, yet the rule only fired on 0. A database next to the cache
+    /// keeps its strict mode: the overcommit_ratio rule sizes that mode for
+    /// it, and switching to 1 would turn that advice into a no-op.
+    #[test]
+    fn overcommit_memory_advice_covers_strict_accounting() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_overcommit_strict_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let strict = dir.join("strict");
+        std::fs::write(&strict, b"2\n").unwrap();
+        let advice = |procs: &[&str]| {
+            let mut recs = Vec::new();
+            eval_overcommit_memory_at(
+                &info_with_processes(procs),
+                &mut recs,
+                strict.to_str().unwrap(),
+            );
+            recs
+        };
+
+        for cache in ["redis-server", "valkey-server"] {
+            let recs = advice(&[cache]);
+            assert_eq!(recs.len(), 1, "{cache}: strict accounting fails the fork");
+            assert_eq!(recs[0].current_value, "2");
+            assert_eq!(recs[0].recommended_value, "1");
+        }
+        assert!(
+            advice(&["redis-server", "postgres"]).is_empty(),
+            "a database's strict mode is left to the overcommit_ratio rule"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// mongod and ClickHouse warn on strict accounting at startup (MongoDB
+    /// "Journaling and memory allocation work best if overcommit_memory is set
+    /// to 1", ClickHouse "Linux memory overcommit is disabled"), while the
+    /// overcommit_ratio rule sized that same strict mode for them as
+    /// databases. Only PostgreSQL documents strict mode as its setting, so the
+    /// mode moves to 1 unless it runs, and the ratio advice steps aside.
+    #[test]
+    fn strict_overcommit_moves_for_services_that_refuse_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_overcommit_refused_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let strict = write("strict", b"2\n");
+        let guess = write("guess", b"0\n");
+        let ratio = write("ratio", b"50\n");
+        let kbytes = write("kbytes", b"0\n");
+        let memory = |procs: &[&str], mode: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_overcommit_memory_at(
+                &info_with_processes(procs),
+                &mut recs,
+                mode.to_str().unwrap(),
+            );
+            recs.into_iter()
+                .map(|r| (r.current_value, r.recommended_value))
+                .collect::<Vec<_>>()
+        };
+        let ratio_advice = |procs: &[&str]| {
+            let mut recs = Vec::new();
+            eval_overcommit_ratio_at(
+                &info_with_processes(procs),
+                &mut recs,
+                ratio.to_str().unwrap(),
+                strict.to_str().unwrap(),
+                kbytes.to_str().unwrap(),
+            );
+            recs.len()
+        };
+
+        for procs in [
+            &["mongod"][..],
+            &["clickhouse"],
+            &["redis-server", "mysqld"],
+        ] {
+            assert_eq!(
+                memory(procs, &strict),
+                [("2".to_string(), "1".to_string())],
+                "{procs:?}: strict mode is refused"
+            );
+            assert_eq!(
+                ratio_advice(procs),
+                0,
+                "{procs:?}: no ratio for a mode that moves"
+            );
+        }
+        // The guessing mode is fine for mongod and ClickHouse.
+        assert!(memory(&["mongod"], &guess).is_empty());
+        // PostgreSQL asks for strict mode: it stays, and its ratio is sized.
+        assert!(memory(&["mongod", "postgres"], &strict).is_empty());
+        assert_eq!(ratio_advice(&["mongod", "postgres"]), 1);
+        // A database nobody refuses strict mode for keeps the ratio advice.
+        assert_eq!(ratio_advice(&["mysqld"]), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -23385,6 +25074,8 @@ mod tests {
         let (off, on, others) = switch_fixture("softlockup_all_cpu_backtrace");
         let watchdog = off.with_file_name("soft_watchdog");
         std::fs::write(&watchdog, b"1\n").unwrap();
+        let thresh = off.with_file_name("watchdog_thresh");
+        std::fs::write(&thresh, b"10\n").unwrap();
         let mut info = make_test_info();
         info.cpu_cores = 64;
         let advice = |path: &std::path::Path| {
@@ -23394,6 +25085,7 @@ mod tests {
                 &mut recs,
                 path.to_str().unwrap(),
                 watchdog.to_str().unwrap(),
+                thresh.to_str().unwrap(),
             );
             recs
         };
@@ -23445,6 +25137,11 @@ mod tests {
         std::fs::write(&detector_empty, b"").unwrap();
         let detector_dir = dir.join("soft_watchdog.dir");
         std::fs::create_dir_all(&detector_dir).unwrap();
+        let thresh_on = dir.join("watchdog_thresh.on");
+        std::fs::write(&thresh_on, b"10\n").unwrap();
+        let thresh_off = dir.join("watchdog_thresh.off");
+        std::fs::write(&thresh_off, b"0\n").unwrap();
+        let thresh_missing = dir.join("watchdog_thresh.missing");
 
         let mut info = make_test_info();
         info.cpu_cores = 96;
@@ -23455,10 +25152,26 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_off.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(
             recs.is_empty(),
             "the soft detector is off: no soft-lockup report can use the backtrace"
+        );
+
+        // watchdog_thresh=0 disables lockup detection even though
+        // soft_watchdog still reads the user-enabled bit.
+        let mut recs = Vec::new();
+        eval_softlockup_all_cpu_backtrace_at(
+            &info,
+            &mut recs,
+            knob.to_str().unwrap(),
+            detector_on.to_str().unwrap(),
+            thresh_off.to_str().unwrap(),
+        );
+        assert!(
+            recs.is_empty(),
+            "watchdog_thresh=0 stops the detector the backtrace belongs to"
         );
 
         for detector in [
@@ -23474,12 +25187,35 @@ mod tests {
                 &mut recs,
                 knob.to_str().unwrap(),
                 detector.to_str().unwrap(),
+                thresh_on.to_str().unwrap(),
             );
             assert!(
                 recs.iter()
                     .any(|r| r.param == "kernel.softlockup_all_cpu_backtrace"),
                 "{}: a live soft detector keeps the rule",
                 detector.display()
+            );
+        }
+
+        // A missing or unreadable threshold keeps the kernel default (10).
+        let thresh_malformed = dir.join("watchdog_thresh.malformed");
+        std::fs::write(&thresh_malformed, b"off\n").unwrap();
+        let thresh_empty = dir.join("watchdog_thresh.empty");
+        std::fs::write(&thresh_empty, b"").unwrap();
+        for thresh in [&thresh_missing, &thresh_malformed, &thresh_empty] {
+            let mut recs = Vec::new();
+            eval_softlockup_all_cpu_backtrace_at(
+                &info,
+                &mut recs,
+                knob.to_str().unwrap(),
+                detector_on.to_str().unwrap(),
+                thresh.to_str().unwrap(),
+            );
+            assert!(
+                recs.iter()
+                    .any(|r| r.param == "kernel.softlockup_all_cpu_backtrace"),
+                "{}: an unreadable threshold keeps the advice",
+                thresh.display()
             );
         }
 
@@ -23491,6 +25227,7 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_on.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "small hosts still skip the rule");
 
@@ -23503,6 +25240,7 @@ mod tests {
             &mut recs,
             knob.to_str().unwrap(),
             detector_on.to_str().unwrap(),
+            thresh_on.to_str().unwrap(),
         );
         assert!(recs.is_empty(), "an enabled knob needs no advice");
 
@@ -23534,6 +25272,50 @@ mod tests {
         let checked = eval_perf_cpu_time_max_percent(&info, &mut recs);
         if std::path::Path::new("/proc/sys/kernel/perf_cpu_time_max_percent").exists() {
             assert_eq!(checked, 1);
+        }
+    }
+
+    #[test]
+    fn perf_cpu_time_max_percent_zero_is_no_limit() {
+        // The kernel treats 0 exactly like 100: both disable the throttling
+        // (perf_sample_allowed_ns = 0). The rule fired on 100 and stayed quiet
+        // on 0, the setting with no CPU limit at all.
+        let (off, _, others) = zero_switch_paths("perf_cpu_time_zero", b"5\n");
+        let dir = off.parent().unwrap().to_path_buf();
+        let value = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let mut info = make_test_info();
+        info.cpu_cores = 64;
+        let advice = |path: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_perf_cpu_time_max_percent_at(&info, &mut recs, path.to_str().unwrap());
+            recs
+        };
+
+        for (name, body) in [
+            ("zero", &b"0\n"[..]),
+            ("full", b"100\n"),
+            ("default", b"25\n"),
+        ] {
+            let recs = advice(&value(name, body));
+            assert_eq!(recs.len(), 1, "{name}");
+            assert_eq!(recs[0].recommended_value, "5", "{name}");
+        }
+        assert_eq!(advice(&value("zero", b"0\n"))[0].current_value, "0");
+        assert!(
+            advice(&value("tight", b"5\n")).is_empty(),
+            "5 is the target"
+        );
+        assert!(advice(&value("tighter", b"1\n")).is_empty(), "1 is tighter");
+        for path in &others {
+            assert!(
+                advice(path).is_empty(),
+                "{}: an unreadable value is not 0",
+                path.display()
+            );
         }
     }
 
@@ -24933,6 +26715,12 @@ mod tests {
         // "-1" to Err and fell back to 0, the disabled value, so the
         // `== 0` gate invented a finding on a host whose D-SACK is on.
         let info = make_test_info();
+        let sack = std::env::temp_dir().join(format!(
+            "ktuner_dsack_sack_on_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&sack, b"1\n").unwrap();
         for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
             let path = std::env::temp_dir().join(format!(
                 "ktuner_dsack_{}_{:?}_{value}",
@@ -24941,7 +26729,12 @@ mod tests {
             ));
             std::fs::write(&path, format!("{value}\n")).unwrap();
             let mut recs = Vec::new();
-            let checked = eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            let checked = eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
             std::fs::remove_file(&path).ok();
             assert_eq!(checked, 1);
             assert_eq!(
@@ -24954,6 +26747,7 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+        std::fs::remove_file(&sack).ok();
     }
 
     #[test]
@@ -24963,10 +26757,16 @@ mod tests {
         // container's, typically) was reported as `current_value: "0"` and
         // answered with a write on a host whose switch was never read.
         let (off, on, others) = switch_fixture("tcp_dsack");
+        let (_, sack_on, _) = switch_fixture("tcp_dsack_sack");
         let info = make_test_info();
         let advice = |path: &std::path::Path| {
             let mut recs = Vec::new();
-            eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                sack_on.to_str().unwrap(),
+            );
             recs
         };
         let recs = advice(&off);
@@ -24980,6 +26780,51 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn tcp_dsack_advice_needs_sack_enabled() {
+        // Both writers of a duplicate SACK test tcp_is_sack() before the
+        // sysctl (v6.6 net/ipv4/tcp_input.c:4473, :4520), and that flag is set
+        // only for a connection whose SYN offered SACK while
+        // net.ipv4.tcp_sack was on (:4127-4129; include/net/tcp.h:1188-1191).
+        // With a readable 0 here no connection reaches the bookkeeping the
+        // tcp_dsack write turns on, so the advice was a no-op.
+        let (sack_off, sack_on, sack_others) = switch_fixture("tcp_dsack_needs_sack");
+        let (dsack_off, dsack_on, _) = switch_fixture("tcp_dsack_switch");
+        let info = make_test_info();
+        let advice = |dsack: &std::path::Path, sack: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_tcp_dsack_at(
+                &info,
+                &mut recs,
+                dsack.to_str().unwrap(),
+                sack.to_str().unwrap(),
+            );
+            recs
+        };
+
+        assert_eq!(
+            advice(&dsack_off, &sack_on).len(),
+            1,
+            "SACK on: the D-SACK switch decides"
+        );
+        assert!(
+            advice(&dsack_off, &sack_off).is_empty(),
+            "SACK off: nothing reads tcp_dsack"
+        );
+        for path in &sack_others {
+            assert_eq!(
+                advice(&dsack_off, path).len(),
+                1,
+                "{}: an unreadable SACK switch is not the value 0",
+                path.display()
+            );
+        }
+        assert!(
+            advice(&dsack_on, &sack_on).is_empty(),
+            "a readable 1 needs no write"
+        );
     }
 
     #[test]
@@ -25663,9 +27508,18 @@ mod tests {
         let checked = eval_hung_task_warnings(&info, &mut recs);
         if std::path::Path::new("/proc/sys/kernel/hung_task_warnings").exists() {
             assert_eq!(checked, 1);
-            let val = read_sysctl_u64("/proc/sys/kernel/hung_task_warnings");
-            if val == 0 {
-                assert!(recs.iter().any(|r| r.param == "kernel.hung_task_warnings"));
+            // Read SIGNED: kernel/hung_task.c registers the sysctl over
+            // [-1, INT_MAX], where -1 means "unlimited warnings" and 0 is the
+            // only disabled value. read_sysctl_u64 parsed "-1" to Err and fell
+            // back to 0, so a host configured for unlimited warnings read as
+            // the disabled switch and this test demanded a recommendation the
+            // rule (correctly) never emits.
+            match read_switch_i64("/proc/sys/kernel/hung_task_warnings") {
+                Some(0) => assert!(recs.iter().any(|r| r.param == "kernel.hung_task_warnings")),
+                Some(_) | None => assert!(
+                    recs.iter().all(|r| r.param != "kernel.hung_task_warnings"),
+                    "only a readable 0 disables the warnings"
+                ),
             }
         }
     }
@@ -25790,5 +27644,97 @@ mod tests {
             }
         }
         assert!(ip_no_pmtu_disc_recommendation(0).is_none());
+    }
+
+    /// `proxy_delay` is read only by `neigh_proxy_delay()` (v6.6
+    /// net/core/neighbour.c:1652-1658), whose single caller `pneigh_enqueue()`
+    /// sits behind a forwarding and a proxy test in both families (net/ipv4/
+    /// arp.c:855-877, net/ipv6/ndisc.c:906-922). On a host that neither
+    /// forwards nor proxies, the write this rule asked for cannot change how
+    /// any packet is delayed — and the `default` template is what every device
+    /// created later inherits (`neigh_parms_alloc()`, neighbour.c:1709).
+    #[test]
+    fn proxy_delay_advice_needs_a_proxying_forwarder() {
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_proxy_delay_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let v4 = dir.join("ipv4");
+        let v6 = dir.join("ipv6");
+        let write = |path: std::path::PathBuf, content: &str| {
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        let knob = dir.join("proxy_delay");
+        write(knob.clone(), "800\n");
+
+        let advice = |v4: &std::path::Path, v6: &std::path::Path| {
+            let mut recs = Vec::new();
+            eval_neigh_proxy_delay_at(&info, &mut recs, knob.to_str().unwrap(), v4, v6);
+            recs.len()
+        };
+
+        // Nothing forwards: no solicitation ever reaches the proxy queue, so
+        // the value is not read and the template is not worth writing.
+        for (name, forwarding) in [("all", "0"), ("default", "0"), ("eth0", "0")] {
+            write(v4.join(name).join("forwarding"), forwarding);
+            write(v4.join(name).join("proxy_arp"), "0");
+            write(v4.join(name).join("proxy_arp_pvlan"), "0");
+            write(v6.join(name).join("forwarding"), forwarding);
+            write(v6.join(name).join("proxy_ndp"), "0");
+        }
+        assert_eq!(advice(&v4, &v6), 0, "nothing forwards, so nothing proxies");
+
+        // A forwarding device whose own proxy_arp is on reaches
+        // arp_fwd_proxy()'s body, which is where the queue is.
+        write(v4.join("eth0").join("forwarding"), "1");
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "a proxying forwarder reads the knob");
+        write(v4.join("eth0").join("proxy_arp"), "0");
+
+        // The `all` template is the ORCONF half, so it alone arms every
+        // forwarding device.
+        write(v4.join("all").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "conf/all proxy_arp arms the queue");
+        write(v4.join("all").join("proxy_arp"), "0");
+
+        // Private-VLAN proxy ARP is the second consumer of the queue.
+        write(v4.join("eth0").join("proxy_arp_pvlan"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "pvlan proxy arp reaches it too");
+        write(v4.join("eth0").join("proxy_arp_pvlan"), "0");
+
+        // IPv6 proxy NDP queues through the same helper, but its guard reads
+        // the device's own `forwarding` slot too (ndisc.c:907).
+        write(v6.join("eth0").join("forwarding"), "1");
+        write(v6.join("eth0").join("proxy_ndp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "proxy_ndp reaches it as well");
+        write(v6.join("eth0").join("proxy_ndp"), "0");
+        write(v6.join("eth0").join("forwarding"), "0");
+        assert_eq!(advice(&v4, &v6), 0, "and only then is it quiet again");
+
+        // A slot that cannot be read is not evidence of a zero: the advice
+        // stays rather than guessing the proxy path away. An unreadable
+        // `forwarding` alone does not, because the device's proxy slots are
+        // still readable zeros and the queue stays out of reach.
+        write(v4.join("eth0").join("forwarding"), "masked\n");
+        assert_eq!(advice(&v4, &v6), 0, "a masked forwarding with no proxy");
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        assert_eq!(advice(&v4, &v6), 1, "a masked forwarding that may proxy");
+        write(v4.join("eth0").join("forwarding"), "1");
+        write(v4.join("eth0").join("proxy_arp"), "masked\n");
+        assert_eq!(advice(&v4, &v6), 1, "an unreadable proxy slot keeps it");
+
+        // The value gate is unchanged, and the default template's 80 is not a
+        // finding even on a proxying forwarder.
+        write(v4.join("eth0").join("proxy_arp"), "1");
+        write(knob.clone(), "80\n");
+        assert_eq!(advice(&v4, &v6), 0, "80 is the documented default");
+        write(knob.clone(), "81\n");
+        assert_eq!(advice(&v4, &v6), 1, "above 80 the delay is excessive");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -43,6 +43,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
+| `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
 | `start_observation` | `instance_id` | 启动一个可选实例观测，进行有界来源兼容探测 |
@@ -106,6 +107,15 @@ ID 是关联数据，不能证明两个回调属于同一个服务事件。`open
 结果及其他字段仍参与绑定，原生命令仍收到第一回调的原始字节。两个阶段复用同一预算
 和步骤单次执行声明。已关闭事件和失败打开的声明保留到实例释放，不能借此重新获得预算。为每个
 步骤打开独立事件不符合共享事件调度。当前每个实例最多关联 1,024 个事件。
+
+`close_hook_event` 以所属 `instance_id`、`event`（`tool.before` 或 `tool.after`）、
+非空 `session_id` 和非空 `call_id`（归一化 `tool.call_id`，AgentScope 使用调用级
+invocation ID）标识关联，不需要事件句柄或输入快照。它在实例的 lease 锁内与打开操作
+串行化，即使事件尚未打开也登记取消声明，后续打开该关联会被 `native_event_closed`
+拒绝；重复关闭具有幂等性。事件存在时，取消活跃 Provider 工作并等待清理和 registry
+移除后才返回 `{"closed": true}`。该操作不创建事件、不执行步骤，也不刷新预算。
+取消声明计入同一个关联数量上限，并保留到实例释放。清理受调用方 RPC 截止时间约束；
+未能及时完成清理会返回 `event_close_timeout`，同时保留取消声明，防止事件重新打开。
 
 OpenClaw 的 after 身份使用固定宿主的大小写/别名策略名；before 输入及原生载荷中的
 原始名称保持不变。在 middleware 压缩后，再执行原生完成观察。私有回调帧将两个阶段绑定到

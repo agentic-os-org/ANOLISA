@@ -150,8 +150,17 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             # Check if this is a tool result (observation)
             tool_results = extract_tool_results(content)
             if tool_results and steps and steps[-1]["source"] == "agent":
-                # Attach as observation to previous agent step
-                steps[-1]["observation"] = {"results": tool_results}
+                # Attach as observation to the previous agent step. Parallel
+                # tool calls answer in separate JSONL records, so append to an
+                # existing observation instead of replacing it; otherwise the
+                # earlier results never reach the analysis input.
+                observation = steps[-1].get("observation")
+                if isinstance(observation, dict) and isinstance(
+                    observation.get("results"), list
+                ):
+                    observation["results"].extend(tool_results)
+                else:
+                    steps[-1]["observation"] = {"results": tool_results}
             else:
                 text = extract_text(content)
                 if text.strip():

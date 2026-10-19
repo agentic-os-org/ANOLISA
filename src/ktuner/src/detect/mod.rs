@@ -142,7 +142,7 @@ mod java_application_argument_regressions {
                 swappiness: 60,
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
-                somaxconn: 128,
+                somaxconn: Some(128),
                 thp_enabled: "always".into(),
             },
             processes,
@@ -234,7 +234,10 @@ pub struct SysctlValues {
     pub swappiness: u64,
     pub dirty_ratio: u64,
     pub dirty_background_ratio: u64,
-    pub somaxconn: u64,
+    /// `None` when `net.core.somaxconn` could not be read or parsed, so the
+    /// rules never size the listen backlog from a value the host did not
+    /// report.
+    pub somaxconn: Option<u64>,
     pub thp_enabled: String,
 }
 
@@ -1228,11 +1231,11 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
         }
     }
 
-    resolve_md_array_types(&mut disks);
+    resolve_md_array_types(&mut disks, block_dir);
     Ok(disks)
 }
 
-/// Re-type an `md*` array from the members that carry it in `holders`.
+/// Re-type an `md*` array from the members that carry it.
 ///
 /// md derives the array's rotational flag from its members: it keeps
 /// `QUEUE_FLAG_NONROT` only while every active member is non-rotational and the
@@ -1244,17 +1247,28 @@ pub(crate) fn read_disk_info_from(block_dir: &Path) -> Result<Vec<DiskInfo>> {
 /// the medium-gated rules followed the array, the device the filesystem is
 /// actually on. The members' answer wins; an array whose members the inventory
 /// does not hold keeps its own.
-fn resolve_md_array_types(disks: &mut [DiskInfo]) {
+///
+/// A member is a whole disk *or a partition of one*: the holder link is created
+/// on the claimed bdev (`block/holder.c`), so an array assembled from
+/// partitions — the usual cloud layout, RAID1 on `vda1`/`vdb1` — records it on
+/// the partition's kobject, which the whole-disk `holders` directory cannot
+/// see. Such an array never counted a member, kept the members' rotational flag
+/// and was typed HDD while its disks read SSD. [`md_member_disk_names`] closes
+/// that gap from the array's own `slaves` directory.
+fn resolve_md_array_types(disks: &mut [DiskInfo], block_dir: &Path) {
     for index in 0..disks.len() {
         let name = disks[index].name.clone();
         if !name.starts_with("md") || disks[index].disk_type != DiskType::HDD {
             continue;
         }
 
+        let member_disks = md_member_disk_names(&block_dir.join(&name));
         let mut members = 0usize;
         let mut solid_state = true;
         for member in disks.iter() {
-            if member.holders.iter().any(|holder| holder == &name) {
+            if member.holders.iter().any(|holder| holder == &name)
+                || member_disks.iter().any(|disk| disk == &member.name)
+            {
                 members += 1;
                 solid_state &= matches!(member.disk_type, DiskType::SSD | DiskType::NVMe);
             }
@@ -1264,6 +1278,31 @@ fn resolve_md_array_types(disks: &mut [DiskInfo]) {
             disks[index].disk_type = DiskType::SSD;
         }
     }
+}
+
+/// The whole-disk names an `md*` directory holds in its `slaves` directory:
+/// every entry resolved to the disk that owns it.
+///
+/// A member may be a partition — sysfs marks one with a `partition` attribute
+/// — and its kobject then lives under the whole disk's, so the disk the
+/// inventory holds is the parent directory. The whole-disk member itself
+/// resolves to its own directory.
+fn md_member_disk_names(md_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(md_dir.join("slaves")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let target = fs::canonicalize(entry.path()).ok()?;
+            let name = target.file_name()?.to_string_lossy().to_string();
+            if target.join("partition").exists() {
+                Some(target.parent()?.file_name()?.to_string_lossy().to_string())
+            } else {
+                Some(name)
+            }
+        })
+        .collect()
 }
 
 /// Medium of the device in `dir`, named `name`: the one place the rotational
@@ -1279,11 +1318,12 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     // rotational flag would mislabel them HDD and apply spinning-disk tuning.
     // Treat them as SSD-like (the SSD optimizations are safe and beneficial,
     // and a real spinning disk presented as vd* in modern clouds is vanishingly
-    // rare). Hyper-V's storvsc disks are the same shape under a name that
-    // carries nothing — `sd*` is a real SCSI disk elsewhere — so they are
-    // identified by their device identity instead.
+    // rare). The emulated disks that arrive as ordinary SCSI devices — Hyper-V's
+    // storvsc and QEMU's scsi-hd — are the same shape under a name that carries
+    // nothing (`sd*` is a real SCSI disk elsewhere), so they are identified by
+    // their device identity instead.
     let is_virtual =
-        name.starts_with("vd") || name.starts_with("xvd") || is_hyperv_virtual_disk(dir);
+        name.starts_with("vd") || name.starts_with("xvd") || is_emulated_virtual_disk(dir);
 
     let rotational_path = dir.join("queue/rotational");
     if let Ok(val) = fs::read_to_string(rotational_path) {
@@ -1305,21 +1345,36 @@ pub(crate) fn detect_disk_type(dir: &Path, name: &str) -> DiskType {
     }
 }
 
-/// Whether the block device in `dir` is one of Hyper-V's virtual disks.
+/// Whether the block device in `dir` is an emulated virtual disk whose
+/// rotational flag follows the hypervisor rather than the backing medium.
 ///
-/// The storvsc driver presents the host's disks as ordinary SCSI devices with
+/// The storvsc driver presents Hyper-V's disks as ordinary SCSI devices with
 /// the vendor/product pair vmbus hands it — "Msft" and "Virtual Disk" — and,
 /// like virtio and Xen, the rotational flag follows what the hypervisor
 /// reports rather than the backing medium: every disk of a Hyper-V or Azure VM
-/// and of a WSL2 instance reads 1, including on an all-NVMe machine. The name
-/// carries nothing to key on, so the device identity decides.
-fn is_hyperv_virtual_disk(dir: &Path) -> bool {
+/// and of a WSL2 instance reads 1, including on an all-NVMe machine.
+///
+/// QEMU's `scsi-hd` disks (the device behind `virtio-scsi` and every guest
+/// disk attached to a SCSI HBA) are the same shape: the drive defaults to
+/// vendor "QEMU" / product "QEMU HARDDISK" with `rotation_rate` 0, which VPD
+/// page 0xb1 reports as "rotation rate not reported" — and the SCSI midlayer
+/// only clears the rotational flag for a reported rate of exactly 1
+/// (drivers/scsi/sd.c), so such a disk reads 1 whatever medium backs it. A
+/// Proxmox/libvirt/OpenStack guest therefore had its disk typed HDD: the
+/// streaming arm raised `read_ahead_kb` on non-rotating storage and the
+/// SSD-gated advice (the scheduler, `vm.page-cluster`, the database window)
+/// never fired.
+///
+/// The name carries nothing to key on, so the device identity decides.
+fn is_emulated_virtual_disk(dir: &Path) -> bool {
+    const IDENTITIES: [(&str, &str); 2] = [("Msft", "Virtual Disk"), ("QEMU", "QEMU HARDDISK")];
     let identity = |entry: &str| {
         fs::read_to_string(dir.join("device").join(entry))
             .map(|value| value.trim().to_string())
             .unwrap_or_default()
     };
-    identity("vendor") == "Msft" && identity("model") == "Virtual Disk"
+    let (vendor, model) = (identity("vendor"), identity("model"));
+    IDENTITIES.contains(&(vendor.as_str(), model.as_str()))
 }
 
 fn read_current_scheduler(dir: &Path) -> String {
@@ -1430,6 +1485,13 @@ fn read_network_info() -> Result<Vec<NetInfo>> {
 /// `net_dir` is a parameter so tests can build a fake sysfs tree.
 fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
     let mut nets = Vec::new();
+    // The interfaces this pass dropped as plumbing, and the ones that survived
+    // it together with the devices they report the link state of. A device
+    // that only forwards a piece of plumbing — a VLAN over a pair end, a
+    // bridge whose only port is one — shows the same fixed rate, so the skip
+    // below is transitive (see the propagation after the loop).
+    let mut plumbing: Vec<String> = Vec::new();
+    let mut kept: Vec<(String, u64, Vec<String>)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(net_dir) {
         let entries: Vec<fs::DirEntry> = entries.filter_map(|e| e.ok()).collect();
@@ -1494,14 +1556,57 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
                 || is_veth_end
                 || peer_is_external
             {
+                plumbing.push(name);
                 continue;
             }
 
-            nets.push(NetInfo {
-                name: name.clone(),
-                speed_mbps,
-            });
+            kept.push((name, speed_mbps, lower_link_names(&entry.path())));
         }
+
+        // The skip is transitive because the rate is. A VLAN and a bridge do
+        // not negotiate a link of their own: `vlan_dev_get_link_ksettings`
+        // forwards the real device's ksettings verbatim (v6.6
+        // net/8021q/vlan_dev.c:662-667) and `br_get_link_ksettings` reports
+        // the best UP/running port's (v6.6 net/bridge/br_device.c:267-292), so
+        // a VLAN over a pair end or a bridge whose only port is one carries
+        // the veth driver's fixed 10000 Mbps (drivers/net/veth.c:126-134) as
+        // the host link — the false positive the `veth*`/`cali*` marker and
+        // the pair test above close one device too low. A device is therefore
+        // plumbing when every device it reports the state of is plumbing; a
+        // macvlan over a real NIC, a bond over real ports and a bridge with a
+        // real port keep their reading, and a chain (a VLAN over a bridge over
+        // a pair end) settles over the repeats.
+        //
+        // A bridge with both a real port and a pair/tap port is the mixed
+        // case: the driver reports the MAXIMUM over its ports, so the veth
+        // driver's fixed 10000 is the bridge's reading even when the real
+        // uplink is 1 GbE. That reading is plumbing too; the real NIC remains
+        // in the list with its own rate. A genuinely faster bridge (25/40 G)
+        // does not equal the veth default and keeps its reading.
+        loop {
+            let mut survivors: Vec<(String, u64, Vec<String>)> = Vec::new();
+            let mut dropped = false;
+            for (name, speed_mbps, lowers) in kept {
+                let plumbing_reading = lowers.iter().any(|lower| plumbing.contains(lower));
+                if !lowers.is_empty()
+                    && (lowers.iter().all(|lower| plumbing.contains(lower))
+                        || (speed_mbps == VETH_SPEED_MBPS && plumbing_reading))
+                {
+                    plumbing.push(name);
+                    dropped = true;
+                } else {
+                    survivors.push((name, speed_mbps, lowers));
+                }
+            }
+            kept = survivors;
+            if !dropped {
+                break;
+            }
+        }
+        nets.extend(
+            kept.into_iter()
+                .map(|(name, speed_mbps, _)| NetInfo { name, speed_mbps }),
+        );
     }
 
     Ok(nets)
@@ -1635,6 +1740,25 @@ fn has_lower_link(dir: &Path) -> bool {
     })
 }
 
+/// The names of the devices `dir`'s interface reports the link state of: its
+/// `lower_<name>` adjacency links ([`has_lower_link`]).
+fn lower_link_names(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix("lower_")
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A sysfs attribute holding one unsigned number, `None` when the file is
 /// absent or unparsable.
 fn read_sysfs_u64(path: &Path) -> Option<u64> {
@@ -1646,9 +1770,16 @@ fn read_sysctl_values() -> Result<SysctlValues> {
         swappiness: read_sysctl_u64("/proc/sys/vm/swappiness"),
         dirty_ratio: read_sysctl_u64("/proc/sys/vm/dirty_ratio"),
         dirty_background_ratio: read_sysctl_u64("/proc/sys/vm/dirty_background_ratio"),
-        somaxconn: read_sysctl_u64("/proc/sys/net/core/somaxconn"),
+        somaxconn: read_somaxconn_from(Path::new("/proc/sys/net/core/somaxconn")),
         thp_enabled: read_thp_enabled(),
     })
+}
+
+/// `net.core.somaxconn`, `None` when the file could not be read or parsed:
+/// the 0 the shared reader falls back to sits below every backlog floor, so
+/// it would be reported as the host's value and answered with a raise.
+pub(crate) fn read_somaxconn_from(path: &Path) -> Option<u64> {
+    read_sysfs_u64(path)
 }
 
 /// Normalize a raw link-speed reading. The kernel prints SPEED_UNKNOWN (-1
@@ -1806,9 +1937,10 @@ pub(crate) fn is_monitoring_helper(pid: &str) -> bool {
 }
 
 /// Whether a command line names a metrics collector. Only the program being
-/// run decides — argv[0], the payload of a `sh -c` wrapper, or the jar a JVM
-/// runs — because a bare `exporter` token in a later argument (a config
-/// path, say) does not make the process a collector.
+/// run decides — argv[0], the payload of a `sh -c` wrapper, the jar a JVM
+/// runs, or the script an interpreter launches — because a bare `exporter`
+/// token in a later argument (a config path, say) does not make the process a
+/// collector.
 fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     let args: Vec<&str> = args.collect();
     let Some(&program) = args.first() else {
@@ -1817,16 +1949,24 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     if is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program)) {
         return true;
     }
-    if is_shell_program(program) {
+    if is_shell_program(program) && args.get(1) == Some(&"-c") {
         // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
         // the payload, not as argv[0]; the payload's first word is its command.
-        return args.get(1) == Some(&"-c")
-            && args
-                .get(2)
-                .and_then(|&payload| payload.split_whitespace().next())
-                .is_some_and(|program| {
-                    is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
-                });
+        return args
+            .get(2)
+            .and_then(|&payload| payload.split_whitespace().next())
+            .is_some_and(|program| {
+                is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
+            });
+    }
+    // The kernel rewrites every shebang exec to
+    // `[interpreter, script, ...]`, so a directly executed
+    // `postgres_exporter.sh` and `python3 /opt/kafka_exporter.py` put the
+    // program-to-run in the argument after the interpreter.
+    if let Some(script) = interpreter_script(program, &args) {
+        if is_monitoring_helper_name(script.rsplit('/').next().unwrap_or(script)) {
+            return true;
+        }
     }
     if program.rsplit('/').next().unwrap_or_default() == "java" {
         // A JVM names its program in the jar after `-jar`; argv[0] is only the
@@ -1851,15 +1991,47 @@ fn is_shell_program(program: &str) -> bool {
     )
 }
 
+/// The script argument of an interpreter command line, when the first argument
+/// after the interpreter names a file rather than an option or an inline
+/// payload.
+///
+/// A shebang exec is rewritten by the kernel to
+/// `[interpreter, (optional arg), script, ...]` (`fs/binfmt_script.c`), for
+/// every interpreter, not only shells. The script is the program being run, so
+/// the collector/tool filters have to look at it: `python3
+/// /opt/kafka_exporter.py` is a collector even though argv[0] is the
+/// interpreter. `-c`/`-m`/`-e` payloads and option values are not script
+/// paths, so a leading `-` answers `None`; the common direct form is covered
+/// without guessing which options take a value.
+fn interpreter_script<'a>(program: &str, args: &[&'a str]) -> Option<&'a str> {
+    let basename = program.rsplit('/').next().unwrap_or(program);
+    let interpreter = is_shell_program(program)
+        || matches!(
+            basename,
+            "python" | "python3" | "node" | "nodejs" | "ruby" | "perl"
+        );
+    if !interpreter {
+        return None;
+    }
+    let script = *args.get(1)?;
+    (!script.starts_with('-')).then_some(script)
+}
+
 /// ClickHouse's client-side entry points. The vendor's `clickhouse-client`
 /// package ships every one of them as a symlink to the single multi-call
 /// `clickhouse` binary, so the kernel truncates the client's comm to a prefix
 /// the server binary's own name shares (`clickhouse-clie` / `clickhouse-serv`)
 /// and the name alone cannot tell the two apart. The program name can.
+///
+/// `clickhouse-copier` is the same class one step outside the multi-call
+/// symlinks: it is the separate client-side data-copy utility (its own binary
+/// through 23.8, removed in 24.3) whose only job is copying between clusters.
+/// A host running a long copier job and no server is not a database host.
 const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
     "clickhouse-benchmark",
     "clickhouse-client",
     "clickhouse-compressor",
+    "clickhouse-copier",
     "clickhouse-format",
     "clickhouse-local",
     "clickhouse-obfuscator",
@@ -1886,11 +2058,29 @@ const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
 /// coordination node runs. Keeper is a separate program with its own
 /// configuration, so the program name decides, exactly as it does for the
 /// client tools of the same package.
+///
+/// `oracle-cloud-agent` is the same shape for the Oracle database: it is the
+/// cloud platform's instance-management agent (with its `-updater` sibling),
+/// not an instance of the database, and both keep `oracle` as their first name
+/// run. A host running only the agent — the default on that platform's images
+/// — reported an Oracle database, classified as its workload and was handed
+/// the database/cache program (swappiness, the dirty limits,
+/// `vm.vfs_cache_pressure`, `kernel.shmmni`, `vm.nr_hugepages`, the busy-poll
+/// pair), while the real database binary is the process named `oracle`.
+/// `consul-dataplane` is the same shape for Consul: it is the Kubernetes
+/// data-plane sidecar that talks to Consul servers running elsewhere, not the
+/// in-memory KV server, but its comm truncates to `consul-dataplan` and its
+/// first name run is `consul`. A node that only runs the sidecar reported
+/// Consul and took the cache program (swappiness, the dirty limits, THP off,
+/// `vm.vfs_cache_pressure`, the busy-poll pair).
 const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "consul-template",
+    "consul-dataplane",
     "consul-esm",
     "grafana-agent",
     "clickhouse-keeper",
+    "oracle-cloud-agent",
+    "oracle-cloud-agent-updater",
 ];
 
 /// Whether the program `program` is a *tool* of a service rather than the
@@ -1938,11 +2128,11 @@ fn is_service_tool(pid: &str) -> bool {
 /// Pure core of [`is_service_tool`], assertable against a synthetic command
 /// line the way [`runtime_service_from_cmdline`] is.
 fn cmdline_names_service_tool(cmdline: &str) -> bool {
-    let mut args = cmdline.split('\0').filter(|arg| !arg.is_empty());
-    let Some(program) = args.next() else {
+    let args: Vec<&str> = cmdline.split('\0').filter(|arg| !arg.is_empty()).collect();
+    let Some(&program) = args.first() else {
         return false;
     };
-    let next = args.next();
+    let next = args.get(1).copied();
     if program_names_service_tool(program) {
         return true;
     }
@@ -1954,7 +2144,9 @@ fn cmdline_names_service_tool(cmdline: &str) -> bool {
         // host.
         return next != Some("server");
     }
-    is_shell_program(program) && next.is_some_and(program_names_service_tool)
+    // A script is run by an interpreter, and the kernel puts its path in the
+    // first argument after the interpreter for every shebang, not only `sh`.
+    interpreter_script(program, &args).is_some_and(program_names_service_tool)
 }
 
 /// Whether `program` (an argv[0]) is ClickHouse's multi-call binary, whose name
@@ -2455,7 +2647,7 @@ mod tests {
                 swappiness: 60,
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
-                somaxconn: 128,
+                somaxconn: Some(128),
                 thp_enabled: "always".to_string(),
             },
             processes: names
@@ -2548,6 +2740,82 @@ mod tests {
             "an array with no member in the inventory keeps its own answer"
         );
         assert_eq!(type_of("md3"), Some(DiskType::SSD));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn md_array_over_partitions_inherits_its_members_medium() {
+        // The holder link is created on the claimed bdev, so an array
+        // assembled from partitions - the usual cloud layout, RAID1 on
+        // vda1/vdb1 - records it on the partition's kobject, not in the whole
+        // disk's `holders` directory. Neither member was counted, the array
+        // kept the members' rotational flag and was typed HDD while both disks
+        // read SSD: the streaming arm raised its read_ahead_kb and the
+        // SSD-gated advice never fired.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_md_partition_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        for (name, rotational) in [
+            ("vda", "1"),
+            ("vdb", "1"),
+            ("md0", "1"),
+            ("sdc", "1"),
+            ("md1", "1"),
+        ] {
+            let disk = dir.join(name);
+            std::fs::create_dir_all(disk.join("queue")).expect("create queue");
+            std::fs::create_dir_all(disk.join("holders")).expect("create holders");
+            std::fs::write(disk.join("queue/rotational"), format!("{rotational}\n"))
+                .expect("write rotational");
+            std::fs::write(disk.join("queue/scheduler"), "none\n").expect("write scheduler");
+            std::fs::write(disk.join("hidden"), "0\n").expect("write hidden");
+        }
+
+        // md0 is assembled from the partitions vda1/vdb1; md1 from the whole
+        // spinning sdc, which keeps it mechanical.
+        std::fs::create_dir_all(dir.join("md0/slaves")).expect("create slaves");
+        for (disk, part) in [("vda", "vda1"), ("vdb", "vdb1")] {
+            std::fs::create_dir_all(dir.join(disk).join(part).join("holders"))
+                .expect("create the partition");
+            std::fs::write(dir.join(disk).join(part).join("partition"), "1\n")
+                .expect("write the partition marker");
+            std::os::unix::fs::symlink(
+                dir.join(disk).join(part),
+                dir.join("md0/slaves").join(part),
+            )
+            .expect("link the member");
+            std::os::unix::fs::symlink(
+                dir.join("md0"),
+                dir.join(disk).join(part).join("holders/md0"),
+            )
+            .expect("link the holder");
+        }
+        std::fs::write(dir.join("sdc/holders/md1"), "").expect("write holder");
+
+        let disks = read_disk_info_from(&dir).expect("read the synthetic block tree");
+        let type_of = |name: &str| {
+            disks
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.disk_type.clone())
+        };
+        assert_eq!(type_of("vda"), Some(DiskType::SSD));
+        assert_eq!(type_of("vdb"), Some(DiskType::SSD));
+        assert_eq!(
+            type_of("md0"),
+            Some(DiskType::SSD),
+            "an array over those members' partitions is solid-state too"
+        );
+        assert_eq!(
+            type_of("md1"),
+            Some(DiskType::HDD),
+            "a spinning whole-disk member keeps its array mechanical"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3304,6 +3572,40 @@ mod tests {
     }
 
     #[test]
+    fn qemu_scsi_disks_are_not_hdds() {
+        // QEMU's scsi-hd - the device behind virtio-scsi and every guest disk
+        // attached to a SCSI HBA - defaults to vendor "QEMU" / product "QEMU
+        // HARDDISK" with rotation_rate 0, which VPD page 0xb1 reports as
+        // "rotation rate not reported"; the SCSI midlayer clears the
+        // rotational flag only for a reported rate of exactly 1
+        // (drivers/scsi/sd.c), so the guest disk reads rotational=1 whatever
+        // medium backs it. Typed HDD, a streaming host raised its
+        // read_ahead_kb and the SSD-gated advice (the scheduler,
+        // `vm.page-cluster`, the database window) never fired.
+        let qemu = device_tree(&[
+            ("device/", ""),
+            // sysfs pads the product string, so the identity compare trims.
+            ("device/vendor", "QEMU\n"),
+            ("device/model", "QEMU HARDDISK   \n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&qemu, "sda"), DiskType::SSD);
+
+        // The vendor alone is not the identity: another QEMU product keeps the
+        // rotational flag's answer, so a future emulated device is not swept in
+        // by the vendor string.
+        let other_product = device_tree(&[
+            ("device/", ""),
+            ("device/vendor", "QEMU\n"),
+            ("device/model", "QEMU DVD-ROM\n"),
+            ("queue/", ""),
+            ("queue/rotational", "1\n"),
+        ]);
+        assert_eq!(detect_disk_type(&other_product, "sdb"), DiskType::HDD);
+    }
+
+    #[test]
     fn holders_read_the_holding_disks() {
         // `/sys/block/<disk>/holders/<holder>` is one symlink per holder named
         // after the holder's gendisk (dm-0, md0, ...); the names are all the
@@ -3968,6 +4270,150 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A VLAN and a bridge do not negotiate a link of their own: the drivers
+    /// forward the device they run over (`vlan_dev_get_link_ksettings`, v6.6
+    /// net/8021q/vlan_dev.c:662-667; `br_get_link_ksettings`,
+    /// net/bridge/br_device.c:267-292), so a VLAN over a veth end or a bridge
+    /// whose only port is one carries the veth driver's fixed 10000 Mbps
+    /// (drivers/net/veth.c:126-134) as the host link. The veth marker and the
+    /// pair test drop the ends, but the device one step above them kept the
+    /// default and every 10 GbE-gated rule sized for a link the machine does
+    /// not have - the same false positive #6883/#7207/#7314 close one device
+    /// lower.
+    #[test]
+    fn network_info_ignores_a_vlan_and_bridge_over_a_veth_end() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_plumbing_upper_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // The one real NIC, backed by a bus device.
+        let eth0 = dir.join("eth0");
+        fs::create_dir_all(&eth0).expect("create eth0");
+        fs::write(eth0.join("speed"), "1000\n").expect("write speed");
+        fs::write(eth0.join("ifindex"), "2\n").expect("write ifindex");
+        fs::write(eth0.join("iflink"), "2\n").expect("write iflink");
+        fs::create_dir_all(eth0.join("device")).expect("create the bus-device link");
+
+        // The pair end the container uplink runs over: no bus device, no
+        // DEVTYPE, the driver's fixed 10000.
+        let veth = dir.join("h1");
+        fs::create_dir_all(&veth).expect("create the veth end");
+        fs::write(veth.join("speed"), "10000\n").expect("write speed");
+        fs::write(veth.join("ifindex"), "8\n").expect("write ifindex");
+        fs::write(veth.join("iflink"), "9\n").expect("write iflink");
+        fs::write(veth.join("uevent"), "INTERFACE=h1\nIFINDEX=8\n").expect("write uevent");
+
+        // A VLAN over that end: DEVTYPE=vlan, the forwarded 10000, and the
+        // adjacency link naming the lower device.
+        let vlan = dir.join("h1.100");
+        fs::create_dir_all(&vlan).expect("create the vlan");
+        fs::write(vlan.join("speed"), "10000\n").expect("write speed");
+        fs::write(vlan.join("ifindex"), "10\n").expect("write ifindex");
+        fs::write(vlan.join("iflink"), "8\n").expect("write iflink");
+        fs::write(vlan.join("uevent"), "DEVTYPE=vlan\nINTERFACE=h1.100\n").expect("write uevent");
+        std::os::unix::fs::symlink(&veth, vlan.join("lower_h1")).expect("link the lower device");
+
+        // A bridge whose only port is that same end.
+        let bridge = dir.join("br0");
+        fs::create_dir_all(&bridge).expect("create the bridge");
+        fs::write(bridge.join("speed"), "10000\n").expect("write speed");
+        fs::write(bridge.join("ifindex"), "11\n").expect("write ifindex");
+        fs::write(bridge.join("iflink"), "11\n").expect("write iflink");
+        fs::write(bridge.join("uevent"), "DEVTYPE=bridge\nINTERFACE=br0\n").expect("write uevent");
+        std::os::unix::fs::symlink(&veth, bridge.join("lower_h1")).expect("link the lower device");
+
+        // A VLAN over the real NIC keeps its parent's reading, and a bridge
+        // with the real NIC as one of its ports reports the best port's — the
+        // veth port's fixed 10000, even though the real uplink is 1 GbE.
+        let real_vlan = dir.join("eth0.200");
+        fs::create_dir_all(&real_vlan).expect("create the vlan");
+        fs::write(real_vlan.join("speed"), "1000\n").expect("write speed");
+        fs::write(real_vlan.join("ifindex"), "12\n").expect("write ifindex");
+        fs::write(real_vlan.join("iflink"), "2\n").expect("write iflink");
+        fs::write(
+            real_vlan.join("uevent"),
+            "DEVTYPE=vlan\nINTERFACE=eth0.200\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth0, real_vlan.join("lower_eth0")).expect("link the lower");
+        let mixed_bridge = dir.join("br1");
+        fs::create_dir_all(&mixed_bridge).expect("create the bridge");
+        // br_get_link_ksettings reports the maximum over the up ports, so the
+        // veth port's fixed 10000 is the bridge's reading on a 1 GbE uplink.
+        fs::write(mixed_bridge.join("speed"), "10000\n").expect("write speed");
+        fs::write(mixed_bridge.join("ifindex"), "13\n").expect("write ifindex");
+        fs::write(mixed_bridge.join("iflink"), "13\n").expect("write iflink");
+        fs::write(
+            mixed_bridge.join("uevent"),
+            "DEVTYPE=bridge\nINTERFACE=br1\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth0, mixed_bridge.join("lower_eth0"))
+            .expect("link the lower device");
+        std::os::unix::fs::symlink(&veth, mixed_bridge.join("lower_h1"))
+            .expect("link the lower device");
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        let mut names: Vec<&str> = info.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["eth0", "eth0.200"],
+            "only the devices that read a real link survive: {names:?}"
+        );
+        assert_eq!(
+            info.max_net_speed(),
+            1000,
+            "the pair end's fixed rate must not decide the host link speed: {names:?}"
+        );
+
+        // Control: a bridge whose real port is genuinely 25 GbE reads 25000,
+        // above the veth default, so the new clause must keep it and the
+        // physical NIC's rate must still decide. The devices are added after
+        // the first read so the assertions above keep measuring the 1 GbE
+        // shape.
+        let eth25g = dir.join("eth25g");
+        fs::create_dir_all(&eth25g).expect("create eth25g");
+        fs::write(eth25g.join("speed"), "25000\n").expect("write speed");
+        fs::write(eth25g.join("ifindex"), "14\n").expect("write ifindex");
+        fs::write(eth25g.join("iflink"), "14\n").expect("write iflink");
+        fs::create_dir_all(eth25g.join("device")).expect("create the bus-device link");
+        let fast_bridge = dir.join("br2");
+        fs::create_dir_all(&fast_bridge).expect("create the bridge");
+        fs::write(fast_bridge.join("speed"), "25000\n").expect("write speed");
+        fs::write(fast_bridge.join("ifindex"), "15\n").expect("write ifindex");
+        fs::write(fast_bridge.join("iflink"), "15\n").expect("write iflink");
+        fs::write(
+            fast_bridge.join("uevent"),
+            "DEVTYPE=bridge\nINTERFACE=br2\n",
+        )
+        .expect("write uevent");
+        std::os::unix::fs::symlink(&eth25g, fast_bridge.join("lower_eth25g"))
+            .expect("link the lower device");
+        std::os::unix::fs::symlink(&veth, fast_bridge.join("lower_h1"))
+            .expect("link the lower device");
+
+        let mut control = info_with_processes(&[]);
+        control.network = read_network_info_from(&dir).expect("read the control tree");
+        let mut names: Vec<&str> = control.network.iter().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert!(
+            names.contains(&"br2") && names.contains(&"eth25g"),
+            "a bridge whose real port outruns the veth default is not plumbing: {names:?}"
+        );
+        assert_eq!(
+            control.max_net_speed(),
+            25000,
+            "the physical 25 GbE NIC still decides: {names:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_has_process() {
         let info = SystemInfo {
@@ -3985,7 +4431,7 @@ mod tests {
                 swappiness: 60,
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
-                somaxconn: 128,
+                somaxconn: Some(128),
                 thp_enabled: "always".to_string(),
             },
             processes: vec![
@@ -4392,12 +4838,20 @@ mod tests {
 
         for (name, service, label) in [
             ("consul-template", "consul", "Consul"),
+            // The Kubernetes data-plane sidecar: a separate client-side
+            // program that talks to Consul servers, not the KV server itself.
+            ("consul-dataplane", "consul", "Consul"),
             ("grafana-agent", "grafana", "Grafana"),
             // ClickHouse's coordination daemon: `has_process("clickhouse")` is
             // satisfied by its first name run, and the whole database program
             // (including `vm.nr_hugepages` and `kernel.shmmni`) then ran on a
             // host whose only ClickHouse process is a Raft store.
             ("clickhouse-keeper", "clickhouse", "ClickHouse"),
+            // Oracle's instance-management agent and its updater: both keep
+            // `oracle` as their first name run, so a host that runs only the
+            // platform's default agents reported an Oracle database.
+            ("oracle-cloud-agent", "oracle", "Oracle"),
+            ("oracle-cloud-agent-updater", "oracle", "Oracle"),
         ] {
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
@@ -4519,6 +4973,8 @@ mod tests {
             "clickhouse-benchmark",
             "clickhouse-client",
             "clickhouse-compressor",
+            // The separate client-side copier binary (through 23.8).
+            "clickhouse-copier",
             "clickhouse-format",
             "clickhouse-local",
             "clickhouse-obfuscator",
@@ -5182,6 +5638,10 @@ mod tests {
             "/opt/exporter/postgres_exporter\0--web.listen-address=:9187",
             "sh\0-c\0/opt/exporter/postgres_exporter --web.listen-address=:9187",
             "java\0-jar\0/opt/client/jmx_prometheus_httpserver.jar",
+            // A script is run by its interpreter; argv[0] is not the program.
+            "sh\0/opt/postgres_exporter.sh\0--web.listen-address=:9187",
+            "/usr/bin/python3\0/opt/postgres_exporter.py\0--web.listen-address=:9187",
+            "node\0/opt/node_exporter.js\0--web.listen-address=:9100",
         ] {
             assert!(cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
         }
@@ -5239,7 +5699,42 @@ mod tests {
         assert!(!cmdline_names_helper(
             "sh\0-c\0cat /etc/exporter.conf".split('\0')
         ));
+        // An interpreter option is not a script path, and a plain script's
+        // later config path still does not decide.
+        assert!(!cmdline_names_helper(
+            "python3\0-c\0import postgres_exporter".split('\0')
+        ));
+        assert!(!cmdline_names_helper(
+            "python3\0/opt/manage.py\0--config=/etc/exporter.conf".split('\0')
+        ));
         assert!(!cmdline_names_helper("".split('\0')));
+    }
+
+    /// The tool-side twin of the collector filter: the same kernel shape, and
+    /// the same documented rule that the program decides.
+    #[test]
+    fn service_tool_scripts_run_by_any_interpreter_are_tools() {
+        for tool in [
+            "/usr/bin/python3\0/opt/kafka-topics.py",
+            "/usr/bin/node\0/opt/elasticsearch-keystore.js",
+            "/bin/bash\0/opt/spark-submit.sh",
+            "/opt/kafka-topics.sh\0--list",
+        ] {
+            assert!(
+                cmdline_names_service_tool(tool),
+                "{tool:?} runs a tool, not the service"
+            );
+        }
+        for daemon in [
+            "/usr/bin/python3\0/opt/manage.py",
+            "/usr/bin/python3\0-c\0import kafka",
+            "/usr/bin/node\0-e\0require('kafka')",
+        ] {
+            assert!(
+                !cmdline_names_service_tool(daemon),
+                "{daemon:?} is not a service tool"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ edition = "2024"
 # reference these via `{ workspace = true }`; the root crate is being
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
+url = "2"
 anyhow = "1.0.86"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
@@ -40,6 +41,7 @@ rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
+tempfile = "3"
 thiserror = "1.0.63"
 tokio = "1"
 tracing = "0.1"
@@ -68,6 +70,7 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
+url = { workspace = true }
 agentsight-audit = { path = "crates/agentsight-audit" }
 agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
@@ -111,6 +114,7 @@ sysinfo = "0.33"
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]

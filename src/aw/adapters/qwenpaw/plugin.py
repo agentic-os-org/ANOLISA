@@ -138,8 +138,8 @@ class AwPlugin:
     """Validate once, then register factories which perform no configuration I/O."""
 
     def register(self, api: Any) -> None:
-        if version("qwenpaw") != "2.2.2b4" or version("agentscope") != "2.0.8":
-            raise RuntimeError("AW requires QwenPaw 2.2.2b4 and AgentScope 2.0.8")
+        if version("qwenpaw") != "2.2.2b4" or version("agentscope") != "2.0.9":
+            raise RuntimeError("AW requires QwenPaw 2.2.2b4 and AgentScope 2.0.9")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
         config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())

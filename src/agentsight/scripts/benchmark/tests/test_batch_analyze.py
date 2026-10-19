@@ -63,3 +63,75 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print(f"ok {name}")
+
+
+def test_parallel_tool_results_in_separate_records_are_all_kept():
+    """Two tool_use calls answered in separate JSONL records must both reach
+    the agent step's observation; the converter used to overwrite the first
+    result with the second."""
+    lines = [
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"tool_use","id":"a","name":"read","input":{}},'
+        '{"type":"tool_use","id":"b","name":"read","input":{}}]}}',
+        '{"type":"user","message":{"role":"user","content":'
+        '[{"type":"tool_result","tool_use_id":"a","content":"first result"}]}}',
+        '{"type":"user","message":{"role":"user","content":'
+        '[{"type":"tool_result","tool_use_id":"b","content":"second result"}]}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    results = agent_steps[0]["observation"]["results"]
+    assert [r["source_call_id"] for r in results] == ["a", "b"]
+    assert [r["content"] for r in results] == ["first result", "second result"]
+
+
+def test_combined_tool_results_in_one_record_still_kept():
+    """A single record carrying both results (the already-working shape) must
+    keep working after the append fix."""
+    lines = [
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"tool_use","id":"a","name":"read","input":{}},'
+        '{"type":"tool_use","id":"b","name":"read","input":{}}]}}',
+        '{"type":"user","message":{"role":"user","content":'
+        '[{"type":"tool_result","tool_use_id":"a","content":"first result"},'
+        '{"type":"tool_result","tool_use_id":"b","content":"second result"}]}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    results = agent_steps[0]["observation"]["results"]
+    assert [r["source_call_id"] for r in results] == ["a", "b"]
+
+
+def test_results_after_intervening_agent_step_attach_to_latest_step():
+    """A tool result attaches to the most recent agent step: when a new agent
+    step intervenes between two result records, each result stays with its
+    own step rather than being merged backwards."""
+    lines = [
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"tool_use","id":"a","name":"read","input":{}}]}}',
+        '{"type":"user","message":{"role":"user","content":'
+        '[{"type":"tool_result","tool_use_id":"a","content":"first result"}]}}',
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"tool_use","id":"b","name":"read","input":{}}]}}',
+        '{"type":"user","message":{"role":"user","content":'
+        '[{"type":"tool_result","tool_use_id":"b","content":"second result"}]}}',
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session.jsonl"
+        session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = batch_analyze.jsonl_to_atif(session)
+    assert doc is not None
+    agent_steps = [s for s in doc["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 2
+    assert [r["source_call_id"] for r in agent_steps[0]["observation"]["results"]] == ["a"]
+    assert [r["source_call_id"] for r in agent_steps[1]["observation"]["results"]] == ["b"]

@@ -9,9 +9,13 @@ on:
   pull_request:
     paths:
       - 'src/aw/**'
-      - '.github/workflows/aw-ci.yml'
   merge_group:
   workflow_dispatch:
+    inputs:
+      integration:
+        description: Also run the nightly suites on this exact workflow commit
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,6 +30,12 @@ env:
   RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
 
 jobs:
+  integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.integration
+    uses: ./.github/workflows/aw-preview.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+
   required:
     name: AW / required
     runs-on: >-
@@ -65,6 +75,8 @@ jobs:
         if: steps.scope.outputs.selected == 'true'
         with:
           workspaces: src/aw
+          # Main warms the dependency cache; PRs avoid uploading disposable caches.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
         if: steps.scope.outputs.selected == 'true'
         id: checks

@@ -250,12 +250,14 @@ npm run dev          # starts webpack-dev-server on http://localhost:3004
 
 When finished, run `make build-frontend && cargo build --release` to embed the updated UI.
 
-### Memory Benchmarking (Linux)
+### Resource Benchmarking (Linux)
 
-[`scripts/benchmark/single_run/memory_run.sh`](scripts/benchmark/single_run/memory_run.sh)
-measures AgentSight RSS with configurable Agent count and output tok/s, defaulting
-to 32 Agents, 100 tok/s each, and 60 seconds. It prints average/peak RSS, host RAM
-shares and load/capture checks, and supports Git A/B comparisons with
+[`scripts/benchmark/single_run/resource_run.sh`](scripts/benchmark/single_run/resource_run.sh)
+measures AgentSight RSS and CPU with configurable Agent count and output tok/s,
+defaulting to 32 Agents, 100 tok/s each, and 60 seconds. It prints average/peak RSS,
+host RAM shares, average/P95/peak CPU (100% = one logical CPU), and load/capture
+checks. Cooperative CPU pacing defaults to 25% of one logical CPU with delayed delivery;
+`--cpu-budget-percent N` overrides the configured target (`0` disables pacing). Load-window and response-drain statistics are separate. It supports Git A/B comparisons with
 `--ab --baseline REF --candidate REF`. `--ring-buffer-mb N` sets the ring buffer
 size; reported probe drops invalidate the comparison. Tracing requires root or eBPF capabilities;
 the script requests sudo by default. See the [benchmark usage guide](scripts/docs/BENCHMARK_USAGE.md)
@@ -561,3 +563,5 @@ This project is derived from [https://github.com/eunomia-bpf/agentsight.git](htt
 ## License
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
+
+Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#tokenless-statistics-api).

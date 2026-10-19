@@ -7,6 +7,7 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::bench::BenchResult;
 use crate::category;
@@ -982,6 +983,50 @@ pub fn param_to_path(param: &str) -> String {
     }
 }
 
+/// The kernel file a ledger entry's restore belongs to: the path the ledger
+/// recorded, or — when that path is an older translation of the same parameter
+/// and is gone — the file the parameter name resolves to now.
+///
+/// A record's identity is its parameter, not the string it recorded:
+/// [`merge_entries`] re-points such a record on the next write,
+/// [`recorded_previous_value`] and [`imported_category`] answer for the key,
+/// and [`render_persistence`] already renders the boot line from the key.
+/// Restoring through the recorded string alone made the undo path blind to
+/// that rule: `Path::exists()` failed, the entry was reported `missing`, the
+/// ledger was kept, and the tuned value kept being re-applied at every boot
+/// with no CLI form able to undo it (the symptom issue #6483 named, which its
+/// merge-side fix left in place for every record the merge never meets again).
+///
+/// Only a recorded path that IS another translation of the parameter may be
+/// adopted: the pre-`5448` spelling of a dotted interface, where the blanket
+/// dot-to-slash translation produced `.../conf/Br0/100/forwarding` where the
+/// name resolves to `.../conf/Br0.100/forwarding` (two spellings of one kernel
+/// file — the pair [`heal_alias_duplicates`] exists to collapse). A path that
+/// is simply gone — an unplugged device, an unloaded module, a removed
+/// interface — is not a translation of anything, so that entry keeps its
+/// `missing` verdict instead of being redirected at whatever file the name
+/// happens to address now.
+fn resolved_entry_path(param: &str, entry: &RollbackEntry) -> String {
+    if Path::new(&entry.path).exists() {
+        return entry.path.clone();
+    }
+    let resolved = param_to_path(param);
+    if is_stale_translation_of(param, &entry.path) && resolved != entry.path {
+        return resolved;
+    }
+    entry.path.clone()
+}
+
+/// Whether `recorded` is the pre-`5448` dot-to-slash translation of `param`'s
+/// kernel path: the spelling an older ktuner wrote for a dotted interface
+/// name. The interface segment is the only place the two spellings differ,
+/// because [`param_to_path`] keeps it verbatim ([`net_iface_path`]) while the
+/// blanket translation split it — so the comparison is exact on both sides and
+/// cannot match a path that names a different knob or device.
+fn is_stale_translation_of(param: &str, recorded: &str) -> bool {
+    recorded == format!("/proc/sys/{}", param.replace('.', "/"))
+}
+
 /// Resolve `net.<proto>.{conf,neigh}.<interface>.<property>` (dotted or
 /// slashed spelling) with the INTERFACE segment kept verbatim. Under
 /// /proc/sys/net/{ipv4,ipv6}/{conf,neigh}/ every interface is a directory
@@ -1345,13 +1390,27 @@ where
 /// today, so the healed restore changes no outcome, it only removes the
 /// duplicate write. Pure (no I/O) so both rules are unit-testable.
 fn heal_alias_duplicates(data: &mut RollbackData) {
-    // Group the entry keys by the kernel path they resolve to.
+    heal_alias_duplicates_with(data, |path| Path::new(path).exists());
+}
+
+/// [`heal_alias_duplicates`] with the existence probe injectable, so the
+/// stale-path identity below is assertable against a synthetic ledger.
+fn heal_alias_duplicates_with(data: &mut RollbackData, path_exists: impl Fn(&str) -> bool) {
+    // Group the entry keys by the kernel file they name with the SAME identity
+    // [`matching_record`] and [`merge_entries`] use: the recorded path, or the
+    // key's own path when the recorded one is gone (a pre-5448 dotted-interface
+    // translation). Grouping by the recorded path alone left a stale record
+    // and its live twin in separate groups, so the merge could not collapse
+    // them and the stale record's intermediate value survived into
+    // persistence and restore.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (key, entry) in &data.entries {
-        groups
-            .entry(canonicalize_path(&entry.path))
-            .or_default()
-            .push(key.clone());
+        let identity = if path_exists(&entry.path) {
+            canonicalize_path(&entry.path)
+        } else {
+            canonicalize_path(&param_to_path(key))
+        };
+        groups.entry(identity).or_default().push(key.clone());
     }
     for (_path, mut keys) in groups {
         if keys.len() < 2 {
@@ -1655,8 +1714,14 @@ fn render_persistence(
             // A slash as the first separator makes sysctl.d preserve literal
             // dots. Derive dotted-interface keys from the recorded proc path,
             // or systemd would interpret Br0.100 as two directories.
-            let key = entry
-                .path
+            // A record written under the pre-5448 blanket translation of a
+            // dotted interface keeps a path with no literal dot, which this
+            // derivation cannot tell from a dot-free interface: it would fall
+            // back to the dotted spelling and systemd would split the
+            // interface at its dot. Read the path the name resolves to now,
+            // as the merge, the preview and the restore already do.
+            let resolved = resolved_entry_path(param, entry);
+            let key = resolved
                 .strip_prefix("/proc/sys/")
                 .filter(|path| net_iface_path(param).is_some() && path.contains('.'))
                 .map(str::to_string)
@@ -1879,16 +1944,59 @@ fn persist_rollback_data_at(
     Ok(true)
 }
 
-/// Run `program` (systemctl) with its output discarded. Returns whether it
-/// ran and exited 0; a host without systemd fails to spawn it.
-fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
+/// The longest a `systemctl` call may take before the manager is presumed
+/// wedged. These calls run under the ledger lock and on the command's critical
+/// path (persist and finalize), so a request the manager never answers must not
+/// hold the transaction open: `tune`/`fix`/`rollback` would never print their
+/// documented body, and every other ktuner command would block on the lock.
+const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `program` (systemctl) with its output discarded, waiting at most
+/// `timeout`. Returns whether it ran and exited 0; a host without systemd
+/// fails to spawn it, and a manager that does not answer within `timeout` is
+/// killed and reaped, then answers false — the "boot replay is not armed"
+/// verdict the callers already give a refused `systemctl enable`, never a
+/// transaction blocked forever. The status of the advisory calls (`disable`,
+/// `daemon-reload`) is ignored by their callers, so only the wait bound
+/// changes for them.
+fn systemctl_quiet_with(program: &str, args: &[&str], timeout: Duration) -> bool {
     use std::process::Stdio;
-    std::process::Command::new(program)
+    let mut child = match std::process::Command::new(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Stop the process before reporting the verdict: a
+                    // lingering systemctl would keep acting on a manager the
+                    // caller has already answered for.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// [`systemctl_quiet_with`] with the production bound.
+fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
+    systemctl_quiet_with(program, args, SYSTEMCTL_TIMEOUT)
 }
 
 /// One ledger row as `rollback --list` publishes it: the recorded
@@ -1967,7 +2075,7 @@ fn preview_entries(data: &RollbackData) -> Vec<RollbackPreview> {
     data.entries
         .iter()
         .map(|(param, entry)| {
-            let (live, drifted) = live_reading(&entry.path, &entry.applied);
+            let (live, drifted) = live_reading(&resolved_entry_path(param, entry), &entry.applied);
             // Read off the published set, not the whole ledger: a clearer the
             // selection left out cannot be named, and a name the listing does
             // not carry would address no row.
@@ -2942,12 +3050,13 @@ fn restore_entries_with(
         .collect();
     for (param, entry) in ordered {
         // The deny-list is enforced on BOTH fields: the parameter name (what a
-        // ktuner-written ledger records) and the recorded path, which is the
-        // file the kernel actually receives. Every ledger ktuner writes has the
-        // two in agreement, but a ledger that was edited or written by another
-        // version can point an innocent parameter at `kernel.core_pattern` —
-        // and restore runs as root.
-        if is_forbidden_param(param) || is_forbidden_resolved_path(&entry.path) {
+        // ktuner-written ledger records) and the path the restore will write,
+        // which is the file the kernel actually receives. Every ledger ktuner
+        // writes has the two in agreement, but a ledger that was edited or
+        // written by another version can point an innocent parameter at
+        // `kernel.core_pattern` — and restore runs as root.
+        let path = resolved_entry_path(param, entry);
+        if is_forbidden_param(param) || is_forbidden_resolved_path(&path) {
             if !quiet {
                 progress!("  {} {} : 拒绝恢复（代码执行参数）", "✗".red(), param);
             }
@@ -2980,8 +3089,8 @@ fn restore_entries_with(
             });
             continue;
         }
-        if Path::new(&entry.path).exists() {
-            match write_value(&entry.path, &entry.previous) {
+        if Path::new(&path).exists() {
+            match write_value(&path, &entry.previous) {
                 Ok(()) => {
                     // Confirm the write with the same read-back the tune path
                     // uses (#5717): fs::write returning Ok only means the
@@ -2990,7 +3099,7 @@ fn restore_entries_with(
                     // not count as restored, or rollback reports Full and
                     // deletes the ledger while the system is still tuned. It
                     // is a failure, which keeps the ledger for a retry.
-                    match readback_verdict(&entry.path, &entry.previous) {
+                    match readback_verdict(&path, &entry.previous) {
                         ReadbackVerdict::Verified { .. } => {
                             if !quiet {
                                 progress!(
@@ -3057,7 +3166,7 @@ fn restore_entries_with(
     for param in &verified {
         let entry = &data.entries[*param];
         if let ReadbackVerdict::Clamped { effective } =
-            readback_verdict(&entry.path, &entry.previous)
+            readback_verdict(&resolved_entry_path(param, entry), &entry.previous)
         {
             if !quiet {
                 progress!(
@@ -3088,10 +3197,11 @@ fn restore_entries_with(
     // read-back), so only a readable, matching value counts.
     for (param, error) in refused {
         let entry = &data.entries[param];
-        let live = fs::read_to_string(&entry.path).ok();
+        let path = resolved_entry_path(param, entry);
+        let live = fs::read_to_string(&path).ok();
         let restored_by_twin = live.is_some_and(|live| {
             matches!(
-                classify_readback_for_path(&entry.path, &entry.previous, live.trim()),
+                classify_readback_for_path(&path, &entry.previous, live.trim()),
                 ReadbackVerdict::Verified { .. }
             )
         });
@@ -3544,6 +3654,39 @@ mod tests {
                 assert!(script.is_none());
             }
         }
+    }
+
+    #[test]
+    fn persistence_renders_a_stale_record_under_its_current_spelling() {
+        // A pre-5448 ledger records the blanket dot-to-slash translation of a
+        // dotted interface, so the recorded path carries no dot at all. The
+        // sysctl.d key reads the literal dot a dotted interface needs from
+        // that recorded proc path, so a stale record fell through to the
+        // dotted spelling -- the form systemd splits at every dot, addressing
+        // .../conf/Br0/100/forwarding -- and the boot replay never matched the
+        // file the name resolves to. The merge, the preview and the restore
+        // already adopt the current path.
+        let param = "net.ipv4.conf.Br0.100.forwarding";
+        let entries = BTreeMap::from([(
+            param.to_string(),
+            RollbackEntry {
+                previous: "0".into(),
+                applied: "1".into(),
+                path: "/proc/sys/net/ipv4/conf/Br0/100/forwarding".into(),
+                category: None,
+            },
+        )]);
+        let (config, script) = render_persistence(&entries);
+        let config = config.unwrap();
+        assert!(
+            config.contains("net/ipv4/conf/Br0.100/forwarding = 1"),
+            "the boot replay must keep the interface's literal dot: {config}"
+        );
+        assert!(
+            !config.contains("net.ipv4.conf.Br0.100.forwarding"),
+            "the dotted spelling addresses a different path: {config}"
+        );
+        assert!(script.is_none());
     }
 
     #[test]
@@ -4017,6 +4160,70 @@ mod tests {
             outcome.failed(),
             outcome.skipped()
         ));
+    }
+
+    #[test]
+    fn restore_adopts_a_stale_recorded_path() {
+        // The recorded path of a pre-5448 ledger spells a dotted interface the
+        // way the old blanket dot-to-slash translation did, so the file is
+        // gone while the knob is live at the path its name resolves to
+        // (issue #6483's shape, which its merge-side fix left in place for
+        // every record the merge never meets again). Restoring the recorded
+        // string alone reported the entry `missing`, kept the ledger, and let
+        // the boot replay stand.
+        assert!(is_stale_translation_of(
+            "net.ipv4.conf.Br0.100.forwarding",
+            "/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+        ));
+        assert!(is_stale_translation_of(
+            "net/ipv4/conf.Br0.100/forwarding",
+            "/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+        ));
+        // Any other path is not a translation of the parameter: a dotted
+        // interface name that resolves to the same file, a scalar knob, a
+        // sysfs device path, or a path that names a different knob entirely.
+        assert!(!is_stale_translation_of(
+            "net.ipv4.conf.Br0.100.forwarding",
+            "/proc/sys/net/ipv4/conf/Br0.100/forwarding"
+        ));
+        for (param, recorded) in [
+            ("vm.swappiness", "/proc/sys/vm/other"),
+            ("block/sda/scheduler", "/sys/block/other/queue/scheduler"),
+            ("kafka.queues", "/tmp/gone/kafka.queues"),
+        ] {
+            assert!(
+                !is_stale_translation_of(param, recorded),
+                "{param}: {recorded} names something else"
+            );
+        }
+
+        // A record that names something else stays `missing` when its path is
+        // gone: an unplugged device or a removed file is not a stale
+        // translation of a live knob.
+        let dir = AtomicTestDir::new("stale_restore_path");
+        let absent = BTreeMap::from([(
+            "block/ktuner_absent_disk/scheduler".to_string(),
+            RollbackEntry {
+                previous: "none".into(),
+                applied: "bfq".into(),
+                path: dir.0.join("absent/scheduler").to_str().unwrap().to_string(),
+                category: None,
+            },
+        )]);
+        let mut writes = 0usize;
+        let outcome = restore_entries_with(
+            &RollbackData {
+                version: 1,
+                entries: absent,
+            },
+            true,
+            &mut |_, _| {
+                writes += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(writes, 0);
+        assert_eq!(outcome.missing.len(), 1);
     }
 
     use super::*;
@@ -6104,6 +6311,39 @@ mod tests {
         assert_eq!(entry.previous, "60");
         assert_eq!(entry.applied, "20");
         assert_eq!(entry.category, Some(Category::Security));
+    }
+
+    #[test]
+    fn heal_alias_duplicates_collapses_a_stale_record_and_its_live_twin() {
+        // A pre-5448 ledger holds the dotted interface spelling translated
+        // dot-to-slash (the file it names does not exist) while a later merge
+        // under the other spelling recorded the live file. Grouping by the
+        // recorded path alone left them apart, so the stale record's
+        // intermediate value survived into persistence and restore.
+        let stale = "/proc/sys/net/ipv4/conf/Br0/100/forwarding";
+        let live = "/proc/sys/net/ipv4/conf/Br0.100/forwarding";
+        let data: RollbackData = serde_json::from_str(&format!(
+            r#"{{"version":1,"entries":{{
+                "net.ipv4.conf.Br0.100.forwarding":{{
+                    "previous":"0","applied":"1","path":"{stale}"
+                }},
+                "net/ipv4/conf.Br0.100/forwarding":{{
+                    "previous":"1","applied":"2","path":"{live}"
+                }}
+            }}}}"#
+        ))
+        .unwrap();
+        let mut healed = data;
+        heal_alias_duplicates_with(&mut healed, |path| path == live);
+        assert_eq!(
+            healed.entries.len(),
+            1,
+            "one kernel file, one record: {:?}",
+            healed.entries.keys().collect::<Vec<_>>()
+        );
+        let entry = healed.entries.values().next().unwrap();
+        assert_eq!(entry.previous, "0", "the pristine original survives");
+        assert_eq!(entry.applied, "2", "the newest value survives");
     }
 
     #[test]
@@ -11684,5 +11924,41 @@ mod tests {
             !stderr.contains("panicked"),
             "the engine panicked on a failed stdout write:\n{stderr}"
         );
+    }
+    /// The service-manager calls run under the ledger lock and on the
+    /// command's critical path (persist/finalize). A manager that never
+    /// answers must therefore not hold the transaction open: the call is
+    /// bounded, the process is stopped and reaped, and the answer is the
+    /// conservative "boot replay not armed" verdict — never an unbounded wait,
+    /// which would keep `tune`/`fix`/`rollback` from printing their documented
+    /// body and block every other ktuner command on the ledger lock.
+    #[test]
+    fn systemctl_quiet_stops_a_manager_that_never_answers() {
+        let started = Instant::now();
+        let armed = systemctl_quiet_with("/bin/sleep", &["5"], Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        assert!(
+            !armed,
+            "a manager that never answers is not an armed replay"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the call must be bounded by its timeout, took {elapsed:?}"
+        );
+    }
+
+    /// The bounded wait keeps the verdict of a manager that does answer.
+    #[test]
+    fn systemctl_quiet_reports_the_exit_status() {
+        assert!(systemctl_quiet_with(
+            "/bin/true",
+            &[],
+            Duration::from_secs(5)
+        ));
+        assert!(!systemctl_quiet_with(
+            "/bin/false",
+            &[],
+            Duration::from_secs(5)
+        ));
     }
 }

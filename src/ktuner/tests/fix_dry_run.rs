@@ -97,9 +97,31 @@ fn fix_dry_run_previews_the_single_write_in_the_tune_shape() {
         .keys()
         .map(String::as_str)
         .collect();
+    // `would_clear` is the one conditional addition to this shape: it appears
+    // whenever the selected parameter applies half of a mutually exclusive
+    // pair (the dirty and overcommit pairs of tuner::cleared_sibling). Allow
+    // exactly that key, the same way tune_exclude.rs does, so the contract is
+    // asserted on a host whose first applicable finding is a pair member too.
+    let expected = if preview.get("would_clear").is_some() {
+        assert!(
+            preview["would_clear"]
+                .as_array()
+                .is_some_and(|twins| !twins.is_empty()),
+            "would_clear is present only when it names a twin: {preview}"
+        );
+        vec![
+            "blocked",
+            "dry_run",
+            "status",
+            "would_apply",
+            "would_clear",
+            "would_skip",
+        ]
+    } else {
+        vec!["blocked", "dry_run", "status", "would_apply", "would_skip"]
+    };
     assert_eq!(
-        keys,
-        vec!["blocked", "dry_run", "status", "would_apply", "would_skip"],
+        keys, expected,
         "the preview carries the tune plan's keys, scoped to one parameter: {preview}"
     );
     assert_eq!(preview["dry_run"], serde_json::json!(true));

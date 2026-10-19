@@ -277,18 +277,17 @@ impl TrajectoryStore {
 
     /// Returns `(file_size, file_mtime_ns)` recorded for `file_path`, if any.
     /// Drives the incremental scan: unchanged files are skipped.
-    /// Checks the successfully ingested trajectory row first and the per-path
-    /// scan bookkeeping (failed conversions, and ingested paths the session
-    /// row no longer points at) second.
+    /// Per-path scan bookkeeping takes precedence: a failed update may differ
+    /// from the last successful trajectory. Falls back to that trajectory
+    /// when its redundant bookkeeping has been removed by maintenance.
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn get_file_state(&self, file_path: &str) -> Result<Option<(i64, i64)>> {
         let conn = self.lock_conn()?;
-        // First check successfully ingested files.
         let state = conn
             .query_row(
-                "SELECT file_size, file_mtime_ns FROM collected_trajectories
+                "SELECT file_size, file_mtime_ns FROM skipped_files
                  WHERE file_path = ?1",
                 params![file_path],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -297,16 +296,15 @@ impl TrajectoryStore {
         if state.is_some() {
             return Ok(state);
         }
-        // Then check skipped (corrupted) files.
-        let skipped = conn
+        let trajectory = conn
             .query_row(
-                "SELECT file_size, file_mtime_ns FROM skipped_files
+                "SELECT file_size, file_mtime_ns FROM collected_trajectories
                  WHERE file_path = ?1",
                 params![file_path],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(skipped)
+        Ok(trajectory)
     }
 
     /// Records the file state for a file that failed conversion, preventing
@@ -382,7 +380,7 @@ impl TrajectoryStore {
         // the row would miss the incremental check and be fully re-read and
         // re-upserted (collected_at_ns churn) on every scan round. Maintenance
         // purges the bookkeeping row again once the trajectory row itself
-        // carries the same path (it serves the check directly).
+        // carries the same path and file version (it serves the check directly).
         conn.execute(
             "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
              VALUES (?1, ?2, ?3)
@@ -804,8 +802,9 @@ impl TrajectoryStore {
     fn delete_trajectories_before(&self, cutoff_ns: i64) -> Result<usize> {
         let mut conn = self.lock_conn()?;
         let transaction = conn.transaction()?;
+        // Evicting the last good trajectory must not overwrite a later failed scan.
         transaction.execute(
-            "INSERT OR REPLACE INTO skipped_files (file_path, file_size, file_mtime_ns)
+            "INSERT OR IGNORE INTO skipped_files (file_path, file_size, file_mtime_ns)
              SELECT file_path, file_size, file_mtime_ns FROM collected_trajectories
              WHERE collected_at_ns < ?1",
             params![cutoff_ns],
@@ -829,8 +828,9 @@ impl TrajectoryStore {
         }
         let limit = ((count as f64 * fraction.clamp(0.0, 1.0)) as i64).max(1);
         let transaction = conn.transaction()?;
+        // Preserve the latest per-path observation while removing old payloads.
         transaction.execute(
-            "INSERT OR REPLACE INTO skipped_files (file_path, file_size, file_mtime_ns)
+            "INSERT OR IGNORE INTO skipped_files (file_path, file_size, file_mtime_ns)
              SELECT file_path, file_size, file_mtime_ns FROM collected_trajectories
              WHERE session_id IN (
                  SELECT session_id FROM collected_trajectories
@@ -855,7 +855,9 @@ impl TrajectoryStore {
             let mut statement = conn.prepare(
                 "SELECT skipped.file_path, skipped.file_mtime_ns,
                         EXISTS(SELECT 1 FROM collected_trajectories AS trajectories
-                               WHERE trajectories.file_path = skipped.file_path)
+                               WHERE trajectories.file_path = skipped.file_path
+                                 AND trajectories.file_size = skipped.file_size
+                                 AND trajectories.file_mtime_ns = skipped.file_mtime_ns)
                  FROM skipped_files AS skipped",
             )?;
             let rows = statement

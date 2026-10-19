@@ -123,7 +123,19 @@ fn tool_response_has_error(map: &serde_json::Map<String, serde_json::Value>) -> 
 
 fn value_has_error_signal(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => text_has_error_signal(text),
+        // A payload that is entirely valid JSON is read through its parsed
+        // form. Scanning the encoded text again would re-judge a result that
+        // declares success by its free-form content — the object arm already
+        // trusts that flag — and could also match words that only appear in a
+        // key or an escape. The Responses API copies
+        // `function_call_output.output` through unchanged, and an MCP result
+        // is often serialized as `{"content":…,"isError":false}` text.
+        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text.trim())
+            .ok()
+            .map_or_else(
+                || text_has_error_signal(text),
+                |parsed| value_has_error_signal(&parsed),
+            ),
         serde_json::Value::Array(items) => items.iter().any(value_has_error_signal),
         serde_json::Value::Object(map) => match declared_failure(map) {
             Some(is_error) => is_error,
@@ -488,6 +500,38 @@ mod tests {
         );
 
         assert!(!looks_like_tool_failure(&event));
+    }
+
+    /// A tool result can ride as a JSON-encoded *string*: the Responses API
+    /// copies `function_call_output.output` through unchanged, and an MCP
+    /// result is often serialized as `{"content":…,"isError":false}` text.
+    /// The string arm scanned the encoded text without reading the flag, so a
+    /// result that declares success was judged by its free-form content — a
+    /// search that skips an unreadable path became a `tool_failure` finding
+    /// while the detector read the same payload as clean.
+    #[test]
+    fn a_json_string_tool_result_that_reports_success_is_not_a_failure() {
+        let clean = event(
+            Some(
+                r#"[{"role":"user","parts":[{"type":"tool_call_response","id":"toolu_1","response":"{\"content\":[{\"type\":\"text\",\"text\":\"grep: no such file or directory\"}],\"isError\":false}"}]}]"#,
+            ),
+            Some(r#"[{"role":"assistant","parts":[{"type":"text","content":"noted"}]}]"#),
+            None,
+        );
+        assert!(
+            !looks_like_tool_failure(&clean),
+            "a JSON string that declares success is not a failure"
+        );
+
+        // The same encoded payload with the failure flag still reports it.
+        let failed = event(
+            Some(
+                r#"[{"role":"user","parts":[{"type":"tool_call_response","id":"toolu_1","response":"{\"content\":[{\"type\":\"text\",\"text\":\"grep: no such file or directory\"}],\"isError\":true}"}]}]"#,
+            ),
+            Some(r#"[{"role":"assistant","parts":[{"type":"text","content":"noted"}]}]"#),
+            None,
+        );
+        assert!(looks_like_tool_failure(&failed));
     }
 
     #[test]

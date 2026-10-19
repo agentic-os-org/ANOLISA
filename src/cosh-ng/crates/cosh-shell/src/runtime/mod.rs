@@ -1,13 +1,5 @@
-#[allow(dead_code)]
-pub(crate) mod approval_gate;
-#[cfg(test)]
-mod approval_gate_tests;
 pub(crate) mod approval_ledger;
 pub(crate) mod approval_state;
-#[allow(dead_code)]
-pub(crate) mod approval_ui;
-#[cfg(test)]
-mod approval_ui_tests;
 pub(crate) mod cancel;
 pub(crate) mod cli_args;
 pub(crate) mod continuity;
@@ -46,10 +38,4 @@ mod state_prelude;
 #[cfg(test)]
 mod state_tests;
 pub(crate) mod terminal;
-#[allow(dead_code)]
-pub(crate) mod terminal_publisher;
-#[cfg(test)]
-mod terminal_publisher_tests;
 pub(crate) mod trust_state;
-#[allow(dead_code)]
-pub(crate) mod ui_coordinator;

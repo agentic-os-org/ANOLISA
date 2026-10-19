@@ -40,6 +40,8 @@ pub(crate) struct RuntimeMetrics {
     pub connection_cache_bytes: u64,
     pub pending_genai_count: u64,
     pub pending_genai_bytes: u64,
+    pub completion_queue_count: u64,
+    pub completion_queue_bytes: u64,
     pub pending_connection_count: u64,
     pub pending_connection_bytes: u64,
     pub eviction_count: u64,
@@ -211,6 +213,10 @@ impl MetricsFileExporter {
         metrics::gauge!("agentsight_pending_connection_bytes")
             .set(snapshot.pending_connection_bytes as f64);
 
+        metrics::gauge!("agentsight_completion_queue_count")
+            .set(snapshot.completion_queue_count as f64);
+        metrics::gauge!("agentsight_completion_queue_bytes")
+            .set(snapshot.completion_queue_bytes as f64);
         let current = CounterSnapshot::from(snapshot);
         increment_counter(
             "agentsight_channel_dropped_total",
@@ -267,6 +273,26 @@ fn increment_counter(name: &'static str, current: u64, previous: u64) {
 }
 
 fn describe_metrics() {
+    metrics::describe_gauge!(
+        "agentsight_completion_queue_count",
+        "Raw completed captures awaiting CPU admission"
+    );
+    metrics::describe_gauge!(
+        "agentsight_completion_queue_bytes",
+        "Retained bytes in the bounded raw completion queue"
+    );
+    metrics::describe_histogram!(
+        "agentsight_completion_wait_seconds",
+        "Time a completed capture waits before analysis and persistence"
+    );
+    metrics::describe_counter!(
+        "agentsight_cpu_budget_deferred_total",
+        "Heavy jobs deferred by the shared process CPU budget"
+    );
+    metrics::describe_counter!(
+        "agentsight_cpu_budget_work_nanoseconds_total",
+        "Process CPU nanoseconds while a heavy job is admitted"
+    );
     metrics::describe_counter!(
         "agentsight_events_received_total",
         "Events received by the AgentSight userspace pipeline"

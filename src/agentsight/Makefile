@@ -171,3 +171,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := build-all
+
+.PHONY: test-tokenless-api
+test-tokenless-api: ## Verify built Tokenless and AgentSight CLI processes on Linux
+	python3 tests/tokenless-api-e2e.py

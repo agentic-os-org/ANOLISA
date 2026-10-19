@@ -5,7 +5,10 @@ use crate::{rejected, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    sync::{atomic::Ordering, mpsc, Arc, TryLockError},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, MutexGuard, TryLockError,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +19,34 @@ pub(super) struct Lease {
     digest: [u8; 32],
     handle: Option<Value>,
     completion_digest: Option<[u8; 32]>,
+    cancelled: Arc<AtomicBool>,
+}
+
+fn correlation(event: &str, session: &str, call: &str) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!([event, session, call]))
+                .map_err(|_| rejected("event_encoding"))?
+        )
+    ))
+}
+
+fn lock_hooks<T>(hooks: &Mutex<T>, deadline: Instant) -> Result<MutexGuard<'_, T>> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(rejected("event_open_timeout"));
+        }
+        match hooks.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => return Err(rejected("state_poisoned")),
+            Err(TryLockError::WouldBlock) => thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(2)),
+            ),
+        }
+    }
 }
 
 fn hermes_completion(mut native: Value) -> Result<Value> {
@@ -35,6 +66,65 @@ fn hermes_completion(mut native: Value) -> Result<Value> {
 }
 
 impl Runtime {
+    pub(super) fn close_hook(
+        &self,
+        instance_id: &str,
+        event: &str,
+        session: &str,
+        call: &str,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if !matches!(event, "tool.before" | "tool.after") || session.is_empty() || call.is_empty() {
+            return Err(rejected("native_correlation_missing"));
+        }
+        let hooks = Arc::clone(
+            &self
+                .instances
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?
+                .get(instance_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| rejected("unknown_instance"))?
+                .hooks,
+        );
+        let key = correlation(event, session, call)?;
+        let cancelled = {
+            // The worker shares this flag even before its handle is ready.
+            let mut hooks = lock_hooks(&hooks, deadline)?;
+            if !hooks.contains_key(&key) && hooks.len() >= MAX_HOOK_EVENTS {
+                return Err(rejected("native_event_limit"));
+            }
+            let lease = hooks.entry(key).or_insert(Lease {
+                digest: [0; 32],
+                handle: None,
+                completion_digest: None,
+                cancelled: Arc::new(AtomicBool::new(true)),
+            });
+            lease.cancelled.store(true, Ordering::Release);
+            Arc::clone(&lease.cancelled)
+        };
+        loop {
+            {
+                let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+                if !events
+                    .values()
+                    .any(|entry| Arc::ptr_eq(&entry.cancelled, &cancelled))
+                {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(rejected("event_close_timeout"));
+            }
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(5)),
+            );
+        }
+        Ok(json!({"closed": true}))
+    }
+
     pub(super) fn release_instance(&self, instance_id: &str, deadline: Instant) -> Result<Value> {
         {
             let mut instances = self
@@ -101,7 +191,7 @@ impl Runtime {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| rejected("native_correlation_missing"))?
             .to_owned();
-        let (hooks, hermes_after, replacement_after) =
+        let (hooks, hook_open, hermes_after, replacement_after) =
             {
                 let instances = self
                     .instances
@@ -114,6 +204,7 @@ impl Runtime {
                     .ok_or_else(|| rejected("unknown_instance"))?;
                 (
                     Arc::clone(&instance.hooks),
+                    Arc::clone(&instance.hook_open),
                     value["name"] == "tool.after"
                         && value["agent"]["adapter"] == "hermes"
                         && instance.host.steps().iter().any(|step| {
@@ -205,35 +296,25 @@ impl Runtime {
         {
             return Err(rejected("event_size_limit"));
         }
-        let correlation = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([value["name"], session, call]))
-                    .map_err(|_| rejected("event_encoding"))?
-            )
-        );
+        let correlation = correlation(
+            value["name"]
+                .as_str()
+                .ok_or_else(|| rejected("event_invalid"))?,
+            &session,
+            &call,
+        )?;
         let mut digest = Sha256::new();
         digest.update((encoded.len() as u64).to_be_bytes());
         digest.update(encoded);
         digest.update(&compared_input);
         let digest: [u8; 32] = digest.finalize().into();
-        // Serialize only opens for this instance, including initial audit claim.
-        // Event workers do not acquire this lock, so preparation cannot deadlock.
-        let mut hooks = loop {
-            if Instant::now() >= deadline {
-                return Err(rejected("event_open_timeout"));
+        // Preserve shared-handle opens without excluding cancellation during I/O.
+        let _opening = lock_hooks(&hook_open, deadline)?;
+        let mut leases = lock_hooks(&hooks, deadline)?;
+        if let Some(lease) = leases.get_mut(&correlation) {
+            if lease.cancelled.load(Ordering::Acquire) {
+                return Err(rejected("native_event_closed"));
             }
-            match hooks.try_lock() {
-                Ok(guard) => break guard,
-                Err(TryLockError::Poisoned(_)) => return Err(rejected("state_poisoned")),
-                Err(TryLockError::WouldBlock) => thread::sleep(
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(2)),
-                ),
-            }
-        };
-        if let Some(lease) = hooks.get_mut(&correlation) {
             if lease.digest != digest {
                 return Err(rejected("native_correlation_mismatch"));
             }
@@ -276,27 +357,31 @@ impl Runtime {
         if observed {
             return Err(rejected("native_completion_without_replacement"));
         }
-        if hooks.len() >= MAX_HOOK_EVENTS {
+        if leases.len() >= MAX_HOOK_EVENTS {
             return Err(rejected("native_event_limit"));
         }
         // Retain failed opens too: retrying must not create a fresh event budget.
-        hooks.insert(
+        let cancelled = Arc::new(AtomicBool::new(false));
+        leases.insert(
             correlation.clone(),
             Lease {
                 digest,
                 handle: None,
                 completion_digest: None,
+                cancelled: Arc::clone(&cancelled),
             },
         );
-        let handle = self.open(instance_id, value, Some(native_input), deadline)?;
-        hooks.insert(
-            correlation,
-            Lease {
-                digest,
-                handle: Some(handle.clone()),
-                completion_digest: None,
-            },
-        );
+        // Initialization may wait on durable storage. Keep cancellation writable.
+        drop(leases);
+        let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
+        let mut leases = lock_hooks(&hooks, deadline)?;
+        let lease = leases
+            .get_mut(&correlation)
+            .ok_or_else(|| rejected("native_event_closed"))?;
+        if lease.cancelled.load(Ordering::Acquire) {
+            return Err(rejected("native_event_closed"));
+        }
+        lease.handle = Some(handle.clone());
         Ok(handle)
     }
 }
@@ -391,6 +476,7 @@ mod tests {
                 closing: false,
                 observation: None,
                 hooks: Arc::new(Mutex::new(BTreeMap::new())),
+                hook_open: Arc::new(Mutex::new(())),
             }),
         );
         let hooks = Arc::clone(
@@ -439,7 +525,8 @@ mod tests {
                 "fixture".into(),
                 json!({}),
                 None,
-                Instant::now() + Duration::from_secs(1)
+                Instant::now() + Duration::from_secs(1),
+                Arc::new(AtomicBool::new(false)),
             )
             .is_err());
         runtime.events.lock().unwrap().remove("busy");

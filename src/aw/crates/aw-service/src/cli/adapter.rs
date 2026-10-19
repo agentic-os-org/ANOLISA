@@ -1,5 +1,7 @@
 //! Native dialects own registration and response semantics; the launcher owns lifetimes.
 
+pub(super) mod catalog;
+
 use super::{read_file, run::Artifacts, Arguments, Exit, Result};
 use aw_exec::CommandSpec;
 use aw_provider::admission::AdmittedStep;
@@ -84,7 +86,7 @@ pub(super) fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) ->
         return Err("block reason must be nonempty and bounded".into());
     }
     match adapter {
-        "qoder" | "qwenpaw" => reply.stderr = format!("{text}\n").into_bytes(),
+        "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
         "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
@@ -112,15 +114,11 @@ pub(super) trait Adapter: Sync {
 }
 
 pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
-    match name {
-        "pi" => Ok(&super::adapters::pi::Pi),
-        "claude-sdk" => Ok(&super::adapters::claude_sdk::ClaudeSdk),
-        "qoder" => Ok(&super::qoder::Qoder),
-        "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
-        "hermes" => Ok(&super::adapters::hermes::Hermes),
-        "openclaw" => Ok(&super::adapters::openclaw::OpenClaw),
-        _ => Err(format!("unsupported launcher adapter: {name}").into()),
-    }
+    catalog::PROFILES
+        .iter()
+        .find(|profile| profile.name == name)
+        .map(|profile| profile.adapter)
+        .ok_or_else(|| format!("unsupported launcher adapter: {name}").into())
 }
 
 pub(super) fn install(args: &Arguments) -> Result<Exit> {
@@ -212,12 +210,20 @@ mod tests {
     #[test]
     fn retry_reasons_preserve_every_dialects_denial_and_never_emit_updates() {
         let message = "Retry: literal ; $(touch NEVER) ' spaces\nnot executable";
-        for name in ["qoder", "qwenpaw", "hermes", "openclaw", "pi", "claude-sdk"] {
+        for name in [
+            "qoder",
+            "qwenpaw",
+            "hermes",
+            "openclaw",
+            "pi",
+            "claude-sdk",
+            "agentscope",
+        ] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
             block_reason(name, &mut reply, message).unwrap();
             assert_eq!(matches!(reply.exit, Exit::Code(0)), was_success);
-            if matches!(name, "qoder" | "qwenpaw") {
+            if matches!(name, "qoder" | "qwenpaw" | "agentscope") {
                 assert!(matches!(reply.exit, Exit::Code(2)));
                 assert!(reply.stdout.is_empty());
                 assert_eq!(reply.stderr, format!("{message}\n").as_bytes());

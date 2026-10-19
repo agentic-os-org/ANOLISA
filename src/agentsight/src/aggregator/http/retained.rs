@@ -66,6 +66,77 @@ impl Counter {
         self.source(&response.source_event);
         self.headers(&response.headers);
     }
+
+    fn aggregated_response(&mut self, response: &crate::aggregator::http::AggregatedResponse) {
+        self.response(&response.parsed);
+        self.bytes += response.sse_events.capacity()
+            * size_of::<crate::parser::sse::ParsedSseEvent>()
+            + response
+                .sse_continuation_bytes
+                .as_ref()
+                .map_or(0, Vec::capacity);
+        for event in &response.sse_events {
+            self.source(event.source_event());
+            self.bytes += event.id.as_ref().map_or(0, String::capacity)
+                + event.event.as_ref().map_or(0, String::capacity);
+        }
+    }
+
+    fn frames(&mut self, frames: &Vec<crate::parser::http2::ParsedHttp2Frame>) {
+        self.bytes += frames.capacity() * size_of::<crate::parser::http2::ParsedHttp2Frame>();
+        for frame in frames {
+            self.source(&frame.source_event);
+        }
+    }
+}
+
+impl crate::aggregator::AggregatedResult {
+    /// Charge retained allocations without serializing or cloning the completed request.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        use crate::aggregator::AggregatedResult::*;
+        let mut counter = Counter::new(size_of::<Self>());
+        match self {
+            Abandoned { partial, .. } => counter.bytes += partial.retained_bytes(),
+            HttpComplete(pair) | SseComplete(pair) => {
+                counter.request(&pair.request);
+                counter.aggregated_response(&pair.response);
+            }
+            RequestOnly { request, .. } => counter.request(request),
+            ResponseOnly { response, .. } => counter.aggregated_response(response),
+            Http2Frames { frames, .. } => counter.frames(frames),
+            Http2StreamComplete(stream) => {
+                for frame in stream
+                    .request_headers
+                    .iter()
+                    .chain(stream.response_headers.iter())
+                {
+                    counter.source(&frame.source_event);
+                }
+                counter.frames(&stream.request_data_frames);
+                counter.frames(&stream.response_data_frames);
+                for headers in stream
+                    .decoded_request_headers
+                    .iter()
+                    .chain(stream.decoded_response_headers.iter())
+                {
+                    counter.bytes += headers.capacity() * size_of::<(String, String)>()
+                        + headers
+                            .iter()
+                            .map(|(key, value)| key.capacity() + value.capacity())
+                            .sum::<usize>();
+                }
+            }
+            ProcessComplete(process) => {
+                counter.bytes += process.comm.capacity()
+                    + process.filename.as_ref().map_or(0, String::capacity)
+                    + process.args.as_ref().map_or(0, String::capacity)
+                    + process.stdout_data.capacity()
+                    + process.stderr_data.capacity()
+                    + process.session_id.as_ref().map_or(0, String::capacity);
+            }
+        }
+        counter.bytes
+    }
 }
 
 impl ConnectionState {

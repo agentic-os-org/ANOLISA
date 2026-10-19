@@ -15,3 +15,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
+jsonschema = { workspace = true }

@@ -89,6 +89,16 @@ reader does not make maintenance wait while excluding the capture writer.
 Maintenance yields before starting another delete batch while capture writes or queued retries
 need the writer, and resumes on a later scheduled pass.
 
+When periodic maintenance is enabled, the trace process delegates primary and GenAI WAL checkpoints
+to that worker instead of triggering them on capture commits. Passive checkpoints run about once a
+second between retention/capacity checks; `check_interval_secs` still controls cleanup. SQLite's
+synchronous durability setting is unchanged. Disabling periodic maintenance retains automatic WAL
+checkpointing on capture connections.
+
+With `runtime_limits.cpu_budget_percent` enabled, primary and GenAI cleanup yield between bounded
+operations and continue on later worker ticks. They share CPU admission with capture delivery;
+retention and capacity targets remain in effect, but a cleanup pass may take longer to finish.
+
 Completed captures that encounter a transient SQLite write lock stay in the existing pending
 queue for retry. They share `pending_genai_max_count` and `pending_genai_max_bytes_mb` with
 session-ID waits. Retries do not resend records to external sinks. Budget rejection and permanent
@@ -188,6 +198,7 @@ Endpoint groups in 0.11:
 | Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
+| Tokenless records | `POST /api/tokenless/refresh`, `GET /api/tokenless/records`, `GET /api/tokenless/records/{cache_id}` | Refresh saved statistics, list metadata, and read details; content requires explicit `include_content=true`. All three routes require Dashboard credentials, including on loopback |
 | Token savings | `GET /api/token-savings`, `GET /api/token-savings/session/{id}` | Tokenless savings |
 | ATIF export | `GET /api/export/atif/session/{id}` (also `trace` and `conversation`) | Trajectory export |
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
@@ -291,3 +302,8 @@ Stopping the service first ensures the WAL is checkpointed, so the archive is co
 - [CLI reference](cli-reference.md) — query the same data from the shell
 - [Dashboard guide](dashboard.md) — the UI over these databases
 - [Configuration](configuration.md) — storage and retention switches
+
+Queried Tokenless statistics are saved in `genai_events.db` alongside the existing GenAI
+store. Repeating a query replaces metadata for the same endpoint, source ID and original
+timestamp, preserving explicitly fetched content. Original source session IDs are retained.
+These copies follow `storage.genai` age and capacity cleanup; they do not modify Tokenless's database.

@@ -27,10 +27,125 @@ downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
 this gate does not certify other operating systems or minimum supported versions.
 
-For pull requests that change `src/aw/**` or the AW CI workflow,
+For pull requests that change `src/aw/**`,
 [AW CI](../../.github/workflows/aw-ci.yml) runs these checks against the candidate
 merge commit. Run the command above on Linux before submitting AW changes. If CI
 fails, find the failing command in the job log and rerun it locally from `src/aw`.
+
+## Regression matrix and source limits
+
+[tests/regression-matrix.json](tests/regression-matrix.json) maps each registered
+Agent, Hook event/effect and lifecycle to exact runnable Rust tests. The compiled
+Adapter catalog must match the matrix and configuration schema. Shared PreTool
+and PostTool cases iterate all matrix Agents with explicit native payloads;
+adding an Agent without its fixture, omitting a Hook cell, deleting a referenced
+test or marking it ignored fails the existing `AW / required` gate.
+
+Security coverage includes denial, scan errors, cancellation and offline
+observation. Tokenless coverage includes fresh-call retry ownership, rejection
+of in-place mutation, final text replacement, unsupported/error/no-savings
+results, managed RTK isolation and optional view isolation. These Provider
+fixtures and callback tests run on every relevant push without credentials.
+Real SDK/CLI adoption and real Tokenless/RTK package acceptance remain separate,
+explicit checks; do not reference ignored native tests as required coverage.
+
+The gate builds workspace test harnesses once with Cargo's JSON artifact output,
+lists each executable directly and reuses the build for the full workspace test
+run. Every integration target must contain runnable tests, including newly added
+targets. The explicitly declared `opt_in_targets` retain installed-package
+acceptance outside this gate; they must exist and contain only ignored tests. Scope selection, candidate SHA verification and fail-closed required
+status remain unchanged; shared security and Tokenless tests are never skipped
+based on the changed Adapter.
+
+Rust, Python and JavaScript (`.js`, `.mjs`, `.cjs`) sources, scripts and fixtures
+have a 699-line ceiling, with an advisory at 600 lines. Only the existing
+`src/validation.rs` retains its fixed 711-line ceiling. Split by responsibility
+and preserve entrypoints and assertions; do not exempt test fixtures.
+Dependency/layout checks are in [check_layout.py](scripts/check_layout.py),
+compiled inventories in [check_inventory.py](scripts/check_inventory.py), and
+matrix/README consistency in [check_matrix.py](scripts/check_matrix.py).
+
+After changing supported capabilities, regenerate both README grids and run the
+gate from `src/aw`:
+
+```bash
+python3 scripts/check_matrix.py --write-readmes
+python3 scripts/check.py
+```
+
+Gate-only development tests need Python 3.11+ and no Rust or Node runtime:
+
+```bash
+python3 -B -m unittest discover -s tests -p 'test_ci_*.py'
+```
+
+## Daily CI and nightly integration
+
+PRs run AW checks only when `src/aw/**` changes. The daily gate retains all
+credential-free security, Tokenless, lifecycle and Agent/Hook matrix contracts,
+including native-inventory validation and source-size checks. Other components'
+internal changes are owned by their own CI. An externally changed public contract
+consumed by AW needs explicit compatibility validation on the candidate SHA.
+
+[AW Integration](../../.github/workflows/aw-preview.yml) runs every night at 03:23
+Asia/Shanghai and accepts a full 40-character `candidate_sha` for manual
+pre-release validation. It builds all four Preview packages once, exercises real
+sec-core health and Tokenless/RTK contracts, and verifies installation, service
+lifecycle, side-by-side prefixes for rollback, and uninstall. Side-by-side
+acceptance uses the same candidate build; it does not certify cross-version data
+migration. Native jobs reuse checksummed binaries from that exact build.
+
+[tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
+owners, bounded commands and the precise acceptance boundary for every registered
+Agent. The nightly job matrix is generated from this inventory. AgentScope,
+Claude SDK/CLI, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
+manual because CI has no provisioned native CLI/model environment; it appears as
+**MANUAL — not tested**, never as a native pass. OpenClaw covers official Hook
+runners. The QwenPaw suite covers native AgentScope middleware and AW plugin
+registration against a simulated API; QwenPaw plugin loading, App/API startup
+and model turns remain manual. Full OpenClaw Gateway model flows also require
+explicit acceptance. Deterministic local models need no cloud keys.
+
+Every native command declares a report contract: `unittest`/`tap` requires an exact
+test count; `json` requires result files with exact case names or observed counts.
+Execution and final aggregation both verify the evidence; exit zero or an outer
+`passed` status alone cannot certify a suite. Keep reported counts tied to completed
+checks rather than constants, and update the inventory when coverage changes.
+Missing suites, stale SHAs and incomplete reports fail the final integration job.
+Evidence artifacts retain the candidate SHA, component package manifests,
+installed SDK versions/npm locks, command/PID/deadline records and per-suite
+results. @kongche-jbw owns AW integration failures and routes backend contract
+failures to the component CODEOWNERS. Before release, rerun on the exact release
+commit and complete the documented manual native boundaries.
+
+The daily Rust cache is restored for PRs and written only by main pushes; the
+heavy build cache is written by nightly. Native Python/npm dependencies are
+cached separately, and native concurrency is capped at three jobs. To validate
+the new integration workflow on a branch before it reaches main, dispatch the
+existing AW workflow with `integration=true`:
+
+```bash
+gh workflow run aw-ci.yml --ref <branch> -f integration=true
+# After the integration workflow is on the default branch:
+gh workflow run aw-preview.yml --ref <branch> -f candidate_sha=<40-character-SHA>
+```
+
+Local inventory planning and native execution use the same entrypoints as CI:
+
+```bash
+python3 -B scripts/check_native.py --candidate-sha "$(git rev-parse HEAD)"
+python3 -B scripts/native_acceptance.py --agent agentscope \
+  --candidate-sha "$(git rev-parse HEAD)" --bin target/native-binaries \
+  --output target/native-evidence/agentscope
+```
+
+The binary directory must contain the nightly bundle and checksums. Install the
+inventory's Python version, Node 24.15.0 and uv 0.11.13 first. Native execution
+owns one short temporary directory for Linux Unix sockets and removes it on exit;
+retained evidence belongs under `target/`. Native jobs use standalone Python and
+private Hermes tools/environments so runner loader overrides or shared writable
+caches do not require weaker native admission. A full run failure is not converted to
+success by retrying or omitting a framework.
 
 ## Crate boundaries
 
@@ -51,7 +166,7 @@ Keep native framework integration outside these libraries and service; process e
 Keep Provider message parsing and offline admission in `aw-provider`; `aw-host`
 owns their execution boundary without adding Provider semantics to raw command
 transport or replacing the Core Host/Journal contracts.
-Dependency and source-layout checks live in [scripts/check.py](scripts/check.py),
+Dependency and source-layout checks live in [scripts/check_layout.py](scripts/check_layout.py),
 with regression tests in [tests/test_ci_checks.py](tests/test_ci_checks.py).
 Changes to a crate boundary must update both the checks and their tests.
 

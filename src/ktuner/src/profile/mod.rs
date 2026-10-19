@@ -147,7 +147,7 @@ mod tests {
                 swappiness: 60,
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
-                somaxconn: 128,
+                somaxconn: Some(128),
                 thp_enabled: "always".to_string(),
             },
             processes: processes

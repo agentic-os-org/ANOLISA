@@ -252,6 +252,8 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+
     let mut session_id = String::new();
     let mut message_count = 0u32;
     let mut first_message = String::new();
@@ -747,6 +749,62 @@ mod tests {
         assert_eq!(session.first_message, "hello there");
         assert_eq!(session.message_count, 1);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn local_bom_scan_keeps_the_only_human_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("-test-projects-demo");
+        fs::create_dir(&project).unwrap();
+        let path = project.join("marked-session.jsonl");
+        let content = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"marked-session\",\"message\":{\"content\":\"left\u{feff}right\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+        );
+        let source = &SESSION_SOURCES[0];
+        for prefix in ["", "\u{feff}"] {
+            fs::write(&path, format!("{prefix}{content}")).unwrap();
+            let mut sessions = Vec::new();
+            scan_source(dir.path(), source, &mut sessions);
+            assert_eq!(
+                sessions.len(),
+                1,
+                "a marked first user must still be listed"
+            );
+            let session = &sessions[0];
+            assert_eq!(session.session_id, "marked-session");
+            assert_eq!(session.first_message, "left\u{feff}right");
+            assert_eq!(session.message_count, 2);
+            assert_eq!(session.project, "demo");
+        }
+        for prefix in ["\u{feff}\u{feff}", "\n\u{feff}"] {
+            fs::write(&path, format!("{prefix}{content}")).unwrap();
+            assert!(parse_session_file(&path, source, "demo").is_none());
+        }
+    }
+
+    #[test]
+    fn local_bom_codex_listing_matches_detail_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-file-stem.jsonl");
+        let content = [codex_meta(), codex_response_user("inspect the project")]
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>();
+        for prefix in ["", "\u{feff}"] {
+            fs::write(&path, format!("{prefix}{content}")).unwrap();
+            let preview = parse_session_file(&path, codex_source(), "demo").unwrap();
+            let detail = crate::local::collector::converter::convert_jsonl_to_atif(&path).unwrap();
+            assert_eq!(preview.session_id, "legacy-id");
+            assert_eq!(Some(preview.session_id), detail.session_id);
+            assert_eq!(preview.first_message, "inspect the project");
+            assert_eq!(preview.message_count, 1);
+        }
+        fs::write(&path, format!("\u{feff}\u{feff}{content}")).unwrap();
+        let preview = parse_session_file(&path, codex_source(), "demo").unwrap();
+        let detail = crate::local::collector::converter::convert_jsonl_to_atif(&path).unwrap();
+        assert_eq!(preview.session_id, "rollout-file-stem");
+        assert_eq!(detail.session_id, None);
     }
 
     #[test]

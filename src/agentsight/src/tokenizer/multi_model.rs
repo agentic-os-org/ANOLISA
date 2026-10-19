@@ -372,14 +372,41 @@ mod tests {
       "model_max_length": 32768
     }"#;
 
-    fn fixture_tokenizer() -> LlmTokenizer {
-        let dir = std::env::temp_dir().join(format!("agentsight-mm-tok-{}", std::process::id()));
+    fn fixture_tokenizer() -> (LlmTokenizer, std::path::PathBuf) {
+        // Unique per call: tests share one process, so a pid-only path lets
+        // two threads race one writer's truncate against another's read.
+        static NEXT_DIR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-mm-tok-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let tokenizer_path = dir.join("tokenizer.json");
         let config_path = dir.join("tokenizer_config.json");
         std::fs::write(&tokenizer_path, FIXTURE_TOKENIZER_JSON).expect("write tokenizer.json");
         std::fs::write(&config_path, FIXTURE_TOKENIZER_CONFIG_JSON).expect("write config");
-        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+        let tokenizer = LlmTokenizer::from_file(&tokenizer_path, &config_path)
+            .expect("fixture tokenizer loads");
+        (tokenizer, dir)
+    }
+
+    /// Concurrent callers must never share a fixture directory: with a
+    /// pid-only path two threads could race one writer's truncate against
+    /// another's read (#7680), so uniqueness — not just survival — is pinned.
+    #[test]
+    fn fixture_tokenizer_dirs_are_unique_under_concurrency() {
+        let dirs: Vec<std::path::PathBuf> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| (0..8).map(|_| fixture_tokenizer().1).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("fixture thread"))
+                .collect()
+        });
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len(), "every call gets its own dir");
     }
 
     /// `features.tokenizer.cache_size` must reach the constructed manager: a
@@ -391,7 +418,7 @@ mod tests {
         let mut manager = MultiModelTokenizer::configured();
         assert_eq!(manager.capacity(), 2, "configured cache_size must be used");
 
-        let tokenizer = fixture_tokenizer();
+        let (tokenizer, _fixture_dir) = fixture_tokenizer();
         for id in ["model-a", "model-b", "model-c"] {
             manager.register(id, tokenizer.clone());
         }
@@ -421,7 +448,7 @@ mod tests {
         const MODEL: &str = "drain-fixture-model";
         // A registered model that a lookup would find, so the disabled branch
         // cannot pass merely because the lookup failed.
-        get_global_manager().register(MODEL, fixture_tokenizer());
+        get_global_manager().register(MODEL, fixture_tokenizer().0);
 
         let disabled = FeatureFlags {
             tokenizer_enabled: false,

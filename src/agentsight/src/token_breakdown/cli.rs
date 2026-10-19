@@ -335,6 +335,11 @@ impl AnalyzeChatmlCommand {
         let mut native_reasoning = String::new();
         let mut native_calls: std::collections::BTreeMap<u64, (String, String)> =
             std::collections::BTreeMap::new();
+        // OpenAI chat-completions cumulative `message` snapshots (see the
+        // choices walk below). They repeat the answer so far, so they need a
+        // single replace-or-extend buffer rather than one entry per frame.
+        let mut message_content = String::new();
+        let mut message_reasoning = String::new();
 
         /// Accumulate cumulative-or-incremental text: a chunk repeating the
         /// buffer plus more replaces it, a bare fragment is appended.
@@ -378,28 +383,62 @@ impl AnalyzeChatmlCommand {
                     let event_type = data_json.get("type").and_then(|v| v.as_str());
                     match event_type {
                         // ── Anthropic streaming shapes ────────────────────
+                        // A compatible gateway may put the block's complete
+                        // payload on `content_block_start` and send no deltas:
+                        // seed the text/thinking buffers and the tool input
+                        // from the start event, the rule the live analyzer
+                        // applies. The normal stream sends an empty payload
+                        // here, so the deltas still drive it.
                         Some("content_block_start") => {
                             if let Some(block) = data_json.get("content_block") {
-                                if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                    let index = data_json
-                                        .get("index")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    anthropic_calls.entry(index).or_insert_with(|| {
-                                        (
-                                            block
-                                                .get("id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                            block
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                            String::new(),
-                                        )
-                                    });
+                                let index =
+                                    data_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                                match block.get("type").and_then(|v| v.as_str()) {
+                                    Some("text") => {
+                                        if let Some(text) =
+                                            block.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("thinking") => {
+                                        if let Some(text) =
+                                            block.get("thinking").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                reasoning_parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some("tool_use") => {
+                                        let arguments = block
+                                            .get("input")
+                                            .filter(|input| {
+                                                input
+                                                    .as_object()
+                                                    .is_some_and(|object| !object.is_empty())
+                                            })
+                                            .map(|input| input.to_string())
+                                            .unwrap_or_default();
+                                        anthropic_calls.entry(index).or_insert_with(|| {
+                                            (
+                                                block
+                                                    .get("id")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                block
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                arguments,
+                                            )
+                                        });
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -463,7 +502,14 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // The shared aggregator also treats `output_item.done`
+                        // as authoritative: it carries the complete arguments
+                        // (and the whole call, for a capture that started
+                        // mid-stream or a custom_tool_call whose input only
+                        // appears there). Routing only `added` left the call
+                        // rendered with whatever partial deltas were caught.
                         Some("response.output_item.added")
+                        | Some("response.output_item.done")
                         | Some("response.function_call_arguments.delta")
                         | Some("response.function_call_arguments.done") => {
                             responses_tool_calls.observe(&data_json);
@@ -471,57 +517,80 @@ impl AnalyzeChatmlCommand {
                         _ => {}
                     }
 
-                    // Extract content and reasoning_content from choices[].delta
+                    // Extract content and reasoning_content from the OpenAI
+                    // chat-completions payload. A choice carries either
+                    // streaming `delta` fragments or a cumulative `message`
+                    // snapshot (SysOM's Copilot stream and some gateways send
+                    // the latter), so read both. A snapshot repeats the answer
+                    // so far, so it accumulates replace-or-extend into a single
+                    // buffer instead of being appended as another fragment.
                     if let Some(choices) = data_json.get("choices").and_then(|v| v.as_array()) {
                         for choice in choices {
-                            if let Some(delta) = choice.get("delta") {
-                                // Extract content
-                                if let Some(content) = delta.get("content").and_then(|v| v.as_str())
-                                {
-                                    if !content.is_empty() {
+                            let (payload, cumulative) =
+                                match (choice.get("delta"), choice.get("message")) {
+                                    (Some(delta), _) => (delta, false),
+                                    (None, Some(message)) => (message, true),
+                                    (None, None) => continue,
+                                };
+                            // Extract content
+                            if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                                if !content.is_empty() {
+                                    if cumulative {
+                                        accumulate(&mut message_content, content);
+                                    } else {
                                         content_parts.push(content.to_string());
                                     }
                                 }
-                                // Extract reasoning_content
-                                if let Some(reasoning) =
-                                    delta.get("reasoning_content").and_then(|v| v.as_str())
-                                {
-                                    if !reasoning.is_empty() {
+                            }
+                            // Extract reasoning_content
+                            if let Some(reasoning) =
+                                payload.get("reasoning_content").and_then(|v| v.as_str())
+                            {
+                                if !reasoning.is_empty() {
+                                    if cumulative {
+                                        accumulate(&mut message_reasoning, reasoning);
+                                    } else {
                                         reasoning_parts.push(reasoning.to_string());
                                     }
                                 }
-                                // Extract tool_calls - merge function name and
-                                // streamed arguments fragments by index
-                                if let Some(calls) =
-                                    delta.get("tool_calls").and_then(|t| t.as_array())
-                                {
-                                    for call in calls {
-                                        let index =
-                                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                                as usize;
-                                        let function = call.get("function");
-                                        let name = function
-                                            .and_then(|f| f.get("name"))
-                                            .and_then(|n| n.as_str())
-                                            .unwrap_or("");
-                                        let arguments = function
-                                            .and_then(|f| f.get("arguments"))
-                                            .and_then(|a| a.as_str())
-                                            .unwrap_or("");
-                                        match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
-                                            Some((_, slot_name, slot_arguments)) => {
-                                                if !name.is_empty() {
-                                                    *slot_name = name.to_string();
-                                                }
+                            }
+                            // Extract tool_calls - merge function name and
+                            // streamed arguments fragments by index. A message
+                            // snapshot carries the complete call, so it
+                            // replaces the slot instead of appending to it.
+                            if let Some(calls) =
+                                payload.get("tool_calls").and_then(|t| t.as_array())
+                            {
+                                for call in calls {
+                                    let index =
+                                        call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    let function = call.get("function");
+                                    let name = function
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("");
+                                    let arguments = function
+                                        .and_then(|f| f.get("arguments"))
+                                        .and_then(|a| a.as_str())
+                                        .unwrap_or("");
+                                    match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
+                                        Some((_, slot_name, slot_arguments)) => {
+                                            if !name.is_empty() {
+                                                *slot_name = name.to_string();
+                                            }
+                                            if cumulative {
+                                                *slot_arguments = arguments.to_string();
+                                            } else {
                                                 slot_arguments.push_str(arguments);
                                             }
-                                            None => {
-                                                tool_calls.push((
-                                                    index,
-                                                    name.to_string(),
-                                                    arguments.to_string(),
-                                                ));
-                                            }
+                                        }
+                                        None => {
+                                            tool_calls.push((
+                                                index,
+                                                name.to_string(),
+                                                arguments.to_string(),
+                                            ));
                                         }
                                     }
                                 }
@@ -594,6 +663,18 @@ impl AnalyzeChatmlCommand {
         }
         if !native_reasoning.is_empty() {
             reasoning_parts.push(native_reasoning);
+        }
+
+        // A message-snapshot stream answers in one cumulative form: the final
+        // snapshot is the answer, so it supersedes any delta fragments captured
+        // alongside it (a stream normally uses one form or the other).
+        if !message_content.is_empty() {
+            content_parts.clear();
+            content_parts.push(message_content);
+        }
+        if !message_reasoning.is_empty() {
+            reasoning_parts.clear();
+            reasoning_parts.push(message_reasoning);
         }
 
         let mut tool_calls: Vec<String> = {
@@ -836,6 +917,68 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    /// A body whose content the chat template cannot render (a content block
+    /// array, the shape multimodal clients send) made the template attempt in
+    /// `count_request_tokens` fail, and its `Err` arm answered a plain 0 while
+    /// claiming "count raw content + tools separately" — the request was
+    /// recorded as a zero-input breakdown next to a counted output side, with
+    /// `by_role`/`per_message` distributing that zero. The fallback must sum
+    /// the serialized messages, the same estimate the manual counter's own
+    /// fallback and the drain fallback answer with.
+    #[test]
+    fn unrenderable_content_still_counts_raw_tokens() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
+        });
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        assert!(
+            count.total_tokens > 0,
+            "the raw fallback must count the messages, got {count:?}"
+        );
+        assert!(
+            count.by_role.get("user").copied().unwrap_or(0) > 0,
+            "the distributed per-role count must be nonzero, got {count:?}"
+        );
+        assert_eq!(count.per_message.len(), 1);
+    }
+
+    /// Tool definitions ride along in the same fallback: a body the template
+    /// cannot render that also declares `tools` must count the definitions on
+    /// top of the raw messages (they never reached the template, and there is
+    /// no tool-role message to fold them into).
+    #[test]
+    fn unrenderable_content_still_counts_tool_definitions() {
+        let tokenizer = fixture_tokenizer();
+        let with_tools = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": "List the entries of a directory",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            }]
+        });
+        let without_tools = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello there"}]}]
+        });
+        let counted = crate::analyzer::count_request_tokens(&with_tools, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        let baseline =
+            crate::analyzer::count_request_tokens(&without_tools, &tokenizer, &tokenizer)
+                .expect("request is counted");
+        assert!(
+            counted.total_tokens > baseline.total_tokens,
+            "the tool definitions must reach the fallback count: {} vs {}",
+            counted.total_tokens,
+            baseline.total_tokens
+        );
+        assert!(counted.tools_tokens > 0);
+    }
+
     /// The Responses API repeats the whole answer in `*.done` events; folding
     /// every captured event through `extract_response_content` used to count
     /// it once per event. `merge_response_output_text` must count the deltas
@@ -1069,6 +1212,34 @@ mod tests {
         );
     }
 
+    /// A compatible Anthropic gateway may put the block's complete payload on
+    /// `content_block_start` and send no deltas. The CLI discarded the start
+    /// payload (text/thinking were ignored, the tool input was replaced with
+    /// an empty string), so such a capture broke down with an empty answer
+    /// and a tool call rendered as `name: `.
+    #[test]
+    fn sse_anthropic_block_start_payload_is_kept() {
+        let events = vec![
+            sse(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Hello"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"pondering"}}"#,
+            ),
+            sse(
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Beijing"}}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Hello".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("pondering"));
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()],
+            "the block-start input must not be discarded"
+        );
+    }
+
     /// The DashScope/Bailian native envelope nests the answer under a
     /// top-level `output` object, so none of the protocol walks above matches
     /// it and a captured native stream broke down as completely empty.
@@ -1141,6 +1312,34 @@ mod tests {
         );
     }
 
+    /// SysOM's Copilot stream and some OpenAI-compatible gateways send
+    /// `choices[].message` snapshots instead of `choices[].delta` fragments:
+    /// each frame repeats the answer so far. The walk read only `delta`, so
+    /// such a capture broke down as an empty response.
+    #[test]
+    fn sse_openai_message_snapshots_are_aggregated_once() {
+        let events = vec![
+            sse(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello"}}]}"#),
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello there!","reasoning_content":"thin"}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello there!","reasoning_content":"thinking","tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]}}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.content,
+            vec!["Hello there!".to_string()],
+            "cumulative snapshots must not be appended as separate fragments"
+        );
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
     /// Same story for the OpenAI Responses protocol (codex 0.137+ via
     /// /v1/responses): its `response.*` events previously produced an empty
     /// breakdown.
@@ -1166,6 +1365,36 @@ mod tests {
             resp.tool_calls,
             vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()]
         );
+    }
+
+    /// `response.output_item.done` is authoritative for a Responses tool
+    /// call: it repeats the complete arguments and is the only event that
+    /// carries a `custom_tool_call`'s input or a call whose `added` event was
+    /// missed. The CLI routed only `added` and the argument events, so the
+    /// done item's payload was discarded.
+    #[test]
+    fn sse_responses_done_item_carries_the_tool_call() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"tool_a","arguments":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"tool_a","arguments":"{\"a\":1}"}}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"tool_a: {"a":1}"#.to_string()],
+            "the done item's complete arguments must win"
+        );
+
+        // A capture that started after `added` still recovers the call.
+        let only_done = vec![sse(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"item_2","call_id":"call_2","name":"tool_b","input":"{\"b\":2}"}}"#,
+        )];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
+        assert_eq!(resp.tool_calls, vec![r#"tool_b: {"b":2}"#.to_string()]);
     }
 
     /// Reasoning models on the Responses protocol stream their thinking as

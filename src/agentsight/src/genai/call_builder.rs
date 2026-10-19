@@ -2132,7 +2132,7 @@ mod tests {
                 message: SysomResponseMessage {
                     content: "answer".to_string(),
                     tool_use: Some(vec![SysomToolUseItem {
-                        index: 0,
+                        index: Some(0),
                         id: "tu_1".to_string(),
                         item_type: "function".to_string(),
                         function: SysomFunction {
@@ -2614,7 +2614,7 @@ mod tests {
                 message: SysomResponseMessage {
                     content: "answer".to_string(),
                     tool_use: Some(vec![SysomToolUseItem {
-                        index: 0,
+                        index: Some(0),
                         id: "tu_1".to_string(),
                         item_type: "function".to_string(),
                         function: SysomFunction {

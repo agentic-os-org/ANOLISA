@@ -3,8 +3,13 @@
 [中文版](qwenpaw-adapter_zh.md)
 
 AW connects the QwenPaw App to the shared AW service through native AgentScope
-middleware. The supported runtime is QwenPaw 2.2.2b4 with AgentScope 2.0.8.
+middleware. The supported runtime is QwenPaw 2.2.2b4 with AgentScope 2.0.9.
 The launcher starts a new App process; it does not attach to an existing server.
+
+The published QwenPaw 2.2.2b4 package requires AgentScope 2.0.9. Nightly installs
+both with dependency resolution enabled and checks the middleware/registration
+boundary; it does not replace the separate App/API acceptance below.
+
 
 ## Native boundaries
 

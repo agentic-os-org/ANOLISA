@@ -81,6 +81,9 @@ def test_valid_timing_collects_samples(
     )
     assert collect_metrics.main() == 0
     assert len(collector_output.read_text(encoding="utf-8").splitlines()) == 3
+    with collector_output.open() as handle:
+        first = next(csv.DictReader(handle))
+    assert first["cpu_pct"] == first["cpu_interval_seconds"] == ""
 
 
 def test_shutdown_sample_keeps_drop_counters_published_after_the_last_tick(

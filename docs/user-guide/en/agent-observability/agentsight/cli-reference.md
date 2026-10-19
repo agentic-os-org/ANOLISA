@@ -156,10 +156,11 @@ One-command health picture for a recent window.
 
 ```
 FLAGS:
-        --json           Output as JSON
+        --json                          Output as JSON
 OPTIONS:
-        --db <db>        Override the sessions database path
-        --last <last>    Query the last N hours (default: 24) [default: 24]
+        --db <db>                       Override the sessions database path
+        --last <last>                   Query the last N hours (default: 24) [default: 24]
+        --tokenless-db <tokenless-db>   Override the tokenless stats database path
 ```
 
 ```bash
@@ -181,6 +182,9 @@ Tokenless     10% saved (110.0K -> 99.0K, 20 ops)
 `--db` reads a copy of the databases — for example one copied off another host — instead of the
 default directory, so the report needs no `sudo` and mixes in no live data. The interruption
 database is read from the same directory (`interruption_events.db`), matching the default layout.
+The tokenless store lives outside those databases, in the caller's home directory, so `--db` does
+not move it: pass `--tokenless-db` to read a copy of `stats.db` and keep the whole report free of
+the reading host's own data.
 
 ```bash
 agentsight summary --last 24 --db /backup/agentsight/genai_events.db
@@ -462,6 +466,18 @@ The same numbers appear on the Dashboard's Skill Metrics page.
 - [Data and storage](data-and-storage.md) — HTTP API and database layout
 
 ## Benchmark artifacts
+
+From the repository root, `bash src/agentsight/scripts/benchmark/single_run/resource_run.sh --help`
+lists controls for the Linux standalone resource benchmark (formerly `memory_run.sh`).
+It defaults to 32 Agents at 100 output tok/s each for 60 seconds and requires root
+or eBPF capabilities. `resource-report.txt` and `resource-summary.json` report
+load-window average/peak RSS and average/P95/peak CPU, with response drain separate.
+CPU 100% means one logical CPU. Cooperative pacing defaults to 25%.
+`--cpu-budget-percent N` overrides the target; `0` disables it, and omission uses the configured
+target or 25% when unset. Check response drain and queue growth
+alongside CPU and RSS. See the
+[benchmark usage guide](../../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE.md)
+for configuration, A/B comparisons and validity checks.
 
 Running `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` also exports UTF-8 `run-inventory.csv`. It contains every discovered formal `runs/**/run-result.json` across smoke, capacity, matrix, soak, recovery and fault scenarios, sorted by relative artifact path. Columns retain run settings, harness exit code, verdict, JSON arrays of missing/failed gates, and `result_path`; absent optional values stay empty. Archived incomplete runs are outside this inventory. Existing summary reports and source artifacts are preserved.
 

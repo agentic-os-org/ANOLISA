@@ -18,7 +18,33 @@ const prettyJson = JSON.stringify(
   null,
   2,
 );
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const completedCalls = new Map();
+function completion(id) {
+  if (!completedCalls.has(id)) {
+    let resolve;
+    const promise = new Promise((done) => {
+      resolve = done;
+    });
+    completedCalls.set(id, { promise, resolve });
+  }
+  return completedCalls.get(id);
+}
+async function waitForFastCall(id) {
+  let timer;
+  try {
+    await Promise.race([
+      completion(id.replace(/-slow$/, "-fast")).promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("parallel fast call did not finish")),
+          10000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const settings = {
   role: "assistant",
   api: "openai-responses",
@@ -113,8 +139,8 @@ export async function createSession({ sdk, sessionManager }) {
             join(root, "side-effects.json"),
             JSON.stringify(sideEffects),
           );
-          if (process.env.PI_PARALLEL === "1")
-            await sleep(id.endsWith("slow") ? 100 : 1);
+          if (process.env.PI_PARALLEL === "1" && id.endsWith("slow"))
+            await waitForFastCall(id);
           if (args.fail) throw new Error("tool failed");
           return {
             content:
@@ -145,6 +171,12 @@ export async function createSession({ sdk, sessionManager }) {
         },
       },
     ],
+  });
+  // Hook process startup can exceed a fixed delay. Wait for the SDK's completed
+  // fast call, including its AW PostTool hook, before finishing the slow tool.
+  result.session.agent.subscribe((event) => {
+    if (event.type === "tool_execution_end")
+      completion(event.toolCallId).resolve();
   });
   const original = result.session.agent.beforeToolCall;
   result.session.agent.beforeToolCall = async (context, signal) => {

@@ -148,10 +148,11 @@ AgentSight 仪表盘状态
 
 ```
 FLAGS:
-        --json           Output as JSON
+        --json                          Output as JSON
 OPTIONS:
-        --db <db>        Override the sessions database path
-        --last <last>    Query the last N hours (default: 24) [default: 24]
+        --db <db>                       Override the sessions database path
+        --last <last>                   Query the last N hours (default: 24) [default: 24]
+        --tokenless-db <tokenless-db>   Override the tokenless stats database path
 ```
 
 ```bash
@@ -171,7 +172,9 @@ Tokenless     10% saved (110.0K -> 99.0K, 20 ops)
 ```
 
 `--db` 改为读取数据库副本（例如从别的机器拷来的），不再读默认目录，因此无需 `sudo`，也不会混入在跑
-主机的数据。中断库从同一目录解析（`interruption_events.db`），与默认布局一致。
+主机的数据。中断库从同一目录解析（`interruption_events.db`），与默认布局一致。tokenless 统计库不在
+这些数据库里（位于调用者的主目录），`--db` 不会移动它：用 `--tokenless-db` 指向 `stats.db` 的副本，
+整份报告才完全不混入读取主机的数据。
 
 ```bash
 agentsight summary --last 24 --db /backup/agentsight/genai_events.db
@@ -450,6 +453,16 @@ Dashboard 的 Skill 指标页展示的是同一批数字。
 - [数据与存储](data-and-storage.md)——HTTP API 与数据库结构
 
 ## 基准测试产物
+
+从仓库根目录运行 `bash src/agentsight/scripts/benchmark/single_run/resource_run.sh --help`，
+可查看 Linux standalone 资源 benchmark（原 `memory_run.sh`）的参数。
+默认 32 个 Agent、每路 100 输出 tok/s、60 秒，需要 root 或 eBPF capabilities。
+`resource-report.txt` 和 `resource-summary.json` 汇总正式负载窗口的平均/峰值 RSS、
+平均/P95/峰值 CPU，尾部收流单独统计；CPU 100% 表示一个逻辑核。
+协作式 CPU 调度默认开启，目标为 25%；`--cpu-budget-percent N` 可覆盖目标，`0` 关闭，
+省略时沿用配置，配置未设置时使用 25%。
+评估时需同时检查 CPU、RSS、队列增长与尾部排空时间。配置、A/B 对比和有效性判断见
+[benchmark 使用指南](../../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE_zh.md)。
 
 运行 `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` 时还会导出 UTF-8 `run-inventory.csv`。清单包含 `runs/**/run-result.json` 下发现的 smoke、capacity、matrix、soak、recovery 和 fault 正式运行，按相对证据路径排序。列包含运行参数、harness 退出码、结论、缺失及失败门槛的 JSON 数组和 `result_path`；未提供的可选值留空。归档的不完整运行不在此清单内。既有汇总报告和原始证据保持不变。
 

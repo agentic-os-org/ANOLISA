@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentsight_sqlite_lifecycle::{
     LifecycleError, MaintenanceJob, MaintenanceWorker, MaintenanceWorkerState,
@@ -412,6 +412,62 @@ impl DatabaseManager {
         )))
     }
 
+    /// Checkpoints frequently while retaining the configured cleanup interval.
+    ///
+    /// The action receives `true` when retention/capacity maintenance is due and
+    /// `false` for a passive checkpoint. Returning false keeps cleanup due on
+    /// the next worker tick; failed cleanup also remains due on retry.
+    pub(crate) fn maintenance_job_with_checkpoints(
+        &self,
+        id: DatabaseId,
+        cleanup_interval: Duration,
+        budget: Option<std::sync::Arc<crate::utils::cpu_budget::CpuBudget>>,
+        mut action: impl FnMut(bool) -> Result<bool, LifecycleError> + Send + 'static,
+    ) -> Result<Box<dyn MaintenanceJob>, DatabaseManagerError> {
+        let mut last_cleanup: Option<Instant> = None;
+        let mut last_checkpoint: Option<Instant> = None;
+        let mut continuation = false;
+        let tick = if budget.is_some() {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_secs(1)
+        };
+        // Smaller WAL copy intervals limit the cost of a non-preemptible checkpoint.
+        let checkpoint_interval = if budget.is_some() {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(1)
+        };
+        self.maintenance_job(id, cleanup_interval.min(tick), move || {
+            let cleanup =
+                continuation || last_cleanup.is_none_or(|last| last.elapsed() >= cleanup_interval);
+            if budget.is_some()
+                && !cleanup
+                && last_checkpoint.is_some_and(|last| last.elapsed() < checkpoint_interval)
+            {
+                return Ok(());
+            }
+            let _permit = if let Some(budget) = &budget {
+                let Some(permit) = budget
+                    .try_acquire(crate::utils::cpu_budget::WorkClass::Maintenance)
+                    .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))?
+                else {
+                    return Ok(());
+                };
+                Some(permit)
+            } else {
+                None
+            };
+            let complete = action(cleanup)?;
+            continuation = cleanup && !complete;
+            last_checkpoint = Some(Instant::now());
+            if cleanup && complete {
+                last_cleanup = Some(Instant::now());
+            }
+            Ok(())
+        })
+    }
+
     /// Starts the registry's single maintenance thread.
     ///
     /// Empty job sets are accepted for query-only processes and do not create a thread.
@@ -539,6 +595,60 @@ mod tests {
             "agentsight-registry-{name}-{}-{nonce}.db",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn checkpoint_ticks_do_not_accelerate_cleanup_and_failed_cleanup_is_retried() {
+        let manager =
+            DatabaseManager::new(DatabaseRole::Trace, [primary(test_path("checkpoint-tick"))])
+                .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&calls);
+        let mut job = manager
+            .maintenance_job_with_checkpoints(
+                DatabaseId::Primary,
+                Duration::from_secs(60),
+                None,
+                move |cleanup| {
+                    let mut calls = observed.lock().unwrap();
+                    calls.push(cleanup);
+                    if calls.len() == 1 {
+                        return Err(LifecycleError::MaintenanceJobFailed("retry fixture".into()));
+                    }
+                    Ok(true)
+                },
+            )
+            .unwrap();
+        assert_eq!(job.interval(), Duration::from_secs(1));
+        assert!(job.run().is_err());
+        job.run().unwrap();
+        job.run().unwrap();
+        job.run().unwrap();
+        assert_eq!(*calls.lock().unwrap(), [true, true, false, false]);
+    }
+
+    #[test]
+    fn yielded_cleanup_resumes_without_waiting_for_the_policy_interval() {
+        let manager =
+            DatabaseManager::new(DatabaseRole::Trace, [primary(test_path("continuation"))])
+                .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let mut job = manager
+            .maintenance_job_with_checkpoints(
+                DatabaseId::Primary,
+                Duration::from_secs(60),
+                None,
+                move |cleanup| {
+                    assert!(cleanup);
+                    Ok(observed.fetch_add(1, Ordering::SeqCst) >= 2)
+                },
+            )
+            .unwrap();
+        job.run().unwrap();
+        job.run().unwrap();
+        job.run().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]

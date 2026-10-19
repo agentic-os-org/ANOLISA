@@ -1,0 +1,458 @@
+{
+  "version": 1,
+  "agents": {
+    "agentscope": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {
+        "agentscope": "2.0.6"
+      },
+      "requirements": [
+        "agentscope==2.0.6"
+      ],
+      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model.",
+      "cases": [
+        {
+          "name": "middleware",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/agentscope/middleware.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 26
+        },
+        {
+          "name": "native",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/agentscope_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "callbacks": 632,
+                "native_callbacks": 320,
+                "executed": 24,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "cancellation",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/agentscope_cancellation.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/cancellation"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/cancellation/result.json",
+              "values": {
+                "cancelled": 136,
+                "prespawn_cancelled": 68,
+                "finalizer_cancelled": 34,
+                "spawn_failures": 36,
+                "rpc_failures": 36,
+                "approval_failures": 48,
+                "deep_directives": 3,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "arguments",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/agentscope_arguments.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/arguments"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/arguments/result-report.json",
+              "values": {
+                "cases": 15,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            },
+            {
+              "file": "fixtures/arguments/result-block.json",
+              "values": {
+                "cases": 15,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "lifecycle",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/agentscope_lifecycle.py",
+            "--aw",
+            "{bin}/aw",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--output",
+            "{output}/lifecycle"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/lifecycle/result.json",
+              "values": {
+                "sdk": "2.0.6",
+                "executed": 5,
+                "permissions": 8,
+                "scans": 3,
+                "after": 7,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "claude-sdk": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {
+        "claude-agent-sdk": "0.2.88",
+        "mcp": "1.26.0"
+      },
+      "requirements": [
+        "claude-agent-sdk==0.2.88",
+        "mcp==1.26.0"
+      ],
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model.",
+      "cases": [
+        {
+          "name": "sdk-cli",
+          "argv": [
+            "{python}",
+            "tests/test_claude_sdk_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--output",
+            "{output}/sdk"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk/results.json",
+              "cases": {
+                "at": "",
+                "key": "mode",
+                "names": [
+                  "allow",
+                  "deny",
+                  "hook-failure",
+                  "before-report-failure",
+                  "after-report-failure",
+                  "failure",
+                  "bash-failure",
+                  "native-deny",
+                  "rewrite",
+                  "native-allow-aw-deny",
+                  "native-hook-deny",
+                  "native-hook-deny-no-reason",
+                  "native-hook-deny-exit2",
+                  "native-hook-deny-rewrite",
+                  "native-hook-neutral",
+                  "native-hook-rewrite",
+                  "native-hook-invalid-chain",
+                  "permission-rewrite",
+                  "permission-hook-rewrite",
+                  "permission-prompt",
+                  "many-denials",
+                  "parallel",
+                  "multi-turn",
+                  "strict-mcp-config",
+                  "unready",
+                  "settings",
+                  "cli-path",
+                  "plugins",
+                  "extra-args",
+                  "bash-compress",
+                  "bash-compress-observer-failure",
+                  "bash-compress-native-rewrite",
+                  "bash-compress-failure",
+                  "bash-compress-tool-failure",
+                  "bash-pretool",
+                  "bash-pretool-deny",
+                  "mcp-error-compress"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "hermes": {
+      "owner": "@kongche-jbw",
+      "python": "3.14.0",
+      "mode": "automated",
+      "versions": {},
+      "source": {
+        "url": "https://github.com/NousResearch/hermes-agent.git",
+        "revision": "952c941e741e922a9be8fc403c8944c6e96318bb"
+      },
+      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model.",
+      "cases": [
+        {
+          "name": "dispatcher",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/hermes/native_contract.py",
+            "--source",
+            "{source}",
+            "--plugin",
+            "{aw_root}/adapters/hermes"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 23
+        },
+        {
+          "name": "chat",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/hermes/live_cli.py",
+            "--aw",
+            "{bin}/aw",
+            "--provider",
+            "{bin}/policy",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--source",
+            "{source}",
+            "--output",
+            "{output}/chat"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/chat/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "block",
+                  "empty",
+                  "profile-safe",
+                  "parent-safe",
+                  "profile-override",
+                  "reload-block",
+                  "rewrite-block"
+                ],
+                "values": {
+                  "instance_released": true,
+                  "launch_directories_removed": true,
+                  "profile_retained": true,
+                  "native_environment_preserved": true
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "openclaw": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "openclaw@2026.9.6"
+      ],
+      "boundary": "Official Hook and result middleware runners, ordering and effect adoption; no Gateway or model turn.",
+      "cases": [
+        {
+          "name": "hooks",
+          "argv": [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            "crates/aw-service/tests/openclaw-native.mjs"
+          ],
+          "timeout_seconds": 120,
+          "report": "tap",
+          "tests": 5
+        }
+      ]
+    },
+    "pi": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_fixture": "crates/aw-service/tests/fixtures/pi",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures.",
+      "cases": [
+        {
+          "name": "public-factory",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/pi/public-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm/public-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-before-denial",
+                  "late-after-replacement",
+                  "late-before-replacement-session",
+                  "late-after-replacement-session",
+                  "allow",
+                  "deny",
+                  "tool-error",
+                  "native-mutation",
+                  "native-replacement",
+                  "two-sessions-parallel",
+                  "before-error-block",
+                  "after-error-report",
+                  "await-both-hooks",
+                  "factory-new",
+                  "factory-resume",
+                  "factory-fork",
+                  "factory-import",
+                  "block-reason-model",
+                  "aw-replacement-metadata",
+                  "aw-replacement-parallel",
+                  "aw-replacement-error-neutral",
+                  "aw-replacement-multiblock-neutral",
+                  "aw-replacement-image-neutral",
+                  "native-invalid-before",
+                  "native-invalid-after-neutral",
+                  "native-forged-after-neutral",
+                  "native-empty-neutral",
+                  "native-block-reason-model",
+                  "native-after-exception",
+                  "native-error-cleared-replaced",
+                  "native-nullish-success",
+                  "native-nullish-error",
+                  "reused-native-id",
+                  "early-denial-forty",
+                  "early-error-block",
+                  "early-native-invalid-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "tokenless",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/pi/tokenless-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless",
+            "--tokenless-cli",
+            "{bin}/tokenless",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm/tokenless-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "json-selected-output",
+                  "rtk-retry-rescanned-denied",
+                  "rtk-retry-allowed-post-neutral"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "qwenpaw": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {
+        "qwenpaw": "2.2.2b4",
+        "agentscope": "2.0.9"
+      },
+      "requirements": [
+        "qwenpaw==2.2.2b4",
+        "agentscope==2.0.9"
+      ],
+      "boundary": "Pinned native AgentScope middleware and AW plugin registration against a simulated API; QwenPaw plugin loading, App/API startup and model turns remain manual.",
+      "cases": [
+        {
+          "name": "middleware",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 12
+        }
+      ]
+    },
+    "qoder": {
+      "owner": "@kongche-jbw",
+      "mode": "manual",
+      "reason": "Native Qoder CLI/model environment is not provisioned on CI runners. Follow the Preview native Agent acceptance guide before release; contract fixtures do not certify native adoption.",
+      "guide": "../../docs/user-guide/en/user-entrypoint/aw-preview.md"
+    }
+  }
+}

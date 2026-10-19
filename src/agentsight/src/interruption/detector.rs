@@ -49,22 +49,47 @@ fn is_token_limit_finish(reason: Option<&str>) -> bool {
     matches!(reason, Some("length" | "max_tokens"))
 }
 
+/// Structured error reported inside a `200` SSE body, if any.
+///
+/// An event's payload may arrive split over several `data:` lines — the SSE
+/// grammar joins an event's data lines with a newline — so a pretty-printed or
+/// wrapped error object never parses as a single line. Reading the lines one by
+/// one therefore missed the error the provider streamed, and the call was
+/// recorded without one. Each event's data lines are folded back into one
+/// payload at its blank-line boundary, while the per-line attempt stays: a
+/// payload that arrives whole must keep reading exactly as before.
 fn structured_stream_error_text(raw_body: &str) -> Option<String> {
     if let Some(error) = structured_error_json_text(raw_body.trim()) {
         return Some(error);
     }
 
-    raw_body.lines().find_map(|line| {
-        let payload = line
-            .trim()
+    let mut event_data = String::new();
+    for line in raw_body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // A blank line ends the event: its payload is complete.
+            if let Some(error) = structured_error_json_text(&event_data) {
+                return Some(error);
+            }
+            event_data.clear();
+            continue;
+        }
+        let payload = trimmed
             .strip_prefix("data:")
             .map(str::trim)
-            .unwrap_or_else(|| line.trim());
+            .unwrap_or(trimmed);
         if payload.is_empty() || payload == "[DONE]" || payload.starts_with("event:") {
-            return None;
+            continue;
         }
-        structured_error_json_text(payload)
-    })
+        if let Some(error) = structured_error_json_text(payload) {
+            return Some(error);
+        }
+        if !event_data.is_empty() {
+            event_data.push('\n');
+        }
+        event_data.push_str(payload);
+    }
+    structured_error_json_text(&event_data)
 }
 
 fn structured_error_json_text(candidate: &str) -> Option<String> {
@@ -146,10 +171,19 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 /// Deliberately excludes generic words like "exception" or "failed" that
 /// commonly appear in normal, non-error tool output (e.g. "handled the
 /// exception gracefully"), which would otherwise cause false positives.
+///
+/// The `error:` prefix is kept: it is how the language runtimes announce a
+/// command's own failure (`error: could not compile`, `Error: ECONNREFUSED`),
+/// and it is the one signal the sibling scans of these same stored payloads
+/// both read — the grader's `text_has_error_signal` and the grounding
+/// classifier's `WEAK_ERROR_TOKENS`. Reading it only there meant one payload
+/// was a `tool_failure` finding for the grader and no ToolFailure for the
+/// detector.
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || lower.contains("error:")
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
@@ -187,10 +221,13 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
             if trimmed.is_empty() {
                 return None;
             }
+            // A payload that is entirely valid JSON is read through its parsed
+            // form. Scanning the encoded text again would re-judge a result
+            // that declares success by its free-form content — the object arm
+            // already trusts that flag — and could also match words that only
+            // appear in a key or an escape.
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if let Some(error) = tool_response_failure_text(&parsed) {
-                    return Some(error);
-                }
+                return tool_response_failure_text(&parsed);
             }
             if text_has_tool_error_signal(trimmed) {
                 Some(trimmed.to_string())
@@ -1511,6 +1548,34 @@ mod tests {
         assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
     }
 
+    /// The SSE grammar joins an event's `data:` lines with a newline, so a
+    /// pretty-printed or wrapped payload arrives split and no single line
+    /// parses. Reading the lines one by one lost the error the provider
+    /// streamed: the call was recorded as an ordinary success.
+    #[test]
+    fn test_detects_a_sse_error_split_over_data_lines() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 100_000_000;
+        call.response.raw_body = Some(
+            "event: error\n\
+             data: {\n\
+             data:   \"error\": {\n\
+             data:     \"message\": \"upstream failed before completion\",\n\
+             data:     \"type\": \"server_error\"\n\
+             data:   }\n\
+             data: }\n\n"
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
     #[test]
     fn test_detect_service_unavailable_503() {
         let detector = InterruptionDetector::default();
@@ -1957,6 +2022,53 @@ mod tests {
     }
 
     #[test]
+    fn a_json_string_tool_result_that_reports_success_is_not_a_failure() {
+        // A tool result can ride as a JSON-encoded string: the Responses API
+        // copies `function_call_output.output` through unchanged, and an MCP
+        // result is often serialized as `{"content":…,"isError":false}` text.
+        // The explicit success flag has to settle the question for that shape
+        // too; scanning the encoded text afterwards turns ordinary output that
+        // mentions a missing path into a ToolFailure.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-mcp".to_string()),
+                response: serde_json::json!(
+                    r#"{"content":[{"type":"text","text":"grep: no such file or directory"}],"isError":false}"#
+                ),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "noted".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "a successful JSON tool result is not a failure: {events:?}"
+        );
+
+        // The same payload with the failure flag still reports the failure.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-mcp".to_string()),
+            response: serde_json::json!(
+                r#"{"content":[{"type":"text","text":"grep: no such file or directory"}],"isError":true}"#
+            ),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+
+    #[test]
     fn an_unflagged_exit_code_zero_output_is_not_a_tool_failure() {
         // Anthropic's `is_error` is optional (it defaults to false) and a
         // tool_result may carry its output as a plain string, so a successful
@@ -2043,6 +2155,96 @@ mod tests {
                 "a non-zero exit status must keep the failure signal: {payload}"
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// A tool that reports its own failure with the `error:` prefix the
+    /// language runtimes print (`error: could not compile`, `Error: ...`) is a
+    /// `ToolFailure` for the detector. The grader's twin scan
+    /// (`text_has_error_signal`) and the grounding classifier's
+    /// `WEAK_ERROR_TOKENS` both read that spelling; this scan did not, so the
+    /// same stored payload got a `tool_failure` finding from the grader and
+    /// scored `tool_use` 0.45 while no ToolFailure interruption was recorded.
+    #[test]
+    fn an_error_prefixed_tool_output_signals_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-cargo".to_string()),
+                response: serde_json::json!(
+                    "cargo build --offline\nerror: could not compile `agentsight`"
+                ),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "checking the build".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1, "unexpected events: {events:?}");
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+
+        // The same spelling at the start of the payload, and the capitalised
+        // `Error:` the runtimes also print, must read the same way.
+        for payload in [
+            "error: unknown argument '--frobnicate'",
+            "Error: connect ECONNREFUSED 127.0.0.1:6443",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-cargo".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "unexpected events for {payload}: {events:?}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// The `error:` arm must not turn a passing run's own summary into a
+    /// failure: it reports how many checks failed, which is not an outcome of
+    /// this call.
+    #[test]
+    fn a_passing_run_summary_is_not_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "noted".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "test result: ok. 30 passed; 0 failed",
+            "60 passing, 2 pending",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-notes".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events.is_empty(),
+                "ordinary output is not a tool failure ({payload}): {events:?}"
+            );
         }
     }
 

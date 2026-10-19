@@ -21,10 +21,7 @@ pub(super) fn complete_local_genai(
     store: &GenAISqliteStore,
     exporters: &[Box<dyn GenAIExporter>],
 ) -> Result<Option<u32>, Box<dyn std::error::Error>> {
-    let persisted = output
-        .events
-        .iter()
-        .try_for_each(|event| store.complete_captured(event));
+    let persisted = store.complete_captured_batch(&output.events);
     // Recheck each sink's normal write gate so activation during persistence
     // cannot silently skip the already completed call.
     export_local_sinks(&output.events, exporters);
@@ -59,7 +56,8 @@ impl PendingGenAiQueue {
         output: crate::genai::builder::BuildOutput,
         store: &GenAISqliteStore,
         limits: &crate::config::RuntimeLimits,
-    ) -> bool {
+    ) -> Result<(), crate::genai::builder::BuildOutput> {
+        let has_response_id = output.pending_response_id.is_some();
         let pid = output
             .events
             .iter()
@@ -86,7 +84,10 @@ impl PendingGenAiQueue {
                 self.bytes,
                 pending.response_id
             );
-            return false;
+            return Err(crate::genai::builder::BuildOutput {
+                events: pending.events.into_events(),
+                pending_response_id: has_response_id.then_some(pending.response_id),
+            });
         }
         self.bytes += bytes;
         if self.local_retry_priority.is_none() {
@@ -97,7 +98,7 @@ impl PendingGenAiQueue {
             .get_or_insert_with(|| std::time::Instant::now() + Duration::from_millis(100));
         metrics::counter!("agentsight_genai_sqlite_retry_total", "outcome" => "queued")
             .increment(1);
-        true
+        Ok(())
     }
 
     /// Retry one owned batch without repeating external delivery.
@@ -125,10 +126,7 @@ impl PendingGenAiQueue {
             let fixup =
                 (session.is_none() && !pending.response_id.is_empty()).then_some(pending.pid);
             let events = pending.events.into_events();
-            match events
-                .iter()
-                .try_for_each(|event| store.complete_captured(event))
-            {
+            match store.complete_captured_batch(&events) {
                 Ok(()) => {
                     self.local_retry_after = None;
                     if self.local_retries.is_empty() {
@@ -167,43 +165,149 @@ impl PendingGenAiQueue {
 
 impl AgentSight {
     fn complete_or_queue_local_genai(&mut self, output: crate::genai::builder::BuildOutput) {
-        let Some(store) = self.genai_sqlite_store.as_ref() else {
+        let Some(store) = self.genai_sqlite_store.as_ref().map(Arc::clone) else {
             return;
         };
         let _priority = store.prioritize_capture();
-        if !self.pending_genai.local_retries.is_empty() {
+        let mut retry_limits = self.runtime_limits;
+        retry_limits.pending_genai_max_bytes = retry_limits
+            .pending_genai_max_bytes
+            .saturating_sub(self.completions.bytes);
+        retry_limits.pending_genai_max_count = retry_limits
+            .pending_genai_max_count
+            .saturating_sub(self.completions.len());
+        let busy = if !self.pending_genai.local_retries.is_empty() {
             export_local_sinks(&output.events, &self.genai_exporters);
-            self.pending_genai
-                .queue_local_completion(output, store, &self.runtime_limits);
-            return;
-        }
-        match complete_local_genai(&output, store, &self.genai_exporters) {
-            Ok(Some(pid)) => self.register_retro_session_fixup(pid, &output.events),
-            Ok(None) => {}
-            Err(error) if is_retryable_sqlite_write(error.as_ref()) => {
-                log::warn!(
-                    "SQLite capture write is busy; retaining completed call within the pending budget: {error}"
-                );
-                self.pending_genai
-                    .queue_local_completion(output, store, &self.runtime_limits);
-                return;
+            true
+        } else {
+            match complete_local_genai(&output, &store, &self.genai_exporters) {
+                Ok(Some(pid)) => {
+                    self.register_retro_session_fixup(pid, &output.events);
+                    false
+                }
+                Ok(None) => false,
+                Err(error) if is_retryable_sqlite_write(error.as_ref()) => true,
+                Err(error) => {
+                    log::warn!("Failed to store completed local call: {error}");
+                    false
+                }
             }
-            Err(error) => log::warn!("Failed to store completed local call: {error}"),
+        };
+        if busy {
+            if let Err(output) =
+                self.pending_genai
+                    .queue_local_completion(output, &store, &retry_limits)
+            {
+                // Keep the rejected call in flight; its sinks have already run.
+                // Backpressure until earlier calls can commit without a larger queue.
+                log::warn!("SQLite retry queue full; waiting with the current capture in flight");
+                let deadline = std::time::Instant::now() + Duration::from_secs(1);
+                while !self.pending_genai.local_retries.is_empty() {
+                    if !self.running.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline
+                    {
+                        log::error!(
+                            "SQLite retry wait stopped or timed out; dropping in-flight capture with {} events",
+                            output.events.len()
+                        );
+                        return;
+                    }
+                    self.retry_local_genai_until(true, deadline, true);
+                    if !self.pending_genai.local_retries.is_empty() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                loop {
+                    if !self.running.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline
+                    {
+                        log::error!(
+                            "SQLite retry wait stopped or timed out; dropping in-flight capture with {} events",
+                            output.events.len()
+                        );
+                        return;
+                    }
+                    match store.complete_captured_batch(&output.events) {
+                        Ok(()) => break,
+                        Err(error) if is_retryable_sqlite_write(error.as_ref()) => {
+                            self.maybe_export_runtime_metrics();
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(error) => {
+                            log::error!("Failed to persist in-flight capture: {error}");
+                            return;
+                        }
+                    }
+                }
+                if let Some(pid) = output.pending_response_id.as_ref().and_then(|_| {
+                    output.events.iter().find_map(|event| match event {
+                        GenAISemanticEvent::LLMCall(call) => Some(call.pid as u32),
+                        _ => None,
+                    })
+                }) {
+                    self.register_retro_session_fixup(pid, &output.events);
+                }
+                self.detect_and_store_interruptions(&output.events);
+            }
+            return;
         }
         self.detect_and_store_interruptions(&output.events);
     }
 
     /// Retry local SQLite writes without repeating completed external delivery.
     pub(super) fn retry_local_genai(&mut self, force: bool) {
+        self.retry_local_genai_until(
+            force,
+            std::time::Instant::now() + Duration::from_secs(1),
+            false,
+        );
+    }
+
+    fn retry_local_genai_until(
+        &mut self,
+        force: bool,
+        deadline: std::time::Instant,
+        stop_on_shutdown: bool,
+    ) {
         let Some(store) = self.genai_sqlite_store.as_ref().map(Arc::clone) else {
             return;
         };
-        while let Some((events, fixup)) = self.pending_genai.retry_local_completion(
-            &store,
-            &self.response_mapper,
-            std::time::Instant::now(),
-            force,
-        ) {
+        let budget = self.completions.budget.clone();
+        loop {
+            if std::time::Instant::now() >= deadline
+                || (stop_on_shutdown && !self.running.load(Ordering::SeqCst))
+            {
+                break;
+            }
+            if self.pending_genai.local_retries.is_empty() {
+                break;
+            }
+            let _permit = if let Some(budget) = &budget {
+                let admission = if force {
+                    budget.acquire_while(crate::utils::cpu_budget::WorkClass::Capture, || {
+                        std::time::Instant::now() < deadline
+                            && (!stop_on_shutdown || self.running.load(Ordering::SeqCst))
+                    })
+                } else {
+                    budget.try_acquire(crate::utils::cpu_budget::WorkClass::Capture)
+                };
+                match admission {
+                    Ok(Some(permit)) => Some(permit),
+                    Ok(None) => break,
+                    Err(error) => {
+                        log::error!("CPU pacing failed during SQLite retry: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let Some((events, fixup)) = self.pending_genai.retry_local_completion(
+                &store,
+                &self.response_mapper,
+                std::time::Instant::now(),
+                force,
+            ) else {
+                break;
+            };
             if let Some(pid) = fixup {
                 self.register_retro_session_fixup(pid, &events);
             }
@@ -211,13 +315,13 @@ impl AgentSight {
         }
         if force && !self.pending_genai.local_retries.is_empty() {
             log::warn!(
-                "SQLite is still busy during shutdown: {} completed batches remain pending",
+                "SQLite retry deferred: {} completed batches remain pending",
                 self.pending_genai.local_retries.len()
             );
         }
     }
 
-    pub(super) fn process_aggregated_results(
+    pub(super) fn deliver_aggregated_results(
         &mut self,
         aggregated_results: Vec<crate::aggregator::AggregatedResult>,
     ) {

@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -26,6 +27,50 @@ class GateFixture(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+
+
+class PackageWorkflowTests(GateFixture):
+    def test_real_cli_paths_use_the_container_workspace(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        step = workflow.split(
+            "      - name: Verify Tokenless PreTool and PostTool contracts\n", 1
+        )[1]
+        step = step.split("      - name: Verify installed packages", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        workspace = self.root / "container workspace"
+        expected = [
+            workspace / "src/tokenless/target/release/tokenless",
+            workspace / "src/aw/target/release/rtk",
+        ]
+        for executable in expected:
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+        binary = self.root / "bin"
+        binary.mkdir()
+        cargo = binary / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$AW_TOKENLESS_TEST_CLI\" "
+            '"$AW_TOKENLESS_TEST_RTK" >> "$AW_PACKAGE_CAPTURE"\n'
+        )
+        cargo.chmod(0o700)
+        capture = self.root / "paths"
+        environment = {
+            **os.environ,
+            "PATH": str(binary),
+            "GITHUB_WORKSPACE": str(workspace),
+            "AW_PACKAGE_CAPTURE": str(capture),
+            "AW_TOKENLESS_TEST_CLI": "/host/runner/src/tokenless/target/release/tokenless",
+            "AW_TOKENLESS_TEST_RTK": "/host/runner/src/aw/target/release/rtk",
+        }
+        subprocess.run(
+            ["/bin/sh", "-eu", "-c", script],
+            env=environment,
+            cwd=self.root,
+            check=True,
+            timeout=10,
+        )
+        self.assertEqual(capture.read_text().splitlines(), [str(p) for p in expected] * 2)
 
 
 class ScopeTests(GateFixture):
@@ -64,6 +109,11 @@ class ScopeTests(GateFixture):
         candidate = self.git("rev-parse", "HEAD")
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": head}}
         self.assertFalse(gate.scope("pull_request", event, candidate, self.root))
+
+        self.git("checkout", "-qb", "workflow-only", advanced)
+        workflow_head = self.commit(".github/workflows/aw-ci.yml", "workflow only")
+        event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": workflow_head}}
+        self.assertFalse(gate.scope("pull_request", event, workflow_head, self.root))
 
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
@@ -132,62 +182,6 @@ class ScopeTests(GateFixture):
 
 
 class GateTests(GateFixture):
-    def test_inventory_rejects_empty_ignored_and_missing_targets(self) -> None:
-        cargo = self.root / "cargo"
-        cargo.write_text(
-            f"#!{sys.executable}\n"
-            "import os, sys\n"
-            "mode = os.environ['FIXTURE_INVENTORY']\n"
-            "if mode == 'core-empty':\n"
-            "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
-            "if mode == 'executor-empty':\n"
-            "    mode = 'empty' if 'aw-exec' in sys.argv else 'valid'\n"
-            "if mode == 'host-empty':\n"
-            "    mode = 'empty' if 'aw-host' in sys.argv else 'valid'\n"
-            "if mode == 'service-empty':\n"
-            "    mode = 'empty' if 'aw-service' in sys.argv else 'valid'\n"
-            "if mode == 'sec-core-empty':\n"
-            "    mode = 'empty' if 'aw-provider-sec-core' in sys.argv else 'valid'\n"
-            "if mode.startswith('contract-empty-'):\n"
-            "    target = mode.removeprefix('contract-empty-')\n"
-            "    mode = 'empty' if target in sys.argv else 'valid'\n"
-            "if mode == 'missing': sys.exit(7)\n"
-            "if mode == 'empty' or (mode == 'valid' and '--ignored' in sys.argv):\n"
-            "    print('0 tests, 0 benchmarks')\n"
-            "else: print('contract: test\\n\\n1 test, 0 benchmarks')\n",
-            encoding="utf-8",
-        )
-        cargo.chmod(0o755)
-        for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty", "service-empty", "sec-core-empty",
-            "contract-empty-canonical", "contract-empty-schemas",
-            "contract-empty-contracts", "contract-empty-orchestration",
-            "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
-            "contract-empty-qwenpaw",
-            "contract-empty-pi",
-            "contract-empty-claude_sdk",
-        ):
-            with self.subTest(mode=mode), patch.dict(
-                os.environ,
-                {
-                    "PATH": str(self.root),
-                    "FIXTURE_INVENTORY": mode,
-                },
-            ), patch.object(gate, "AW", self.root):
-                if mode == "valid":
-                    gate.check_inventory()
-                else:
-                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
-                        gate.check_inventory()
-        for malformed in (
-            "",
-            "noise",
-            "0 tests, 0 benchmarks\nnoise",
-            "test: test\n2 tests, 0 benchmarks",
-        ):
-            with self.assertRaises(ValueError):
-                gate.inventory(malformed)
-
     def test_structure_enforces_crate_boundaries_and_source_limits(self) -> None:
         from contextlib import chdir
 

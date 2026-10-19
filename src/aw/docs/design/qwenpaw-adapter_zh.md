@@ -3,7 +3,11 @@
 [English](qwenpaw-adapter.md)
 
 AW 通过原生 AgentScope 中间件，将 QwenPaw App 接入共享的 AW 服务。支持的运行时为
-QwenPaw 2.2.2b4 和 AgentScope 2.0.8。启动器负责启动新的 App 进程，不接管已经运行的服务器。
+QwenPaw 2.2.2b4 和 AgentScope 2.0.9。启动器负责启动新的 App 进程，不接管已经运行的服务器。
+
+已发布的 QwenPaw 2.2.2b4 包要求 AgentScope 2.0.9。Nightly 保留完整依赖解析，
+安装两者并验证 middleware/注册边界；它不替代下述独立 App/API 验收。
+
 
 ## 原生边界
 

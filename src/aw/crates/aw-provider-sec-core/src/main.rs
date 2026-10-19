@@ -14,9 +14,18 @@ fn main() -> ExitCode {
 
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    const USAGE: &str = "usage: aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH";
+    const USAGE: &str = "usage: aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH\n       aw-provider-sec-core --health --helper ABSOLUTE_PATH --socket ABSOLUTE_PATH";
     if args.len() == 1 && args[0] == "--help" {
         println!("{USAGE}");
+        return Ok(());
+    }
+    if args.len() == 5 && args[0] == "--health" && args[1] == "--helper" && args[3] == "--socket" {
+        let result = aw_provider_sec_core::health::query(
+            &PathBuf::from(&args[2]),
+            &PathBuf::from(&args[4]),
+            Duration::from_secs(1),
+        )?;
+        println!("{}", serde_json::to_string(&result)?);
         return Ok(());
     }
     if args.len() != 4 || args[0] != "--cli" || args[2] != "--socket" {

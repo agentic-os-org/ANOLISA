@@ -76,6 +76,13 @@ GenAI 维护使用独立于采集投递与查询的连接。删除分成小批�
 等待时阻塞采集写入。
 采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
 
+开启定时维护时，trace 进程将 primary 和 GenAI 的 WAL checkpoint 交给该维护线程，避免在采集提交时触发。
+保留与容量检查之间约每秒执行一次 passive checkpoint；清理周期仍由 `check_interval_secs` 控制。
+SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动 WAL checkpoint。
+
+开启 `runtime_limits.cpu_budget_percent` 后，primary 与 GenAI 清理会在有界操作之间让出执行权，
+并在后续调度继续。维护与采集投递共用 CPU 准入，既有保留和容量目标继续生效，但清理一轮可能耗时更长。
+
 完成的采集记录遇到临时 SQLite 写锁冲突时，会留在现有 pending 队列中重试，与等待 session ID 的事件
 共享 `pending_genai_max_count` 和 `pending_genai_max_bytes_mb`。重试不会向外部出口重复发送记录。
 超出预算或永久写入失败会记录日志；`agentsight_genai_sqlite_retry_total` 按 queued、busy、stored、
@@ -165,6 +172,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/agent-names` | Token 时序、延迟分位、Agent 过滤项 |
 | 中断 | `GET /api/interruptions`、`/count`、`/stats`、`/session-counts`、`/conversation-counts`、`POST /api/interruptions/{id}/resolve` | 排查与关闭 |
 | Agent 健康 | `GET /api/agent-health`、`DELETE /api/agent-health/{pid}`、`POST /api/agent-health/{pid}/restart` | 实时状态与恢复动作 |
+| Tokenless 记录 | `POST /api/tokenless/refresh`、`GET /api/tokenless/records`、`GET /api/tokenless/records/{cache_id}` | 刷新已保存统计、列出元数据和读取详情；内容需显式指定 `include_content=true`。三条路由即使来自 loopback 也需要 Dashboard 凭据 |
 | Token 节省 | `GET /api/token-savings`、`GET /api/token-savings/session/{id}` | Tokenless 节省量 |
 | ATIF 导出 | `GET /api/export/atif/session/{id}`（还有 `trace`、`conversation`） | 轨迹导出 |
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
@@ -260,3 +268,7 @@ sudo systemctl start agentsight.service
 - [CLI 参考](cli-reference.md)——用命令行查同一批数据
 - [Dashboard 指南](dashboard.md)——这些数据库之上的界面
 - [配置](configuration.md)——存储与保留相关开关
+
+查询到的 Tokenless 统计数据保存在现有 GenAI store 的 `genai_events.db` 中。同一端点、
+源 ID 和原始时间戳的重复查询更新元数据，保留显式获取的完整内容与原始源会话 ID。
+这些副本遵循 `storage.genai` 的保留期限和容量清理策略，不修改 Tokenless 数据库。

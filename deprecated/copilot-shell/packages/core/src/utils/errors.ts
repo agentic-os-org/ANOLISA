@@ -6,6 +6,7 @@
 
 interface GaxiosError {
   response?: {
+    status?: number;
     data?: unknown;
   };
 }
@@ -98,11 +99,14 @@ interface ResponseData {
   };
 }
 
+/** Maximum length of a non-JSON response body inlined into a friendly error. */
+const MAX_NON_JSON_BODY_LENGTH = 200;
+
 export function toFriendlyError(error: unknown): unknown {
   if (error && typeof error === 'object' && 'response' in error) {
     const gaxiosError = error as GaxiosError;
     const data = parseResponseData(gaxiosError);
-    if (data.error && data.error.message && data.error.code) {
+    if (data?.error?.message && data?.error?.code) {
       switch (data.error.code) {
         case 400:
           return new BadRequestError(data.error.message);
@@ -116,14 +120,56 @@ export function toFriendlyError(error: unknown): unknown {
         default:
       }
     }
+    if (data === null) {
+      // The body was a string that failed to parse (e.g. an HTML 502 page
+      // from a proxy or gateway). Build a friendly error from the HTTP
+      // status and a truncated body instead of throwing inside error
+      // handling, so the caller's status handling still runs.
+      return buildNonJsonBodyError(gaxiosError);
+    }
   }
   return error;
 }
 
-function parseResponseData(error: GaxiosError): ResponseData {
+/**
+ * Parses the gaxios response data.
+ * Returns:
+ *  - the parsed object when the data is JSON (or already an object),
+ *  - `null` when a string body is not valid JSON,
+ *  - `undefined` when there is no body at all.
+ */
+function parseResponseData(
+  error: GaxiosError,
+): ResponseData | null | undefined {
   // Inexplicably, Gaxios sometimes doesn't JSONify the response data.
   if (typeof error.response?.data === 'string') {
-    return JSON.parse(error.response?.data) as ResponseData;
+    try {
+      return JSON.parse(error.response.data) as ResponseData;
+    } catch {
+      return null;
+    }
   }
-  return error.response?.data as ResponseData;
+  return error.response?.data as ResponseData | undefined;
+}
+
+function buildNonJsonBodyError(error: GaxiosError): Error {
+  const status = error.response?.status;
+  const raw =
+    typeof error.response?.data === 'string' ? error.response.data : '';
+  const snippet = raw.replace(/\s+/g, ' ').trim();
+  const truncated =
+    snippet.length > MAX_NON_JSON_BODY_LENGTH
+      ? `${snippet.slice(0, MAX_NON_JSON_BODY_LENGTH)}...`
+      : snippet;
+  const message = `HTTP error ${status ?? 'unknown'}: ${truncated || 'no response body'}`;
+  switch (status) {
+    case 400:
+      return new BadRequestError(message);
+    case 401:
+      return new UnauthorizedError(message);
+    case 403:
+      return new ForbiddenError(message);
+    default:
+      return new Error(message);
+  }
 }
