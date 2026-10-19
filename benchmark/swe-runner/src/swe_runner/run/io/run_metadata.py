@@ -75,7 +75,13 @@ class RunMetadataSnapshot:
 
 def ns_to_iso(ns: int) -> str:
     """Convert a nanosecond timestamp to UTC ISO-8601."""
-    return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.UTC).isoformat()
+    seconds, remainder = divmod(ns, 1_000_000_000)
+    # Integer arithmetic only; see trace_extraction.helpers.ns_to_iso for why
+    # the float conversion is not safe near the supported timestamp bounds.
+    micros = (remainder + 500) // 1_000
+    instant = dt.datetime(1970, 1, 1, tzinfo=dt.UTC) + dt.timedelta(
+        seconds=seconds, microseconds=micros)
+    return instant.isoformat()
 
 
 def merge_run_metadata(existing: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
