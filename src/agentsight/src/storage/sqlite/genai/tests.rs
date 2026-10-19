@@ -1406,9 +1406,52 @@ fn test_list_traces_by_session_with_time_range() {
 fn test_list_agent_names() {
     let (store, path) = create_populated_store("agent_names");
     let r = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     assert_eq!(r, vec!["agent-a", "agent-b"]);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_list_agent_names_excludes_auxiliary_by_default() {
+    // The list feeds the dashboard's agent filter. Sessions whose only calls
+    // are auxiliary kinds are hidden by /api/sessions by default, so offering
+    // their agents in the filter produced a selectable label that matched no
+    // visible session.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_agent_names_aux_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, agent, kind) in [
+            ("aux-main", "main-agent", "main"),
+            ("aux-search", "search-helper", "web_search"),
+        ] {
+            conn.execute(
+                "INSERT INTO genai_events
+                 (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+                  agent_name, process_name, provider, model, call_kind, event_json)
+                 VALUES ('llm_call', 'complete', ?1, ?2, ?3, ?4, ?4, 'openai', 'gpt-4', ?5, '{}')",
+                params![call_id, BASE_NS, BASE_NS + STEP_NS, agent, kind],
+            )
+            .unwrap();
+        }
+    }
+
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
+        .unwrap();
+    assert_eq!(names, vec!["main-agent"]);
+
+    let all = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    assert_eq!(all, vec!["main-agent", "search-helper"]);
     cleanup_db(&path);
 }
 
@@ -1439,7 +1482,7 @@ fn test_list_agent_names_falls_back_to_process_name() {
     }
 
     let names = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     assert_eq!(names, vec!["fallback-agent"]);
     cleanup_db(&path);
@@ -1492,7 +1535,7 @@ fn test_list_agent_names_merges_case_variants() {
         }
     }
     let names = store
-        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS, false)
         .unwrap();
     let qoder_entries: Vec<&String> = names
         .iter()

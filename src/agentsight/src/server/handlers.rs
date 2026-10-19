@@ -595,7 +595,7 @@ pub async fn list_agent_names(
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": "GenAI store unavailable"}));
     };
-    match store.list_agent_names(start_ns, end_ns) {
+    match store.list_agent_names(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
         Ok(names) => HttpResponse::Ok().json(names),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
