@@ -2028,6 +2028,13 @@ mod tests {
             Some(AggregatedResult::HttpComplete(pair)) => {
                 assert_eq!(pair.request.body(), b"{}");
                 assert_eq!(pair.request.body_len, 2);
+                // The consumer that used to fail on the surplus bytes: a
+                // body with a trailing pipelined request is not valid JSON.
+                assert_eq!(
+                    pair.request.json_body(),
+                    Some(serde_json::json!({})),
+                    "the request view must parse after truncation"
+                );
             }
             other => panic!("expected a completed exchange, got {other:?}"),
         }
