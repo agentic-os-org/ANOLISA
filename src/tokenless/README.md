@@ -828,7 +828,8 @@ The installer runs `qwenpaw plugin install <bundle> --force`; QwenPaw copies the
 bundle into `<working dir>/plugins/tokenless/` (`QWENPAW_WORKING_DIR`, else
 `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`) and installs
 the `anolisa_tokenless` wheel listed in `requirements.txt` from the matching
-GitHub Release. Records are written under `<workspace>/.tokenless`.
+GitHub Release. Records are written under `<workspace>/.tokenless` by default;
+set an absolute `TOKENLESS_DATA_DIR` in QwenPaw's environment to override it.
 
 Before the bundle is handed over, the installer probes that pinned wheel URL and
 stops with an explanatory error when the asset answers `404`. Set

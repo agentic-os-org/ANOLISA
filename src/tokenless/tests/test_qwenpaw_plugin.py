@@ -246,6 +246,19 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         plugin._SDKS[expected] = self.sdk
         self.assertEqual(plugin._factory(ctx, agent_config=None).data_dir, expected)
 
+    def test_factory_uses_absolute_configured_data_dir(self) -> None:
+        ctx = types.SimpleNamespace(workspace=types.SimpleNamespace(workspace_dir="/testbed"))
+        with mock.patch.dict("os.environ", {"TOKENLESS_DATA_DIR": DATA_DIR}):
+            middleware = plugin._factory(ctx, agent_config=None)
+        self.assertEqual(middleware.data_dir, DATA_DIR)
+        self.assertIs(middleware.sdk, self.sdk)
+
+    def test_factory_rejects_relative_configured_data_dir(self) -> None:
+        ctx = types.SimpleNamespace(workspace=types.SimpleNamespace(workspace_dir="/testbed"))
+        with mock.patch.dict("os.environ", {"TOKENLESS_DATA_DIR": "relative/state"}):
+            with self.assertRaisesRegex(ValueError, "must be absolute"):
+                plugin._factory(ctx, agent_config=None)
+
     def test_sdk_is_configured_with_the_registered_retrieve_tool(self) -> None:
         fake_sdk = lambda config: types.SimpleNamespace(config=config)  # noqa: E731
         with mock.patch.object(core, "TokenlessSdk", side_effect=fake_sdk):

@@ -490,7 +490,7 @@ SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的
 `view_video` 为文件内容，其余内置工具为 API 响应；Skill、MCP 工具以及后续 QwenPaw 版本新增的工具原样
 透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，且保留结果头部（最近两条工具结果 50000 字节，更早的 3000
 字节，溢出部分写入 `tool_results/`），因此压缩结果末尾的恢复指令只在结果未超出该预算时可见；被省略的内容仍可用
-`tokenless retrieve` 从 Stash 取回。统计记录按 QwenPaw 工作区写入 `<workspace>/.tokenless`，运行 `tokenless stats list --data-dir` 时指向该目录。
+`tokenless retrieve` 从 Stash 取回。统计记录默认按 QwenPaw 工作区写入 `<workspace>/.tokenless`。可在 QwenPaw 环境中设置绝对路径 `TOKENLESS_DATA_DIR` 覆盖此位置；相对路径会被拒绝。运行 `tokenless stats list --data-dir` 时指向实际使用的目录。
 
 ## AgentScope 框架集成
 

@@ -388,7 +388,8 @@ make qwenpaw-install
 安装器执行 `qwenpaw plugin install <bundle> --force`，由 QwenPaw 把 Bundle 复制到
 `<工作目录>/plugins/tokenless/`（`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
 `~/.copaw`，否则 `~/.qwenpaw`），并按 `requirements.txt` 从对应 GitHub Release
-安装 `anolisa_tokenless` wheel。统计记录写入 `<workspace>/.tokenless`。
+安装 `anolisa_tokenless` wheel。统计记录默认写入 `<workspace>/.tokenless`；可在 QwenPaw 环境中
+设置绝对路径 `TOKENLESS_DATA_DIR` 覆盖此目录。
 
 在把 Bundle 交给 QwenPaw 之前，安装器会先探测这个 wheel URL，资产返回 `404` 时给出说明性报错并停止。
 离线或镜像网络可用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测；

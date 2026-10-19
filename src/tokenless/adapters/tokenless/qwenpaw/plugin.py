@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
@@ -352,7 +353,14 @@ class TokenlessMiddleware(MiddlewareBase):
 def _factory(ctx: Any, agent_config: Any) -> TokenlessMiddleware:
     del agent_config
     # TokenlessConfig rejects relative data directories.
-    data_dir = str(Path(ctx.workspace.workspace_dir).expanduser().resolve() / ".tokenless")
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_absolute():
+            raise ValueError("TOKENLESS_DATA_DIR must be absolute")
+        data_dir = str(configured_path.resolve())
+    else:
+        data_dir = str(Path(ctx.workspace.workspace_dir).expanduser().resolve() / ".tokenless")
     return TokenlessMiddleware(_sdk_for(data_dir), data_dir)
 
 
