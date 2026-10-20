@@ -1,6 +1,6 @@
 //! API request handlers
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use actix_web::http::StatusCode;
@@ -3736,6 +3736,100 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `stats` groups by `(type, severity)`, so one type answers twice once an
+    /// upgrade changes its severity mapping. The exposition labels a sample
+    /// only by type, so emitting every row verbatim produced two samples with
+    /// the same name and labels in one scrape — at the same scrape timestamp
+    /// Prometheus rejects the whole scrape as a duplicate sample. The rows for
+    /// one type must be summed into a single series.
+    #[actix_web::test]
+    async fn metrics_sum_interruption_rows_that_share_a_type() {
+        let interruption_path = unique_handler_db("metrics_shared_type");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let mut high = make_interruption_event(
+            "int-high",
+            "sess-metrics",
+            "conv-metrics",
+            crate::interruption::InterruptionType::RateLimit,
+        );
+        high.severity = crate::interruption::types::Severity::High;
+        let mut medium = make_interruption_event(
+            "int-medium",
+            "sess-metrics",
+            "conv-metrics",
+            crate::interruption::InterruptionType::RateLimit,
+        );
+        medium.severity = crate::interruption::types::Severity::Medium;
+        istore.insert(&high).unwrap();
+        istore.insert(&medium).unwrap();
+
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        let state = web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: Some(Arc::new(
+                GenAISqliteStore::new_with_path(
+                    std::path::Path::new(":memory:"),
+                    crate::config::PeriodicStoragePolicy::default(),
+                )
+                .unwrap(),
+            )),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: Some(Arc::clone(&istore)),
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        });
+
+        let app = awtest::init_service(App::new().app_data(state).service(metrics)).await;
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/metrics").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let samples: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("agentsight_interruptions_total{type=\"rate_limit\"}"))
+            .collect();
+        assert_eq!(
+            samples,
+            vec!["agentsight_interruptions_total{type=\"rate_limit\"} 2"],
+            "one type must be one Prometheus series:\n{text}"
+        );
+
+        cleanup_db(&interruption_path);
+    }
+
     #[test]
     fn live_process_matches_checks_the_live_executable() {
         let self_pid = std::process::id();
@@ -4694,11 +4788,23 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
                 "# HELP agentsight_interruptions_total Total interruption events by type\n",
             );
             out.push_str("# TYPE agentsight_interruptions_total counter\n");
+            // `stats` groups by `(type, severity)` so a type whose severity
+            // mapping changed across versions stays exact in the by-severity
+            // breakdowns. This exposition labels samples by type only, so the
+            // rows must be summed here: two samples with the same name and
+            // labels in one scrape carry the same timestamp, and Prometheus
+            // rejects the whole scrape as a duplicate sample.
+            let mut counts_by_type: BTreeMap<&str, i64> = BTreeMap::new();
             for s in &stats {
+                *counts_by_type
+                    .entry(s.interruption_type.as_str())
+                    .or_default() += s.count;
+            }
+            for (interruption_type, count) in counts_by_type {
                 out.push_str(&format!(
                     "agentsight_interruptions_total{{type=\"{}\"}} {}\n",
-                    escape_label(&s.interruption_type),
-                    s.count
+                    escape_label(interruption_type),
+                    count
                 ));
             }
             out.push('\n');
