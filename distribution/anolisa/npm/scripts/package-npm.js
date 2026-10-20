@@ -134,7 +134,7 @@ function parseArgs(hostPlatform, hostArch) {
     (argument, index) =>
       argument !== '--all' &&
       argument !== '--target' &&
-      index !== targetIdx + 1,
+      (targetIdx === -1 || index !== targetIdx + 1),
   );
   if (unexpected !== -1) {
     console.error(`Error: unknown package option ${args[unexpected]}`);
