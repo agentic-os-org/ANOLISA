@@ -108,6 +108,13 @@ stage-raw: ## Stage one raw payload into DESTDIR
 test-raw-package: ## Validate Linux and macOS raw package assembly
 	@bash scripts/test-package-raw.sh
 
+.PHONY: test-batch-analysis
+test-batch-analysis: ## Exercise batch discovery and execution without model calls
+	python3 -m unittest discover -s scripts/benchmark/tests -p test_batch_execution_regressions.py
+
+# Add the dependency separately from the shared native-test rule.
+test: test-batch-analysis
+
 .PHONY: test
 test: test-rpm-packaging test-raw-package ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test

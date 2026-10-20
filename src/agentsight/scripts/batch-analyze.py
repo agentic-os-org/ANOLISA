@@ -57,11 +57,13 @@ def extract_tool_calls(content) -> list:
         return calls
     for block in content:
         if isinstance(block, dict) and block.get("type") == "tool_use":
-            calls.append({
-                "tool_call_id": block.get("id", ""),
-                "function_name": block.get("name", ""),
-                "arguments": block.get("input", {}),
-            })
+            calls.append(
+                {
+                    "tool_call_id": block.get("id", ""),
+                    "function_name": block.get("name", ""),
+                    "arguments": block.get("input", {}),
+                }
+            )
     return calls
 
 
@@ -110,9 +112,7 @@ def usage_to_metrics(usage) -> dict:
     """Map a provider usage object onto ATIF metric names."""
     if not isinstance(usage, dict):
         return {}
-    counters = {
-        key: value for key, value in usage.items() if type(value) is int and value >= 0
-    }
+    counters = {key: value for key, value in usage.items() if type(value) is int and value >= 0}
     metrics = {}
     for source, target in (
         ("input_tokens", "prompt_tokens"),
@@ -305,11 +305,14 @@ def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path
     """Find JSONL conversation files in given directories."""
     files = []
     for d in dirs:
-        if not d.exists():
+        if not d.exists() or d.name in ("subagent", "subagents"):
             continue
         for f in d.rglob("*.jsonl"):
-            # Skip subagent files and small files
-            if "subagent" in str(f):
+            # Only child locations inside this scan root identify a child run;
+            # arbitrary ancestors and encoded project names do not.
+            if "subagent" in f.name or any(
+                part in ("subagent", "subagents") for part in f.relative_to(d).parent.parts
+            ):
                 continue
             try:
                 if f.stat().st_size >= min_size:
