@@ -37,6 +37,7 @@ FIELDS = (
     "eviction_count",
     "ring_buffer_dropped",
     "channel_dropped",
+    "ffi_dropped",
     "completed",
 )
 INTERNAL_FIELDS = {
@@ -145,6 +146,14 @@ def read_internal_metrics(path: Path | None) -> dict[str, str]:
     result: dict[str, str] = {}
     for line in lines:
         fields = line.split()
+        if len(fields) == 2 and fields[0].split("{", 1)[0] == "agentsight_ffi_dropped_total":
+            try:
+                result["ffi_dropped"] = str(
+                    float(result.get("ffi_dropped", "0")) + float(fields[1])
+                )
+            except ValueError:
+                result["ffi_dropped"] = "nan"
+            continue
         if len(fields) == 2 and fields[0] in PROMETHEUS_FIELDS:
             result[PROMETHEUS_FIELDS[fields[0]]] = fields[1]
             continue

@@ -61,7 +61,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
     "pending_genai_max_count": 1000,
     "pending_genai_max_bytes_mb": 16,
     "pid_cache_size": 1024,
-    "connection_capacity": 32,
+    "connection_capacity": 128,
     "connection_max_bytes_mb": 64,
     "ffi_channel_max_bytes_mb": 64,
     "max_connection_body_mb": 8,
@@ -163,7 +163,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 | `pending_genai_max_count` | `1000` | 原始完成记录、等待 session ID 的事件与本地 SQLite 重试共享条数上限 |
 | `pending_genai_max_bytes_mb` | `16` | 同一队列的字节上限 |
 | `pid_cache_size` | `1024` | PID → Agent 名称的 LRU 条目数 |
-| `connection_capacity` | `32` | HTTP 连接缓存条目数，必须大于零；至少应达到预计同时存在的连接数 |
+| `connection_capacity` | `128` | HTTP 连接缓存条目数，必须大于零；至少应达到预计同时存在的连接数 |
 | `connection_max_bytes_mb` | `64` | HTTP/1 与 HTTP/2 共用的保留字节预算，包含 buffer capacity 和解码器状态；`0` 关闭预算 |
 | `ffi_channel_max_bytes_mb` | `64` | FFI 事件 payload 的字节预算，计入执行中的 callback；`0` 关闭预算。同时受已有的 10000 条队列容量限制 |
 | `max_connection_body_mb` | `8` | 单连接 body 上限，接收分片时立即检查 |
@@ -173,9 +173,15 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 | `connection_hard_timeout_secs` | `300` | 空闲硬超时：输出不完整记录并释放 HTTP/1 连接及 HTTP/2 流；`0` 关闭该超时 |
 | `ring_buffer_mb` | `64` | eBPF ring buffer 大小，必须是 2 的幂 |
 
-默认 `connection_capacity=32` 可容纳 32 个并发 HTTP/1 连接。应按所有 Agent 实际打开的连接数
+默认 `connection_capacity=128` 可容纳 128 个并发 HTTP/1 连接。应按所有 Agent 实际打开的连接数
 选择容量，一个 Agent 可能打开多个连接。HTTP/2 的流条目容量为该值的四倍，并共用同一字节预算。
-修改运行时限额后需要重启采集。
+最近 5 秒有流量的 HTTP/1 连接与 HTTP/2 流会跳过容量驱逐。所有条目均受保护时，拒绝新调用并标记
+`abandon_reason=capacity_rejected`，已有调用继续采集。保护覆盖请求组装、等待响应及流式接收阶段；
+在途调用空闲满 5 秒后可被淘汰。
+HTTP/1 调用完成后将名额继续保留 5 秒，供 keep-alive 复用，仅保存连接标识和完成时间。
+保留名额计入 `connection_capacity`，无后续流量时过期；期间新连接可能被拒绝。
+HTTP/2 流 ID 不会复用，因此已完成的流不保留名额。
+硬字节上限仍可回收受保护条目。已有配置中显式设置的容量保持不变。修改运行时限额后需要重启采集。
 
 CPU 调度默认开启，`cpu_budget_percent=25`；设为 `0` 可关闭。
 完成记录在分析和写入之前按进程 CPU 预算调度，并与 primary/GenAI
@@ -186,9 +192,12 @@ CPU 调度默认开启，`cpu_budget_percent=25`；设为 `0` 可关闭。
 `agentsight_completion_queue_count`、`agentsight_completion_queue_bytes` 和
 `agentsight_completion_wait_seconds` 反映延迟投递，`agentsight_cpu_budget_deferred_total` 记录预算等待次数。
 
-容量淘汰、同 key 替换、字节超限、空闲硬超时、进程退出或采集关闭时，AgentSight 会输出已捕获的请求
-或部分响应，并设置 `finish_reason="incomplete"`。语义事件 metadata 包含 `abandon_reason` 和
-`incomplete=true`；字节超限还包含 `truncated=true`。即使关闭 SQLite，这些记录也会走正常 FFI 投递路径。
+容量淘汰、容量拒绝、同 key 替换、字节超限、空闲硬超时、进程退出或采集关闭时，AgentSight 输出
+`finish_reason="incomplete"`、`abandon_reason` 和 `incomplete=true`。
+容量淘汰、容量拒绝与字节超限仅保留有界的路由和关联元数据，设置 `metadata_only=true`，
+不保留正文、消息与 token 用量，也不执行完整 payload 分析。每个字段上限 2 KiB，最多保留八个路由或关联
+header；字节超限还包含 `truncated=true`。其他生命周期移除继续保留已捕获的部分证据。
+即使关闭 SQLite，这些记录也会走正常 FFI 投递路径；v2 callback 暴露 metadata，typed callback 暴露 incomplete finish reason。
 新流量会刷新空闲计时。软超时 snapshot 依赖 SQLite 并保留在途状态；FFI 模式无采集事件时仍执行硬超时维护。
 
 仅投递语义事件时，SSE delta 会增量归约，原始 TLS buffer 在流结束前即可释放。需要原始事件序列的 exporter

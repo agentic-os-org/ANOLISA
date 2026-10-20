@@ -261,6 +261,11 @@ npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
 `--ab --baseline REF --candidate REF` 支持 Git A/B 对比。`--ring-buffer-mb N` 可指定 Ring Buffer 大小；探针计数发现丢事件时，对比结果判为无效。采集需要 root 或 eBPF capabilities，
 脚本默认请求 sudo。一键命令、工作区快照和报告说明见 [benchmark 使用指南](scripts/docs/BENCHMARK_USAGE_zh.md)。
 
+添加 `--ffi` 可构建并测量最小 C FFI consumer；`--ffi-api typed|v2` 选择 typed 回调（默认）
+或 JSON envelope 回调。`--candidate-lib PATH` 和 `--baseline-lib PATH` 支持已有动态库。
+测量包含 AgentSight 线程、FFI 数据转换、凭证转发及少量 C 宿主基础开销。
+FFI 就绪和采集校验直接使用回调凭证，不依赖 SQLite 存储。
+
 
 ## 快速开始
 
@@ -480,7 +485,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 | `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
 | `pending_genai_max_bytes_mb` | 16 | 等待 session_id 的最大字节数 |
 | `pid_cache_size` | 1,024 | PID → agent_name 的 LRU 缓存大小 |
-| `connection_capacity` | 32 | HTTP 连接缓存条目数；至少设为预计并发连接数，并重启采集 |
+| `connection_capacity` | 128 | HTTP 连接缓存条目数；至少设为预计并发连接数，并重启采集 |
 | `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
 | `connection_idle_timeout_secs` | 60 | SQLite pending snapshot 的空闲软超时 |
 | `connection_hard_timeout_secs` | 300 | 空闲硬超时：输出不完整记录并释放状态；0 关闭该超时 |
@@ -491,7 +496,10 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 | `ring_buffer_mb` | 64 | eBPF Ring Buffer 大小（必须为 2 的幂） |
 
 仅投递语义事件时，SSE delta 会增量归约，原始 TLS buffer 在流结束前即可释放。
-强制移除连接时会输出带原因的不完整记录。Probe 与 FFI 队列同时执行条数和字节限额，
+最近 5 秒活跃的在途连接受容量驱逐保护，包括请求组装和等待响应阶段；所有条目均受保护时拒绝新连接，
+标记 `abandon_reason=capacity_rejected`。HTTP/1 调用完成后仅保留连接标识与时间，将名额保留 5 秒，
+供下一次 keep-alive 请求复用，不保留 payload。资源移除仅输出有界元数据，包含 `incomplete=true` 和
+`metadata_only=true`；硬字节上限仍可强制回收。Probe 与 FFI 队列同时执行条数和字节限额，
 并记录被拒绝的事件数。这些预算约束保留的 payload；评估进程 RSS 时，
 还应计入 ring buffer、解码器工作内存及 allocator 开销。超时、raw 捕获与过载语义见
 [配置参考](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#运行时上限)。

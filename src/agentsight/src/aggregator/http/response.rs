@@ -98,7 +98,7 @@ impl AggregatedResponse {
     pub fn first_output_timestamp_ns(&self) -> Option<u64> {
         self.sse_events
             .iter()
-            .find(|event| event_has_meaningful_output(event.json_body().as_ref()))
+            .find(|event| event.with_json(event_has_meaningful_output))
             .map(|event| event.source_event().timestamp_ns)
     }
 

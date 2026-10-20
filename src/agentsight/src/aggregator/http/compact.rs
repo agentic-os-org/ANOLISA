@@ -10,6 +10,34 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 impl HttpConnectionAggregator {
+    /// Ignore tails of explicitly abandoned streams until a new exchange begins.
+    pub(crate) fn discard_retired_sse(&mut self, event: &SslEvent) -> bool {
+        if event.rw != 0 {
+            return false;
+        }
+        let id = ConnectionId::from_ssl_event(event);
+        let bytes = &event.buf[..event.buf_size() as usize];
+        if self
+            .retired_sse
+            .peek(&id)
+            .is_some_and(|(_, reason)| *reason == RemoveReason::CapacityRejected)
+        {
+            metrics::counter!("agentsight_http_sse_discarded_bytes_total", "reason" => "capacity_rejected")
+                .increment(bytes.len() as u64);
+            return true;
+        }
+        // A fresh HTTP response is a new exchange, even if its request was missed.
+        if bytes.starts_with(b"HTTP/1.") {
+            return false;
+        }
+        let Some((_, reason)) = self.retired_sse.get(&id) else {
+            return false;
+        };
+        metrics::counter!("agentsight_http_sse_discarded_bytes_total", "reason" => reason.as_str())
+            .increment(bytes.len() as u64);
+        true
+    }
+
     pub(crate) fn set_compact_sse(&mut self, enabled: bool) {
         self.compact_sse = enabled;
     }
@@ -18,6 +46,7 @@ impl HttpConnectionAggregator {
         &mut self,
         id: ConnectionId,
         response: &ParsedResponse,
+        request: Option<&crate::parser::http::ParsedRequest>,
     ) -> (
         Vec<ParsedSseEvent>,
         Option<Vec<u8>>,
@@ -29,6 +58,15 @@ impl HttpConnectionAggregator {
         }
         match SseStream::new(response, self.max_sse_retained_bytes.max(1024)) {
             Ok(mut stream) => {
+                if let Some(request) = request
+                    .filter(|request| crate::parser::llm::is_dashscope_native_path(&request.path))
+                {
+                    stream.set_native_incremental(request.json_body().and_then(|value| {
+                        value
+                            .pointer("/parameters/incremental_output")
+                            .and_then(serde_json::Value::as_bool)
+                    }));
+                }
                 let error = stream.feed(response.body(), &response.source_event).err();
                 let done = error.is_none() && stream.done();
                 self.sse_streams.put(id, stream);
@@ -117,7 +155,8 @@ impl HttpConnectionAggregator {
                 return Some(result);
             }
         }
-        self.enforce_limits();
+        self.refresh_retained(&id);
+        self.enforce_connection_limits(&id);
         None
     }
 }

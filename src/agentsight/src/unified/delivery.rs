@@ -326,8 +326,8 @@ impl AgentSight {
         aggregated_results: Vec<crate::aggregator::AggregatedResult>,
     ) {
         for agg_result in aggregated_results {
-            let mut analysis_results = self.analyzer.analyze_for_delivery(
-                &agg_result,
+            let mut analysis_results = self.analyzer.analyze_for_owned_delivery(
+                agg_result,
                 self.runtime_limits.retain_raw_sse
                     || (self.ffi_sender.is_none() && self.features.sqlite_storage_enabled)
                     || self
@@ -335,8 +335,6 @@ impl AgentSight {
                         .as_ref()
                         .is_some_and(FfiEventSender::raw_https_enabled),
             );
-
-            drop(agg_result);
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
             // to the *process* comm (`<procfs root>/<pid>/comm`) and only then

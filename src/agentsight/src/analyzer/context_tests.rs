@@ -29,6 +29,16 @@ fn event(rw: i32, bytes: &[u8]) -> Event {
 }
 
 fn captured(path: &str, request: Value, response: Value, sse: bool) -> AggregatedResult {
+    captured_with_retention(path, request, response, sse, true)
+}
+
+fn captured_with_retention(
+    path: &str,
+    request: Value,
+    response: Value,
+    sse: bool,
+    raw: bool,
+) -> AggregatedResult {
     let request = request.to_string();
     let request = format!(
         "POST {path} HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",
@@ -37,7 +47,7 @@ fn captured(path: &str, request: Value, response: Value, sse: bool) -> Aggregate
     let mut aggregator = Aggregator::with_limits(
         4,
         &RuntimeLimits {
-            retain_raw_sse: true,
+            retain_raw_sse: raw,
             ..Default::default()
         },
     );
@@ -114,6 +124,87 @@ fn build(results: &[AnalysisResult]) -> Value {
 }
 
 #[test]
+fn resource_abandonments_skip_body_analysis_and_preserve_metadata_for_every_delivery_path() {
+    use crate::aggregator::RemoveReason;
+    for reason in [
+        RemoveReason::LruEvicted,
+        RemoveReason::CapacityRejected,
+        RemoveReason::OverBudget,
+    ] {
+        for raw in [false, true] {
+            let mut partial = captured(
+                "/v1/chat/completions",
+                json!({"model":"fixture", "messages":[{"role":"user", "content":"x".repeat(65536)}]}),
+                json!({"id":"fixture", "choices":[{"message":{"role":"assistant", "content":"response"}}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}),
+                false,
+            );
+            let AggregatedResult::HttpComplete(pair) = &mut partial else {
+                panic!("expected pair")
+            };
+            pair.request
+                .headers
+                .insert("x-request-id".into(), "request-fixture".into());
+            pair.request
+                .headers
+                .insert("host".into(), "fixture.test".into());
+            let result = AggregatedResult::Abandoned {
+                reason,
+                partial: Box::new(partial),
+            };
+            let analyzer = Analyzer::new();
+            for analysis in [
+                analyzer.analyze_aggregated(&result),
+                analyzer.analyze_for_delivery(&result, raw),
+                analyzer.analyze_for_owned_delivery(result.clone(), raw),
+            ] {
+                let [
+                    AnalysisResult::Http(http),
+                    AnalysisResult::Abandoned(actual),
+                ] = &analysis[..]
+                else {
+                    panic!("only metadata should be analyzed")
+                };
+                assert_eq!(*actual, reason);
+                assert!(http.request_body.is_none());
+                assert!(http.response_body.is_none());
+                let (output, pending) = GenAIBuilder::new().build_for_delivery(
+                    &analysis,
+                    &ResponseSessionMapper::new(),
+                    &HashMap::from([(std::process::id(), "fixture-agent".to_owned())]),
+                    true,
+                );
+                assert!(output.pending_response_id.is_none());
+                let [GenAISemanticEvent::LLMCall(call)] = &output.events[..] else {
+                    panic!("one metadata call")
+                };
+                assert_eq!(call.pid, std::process::id() as i32);
+                assert_eq!(call.agent_name.as_deref(), Some("fixture-agent"));
+                assert_eq!(call.metadata["metadata_only"], "true");
+                assert_eq!(call.metadata["incomplete"], "true");
+                assert_eq!(call.metadata["abandon_reason"], reason.as_str());
+                assert_eq!(call.metadata["request_id"], "request-fixture");
+                assert_eq!(call.metadata["server.address"], "fixture.test");
+                assert_eq!(call.metadata["status_code"], "200");
+                assert!(!call.metadata.contains_key("pending_match_key"));
+                assert!(call.request.messages.is_empty());
+                assert!(call.request.raw_body.is_none());
+                assert!(call.response.raw_body.is_none());
+                assert!(call.token_usage.is_none());
+                assert!(call.response.messages[0].parts.is_empty());
+                assert_eq!(
+                    call.response.messages[0].finish_reason.as_deref(),
+                    Some("incomplete")
+                );
+                let pending = pending.unwrap();
+                assert!(pending.input_messages.is_none());
+                assert!(pending.pending_match_key.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn semantic_context_preserves_provider_fields_without_raw_body_strings() {
     let chat_request = json!({"model":"fixture","temperature":0.2,"max_tokens":100,"seed":123,"messages":[{"role":"user","content":"你好"}],"tools":[{"type":"function","function":{"name":"lookup"}}]});
     let chat_response = json!({"id":"chatcmpl-fixture","object":"chat.completion","created":0,"model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}});
@@ -165,9 +256,15 @@ fn semantic_context_preserves_provider_fields_without_raw_body_strings() {
         ),
     ];
     for (path, request, response, sse) in fixtures {
+        let reduced = captured_with_retention(path, request.clone(), response.clone(), sse, false);
         let result = captured(path, request, response, sse);
         let analyzer = Analyzer::new();
         let original = analyzer.analyze_aggregated(&result);
+        assert_eq!(
+            build(&analyzer.analyze_for_owned_delivery(reduced, false)),
+            build(&original),
+            "owned path={path}"
+        );
         let compact = analyzer.analyze_for_delivery(&result, false);
         let context = compact
             .iter()

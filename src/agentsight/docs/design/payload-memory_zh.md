@@ -78,11 +78,13 @@ FFI 将调用和 HTTP 记录 move 到 boxed 队列条目。字节 reservation �
 ## 连接生命周期
 
 HTTP/1 强制移除时移交旧状态的所有权，并统一清理所有辅助缓存。HTTP/2 使用同样的不完整记录语义，
-同步清理已解码 header 和 continuation 状态。移除原因包括 `lru_evicted`、`replaced`、`hard_timeout`、
+同步清理已解码 header 和 continuation 状态。移除原因包括 `lru_evicted`、`capacity_rejected`、`replaced`、`hard_timeout`、
 `over_budget`、`pid_exited`、`protocol_error` 和 `shutdown`。正常完成及空 Idle 状态的软超时单独计数。
 
-在途证据转为 `AggregatedResult::Abandoned`，包含 owned 请求或部分响应。正常 analyzer 与 builder
-输出 `finish_reason="incomplete"`，metadata 包含 `abandon_reason` 和 `incomplete=true`；字节超限还设置
+在途证据转为 `AggregatedResult::Abandoned`，包含 owned 请求或部分响应。容量与字节压力移除在入队前
+释放正文、原始 TLS source、SSE reducer 和解码缓冲，仅保留最多八个路由或关联 header，每字段上限
+2 KiB。专用元数据 analyzer 与 builder 跳过正文解压、JSON 与消息解析、token 计算和请求 hash，
+设置 `metadata_only=true`；其他生命周期移除继续保留已捕获的证据。两条交付路径均输出 `finish_reason="incomplete"`，metadata 包含 `abandon_reason` 和 `incomplete=true`；字节超限还设置
 `truncated=true`。这些调用跳过 session 延迟解析和空语义调用的 raw HTTPS 回退，因此关闭 SQLite 或部分
 请求无法解析时仍可投递。FFI 队列过载继续采用丢弃最新事件并计数的策略。
 
@@ -92,16 +94,44 @@ HTTP/1 强制移除时移交旧状态的所有权，并统一清理所有辅助�
 
 HTTP/2 在 END_STREAM 前完成时只留下有界标记，不保留 payload 状态；迟到的压缩尾部不会重新创建在途流，
 trailer 仍继续解码以保持 HPACK 一致。
+资源驱逐和协议错误也使用同一关闭流路径；丢弃的 DATA payload 计入
+`agentsight_http2_closed_stream_discarded_bytes_total`。
+
+HTTP/1 SSE 活动同步提升连接和活动时间 LRU。资源驱逐或协议错误只输出一次诊断记录，并留下
+受连接容量约束的标记。匹配标记的后续读取计入 `agentsight_http_sse_discarded_bytes_total{reason}`，
+不再重新建立 response-only 配对。新请求或 HTTP 响应清除标记；定期维护按配置的软超时、硬超时和
+60 秒三者中的最大值使标记过期。PID 清理和 reset 也释放标记；容量驱逐可能提前移除标记。
+容量拒绝的调用连响应 header 也会跳过，直到新请求到达。硬超时移除仍允许迟到响应恢复为 response-only。
+
+HTTP/1 与 HTTP/2 容量准入都跳过最近 5 秒有流量的在途调用，覆盖请求组装、等待响应和流式接收阶段，
+包括 raw 保留模式。所有条目均受保护时，
+新调用仅输出 `capacity_rejected` 元数据诊断，已有流仍受配置的条数上限约束。硬字节上限优先回收
+不受保护的条目，必要时仍可回收受保护流，避免活动保护绕过内存上限。
+HTTP/1 完成时释放全部 payload 缓存，仅用连接 ID 与完成时间将名额保留 5 秒。后续同连接请求消耗自己的
+保留名额，新连接无法在 keep-alive 请求间隙抢占。活跃状态与保留名额之和不超过配置容量；过期、PID 清理与
+reset 会释放名额，重复完成清理不会延长保留时间。保留名额不计入 pending 调用，也不持有采集分配。
+HTTP/2 流 ID 不能复用，因此无需保留已完成流的名额。
 
 ## 预算与可观测性
 
-默认 HTTP/1 容量为 32，HTTP/2 流容量为 128，共用 64 MiB 配对预算；Probe 队列和 FFI 预算各为 64 MiB，
+默认 HTTP/1 容量为 128，HTTP/2 流容量为 512，共用 64 MiB 配对预算；Probe 队列和 FFI 预算各为 64 MiB，
 延迟 GenAI 队列预算为 16 MiB，ring buffer 为 64 MiB。Body 上限为 8 MiB，单流 SSE payload 上限为
 2 MiB，空闲软、硬超时分别为 60、300 秒。
 
 计量包含 capacity 和 owned String，对 HTTP/1 共享 TLS source 去重，并计入 continuation、HPACK
 及解码器存储。聚合层按 LRU 顺序执行共用字节预算；body 与 SSE 限额在分片到达时检查。这些估算约束
 保留的 payload；临时解析、callback 序列化、C++ 复制及 allocator 开销需要额外内存余量。
+
+连接和流的总量在状态变更与移除时更新。Raw SSE source 去重及 HTTP/2 帧计量只处理新追加的条目，
+定期维护保留超限兜底检查。HTTP/1 持续保存的 source 去重集合计入共用预算。
+Compact 归约在发生变化的 JSON 子树内更新分配估算，并使用结构化 delta key；完成时把已解析的值
+移交给语义交付，只在消费者需要字节时延迟序列化。Compact SSE framing 直接从 continuation buffer
+借用单行 payload，仅对多行数据进行拼接，避免每帧创建有所有权的 capture 与结果向量。
+归约器先扫描 JSON 字面标记；不影响归约或结束判断的帧保留 payload 供下游分析，不提前试解析 JSON。
+字段名包含转义时保守地走 JSON 路径，已解析的透传事件直接保留 Value。
+Raw parser 在 framing 消费完成前保留多行数据的 capture 来源。
+DashScope 显式 `parameters.incremental_output` 选择追加或快照语义，无需前缀比较；未知模式保留
+精确的逐事件前缀判断，包括同一流中切换模式的兼容行为。
 
 指标包括活跃条目及保留字节 gauge、按原因和状态分类的移除计数、不完整记录输出数、覆盖 callback
 生命周期的 FFI 字节数，以及按条数或字节限额分类的 FFI 丢弃计数。两种运行模式均可使用已有的

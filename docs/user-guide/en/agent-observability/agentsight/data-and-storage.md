@@ -49,6 +49,21 @@ subsequent calls.
 
 ## Retention and size limits
 
+When an SSE call exceeds a capture byte limit or is evicted for connection capacity, AgentSight
+reports bounded metadata with `incomplete=true`, `metadata_only=true` and `abandon_reason`,
+without bodies, messages or token usage; byte-limit removal also sets `truncated=true`. Capacity
+eviction skips in-flight calls active within the last 5 seconds, including request assembly and
+response waiting. If all entries are protected, the new exchange
+is rejected with `abandon_reason=capacity_rejected`. Completed HTTP/1 connections keep a payload-free
+slot reservation for 5 seconds so their next keep-alive request can reuse it. Active connections
+and reservations together stay within `connection_capacity`; new connections may be rejected until
+a reservation expires. Hard byte limits can still reclaim active entries. A bounded marker suppresses subsequent tail reads from that call, preventing
+repeated incomplete records and further connection evictions. A new request or HTTP response clears
+the marker, except a capacity-rejected exchange stays suppressed until a new request arrives.
+Markers can be displaced by capacity and expire during maintenance after the larger of
+the configured connection soft timeout, hard timeout, and 60 seconds. Hard-timeout removal still
+allows a late response to resume as response-only evidence.
+
 Schema v4 gives every AgentSight-owned database a `retention_days`, `max_db_size_mb`, and
 `check_interval_secs` policy:
 
@@ -258,6 +273,12 @@ Counters are per Agent and all-time: `agentsight_token_input_total`,
 `agentsight_token_output_total`, `agentsight_token_total_total`, `agentsight_llm_requests_total`.
 `/metrics` is loopback-only, so scrape it with a node-local Prometheus agent or expose it through a
 local reverse proxy. `agentsight metrics` prints the same content from the CLI.
+
+`agentsight_http_sse_discarded_bytes_total{reason}` counts tail bytes skipped while an abandoned SSE
+marker is retained. Compare it with `agentsight_http_conn_removed_total{reason,state}` to distinguish
+resource pressure from normal completion. Aggregator stage timings include compact SSE reads.
+`agentsight_http2_closed_stream_discarded_bytes_total` counts DATA payload bytes skipped after
+HTTP/2 completion or resource/protocol abandonment; trailers still update the header decoder.
 
 ## Trajectory export (ATIF v1.7)
 

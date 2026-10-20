@@ -263,6 +263,7 @@ dependencies = [
  "log 0.4.33",
  "log4rs",
  "lru",
+ "memchr",
  "memmap2 0.9.11",
  "metrics",
  "metrics-exporter-prometheus",

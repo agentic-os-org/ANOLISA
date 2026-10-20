@@ -18,7 +18,7 @@ from typing import Any
 from mock_llm_server import PREFLIGHT_TOTAL_TOKENS
 from resource_inputs import Inputs, arguments, ensure_python
 from resource_report import report
-from validate_results import load_captured
+from validate_results import load_captured, load_ffi_captured
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[2]
@@ -167,6 +167,7 @@ def wait_for_capture(
     runner: subprocess.Popen[bytes],
     trace: subprocess.Popen[bytes],
     timeout: float,
+    ffi: bool = False,
 ) -> None:
     """Require a complete, token-correct preflight call from every traced worker."""
     expected = set(prepared["request_ids"])
@@ -178,7 +179,11 @@ def wait_for_capture(
                 f"capture preparation process exited; see {directory / 'trace.log'} and {directory / 'agents.log'}"
             )
         try:
-            captured = load_captured(directory / "db/genai_events.db", expected=expected)
+            captured = (
+                load_ffi_captured(directory / "ffi-events.log", expected=expected)[0]
+                if ffi
+                else load_captured(directory / "db/genai_events.db", expected=expected)
+            )
         except sqlite3.Error:
             captured = {}
         correct = {
@@ -225,6 +230,7 @@ def worker(job_path: Path) -> int:
         raise OSError(ctypes.get_errno(), "cannot enable child subreaper")
     result: dict[str, Any] = {"status": "failed", "returncode": 1, "trace_survived": False}
     configuration = job["config"]
+    ffi = job.get("ffi", False)
     configuration.setdefault("storage", {})["base_path"] = str(directory / "db")
     config_path = directory / "config.json"
     write_json(config_path, configuration)
@@ -240,6 +246,8 @@ def worker(job_path: Path) -> int:
         **job["env"],
         RUST_LOG="info",
         AGENTSIGHT_METRICS_FILE=str(directory / "internal-metrics.prom"),
+        AGENTSIGHT_BENCH_FFI_STATS=str(directory / "ffi-consumer.json"),
+        AGENTSIGHT_BENCH_FFI_EVENTS=str(directory / "ffi-events.log"),
     )
     trace: subprocess.Popen[bytes] | None = None
     try:
@@ -254,8 +262,8 @@ def worker(job_path: Path) -> int:
                 "--prepare-capture",
                 "--metrics-file",
                 str(directory / "internal-metrics.prom"),
-                "--db",
-                str(directory / "db/genai_events.db"),
+                "--ffi-events" if ffi else "--db",
+                str(directory / "ffi-events.log" if ffi else directory / "db/genai_events.db"),
                 "--output-dir",
                 str(directory),
             ]
@@ -296,7 +304,7 @@ def worker(job_path: Path) -> int:
                 initialized = "AgentSight initialized:" in (directory / "trace.log").read_text(
                     errors="replace"
                 )
-                if initialized and (directory / "db/genai_events.db").exists():
+                if initialized and (ffi or (directory / "db/genai_events.db").exists()):
                     ready_since = ready_since or time.monotonic()
                     if (
                         directory / "internal-metrics.prom"
@@ -313,7 +321,7 @@ def worker(job_path: Path) -> int:
                 )
             write_json(directory / "tracer-ready.json", {"pid": trace.pid})
             result["capture_ready"] = False
-            wait_for_capture(directory, prepared, runner, trace, job["ready_timeout"])
+            wait_for_capture(directory, prepared, runner, trace, job["ready_timeout"], ffi=ffi)
             result["capture_ready"] = True
             while runner.poll() is None:
                 check_cancel(directory)
@@ -338,6 +346,8 @@ def worker(job_path: Path) -> int:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         for child in reversed(children):
             stop_group(child, signal.SIGINT if child is trace else signal.SIGTERM)
+        if trace is not None:
+            result["trace_returncode"] = trace.returncode
         while True:
             try:
                 pid, _ = os.waitpid(-1, 0)
@@ -365,7 +375,10 @@ def main() -> int:
     if privileged and not shutil.which("sudo"):
         raise RuntimeError("sudo is required; --no-sudo requires eBPF capabilities")
     config = json.loads(args.config.expanduser().read_text())
-    if config.get("features", {}).get("sqlite_storage", {}).get("enabled", True) is False:
+    if (
+        not args.ffi
+        and config.get("features", {}).get("sqlite_storage", {}).get("enabled", True) is False
+    ):
         raise RuntimeError("capture validation requires features.sqlite_storage.enabled=true")
     config["cmdline"] = {
         "allow": [{"rule": ["*python*", "*agents.py", "--worker"], "agent_name": "BenchmarkAgent"}],
@@ -399,14 +412,18 @@ def main() -> int:
             ["git", "-C", str(COMPONENT), "rev-parse", "--show-toplevel"], text=True
         ).strip()
     )
-    inputs = Inputs(repo, output)
+    inputs = Inputs(repo, output, ffi=args.ffi)
     sources: dict[str, dict[str, Any]] = {}
     exit_code = 0
     try:
         if args.ab:
-            sources["before"] = inputs.prepare("before", args.baseline or "", args.baseline_bin)
+            sources["before"] = inputs.prepare(
+                "before", args.baseline or "", args.baseline_lib if args.ffi else args.baseline_bin
+            )
         label = "after" if args.ab else "run"
-        sources[label] = inputs.prepare(label, args.candidate, args.candidate_bin)
+        sources[label] = inputs.prepare(
+            label, args.candidate, args.candidate_lib if args.ffi else args.candidate_bin
+        )
         shutil.copytree(HERE, output / "harness", ignore=shutil.ignore_patterns("__pycache__"))
         write_json(output / "configuration.json", config)
         env = dict(
@@ -439,6 +456,8 @@ def main() -> int:
                 "connection_capacity": args.connection_capacity,
                 "ring_buffer_mb": config["runtime_limits"].get("ring_buffer_mb", 32),
                 "cpu_budget_percent": config["runtime_limits"]["cpu_budget_percent"],
+                "mode": "ffi" if args.ffi else "cli",
+                "ffi_api": args.ffi_api if args.ffi else None,
             },
         )
         load_args = [
@@ -478,13 +497,22 @@ def main() -> int:
             directory = output / label
             job = {
                 "binary": source["binary"],
+                "ffi": args.ffi,
                 "config": config,
                 "ready_timeout": args.ready_timeout,
                 "runner": str(output / "harness/run.sh"),
                 "load_args": load_args,
                 "env": {
-                    key: env[key]
-                    for key in ("PATH", "PYTHON", "TIKTOKEN_CACHE_DIR", "PYTHONDONTWRITEBYTECODE")
+                    **{
+                        key: env[key]
+                        for key in (
+                            "PATH",
+                            "PYTHON",
+                            "TIKTOKEN_CACHE_DIR",
+                            "PYTHONDONTWRITEBYTECODE",
+                        )
+                    },
+                    "AGENTSIGHT_BENCH_FFI_API": args.ffi_api,
                 },
             }
             write_json(directory / "job.json", job)

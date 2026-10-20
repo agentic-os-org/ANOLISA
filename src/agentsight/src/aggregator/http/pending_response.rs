@@ -133,14 +133,9 @@ impl PendingResponse {
             if response.body_len > limit || matches!(framing, Framing::Length(n) if *n > limit))
     }
 
-    fn truncate_body(&mut self, limit: usize) {
+    fn discard_body(&mut self) {
         if let Self::Body { response, .. } = self {
-            let mut source = response.source_event.metadata_only();
-            source.buf = response.body()[..response.body_len.min(limit)].to_vec();
-            source.len = source.buf.len() as u32;
-            response.body_offset = 0;
-            response.body_len = source.buf.len();
-            response.source_event = Rc::new(source);
+            super::lifecycle::metadata_response(response);
         }
     }
     /// Finish an in-flight response on the clean-exit path with whatever
@@ -365,7 +360,7 @@ impl HttpConnectionAggregator {
                     "[HttpAggregator] incomplete response finalized early | conn={id:?}: {error}"
                 );
                 let reason = if assembly.exceeds_limit(self.max_body_bytes) {
-                    assembly.truncate_body(self.max_body_bytes);
+                    assembly.discard_body();
                     RemoveReason::OverBudget
                 } else {
                     RemoveReason::ProtocolError

@@ -819,7 +819,8 @@ assert Path("../../staged").read_text() in ("before", "staged and unstaged")
     start = args.index("--agentsight-bin")
     del args[start : start + 2]
     result = run(
-        args + ["--ab", "--baseline", "HEAD"],
+        # Let the sampler initialize before the short measured load window.
+        args + ["--ab", "--baseline", "HEAD", "--startup-delay", "1"],
         dict(environment, PATH=f"{tools}:{environment['PATH']}"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -955,6 +956,10 @@ def test_invalid_binary_reports_specific_cause(
         ["--ring-buffer-mb", "3"],
         ["--cpu-budget-percent", "-1"],
         ["--cpu-budget-percent", "101"],
+        ["--candidate-lib", "missing.so"],
+        ["--ffi-api", "v2"],
+        ["--ffi", "--agentsight-bin", "observer"],
+        ["--ffi", "--baseline-lib", "missing.so"],
     ],
 )
 def test_invalid_arguments_fail_before_build(options: list[str]) -> None:

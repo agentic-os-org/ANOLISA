@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_stats import numeric, percentile
+from collect_metrics import read_internal_metrics
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -88,6 +89,11 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "ring_buffer_dropped": [],
         "channel_dropped": [],
     }
+    final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    for key in drop_samples:
+        value = numeric(final_metrics.get(key))
+        if value is not None and value >= 0:
+            drop_samples[key].append(value)
     counter_samples = {"eviction_count": evictions, **drop_samples}
     invalid_counters: set[str] = set()
     metrics = directory / "metrics.csv"
@@ -134,6 +140,20 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         if worker.get("capture_ready") is False
         else "PASS" if capture_ok else "FAIL" if capture or events_dropped else "UNVERIFIED"
     )
+    ffi = read_json(directory / "ffi-consumer.json") if source.get("mode") == "ffi" else None
+    ffi_error = None
+    if ffi is not None:
+        expected = capture.get("sent", 0) + len(
+            read_json(directory / "clients-ready.json").get("request_ids", [])
+        )
+        if not ffi.get("completed") or worker.get("trace_returncode") != 0:
+            ffi_error = "FFI consumer did not finish successfully"
+        elif ffi.get("llm_events", 0) < expected or expected == 0:
+            ffi_error = f"FFI consumer received {ffi.get('llm_events', 0)}/{expected} LLM events (including preflight)"
+        elif not final_metrics:
+            ffi_error = "missing final FFI pipeline metrics"
+        elif numeric(final_metrics.get("ffi_dropped", "0")) != 0:
+            ffi_error = "FFI consumer queue dropped events"
     valid = (
         worker.get("status") == "complete"
         and worker.get("returncode") == 0
@@ -143,6 +163,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and all(alive)
         and load_status == capture_status == "PASS"
         and not safety_stop
+        and ffi_error is None
     )
     capture_counts = {
         key: capture.get(key)
@@ -165,11 +186,15 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "rss_peak_host_pct": peak / total * 100 if peak is not None and total else None,
         "load": load_status,
         "capture": capture_status,
+        "capture_source": capture.get("capture_source"),
         "capture_completeness": capture.get("completeness_ratio"),
         "capture_token_accuracy": capture.get("token_accuracy"),
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,
+        "ffi_consumer": ffi,
+        "ffi_error": ffi_error,
+        "ffi_dropped": numeric(final_metrics.get("ffi_dropped", "0")) if ffi is not None else None,
         "safety_stop": safety_stop or None,
     }
 
@@ -230,6 +255,14 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
     ]
     settings = read_json(output / "settings.json")
     if settings:
+        if settings.get("mode") == "ffi":
+            lines.append(
+                f"Scope: minimal C FFI host, {settings['ffi_api']} callbacks; includes library threads, "
+                "conversion, receipt forwarding and the small C host baseline; excludes application callback work."
+            )
+            lines.append(
+                "Capture validation: FFI callback receipts; independent of AgentSight SQLite storage."
+            )
         lines.append(
             f"Load target: {settings['agents']} agents x {settings['tokens_per_second']:g} output tok/s, "
             f"{settings['duration']:g}s; {settings['tokens_per_response']} tokens/response, "
@@ -285,6 +318,12 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
             + (f"{'-':>28}" if ab else "")
         )
     for label, run in runs.items():
+        if run["ffi_consumer"] is not None:
+            lines.append(
+                f"{label} FFI consumer: {run['ffi_consumer'].get('llm_events', 0)} LLM events (including preflight); dropped={drop_count(run['ffi_dropped'])}"
+            )
+            if run["ffi_error"]:
+                lines.append(f"{label} FFI failed: {run['ffi_error']}")
         lines.append(
             f"{label} CPU measurement: {run['cpu_samples']} samples, "
             f"{display(run['cpu_measurement_seconds'])} s, "

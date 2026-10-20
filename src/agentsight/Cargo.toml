@@ -37,6 +37,7 @@ libc = "0.2.155"
 log = "0.4.22"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+memchr = "2"
 rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -70,6 +71,7 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
+memchr = { workspace = true }
 url = { workspace = true }
 agentsight-audit = { path = "crates/agentsight-audit" }
 agentsight-atif = { path = "crates/agentsight-atif" }

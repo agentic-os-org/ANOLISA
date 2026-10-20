@@ -36,6 +36,16 @@ SUBCOMMANDS:
     trace            Trace agent activity (default)
 ```
 
+## Resource benchmark helper (Linux)
+
+The repository's `resource_run.sh --ffi` measures AgentSight through a minimal
+C FFI host, reusing the normal load and CPU/RSS reports. `--ffi-api typed|v2`
+selects callbacks; `--candidate-lib` and `--baseline-lib` accept prebuilt libraries.
+FFI readiness and capture validation read callback receipts without requiring SQLite storage.
+Tracing still requires root or eBPF capabilities. See the
+[benchmark usage guide](../../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE.md#71-measure-the-ffi-library-with-a-minimal-c-host)
+for build requirements, A/B options and measurement boundaries.
+
 ## agentsight trace
 
 Loads the eBPF probes, discovers Agent processes, and writes captured events to SQLite.

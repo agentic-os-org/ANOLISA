@@ -8,6 +8,7 @@ import importlib.metadata
 import importlib.util
 import math
 import os
+import shlex
 import shutil
 import site
 import subprocess
@@ -23,6 +24,16 @@ def arguments(component: Path) -> argparse.Namespace:
         prog="resource_run.sh", description="Measure AgentSight RSS and CPU with optional Git A/B."
     )
     parser.add_argument("--ab", action="store_true", help="run before/after sequentially")
+    parser.add_argument("--ffi", action="store_true", help="measure a minimal C FFI consumer")
+    parser.add_argument(
+        "--ffi-api", choices=("typed", "v2"), help="FFI callback API (default: typed)"
+    )
+    parser.add_argument(
+        "--candidate-lib", type=Path, help="prebuilt FFI candidate .so; requires --ffi"
+    )
+    parser.add_argument(
+        "--baseline-lib", type=Path, help="prebuilt FFI baseline .so; requires --ffi --ab"
+    )
     parser.add_argument("--baseline", help="baseline commit, branch or tag; required with --ab")
     parser.add_argument(
         "--candidate",
@@ -77,9 +88,14 @@ def arguments(component: Path) -> argparse.Namespace:
         return args
     if args.connection_capacity is None:
         args.connection_capacity = args.agents
-    if args.ab and not (args.baseline or args.baseline_bin):
-        parser.error("--ab requires --baseline REF or --baseline-bin PATH")
-    if not args.ab and (args.baseline or args.baseline_bin):
+    if not args.ffi and (args.candidate_lib or args.baseline_lib or args.ffi_api):
+        parser.error("--candidate-lib, --baseline-lib and --ffi-api require --ffi")
+    if args.ffi and (args.candidate_bin or args.baseline_bin):
+        parser.error("--ffi uses --candidate-lib/--baseline-lib instead of executable inputs")
+    args.ffi_api = args.ffi_api or "typed"
+    if args.ab and not (args.baseline or args.baseline_bin or args.baseline_lib):
+        parser.error("--ab requires --baseline REF, --baseline-bin PATH or --baseline-lib PATH")
+    if not args.ab and (args.baseline or args.baseline_bin or args.baseline_lib):
         parser.error("baseline options require --ab")
     for name, value in vars(args).items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -149,9 +165,10 @@ def digest(path: Path) -> str:
 class Inputs:
     """Own temporary detached worktrees and a private working-tree snapshot index."""
 
-    def __init__(self, repo: Path, output: Path) -> None:
+    def __init__(self, repo: Path, output: Path, *, ffi: bool = False) -> None:
         self.repo = repo
         self.output = output
+        self.ffi = ffi
         self.temporary = tempfile.TemporaryDirectory(prefix="agentsight-resource-inputs-")
         self.worktrees: list[Path] = []
 
@@ -169,16 +186,22 @@ class Inputs:
         destination = self.output / label
         destination.mkdir()
         copied_binary = destination / "agentsight"
+        artifact = destination / "libagentsight.so" if self.ffi else copied_binary
         if binary is not None:
             binary = binary.expanduser().resolve()
+            name = "AgentSight library" if self.ffi else "AgentSight binary"
             if not binary.exists():
-                raise RuntimeError(f"AgentSight binary does not exist: {binary}")
+                raise RuntimeError(f"{name} does not exist: {binary}")
             if not binary.is_file():
-                raise RuntimeError(f"AgentSight binary is not a regular file: {binary}")
-            if not os.access(binary, os.X_OK):
+                raise RuntimeError(f"{name} is not a regular file: {binary}")
+            if not self.ffi and not os.access(binary, os.X_OK):
                 raise RuntimeError(f"AgentSight binary is not executable: {binary}")
-            shutil.copy2(binary, copied_binary)
-            return {"kind": "binary", "path": str(binary), "binary": str(copied_binary)}
+            shutil.copy2(binary, artifact)
+            return {
+                "kind": "library" if self.ffi else "binary",
+                "path": str(binary),
+                "binary": str(copied_binary),
+            }
 
         commit = self.git(
             "rev-parse",
@@ -233,12 +256,45 @@ class Inputs:
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     env["LIBBPF_SYS_LIBRARY_PATH"] = result.stdout.strip()
-            command = ["cargo", "build", "--release", "--locked", "--bin", "agentsight"]
+            command = ["cargo", "build", "--release", "--locked"]
+            command.extend(["--lib"] if self.ffi else ["--bin", "agentsight"])
             log = Path(source["binary"]).parent / "build.log"
             if run(command, log, cwd=source["component"], env=env):
                 raise RuntimeError(f"release build failed; see {log}")
-            shutil.copy2(cache / "target/release/agentsight", source["binary"])
+            name = "libagentsight.so" if self.ffi else "agentsight"
+            shutil.copy2(cache / "target/release" / name, Path(source["binary"]).parent / name)
             source["build_command"] = command
+        if self.ffi:
+            directory = Path(source["binary"]).parent
+            library = directory / "libagentsight.so"
+            component = Path(source.get("component", self.repo / "src/agentsight"))
+            # Prefer the frozen sibling library over an inherited LD_LIBRARY_PATH.
+            command = [
+                *shlex.split(os.environ.get("CC", "cc")),
+                "-O2",
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                str(self.output / "harness/ffi_runner.c"),
+                "-I",
+                str(component / "include"),
+                "-L",
+                str(directory),
+                "-Wl,--disable-new-dtags,-rpath,$ORIGIN",
+                "-lagentsight",
+                "-o",
+                source["binary"],
+            ]
+            log = directory / "ffi-build.log"
+            if run(command, log):
+                raise RuntimeError(f"FFI runner build failed; see {log}")
+            source.update(
+                mode="ffi",
+                library=str(library),
+                library_sha256=digest(library),
+                runner_build_command=command,
+            )
         source["sha256"] = digest(Path(source["binary"]))
 
     def close(self) -> None:

@@ -70,6 +70,7 @@ bash scripts/benchmark/single_run/run.sh \
 | `--agentsight-pid PID` | 未指定 | 采集已经运行的采集进程的资源占用。 |
 | `--metrics-file PATH` | 未指定 | 读取已有的内部 Prometheus 指标快照。 |
 | `--db PATH` | 未指定 | 与已有的 standalone AgentSight SQLite 数据库按 request ID 对账。 |
+| `--ffi-events PATH` | 未指定 | 对账 FFI 回调凭证；与 `--db` 互斥。 |
 | `--validation-wait-seconds SEC` | 30 | 负载结束后额外等待异步数据库写入的时间。 |
 | `--help` | — | 打印脚本参数和 Agent 模式默认值。 |
 
@@ -90,7 +91,7 @@ bash scripts/benchmark/single_run/run.sh \
 | `mock-server.log` | 本地 mock 服务端的启动信息和错误。 |
 | `request-logs/` | mock 服务端接受请求的流水记录。 |
 | `metrics.csv` | 通过 `--agentsight-pid` 启用采样后生成的进程资源数据。 |
-| `report.json` | 通过 `--db` 启用校验后生成的 SQLite 对账结果。 |
+| `report.json` | 根据 SQLite 或 FFI 回调凭证生成的 request ID 和 Token 对账结果。 |
 
 在 `agent-summary.json` 中查看 `distinct_agent_pids`、`peak_active_streams`、`average_active_streams`、`agents[].tokens_per_second` 和 `passed`。每路输出速率都必须位于配置的偏差范围内；活跃流峰值必须达到 Agent 数量，均值必须达到 `N × (1 - tolerance)`。实测速率仅统计测量窗口内接收的输出 Token，不包含模拟输入 usage 和尾部收流阶段接收的 Token。
 
@@ -114,7 +115,7 @@ bash scripts/benchmark/single_run/run.sh \
 ## 7. 一键测资源与 A/B 对比
 
 脚本先让全部客户端建立 TLS 连接，再启动 AgentSight，使启动扫描能看到已加载的 TLS 库。
-每路客户端发送一条小预检请求；只有全部客户端的请求都在 SQLite 中形成完整且 Token 用量正确的记录后，
+每路客户端发送一条小预检请求；只有全部客户端都有完整且 Token 用量正确的 SQLite 记录（CLI）或 FFI 回调凭证后，
 才放行测量 barrier。预检请求使用独立 ID 前缀，不计入正式负载、采集记录数和 RSS 采样。
 
 `--ready-timeout` 默认 30 秒，分别限制采集初始化和捕获就绪的等待时间。预检失败会在测量开始前退出，
@@ -163,6 +164,41 @@ A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `
 此一键脚本默认 32 个 Agent、每路 100 tok/s、60 秒；仅负载的 `run.sh` 仍默认 900 秒。支持上面的负载、探针发现、端口和安全限制参数，完整列表见 `resource_run.sh --help`。RSS 和 CPU 约每秒采样一次，覆盖尾部收流。主统计使用 `agents/start.json` 中的单调时钟起止窗口，尾部收流单独保存在每轮的 `tail` 对象和文本报告中。
 
 平均 RSS 是窗口内样本的算术平均，峰值 RSS 是采样最大值，并非进程运行以来的 `VmHWM`；单位为 MiB，并非十进制 MB。首条样本只建立 CPU 基准，CPU 字段留空。平均 CPU 按实际采样间隔加权，同时报告累计 CPU 秒；P95 使用区间样本的最近秩百分位数，CPU 峰值是区间平均占用率的最大值。跨越窗口边界的区间按重叠时长分摊。`metrics.csv` 保留原时间戳，并新增 `monotonic_timestamp` 和 `cpu_interval_seconds` 支持这些计算。原 LoongCollector WSS 目标需要按原实验范围另行测量。
+
+### 7.1 使用最小 C 宿主测量 FFI 动态库
+
+在资源测试命令中添加 `--ffi`，脚本会编译 `libagentsight.so` 和
+[最小 C consumer](../benchmark/single_run/ffi_runner.c)，复用现有负载、配置和 Git A/B 参数。
+需要 C 编译器（`cc`，也可用 `CC` 指定）。eBPF 仍需要 root 或相应 capabilities，默认请求 sudo。
+
+```bash
+bash scripts/benchmark/single_run/resource_run.sh --ffi \
+  --agents 32 --tokens-per-second 100 --duration 60
+```
+
+C 宿主通过 epoll 等待 eventfd，并使用非 NULL 回调持续消费事件。
+默认的 `--ffi-api typed` 测量 `agentsight_read` typed 接口；`--ffi-api v2` 则通过
+`agentsight_read_v2` 仅接收 JSON envelope 回调。请选择实际集成使用的接口。
+不逐事件打印或执行业务处理。CPU/RSS 包含全部 AgentSight 线程、FFI 转换、凭证转发及少量 C 宿主基础开销，
+并非对生产宿主内部内存的精确归因。FFI 校验直接使用回调，不要求 AgentSight SQLite 存储；
+保留 `--config` 中的存储开关，包括关闭 SQLite 的配置。
+
+请求在用户内容中携带测试 ID 标记，使精简的 FFI 事件即使使用库自行生成的 response ID，也能准确关联测试请求。
+Typed 回调仅将 ID、HTTP 状态和 Token 用量写入 `ffi-events.log`；v2 回调转发已有 JSON，不重复解析或序列化，
+大请求可能产生较大的凭证文件。独立校验进程增量读取凭证，复用现有就绪、完整性和 Token 正确率校验。
+宿主测量包含凭证写入开销；对账和 JSON 解析在其进程之外完成。
+
+已有动态库可指定 `--ffi --candidate-lib /path/to/libagentsight.so`。
+两个已有动态库使用 `--ffi --ab --baseline-lib PATH --candidate-lib PATH`；
+两个 Git 版本使用 `--ffi --ab --baseline REF --candidate REF`。
+`--ffi` 不能与可执行文件输入参数 `--agentsight-bin`、`--candidate-bin`、`--baseline-bin` 混用。
+已有动态库需要兼容当前工作区的 `include/agentsight.h`，并安装其运行时依赖。
+
+每轮将动态库保存在 runner 旁边，通过相对库搜索路径加载。
+`inputs.json` 和 `resource-summary.json` 记录动态库及 runner 的 SHA-256。
+`ffi-consumer.json` 记录包含预检请求的回调计数；回调凭证缺失或不正确、consumer 异常退出、
+最终流水线指标缺失或 FFI 队列丢事件仍会将结果判为 INVALID。
+报告会明确标注最小 C FFI 宿主的测量范围。
 
 完整的优化前后对比设计见 [benchmark 计划](BENCHMARK_PLAN_zh.md)。
 

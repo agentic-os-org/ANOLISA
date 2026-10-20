@@ -742,7 +742,7 @@ mod tests {
                     assert!(matches!(
                         results.as_slice(),
                         [crate::aggregator::AggregatedResult::Abandoned {
-                            reason: crate::aggregator::RemoveReason::LruEvicted,
+                            reason: crate::aggregator::RemoveReason::CapacityRejected,
                             ..
                         }]
                     ));
@@ -753,10 +753,12 @@ mod tests {
         });
         let snapshot = handle.render();
         assert!(snapshot.contains(
-            "agentsight_http_conn_removed_total{reason=\"lru_evicted\",state=\"request_pending\"} 1"
+            "agentsight_http_conn_removed_total{reason=\"capacity_rejected\",state=\"admission\"} 1"
         ));
         assert!(
-            snapshot.contains("agentsight_http_abandoned_emitted_total{reason=\"lru_evicted\"} 1")
+            snapshot.contains(
+                "agentsight_http_abandoned_emitted_total{reason=\"capacity_rejected\"} 1"
+            )
         );
         assert!(snapshot.contains("agentsight_http_conn_active 0"));
         assert!(snapshot.contains("agentsight_http_conn_retained_bytes 0"));

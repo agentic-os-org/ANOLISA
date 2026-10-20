@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // ==================== Default Constants ====================
 
 /// Default LRU cache capacity for HTTP connections
-pub const DEFAULT_CONNECTION_CAPACITY: usize = 32;
+pub const DEFAULT_CONNECTION_CAPACITY: usize = 128;
 
 /// Default poll timeout for ring buffer polling (milliseconds)
 pub const DEFAULT_POLL_TIMEOUT_MS: u64 = 100;
@@ -1889,7 +1889,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 32);
+        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 128);
         assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
         assert_eq!(DEFAULT_MAX_HEADERS, 64);
@@ -1920,7 +1920,7 @@ mod tests {
             config.storage.primary_path(),
             default_base_path().join(PRIMARY_DB_NAME)
         );
-        assert_eq!(config.connection_capacity, 32);
+        assert_eq!(config.connection_capacity, 128);
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
         assert_eq!(config.max_headers, 64);

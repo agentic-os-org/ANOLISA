@@ -53,7 +53,7 @@
     "pending_genai_max_count": 1000,
     "pending_genai_max_bytes_mb": 16,
     "pid_cache_size": 1024,
-    "connection_capacity": 32,
+    "connection_capacity": 128,
     "connection_max_bytes_mb": 64,
     "ffi_channel_max_bytes_mb": 64,
     "max_connection_body_mb": 8,

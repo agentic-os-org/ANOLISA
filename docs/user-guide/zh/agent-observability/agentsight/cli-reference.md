@@ -35,6 +35,14 @@ SUBCOMMANDS:
     trace            Trace agent activity (default)
 ```
 
+## 资源 benchmark 辅助脚本（Linux）
+
+仓库中的 `resource_run.sh --ffi` 通过最小 C FFI 宿主测量 AgentSight，复用现有负载和 CPU/RSS 报告。
+`--ffi-api typed|v2` 选择回调接口，`--candidate-lib` 和 `--baseline-lib` 支持已有动态库。
+FFI 就绪和采集校验直接读取回调凭证，不要求 SQLite 存储。
+采集仍需要 root 或 eBPF capabilities。构建条件、A/B 参数及测量范围见
+[benchmark 使用指南](../../../../../src/agentsight/scripts/docs/BENCHMARK_USAGE_zh.md#71-使用最小-c-宿主测量-ffi-动态库)。
+
 ## agentsight trace
 
 加载 eBPF 探针、发现 Agent 进程、把采集到的事件写入 SQLite。

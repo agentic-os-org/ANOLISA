@@ -228,9 +228,15 @@ impl GenAIBuilder {
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        if let Some(mut llm_call) =
+        let resource_only = results.iter().any(|r| {
+            matches!(r,
+            AnalysisResult::Abandoned(reason) if reason.metadata_only())
+        });
+        if let Some(mut llm_call) = if resource_only {
+            self.build_resource_metadata(results, response_mapper, pid_agent_name_cache)
+        } else {
             self.build_llm_call_with_raw(results, response_mapper, pid_agent_name_cache, copy_raw)
-        {
+        } {
             if let Some(reason) = results.iter().find_map(|result| match result {
                 AnalysisResult::Abandoned(reason) => Some(*reason),
                 _ => None,

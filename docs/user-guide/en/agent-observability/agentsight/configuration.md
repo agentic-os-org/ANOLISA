@@ -62,7 +62,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
     "pending_genai_max_count": 1000,
     "pending_genai_max_bytes_mb": 16,
     "pid_cache_size": 1024,
-    "connection_capacity": 32,
+    "connection_capacity": 128,
     "connection_max_bytes_mb": 64,
     "ffi_channel_max_bytes_mb": 64,
     "max_connection_body_mb": 8,
@@ -171,7 +171,7 @@ The packaged systemd unit still uses `MemoryMax=350M`.
 | `pending_genai_max_count` | `1000` | Shared limit for raw completed captures, session-ID waits and local SQLite retries |
 | `pending_genai_max_bytes_mb` | `16` | Byte cap for the same queue |
 | `pid_cache_size` | `1024` | PID → Agent name LRU entries |
-| `connection_capacity` | `32` | HTTP connection cache entries; must be greater than zero. Set at least as high as the expected concurrent connections |
+| `connection_capacity` | `128` | HTTP connection cache entries; must be greater than zero. Set at least as high as the expected concurrent connections |
 | `connection_max_bytes_mb` | `64` | Shared HTTP/1 + HTTP/2 retained-byte budget, including buffer capacity and decoder state; `0` disables it |
 | `ffi_channel_max_bytes_mb` | `64` | FFI event payload budget through callback completion; `0` disables it. Admission also observes the existing 10000-event queue limit |
 | `max_connection_body_mb` | `8` | Per-connection body limit, checked as fragments arrive |
@@ -181,10 +181,19 @@ The packaged systemd unit still uses `MemoryMax=350M`.
 | `connection_hard_timeout_secs` | `300` | Finalize and release inactive HTTP/1 connections and HTTP/2 streams as incomplete; `0` disables this timeout |
 | `ring_buffer_mb` | `64` | eBPF ring buffer size; must be a power of two |
 
-The default `connection_capacity=32` accommodates 32 concurrent HTTP/1 connections.
+The default `connection_capacity=128` accommodates 128 concurrent HTTP/1 connections.
 Choose a capacity covering the actual connections used by all Agents; one Agent can open multiple
 connections. HTTP/2 allows four times that many stream entries and shares the same byte budget.
-Restart capture after changing runtime limits.
+HTTP/1 connections and HTTP/2 streams with traffic in the last 5 seconds are skipped by capacity
+eviction. If every entry is protected, the new exchange is rejected with
+`abandon_reason=capacity_rejected`; existing calls continue. Protection covers request assembly,
+response waiting and response streaming. In-flight calls become eligible after
+5 seconds. Completed HTTP/1 connections reserve their slot for another 5 seconds for keep-alive
+reuse, retaining only the connection identifier and completion time. Reservations count toward
+`connection_capacity` and expire without further traffic; new connections may be rejected during
+that interval. HTTP/2 stream IDs are not reused, so completed streams do not reserve slots.
+Hard byte limits can still reclaim protected entries. Explicit capacities in existing
+configs remain unchanged. Restart capture after changing runtime limits.
 
 CPU pacing is enabled by default with `cpu_budget_percent=25`; set it to `0` to disable it.
 Pacing runs before completed-capture analysis and writes, sharing
@@ -199,9 +208,13 @@ probe drops, queue growth and response-drain time when tuning it.
 records CPU admission deferrals.
 
 When capacity, replacement, a byte limit, hard inactivity, process exit or shutdown ends a call,
-AgentSight emits the captured request or partial response with `finish_reason="incomplete"`.
-The semantic event metadata includes `abandon_reason` and `incomplete=true`; byte-limit removals
-also include `truncated=true`. These records use the normal FFI delivery path even without SQLite.
+AgentSight emits a record with `finish_reason="incomplete"`, `abandon_reason` and `incomplete=true`.
+Capacity eviction, capacity rejection and byte-limit removal retain only bounded routing and
+correlation metadata with `metadata_only=true`: bodies, messages and token usage are omitted,
+and full payload analysis is skipped. Each retained field is capped at 2 KiB, with at most eight
+routing/correlation headers. Byte-limit removals also include `truncated=true`. Other lifecycle
+removals preserve captured partial evidence. These records use the normal FFI delivery path even
+without SQLite; v2 callbacks expose the metadata and typed callbacks expose the incomplete finish reason.
 Active traffic refreshes the inactivity timer. Soft snapshots require SQLite and keep the call in memory;
 hard maintenance also runs in FFI mode when no capture events arrive.
 

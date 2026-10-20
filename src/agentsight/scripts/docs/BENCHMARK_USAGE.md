@@ -87,6 +87,7 @@ The `OUTPUT_DIR` environment variable also sets the destination; an explicit
 | `--agentsight-pid PID` | Unset | Collect resources of an already-running collector process. |
 | `--metrics-file PATH` | Unset | Read an existing internal Prometheus metrics snapshot. |
 | `--db PATH` | Unset | Reconcile request IDs with an existing standalone AgentSight SQLite database. |
+| `--ffi-events PATH` | Unset | Reconcile FFI callback receipts; mutually exclusive with `--db`. |
 | `--validation-wait-seconds SEC` | 30 | Additional wait for asynchronous database writes after the load finishes. |
 | `--help` | — | Print the runner's options and Agent mode defaults. |
 
@@ -111,7 +112,7 @@ before and after an optimization. Both affect retained data and stream lifetime.
 | `mock-server.log` | Local mock server startup and errors. |
 | `request-logs/` | Mock server's accepted-request ledgers. |
 | `metrics.csv` | Process resources, when `--agentsight-pid` enables collection. |
-| `report.json` | SQLite reconciliation, when `--db` enables validation. |
+| `report.json` | Request-ID and Token reconciliation from SQLite or FFI callback receipts. |
 
 In `agent-summary.json`, check `distinct_agent_pids`, `peak_active_streams`,
 `average_active_streams`, `agents[].tokens_per_second`, and `passed`. Every
@@ -176,7 +177,7 @@ appear. Use `--no-sudo` only when the current user already has eBPF permissions.
 The script creates an isolated configuration, database and log files. It prepares
 all client TLS connections before starting AgentSight, so startup discovery sees
 the loaded TLS libraries. Every client sends a small preflight call; the wrapper
-requires a complete SQLite record with correct token usage from every client
+requires a complete SQLite record (CLI) or FFI callback receipt with correct token usage from every client
 before releasing the measurement barrier. Preflight requests use a separate ID
 prefix and are excluded from load totals, capture totals and RSS samples.
 
@@ -263,6 +264,50 @@ Intervals crossing a window boundary contribute proportionally to their overlap.
 `metrics.csv` retains wall-clock timestamps and adds `monotonic_timestamp` and
 `cpu_interval_seconds` for these calculations. The original LoongCollector WSS
 target needs a separate measurement using the same original scope.
+
+### 7.1 Measure the FFI library with a minimal C host
+
+Add `--ffi` to the resource command to build `libagentsight.so` and a minimal
+[C consumer](../benchmark/single_run/ffi_runner.c). It accepts the same load,
+configuration and Git A/B options. A C compiler (`cc`, or `CC`) is required.
+eBPF still requires root or the appropriate capabilities; sudo is requested by default.
+
+```bash
+bash scripts/benchmark/single_run/resource_run.sh --ffi \
+  --agents 32 --tokens-per-second 100 --duration 60
+```
+
+The host waits on eventfd with epoll and drains events through non-NULL callbacks.
+`--ffi-api typed` (default) measures the typed
+`agentsight_read` interface; `--ffi-api v2` measures `agentsight_read_v2` with only
+the JSON envelope callback. Select the interface used by the real integration.
+No per-event printing or application processing is included. CPU/RSS cover all
+AgentSight threads, FFI conversion, receipt forwarding and the small C host baseline;
+they are not an exact allocation attribution inside a production host.
+FFI validation uses callbacks and does not require AgentSight SQLite storage.
+Storage feature settings from `--config` are preserved, including disabled SQLite.
+
+Requests include a benchmark ID marker in user content so compact FFI events retain
+their identity even when the library generates its own response ID. Typed callbacks
+write only the ID, HTTP status and Token usage to `ffi-events.log`. V2 callbacks forward
+their existing JSON payload without parsing or serializing it again; this can produce
+large receipt files for large requests. A separate validator process reads these receipts
+incrementally and reuses the normal readiness, completeness and Token accuracy checks.
+The measured host includes receipt writes; reconciliation and JSON parsing are outside it.
+
+Supply an existing library with `--ffi --candidate-lib /path/to/libagentsight.so`.
+For two prebuilt libraries, use `--ffi --ab --baseline-lib PATH --candidate-lib PATH`;
+for Git versions, use `--ffi --ab --baseline REF --candidate REF`.
+Do not combine `--ffi` with executable input options (`--agentsight-bin`,
+`--candidate-bin`, `--baseline-bin`). Prebuilt libraries must be compatible with
+the checkout's `include/agentsight.h`; their runtime dependencies must be installed.
+
+Each run retains its library beside the runner, with a relative library search
+path. `inputs.json` and `resource-summary.json` record both library and runner
+SHA-256 hashes. `ffi-consumer.json` records callback counts, including preflight;
+missing or incorrect callback receipts, an unsuccessful consumer exit, missing final
+pipeline metrics or any FFI queue drops invalidate the result.
+The report labels the measurement as a minimal C FFI host.
 
 See the [benchmark plan](BENCHMARK_PLAN.md) for the complete before/after design.
 

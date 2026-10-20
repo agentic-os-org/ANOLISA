@@ -98,11 +98,15 @@ are unchanged; consumers must continue copying borrowed fields before returning.
 
 HTTP/1 forced removals own the old state and retire all side caches together. HTTP/2 follows the
 same abandonment semantics and retires decoded-header and continuation state. Removal reasons
-include `lru_evicted`, `replaced`, `hard_timeout`, `over_budget`, `pid_exited`, `protocol_error`
+include `lru_evicted`, `capacity_rejected`, `replaced`, `hard_timeout`, `over_budget`, `pid_exited`, `protocol_error`
 and `shutdown`. Completed and empty soft-expired entries are counted separately.
 
 Unfinished evidence becomes `AggregatedResult::Abandoned` with an owned request or partial response.
-The normal analyzer and builder produce `finish_reason="incomplete"` with `abandon_reason` and
+Capacity and byte-pressure removals strip bodies, raw TLS sources, SSE reducers and decoder buffers
+before queuing. At most eight routing/correlation headers and 2 KiB per field are retained. A metadata
+analyzer and builder skip body decompression, JSON/message parsing, token calculation and request
+hashing, and set `metadata_only=true`. Other lifecycle removals retain their captured evidence.
+Both delivery paths produce `finish_reason="incomplete"` with `abandon_reason` and
 `incomplete=true` metadata. Byte-limit removal also sets `truncated=true`. Such calls bypass
 session deferral and the empty-call raw HTTPS fallback, so missing SQLite or an unparseable partial
 request does not suppress delivery. FFI queue overload remains a counted newest-event drop.
@@ -115,10 +119,32 @@ releasing it.
 
 HTTP/2 completion before END_STREAM leaves a bounded marker instead of a payload state. Late
 compressed epilogues cannot recreate an in-flight stream, and trailer decoding keeps HPACK coherent.
+Resource and protocol abandonment use the same closed-stream path; discarded DATA payloads are
+counted by `agentsight_http2_closed_stream_discarded_bytes_total`.
+
+HTTP/1 SSE activity promotes both the connection and activity LRUs. Resource eviction or a protocol
+error emits one diagnostic and leaves a marker bounded by the connection capacity.
+Reads matching that marker are counted by `agentsight_http_sse_discarded_bytes_total{reason}` instead
+of restarting response-only correlation. A new request or HTTP response clears the marker; periodic
+maintenance expires it after the larger of the configured soft timeout, hard timeout, and 60 seconds.
+Capacity-rejected exchanges suppress even response headers until a new request arrives.
+PID cleanup and reset also release markers. Capacity displacement can remove a marker earlier.
+
+Capacity admission skips in-flight calls with traffic inside the last 5 seconds in both HTTP versions,
+including request assembly, response waiting, response streaming and raw retention. If every entry is protected, admission emits a metadata-only `capacity_rejected`
+diagnostic. Existing streams stay within the configured count cap. Hard byte limits may reclaim
+protected streams after trying unprotected entries; activity protection cannot override memory safety.
+HTTP/1 completion releases all payload caches but reserves the same connection's count slot for
+5 seconds using only its ID and completion time. A returning request consumes its reservation;
+new connections cannot occupy it between keep-alive exchanges. Active states plus reservations
+never exceed the configured capacity. Expiration, PID cleanup and reset release reservations;
+duplicate completion cleanup does not renew them. They do not appear as pending calls or retain
+capture allocations. HTTP/2 stream IDs cannot be reused and do not need these reservations.
+Hard-timeout removal still permits late response-only recovery.
 
 ## Budgets and observability
 
-Defaults are 32 HTTP/1 entries, 128 HTTP/2 streams, a shared 64 MiB correlation budget, a 64 MiB probe
+Defaults are 128 HTTP/1 entries, 512 HTTP/2 streams, a shared 64 MiB correlation budget, a 64 MiB probe
 queue, a 64 MiB FFI budget, a 16 MiB deferred GenAI budget and a 64 MiB ring buffer. Bodies have an
 8 MiB limit and SSE payloads a 2 MiB per-stream limit. Soft and hard inactivity default to 60 and
 300 seconds.
@@ -127,6 +153,20 @@ Accounting uses capacities and owned strings, deduplicates shared HTTP/1 TLS sou
 continuation, HPACK and decoder storage. Aggregate admission enforces the shared byte budget in LRU
 order. Body and SSE limits are checked as fragments arrive. These estimates cover retained payloads;
 temporary parsing, callback serialization, C++ copies and allocator overhead require separate headroom.
+
+Connection and stream totals are updated at mutation and removal boundaries. Raw SSE source dedup
+and HTTP/2 frame accounting visit newly appended items, while periodic maintenance retains the
+oversize safety check. Persistent HTTP/1 source-dedup sets are charged to the shared budget.
+Compact reduction updates allocation estimates within changed JSON subtrees and uses structured
+delta keys. Completion transfers parsed values to semantic delivery; byte-oriented consumers request
+serialization lazily. Compact SSE framing borrows single-line payloads directly from the continuation
+buffer and joins only multiline payloads, avoiding an owned capture and result vector per frame.
+The reducer scans literal JSON markers before parsing. Frames that cannot affect reduction or
+completion retain their payload for downstream analysis without a speculative JSON parse. Escaped
+field names conservatively take the JSON path, and parsed pass-through events keep their value.
+The raw parser retains multiline capture provenance until framing has consumed it.
+Explicit DashScope `parameters.incremental_output` selects append or snapshot semantics without
+prefix comparisons; unknown modes retain exact per-event prefix detection, including mode switches.
 
 Metrics expose active and retained-byte gauges, removals by reason and state, abandoned emissions,
 FFI bytes through callback completion and FFI drops by slot or byte limit. The existing

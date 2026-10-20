@@ -14,6 +14,8 @@ use crate::parser::http2::ParsedHttp2Frame;
 pub enum RemoveReason {
     /// A newer connection displaced the least recently used entry.
     LruEvicted,
+    /// Capacity was exhausted by recently active streams, so admission was refused.
+    CapacityRejected,
     /// A new request reused a connection with an unfinished call.
     Replaced,
     /// An empty connection exceeded the soft inactivity timeout.
@@ -35,6 +37,7 @@ impl RemoveReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LruEvicted => "lru_evicted",
+            Self::CapacityRejected => "capacity_rejected",
             Self::Replaced => "replaced",
             Self::IdleTimeout => "idle_timeout",
             Self::HardTimeout => "hard_timeout",
@@ -44,6 +47,41 @@ impl RemoveReason {
             Self::Shutdown => "shutdown",
         }
     }
+
+    /// Resource pressure reports bounded metadata instead of expanding partial payloads.
+    pub(crate) fn metadata_only(self) -> bool {
+        matches!(
+            self,
+            Self::LruEvicted | Self::CapacityRejected | Self::OverBudget
+        )
+    }
+}
+
+/// Capacity eviction must spare in-flight connections with traffic inside this window.
+pub(crate) const ACTIVE_CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bound each diagnostic field without splitting UTF-8 characters.
+pub(crate) fn metadata_text(value: &str) -> String {
+    let mut end = value.len().min(2048);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+/// Keep only routing and correlation headers on resource-pressure diagnostics.
+pub(crate) fn metadata_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "x-request-id"
+            | "content-type"
+            | ":method"
+            | ":path"
+            | ":authority"
+            | ":scheme"
+            | ":status"
+    )
 }
 
 /// Aggregated result from any aggregator
@@ -53,7 +91,7 @@ pub enum AggregatedResult {
     Abandoned {
         /// Lifecycle or resource limit that ended correlation.
         reason: RemoveReason,
-        /// Owned request or partial response, analyzed through the normal pipeline.
+        /// Owned partial evidence; resource removals retain only bounded metadata.
         partial: Box<AggregatedResult>,
     },
     /// HTTP request/response pair complete

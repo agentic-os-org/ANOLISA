@@ -41,6 +41,18 @@ SQLite 为唯一活跃输出时会立即保存已经完成的调用。默认 Log
 
 ## 保留与容量上限
 
+SSE 调用超过采集字节上限或因连接容量被驱逐时，AgentSight 仅输出有界元数据，标记
+`incomplete=true`、`metadata_only=true` 和 `abandon_reason`，不保留正文、消息或 token 用量；
+字节超限还设置 `truncated=true`。容量驱逐跳过最近 5 秒活跃的在途调用，包括请求组装和等待响应阶段；
+所有条目均受保护时，
+拒绝新调用并标记 `abandon_reason=capacity_rejected`。HTTP/1 调用完成后保留不含 payload 的名额 5 秒，
+供下一次 keep-alive 请求复用。活跃连接与保留名额合计不超过 `connection_capacity`；名额过期前可能拒绝新连接。
+硬字节上限仍可回收活跃条目。有界标记会跳过该调用的
+后续尾流，避免反复输出 incomplete 记录和驱逐其他连接。新请求或 HTTP 响应清除标记，
+但容量拒绝的调用必须等到新请求到达才清除标记。标记可能因
+容量限制被提前移除；定期维护按配置的连接软超时、硬超时和 60 秒三者中的最大值使标记过期。
+硬超时移除仍允许迟到响应恢复为 response-only 证据。
+
 schema v4 为每个 AgentSight 自有数据库统一配置 `retention_days`、`max_db_size_mb` 和
 `check_interval_secs`：
 
@@ -227,6 +239,12 @@ agentsight_token_input_total{agent="Cosh"} 50000
 计数器按 Agent 维度、取累计值：`agentsight_token_input_total`、`agentsight_token_output_total`、
 `agentsight_token_total_total`、`agentsight_llm_requests_total`。`/metrics` 只允许本机访问，因此请用
 节点本地的 Prometheus agent 抓取，或者通过本机反向代理暴露。`agentsight metrics` 在命令行输出同样内容。
+
+`agentsight_http_sse_discarded_bytes_total{reason}` 统计保留废弃 SSE 标记期间跳过的尾流字节。
+结合 `agentsight_http_conn_removed_total{reason,state}` 可区分资源压力与正常完成。
+Aggregator 阶段耗时包含 compact SSE 读取。
+`agentsight_http2_closed_stream_discarded_bytes_total` 统计 HTTP/2 正常完成或因资源、协议问题终止后
+跳过的 DATA payload 字节；trailer 仍更新 header 解码器。
 
 ## 轨迹导出（ATIF v1.7）
 

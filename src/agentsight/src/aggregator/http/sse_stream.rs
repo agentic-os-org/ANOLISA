@@ -3,11 +3,11 @@
 use super::chunk_stream::ChunkStream;
 use super::sse_reduce::SseReducer;
 use crate::parser::http::ParsedResponse;
-use crate::parser::sse::{ParsedSseEvent, SseParser};
+use crate::parser::sse::ParsedSseEvent;
+use crate::parser::sse::parser::SseFrame;
 use crate::probes::sslsniff::SslEvent;
 use crate::utils::stream_decode::StreamDecoder;
 use std::io;
-use std::rc::Rc;
 
 #[derive(Debug)]
 pub(crate) struct SseStream {
@@ -23,6 +23,7 @@ pub(crate) struct SseStream {
 struct Lines {
     pending: Vec<u8>,
     scan: usize,
+    line_start: usize,
     reducer: SseReducer,
     limit: usize,
     at_start: bool,
@@ -35,31 +36,35 @@ impl Lines {
         let mut consumed = 0;
         let result = (|| {
             while self.scan < self.pending.len() {
-                self.scan += 1;
-                let end = self.scan;
-                if self.pending[..end].ends_with(b"\n\n")
-                    || self.pending[..end].ends_with(b"\r\r")
-                    || self.pending[..end].ends_with(b"\n\r")
-                {
+                let Some(offset) = memchr::memchr2(b'\r', b'\n', &self.pending[self.scan..]) else {
+                    self.scan = self.pending.len();
+                    break;
+                };
+                let pos = self.scan + offset;
+                if self.pending[pos] == b'\r' && pos + 1 == self.pending.len() {
+                    self.scan = pos;
+                    break;
+                }
+                let end = pos
+                    + 1
+                    + usize::from(
+                        self.pending[pos] == b'\r' && self.pending.get(pos + 1) == Some(&b'\n'),
+                    );
+                self.scan = end;
+                let blank = pos == self.line_start;
+                self.line_start = end;
+                if blank {
                     if end - consumed > self.limit {
                         return Err(io::Error::new(
                             io::ErrorKind::OutOfMemory,
                             "SSE event exceeds byte limit",
                         ));
                     }
-                    let mut event_source = source.metadata_only();
-                    event_source.buf = self.pending[consumed..end].to_vec();
-                    event_source.len = event_source.buf.len() as u32;
-                    let parser = SseParser::new();
-                    let events = if self.at_start {
-                        parser.parse_at_stream_start(Rc::new(event_source))
-                    } else {
-                        parser.parse(Rc::new(event_source))
-                    };
+                    let frame = SseFrame::parse(&self.pending[consumed..end], self.at_start);
                     self.at_start = false;
                     consumed = end;
-                    for event in events {
-                        self.done |= self.reducer.push(event);
+                    if let Some(frame) = frame {
+                        self.done |= self.reducer.push(frame, source);
                         if self.reducer.retained_bytes() > self.limit {
                             return Err(io::Error::new(
                                 io::ErrorKind::OutOfMemory,
@@ -74,6 +79,7 @@ impl Lines {
         if consumed != 0 {
             self.pending.drain(..consumed);
             self.scan -= consumed;
+            self.line_start -= consumed;
             if self.pending.is_empty() && self.pending.capacity() > 64 * 1024 {
                 self.pending = Vec::new();
             }
@@ -116,6 +122,7 @@ impl SseStream {
             lines: Lines {
                 pending: Vec::new(),
                 scan: 0,
+                line_start: 0,
                 reducer: SseReducer::default(),
                 limit,
                 at_start: true,
@@ -168,6 +175,11 @@ impl SseStream {
             self.lines.feed(b"\n\n", source)?;
         }
         Ok(())
+    }
+
+    /// Respect an explicit DashScope mode; otherwise retain compatible prefix detection.
+    pub(crate) fn set_native_incremental(&mut self, enabled: Option<bool>) {
+        self.lines.reducer.native_incremental = enabled;
     }
 
     pub(crate) fn done(&self) -> bool {

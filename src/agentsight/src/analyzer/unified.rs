@@ -446,6 +446,9 @@ impl Analyzer {
     /// `AnalysisResult::Token` for SSE streams containing token usage,
     /// or `AnalysisResult::Message` for parsed LLM API request/response bodies.
     pub fn analyze_aggregated(&self, result: &AggregatedResult) -> Vec<AnalysisResult> {
+        if let Some(metadata) = context::resource_abandonment(result) {
+            return metadata;
+        }
         if let AggregatedResult::Abandoned { reason, partial } = result {
             let mut results = self.analyze_aggregated(partial);
             results.push(AnalysisResult::Abandoned(*reason));

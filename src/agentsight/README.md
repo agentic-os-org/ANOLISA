@@ -263,6 +263,12 @@ size; reported probe drops invalidate the comparison. Tracing requires root or e
 the script requests sudo by default. See the [benchmark usage guide](scripts/docs/BENCHMARK_USAGE.md)
 for one-command examples, working-tree snapshots and reports.
 
+Add `--ffi` to build and measure a minimal C FFI consumer instead of the CLI.
+`--ffi-api typed|v2` selects typed callbacks (default) or JSON envelope callbacks;
+`--candidate-lib PATH` and `--baseline-lib PATH` accept prebuilt shared libraries.
+The measurement includes AgentSight threads, FFI conversion, receipt forwarding and the small C host baseline.
+FFI readiness and capture validation use callback receipts independently of SQLite storage.
+
 ## Quick Start
 
 ### Prerequisites
@@ -491,7 +497,7 @@ Configure buffer caps to prevent unbounded memory growth:
 | `pending_genai_max_count` | 1,000 | Max pending events awaiting session_id |
 | `pending_genai_max_bytes_mb` | 16 | Max bytes for pending events |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU cache size |
-| `connection_capacity` | 32 | HTTP connection cache entries; use at least the expected concurrency and restart tracing |
+| `connection_capacity` | 128 | HTTP connection cache entries; use at least the expected concurrency and restart tracing |
 | `max_connection_body_mb` | 8 | Per-connection HTTP body buffer cap |
 | `connection_idle_timeout_secs` | 60 | Soft inactivity timeout for pending SQLite snapshots |
 | `connection_hard_timeout_secs` | 300 | Finalize inactive calls as incomplete and release them; 0 disables the timeout |
@@ -502,7 +508,13 @@ Configure buffer caps to prevent unbounded memory growth:
 | `ring_buffer_mb` | 64 | eBPF Ring Buffer size (must be power of 2) |
 
 Semantic-only delivery reduces SSE deltas and releases raw TLS buffers during the stream.
-Forced connection removal reports an incomplete call with an abandonment reason.
+In-flight connections active within the last 5 seconds are protected from capacity eviction,
+including request assembly and response waiting; when all
+entries are protected, new connections are rejected with `abandon_reason=capacity_rejected`.
+Completed HTTP/1 connections reserve their slot for 5 seconds using only an identifier and
+timestamp, allowing the next keep-alive request to reuse it without retaining payloads.
+Resource removals report bounded metadata with `incomplete=true` and `metadata_only=true`.
+Hard byte limits still permit forced reclamation.
 Probe and FFI queues enforce byte limits alongside their slot limits and count rejected events.
 These budgets cover retained payloads; process RSS also includes the ring buffer, decoder working
 memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits)

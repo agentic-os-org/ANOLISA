@@ -1,11 +1,12 @@
 //! Capacity accounting includes shared capture buffers once per retained state.
 
-use super::ConnectionState;
+use super::{ConnectionId, ConnectionMetrics, ConnectionState, HttpConnectionAggregator};
 use crate::parser::http::{ParsedRequest, ParsedResponse};
 use crate::probes::sslsniff::SslEvent;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
+#[derive(Debug)]
 struct Counter {
     bytes: usize,
     first_sources: [usize; 4],
@@ -13,7 +14,183 @@ struct Counter {
     sources: Option<HashSet<usize>>,
 }
 
+#[derive(Debug, Default)]
+/// Per-connection charges and append-only SSE source history.
+pub(super) struct RetainedConnection {
+    bytes: usize,
+    pending_bytes: usize,
+    pending: usize,
+    /// Payload charge used by the per-stream limit independently of request bytes.
+    pub(super) sse_bytes: usize,
+    sse: Option<RetainedSse>,
+}
+
+#[derive(Debug)]
+struct RetainedSse {
+    all: Counter,
+    events: Counter,
+    count: usize,
+    first_source: usize,
+    first_metadata: usize,
+}
+
+fn event_metadata(event: &crate::parser::sse::ParsedSseEvent) -> usize {
+    event.id.as_ref().map_or(0, String::capacity)
+        + event.event.as_ref().map_or(0, String::capacity)
+        + event.parsed_retained_bytes()
+}
+
+impl RetainedConnection {
+    /// Include persistent source-dedup sets in the shared byte budget.
+    pub(super) fn metadata_bytes(&self) -> usize {
+        self.sse.as_ref().map_or(0, |sse| {
+            sse.all.metadata_bytes() + sse.events.metadata_bytes()
+        })
+    }
+
+    fn update_state(&mut self, state: &ConnectionState) {
+        self.pending = usize::from(!matches!(state, ConnectionState::Idle));
+        let ConnectionState::SseActive {
+            request,
+            response_headers,
+            sse_events,
+            compressed_buffer,
+            zstd_decoder,
+            ..
+        } = state
+        else {
+            self.sse = None;
+            self.sse_bytes = 0;
+            self.pending_bytes = state.buffered_bytes();
+            return;
+        };
+        let first_source = sse_events
+            .first()
+            .map_or(0, |event| event.source_event() as *const SslEvent as usize);
+        // Prefix recovery can prepend one event or repair the first event's metadata.
+        // Ordinary reads only append, so old TLS sources never need to be rescanned.
+        if self
+            .sse
+            .as_ref()
+            .is_none_or(|sse| sse.count > sse_events.len() || sse.first_source != first_source)
+        {
+            let mut all = Counter::new(size_of::<ConnectionState>());
+            if let Some(request) = request {
+                all.request(request);
+            }
+            all.response(response_headers);
+            self.sse = Some(RetainedSse {
+                all,
+                events: Counter::new(0),
+                count: 0,
+                first_source,
+                first_metadata: 0,
+            });
+        }
+        if let Some(sse) = &mut self.sse {
+            if sse.count != 0 {
+                let metadata = sse_events.first().map_or(0, event_metadata);
+                sse.all.bytes = sse.all.bytes.saturating_sub(sse.first_metadata) + metadata;
+                sse.events.bytes = sse.events.bytes.saturating_sub(sse.first_metadata) + metadata;
+            }
+            for event in &sse_events[sse.count..] {
+                sse.all.source(event.source_event());
+                sse.all.source(event.capture_event());
+                sse.events.source(event.source_event());
+                sse.events.source(event.capture_event());
+                let metadata = event_metadata(event);
+                sse.all.bytes += metadata;
+                sse.events.bytes += metadata;
+            }
+            sse.count = sse_events.len();
+            sse.first_metadata = sse_events.first().map_or(0, event_metadata);
+            let buffers = sse_events.capacity() * size_of::<crate::parser::sse::ParsedSseEvent>()
+                + compressed_buffer.as_ref().map_or(0, Vec::capacity)
+                + zstd_decoder
+                    .as_ref()
+                    .map_or(0, |decoder| decoder.borrow().retained_bytes());
+            self.pending_bytes = sse.all.bytes + buffers;
+            self.sse_bytes = sse.events.bytes + buffers;
+        }
+    }
+}
+
+impl HttpConnectionAggregator {
+    /// Reconcile the touched connection without rescanning earlier SSE events.
+    pub(super) fn refresh_retained(&mut self, id: &ConnectionId) {
+        let Some(state) = self.connections.peek(id) else {
+            return;
+        };
+        let retained = self.retained.entry(*id).or_default();
+        self.retained_metrics.connection_cache_bytes = self
+            .retained_metrics
+            .connection_cache_bytes
+            .saturating_sub(retained.bytes);
+        self.retained_metrics.pending_connection_bytes = self
+            .retained_metrics
+            .pending_connection_bytes
+            .saturating_sub(retained.pending_bytes);
+        self.retained_metrics.pending_connection_count = self
+            .retained_metrics
+            .pending_connection_count
+            .saturating_sub(retained.pending);
+        retained.update_state(state);
+        let continuation = self
+            .sse_continuation_buffers
+            .peek(id)
+            .map_or(0, Vec::capacity);
+        retained.sse_bytes += continuation;
+        let stream = self.sse_streams.peek(id);
+        if let Some(stream) = stream {
+            retained.sse_bytes = stream.payload_retained_bytes();
+        }
+        retained.bytes = retained.pending_bytes
+            + continuation
+            + retained.metadata_bytes()
+            + stream.map_or(0, super::super::sse_stream::SseStream::retained_bytes)
+            + self
+                .request_chunks
+                .peek(id)
+                .map_or(0, super::super::chunk_stream::ChunkStream::retained_bytes);
+        self.retained_metrics.connection_cache_bytes += retained.bytes;
+        self.retained_metrics.pending_connection_bytes += retained.pending_bytes;
+        self.retained_metrics.pending_connection_count += retained.pending;
+    }
+
+    /// Refund charges when a connection leaves correlation.
+    pub(super) fn forget_retained(&mut self, id: &ConnectionId) {
+        if let Some(retained) = self.retained.remove(id) {
+            self.retained_metrics.connection_cache_bytes = self
+                .retained_metrics
+                .connection_cache_bytes
+                .saturating_sub(retained.bytes);
+            self.retained_metrics.pending_connection_bytes = self
+                .retained_metrics
+                .pending_connection_bytes
+                .saturating_sub(retained.pending_bytes);
+            self.retained_metrics.pending_connection_count = self
+                .retained_metrics
+                .pending_connection_count
+                .saturating_sub(retained.pending);
+        }
+    }
+
+    /// Return incrementally maintained gauges without traversing retained payloads.
+    pub(crate) fn metrics(&self) -> ConnectionMetrics {
+        ConnectionMetrics {
+            eviction_count: self.eviction_count,
+            ..self.retained_metrics
+        }
+    }
+}
+
 impl Counter {
+    fn metadata_bytes(&self) -> usize {
+        self.sources
+            .as_ref()
+            .map_or(0, |sources| sources.capacity() * size_of::<usize>())
+    }
+
     fn new(bytes: usize) -> Self {
         Self {
             bytes,
@@ -77,8 +254,8 @@ impl Counter {
                 .map_or(0, Vec::capacity);
         for event in &response.sse_events {
             self.source(event.source_event());
-            self.bytes += event.id.as_ref().map_or(0, String::capacity)
-                + event.event.as_ref().map_or(0, String::capacity);
+            self.source(event.capture_event());
+            self.bytes += event_metadata(event);
         }
     }
 
@@ -114,6 +291,15 @@ impl crate::aggregator::AggregatedResult {
                 }
                 counter.frames(&stream.request_data_frames);
                 counter.frames(&stream.response_data_frames);
+                if let Some(events) = &stream.reduced_sse_events {
+                    counter.bytes +=
+                        events.capacity() * size_of::<crate::parser::sse::ParsedSseEvent>();
+                    for event in events {
+                        counter.source(event.source_event());
+                        counter.source(event.capture_event());
+                        counter.bytes += event_metadata(event);
+                    }
+                }
                 for headers in stream
                     .decoded_request_headers
                     .iter()
@@ -140,6 +326,7 @@ impl crate::aggregator::AggregatedResult {
 }
 
 impl ConnectionState {
+    #[cfg(test)]
     pub(super) fn sse_retained_bytes(&self) -> usize {
         let Self::SseActive {
             sse_events,
@@ -154,8 +341,8 @@ impl ConnectionState {
             Counter::new(sse_events.capacity() * size_of::<crate::parser::sse::ParsedSseEvent>());
         for event in sse_events {
             counter.source(event.source_event());
-            counter.bytes += event.id.as_ref().map_or(0, String::capacity)
-                + event.event.as_ref().map_or(0, String::capacity);
+            counter.source(event.capture_event());
+            counter.bytes += event_metadata(event);
         }
         counter.bytes
             + compressed_buffer.as_ref().map_or(0, Vec::capacity)
@@ -206,8 +393,8 @@ impl ConnectionState {
                     sse_events.capacity() * size_of::<crate::parser::sse::ParsedSseEvent>();
                 for event in sse_events {
                     counter.source(event.source_event());
-                    counter.bytes += event.id.as_ref().map_or(0, String::capacity)
-                        + event.event.as_ref().map_or(0, String::capacity);
+                    counter.source(event.capture_event());
+                    counter.bytes += event_metadata(event);
                 }
                 counter.bytes += compressed_buffer.as_ref().map_or(0, Vec::capacity)
                     + zstd_decoder

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare load-generator request IDs with AgentSight SQLite records."""
+"""Compare load-generator request IDs with SQLite records or FFI callback receipts."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import gzip
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -15,6 +16,52 @@ from pathlib import Path
 from typing import Any
 
 Captured = dict[str, list[tuple[str, int | None]]]
+
+
+def load_ffi_captured(
+    path: Path, prefix: str = "", expected: set[str] | None = None, offset: int = 0
+) -> tuple[Captured, int]:
+    """Read complete callback receipts; retain an unfinished line for the next poll."""
+    captured: Captured = {}
+    if not path.exists():
+        return captured, offset
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while line := handle.readline():
+            if not line.endswith(b"\n"):
+                break
+            offset = handle.tell()
+            kind, payload = line.decode("utf-8").rstrip("\n").split("\t", 1)
+            if kind == "T":
+                request_id, status, total, usage = payload.split("\t")
+                identifiers = {request_id}
+                tokens = int(total) if usage == "1" else None
+                complete = 200 <= int(status) < 400
+            elif kind == "J":
+                call = json.loads(payload)
+                identifiers = set(re.findall(r"\[agentsight-benchmark:([A-Za-z0-9_-]+)\]", payload))
+                usage = call.get("token_usage") or {}
+                tokens = usage.get("total_tokens")
+                if type(tokens) is not int or tokens < 0:
+                    tokens = None
+                metadata = call.get("metadata", {})
+                request_id = metadata.get("request_id")
+                if isinstance(request_id, str) and request_id:
+                    identifiers.add(request_id)
+                status = int(metadata.get("status_code", 0))
+                complete = (
+                    not call.get("error")
+                    and metadata.get("incomplete") not in (True, "true")
+                    and 200 <= status < 400
+                )
+            else:
+                raise ValueError(f"unknown FFI callback receipt type: {kind}")
+            for request_id in identifiers:
+                if (not prefix or request_id.startswith(prefix)) and (
+                    expected is None or request_id in expected
+                ):
+                    merge_capture(captured, request_id, "complete" if complete else "error", tokens)
+    return captured, offset
 
 
 def json_lines(path: Path) -> Iterable[dict[str, Any]]:
@@ -110,9 +157,7 @@ def load_captured(
     with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if "token_records" in tables:
             columns = table_columns(connection, "token_records")
@@ -131,9 +176,7 @@ def load_captured(
                     if (not prefix or request_id.startswith(prefix)) and (
                         expected is None or request_id in expected
                     ):
-                        captured.setdefault(request_id, []).append(
-                            ("complete", int(total))
-                        )
+                        captured.setdefault(request_id, []).append(("complete", int(total)))
         if "genai_events" in tables:
             columns = table_columns(connection, "genai_events")
             selected = [
@@ -157,15 +200,11 @@ def load_captured(
                 for row in rows:
                     record = dict(zip(selected, row))
                     identifiers = {
-                        str(record[name])
-                        for name in ("call_id", "trace_id")
-                        if record.get(name)
+                        str(record[name]) for name in ("call_id", "trace_id") if record.get(name)
                     }
                     if record.get("event_json"):
                         try:
-                            identifiers.update(
-                                find_request_ids(json.loads(record["event_json"]))
-                            )
+                            identifiers.update(find_request_ids(json.loads(record["event_json"])))
                         except (json.JSONDecodeError, TypeError):
                             pass
                     for request_id in identifiers:
@@ -181,9 +220,7 @@ def load_captured(
     return captured
 
 
-def merge_capture(
-    captured: Captured, request_id: str, status: str, total: int | None
-) -> None:
+def merge_capture(captured: Captured, request_id: str, status: str, total: int | None) -> None:
     """Retain each observed state once across incremental database polls."""
     observation = (status, total)
     observations = captured.setdefault(request_id, [])
@@ -257,8 +294,7 @@ def load_captured_incremental(
                     )
                     parameters.append(since_ns)
                 rows = [
-                    row if has_id else (None, *row)
-                    for row in connection.execute(query, parameters)
+                    row if has_id else (None, *row) for row in connection.execute(query, parameters)
                 ]
                 if has_id and pending_genai_ids:
                     pending_rows = []
@@ -278,15 +314,11 @@ def load_captured_incremental(
                     row_id = int(row[0]) if row[0] is not None else None
                     record = dict(zip(selected, row[1:]))
                     identifiers = {
-                        str(record[name])
-                        for name in ("call_id", "trace_id")
-                        if record.get(name)
+                        str(record[name]) for name in ("call_id", "trace_id") if record.get(name)
                     }
                     if record.get("event_json"):
                         try:
-                            identifiers.update(
-                                find_request_ids(json.loads(record["event_json"]))
-                            )
+                            identifiers.update(find_request_ids(json.loads(record["event_json"])))
                         except (json.JSONDecodeError, TypeError):
                             pass
                     status = str(record.get("status") or "complete")
@@ -428,7 +460,7 @@ def _validation_passed(report: dict[str, Any], minimum: float) -> bool:
 
 
 def wait_for_report(
-    db_path: Path,
+    db_path: Path | None,
     prefix: str,
     expected: set[str],
     successful: set[str],
@@ -437,13 +469,18 @@ def wait_for_report(
     wait_seconds: float,
     poll_interval: float,
     since_ns: int | None = None,
+    ffi_events: Path | None = None,
 ) -> dict[str, Any]:
-    """Poll read-only SQLite until capture settles or the deadline expires."""
+    """Poll SQLite or callback receipts until capture settles or the deadline expires."""
     deadline = time.monotonic() + wait_seconds
     captured: Captured = {}
     while True:
         try:
-            captured = load_captured(db_path, prefix, expected, since_ns)
+            captured = (
+                load_ffi_captured(ffi_events, prefix, expected)[0]
+                if ffi_events is not None
+                else load_captured(db_path, prefix, expected, since_ns)
+            )
         except sqlite3.OperationalError as error:
             if (getattr(error, "sqlite_errorcode", 0) & 0xFF) not in (
                 sqlite3.SQLITE_BUSY,
@@ -461,7 +498,7 @@ def wait_for_report(
 
 
 def wait_for_streaming_report(
-    db_path: Path,
+    db_path: Path | None,
     load_results: Path,
     completion_marker: Path,
     prefix: str,
@@ -471,6 +508,7 @@ def wait_for_streaming_report(
     poll_interval: float,
     since_ns: int | None = None,
     request_log: Path | None = None,
+    ffi_events: Path | None = None,
 ) -> dict[str, Any]:
     """Accumulate captures while load runs so retention pruning cannot erase evidence."""
     captured: Captured = {}
@@ -478,20 +516,24 @@ def wait_for_streaming_report(
     token_after_rowid = 0
     pending_genai_ids: set[int] = set()
     completion_deadline: float | None = None
+    ffi_offset = 0
     while True:
         try:
-            incremental, genai_after_id, token_after_rowid, pending_genai_ids = (
-                load_captured_incremental(
-                    db_path,
-                    prefix,
-                    # Run IDs are authoritative across capture clock domains.
-                    None,
-                    genai_after_id,
-                    token_after_rowid,
-                    pending_genai_ids,
-                    expected_total_tokens=expected_total_tokens,
+            if ffi_events is not None:
+                incremental, ffi_offset = load_ffi_captured(ffi_events, prefix, offset=ffi_offset)
+            else:
+                incremental, genai_after_id, token_after_rowid, pending_genai_ids = (
+                    load_captured_incremental(
+                        db_path,
+                        prefix,
+                        # Run IDs are authoritative across capture clock domains.
+                        None,
+                        genai_after_id,
+                        token_after_rowid,
+                        pending_genai_ids,
+                        expected_total_tokens=expected_total_tokens,
+                    )
                 )
-            )
         except sqlite3.OperationalError as error:
             if (getattr(error, "sqlite_errorcode", 0) & 0xFF) not in (
                 sqlite3.SQLITE_BUSY,
@@ -510,6 +552,7 @@ def wait_for_streaming_report(
             report = make_report(expected, successful, captured, expected_total_tokens)
             report["validation_mode"] = "streaming_incremental"
             report["retention_safe"] = True
+            report["capture_source"] = "ffi_callbacks" if ffi_events is not None else "sqlite"
             if _validation_passed(report, min_completeness):
                 return report
             now = time.monotonic()
@@ -532,7 +575,11 @@ def main() -> int:
         type=Path,
         help="read per-request IDs from the mock server instead of k6 metric tags",
     )
-    parser.add_argument("--db", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--db", type=Path)
+    source.add_argument(
+        "--ffi-events", type=Path, help="callback receipts from the minimal FFI host"
+    )
     parser.add_argument("--prefix", default="")
     parser.add_argument(
         "--since-ns",
@@ -555,7 +602,7 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if not args.db.exists():
+    if args.db is not None and not args.db.exists():
         raise SystemExit(f"AgentSight database does not exist: {args.db}")
     if not 0 <= args.min_completeness <= 1:
         raise SystemExit("min-completeness must be between 0 and 1")
@@ -575,6 +622,7 @@ def main() -> int:
             args.poll_interval,
             args.since_ns,
             args.request_log,
+            args.ffi_events,
         )
     else:
         expected, successful = (
@@ -592,7 +640,9 @@ def main() -> int:
             args.wait_seconds,
             args.poll_interval,
             args.since_ns,
+            args.ffi_events,
         )
+    report["capture_source"] = "ffi_callbacks" if args.ffi_events is not None else "sqlite"
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

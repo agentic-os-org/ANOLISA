@@ -82,7 +82,12 @@ def capture_preflight(connection: http.client.HTTPSConnection, run_id: str, inde
             {
                 "request_id": request_id,
                 "model": "benchmark-model",
-                "messages": [{"role": "user", "content": "capture readiness"}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"[agentsight-benchmark:{request_id}] capture readiness",
+                    }
+                ],
             }
         ),
         headers={
@@ -145,6 +150,7 @@ def worker(args: argparse.Namespace) -> int:
         with (root / f"agent-{index}.jsonl").open("w", encoding="utf-8", buffering=1) as log:
             while time.monotonic() < end:
                 request_id = f"bench-{args.run_id}-{index}-{iteration}"
+                marker = f"[agentsight-benchmark:{request_id}] "
                 started = time.monotonic()
                 connection.request(
                     "POST",
@@ -154,7 +160,9 @@ def worker(args: argparse.Namespace) -> int:
                             "request_id": request_id,
                             "model": "benchmark-model",
                             "stream": True,
-                            "messages": [{"role": "user", "content": content}],
+                            "messages": [
+                                {"role": "user", "content": marker + content[len(marker) :]}
+                            ],
                             "metadata": {"agent_id": str(index)},
                         }
                     ),
