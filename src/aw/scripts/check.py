@@ -17,6 +17,24 @@ sys.dont_write_bytecode = True
 
 AW = Path(__file__).resolve().parents[1]
 REPO = AW.parents[1]
+# Public component libraries consumed by the separate application SDK.
+SDK_INPUTS = (
+    "src/agent-sec-core/v2/Cargo.",
+    "src/agent-sec-core/v2/crates/asc-daemon-client/",
+    "src/agent-sec-core/v2/crates/asc-daemon-protocol/",
+    "src/agent-sec-core/v2/crates/asc-observability/",
+    "src/agent-sec-core/v2/crates/asc-foundation-types/",
+    "src/agent-sec-core/v2/crates/asc-policy-types/",
+    "src/agent-sec-core/v2/crates/asc-security-events/",
+    "src/tokenless/Cargo.",
+    "src/tokenless/crates/tokenless-ccr/",
+    "src/tokenless/crates/tokenless-compressors/",
+    "src/tokenless/crates/tokenless-protocol/",
+    "src/tokenless/crates/tokenless-runtime/",
+    "src/tokenless/crates/tokenless-schema/",
+    "src/tokenless/crates/tokenless-stats/",
+    "src/tokenless/adapters/tokenless/common/hooks/tool_categories.json",
+)
 # Also support importlib-based gate tests without loading full-tree modules in scope jobs.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -119,7 +137,7 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
             )
         )
     return any(
-        path.startswith(("src/aw/", "providers/"))
+        path.startswith(("src/aw/", "providers/", *SDK_INPUTS))
         or (
             event_name != "pull_request"
             and path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-preview.yml"}
@@ -193,6 +211,9 @@ def check() -> None:
             root, capture=True,
         )))
     structure(metadata, AW)
+    from check_sdk import check as check_sdk
+
+    check_sdk(AW, run)
     for root in [AW, *provider_roots]:
         run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
     check_inventory(metadata)

@@ -32,6 +32,13 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`。
 
+### 应用 SDK
+
+`src/aw/sdk/rust/` 是独立的 `aw-sdk` workspace。应用只引用一个包，按需启用的
+组件 feature 分别依赖 sec-core daemon client 和 Tokenless Runtime。
+九个框架 crate 不依赖该 SDK，SDK 也不引入 AW Service、Host 或具体 Provider。
+用法见 [Rust SDK 指南](sdk.md)。
+
 ### 独立 Provider
 
 | Cargo 包与二进制 | 目录 | 职责 | 依赖的框架 crate |

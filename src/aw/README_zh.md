@@ -32,6 +32,7 @@ core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需
 
 | 任务 | 文档 |
 | --- | --- |
+| 在 Rust 应用中调用 sec-core 和 Tokenless | [Rust SDK](../../docs/developer-guide/zh/aw/sdk.md) |
 | 选择能力和开始使用 | [AW 用户指南](../../docs/user-guide/zh/user-entrypoint/aw/README.md) |
 | 安装包、生成配置和首次运行 | [安装 AW](../../docs/user-guide/zh/user-entrypoint/aw/installation.md) |
 | 选择 Agent、启用 Provider 和修改配置 | [配置 AW](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md) |

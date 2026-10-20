@@ -73,6 +73,13 @@ crates separately from concrete Providers:
 | Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
 | Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
 
+The application package `aw-sdk` has a separate workspace under `sdk/rust/`.
+It composes typed component APIs; sec-core owns daemon calls and Tokenless owns
+its Runtime. Framework crates must not depend on it, and it must not import
+Service, Host or concrete Providers. Keep component-only SDK builds independent,
+explicit state and endpoints, daemon identity checks, and marker-authorized
+recovery. Direct SDK calls do not create AW receipts or native authorization.
+
 The Hook path is Adapter -> service -> Host -> executor -> Provider process.
 Results return to the Adapter for native adoption. The service uses
 `aw-core::journal::FileJournal`, not `Core::prepare/execute`; do not insert the
@@ -145,8 +152,9 @@ named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the
 repository-approved `tests/common/mod.rs` convention.
 
-Only PRs changing `src/aw/**` or `providers/**` automatically run AW CI. Component internals belong
-in component CI; explicitly validate public contract changes consumed by AW.
+PRs changing `src/aw/**`, `providers/**`, or public component libraries consumed
+by the SDK run AW CI. Keep `SDK_INPUTS` and workflow filters aligned when the
+dependency closure changes. Other component internals belong in component CI.
 Keep daily checks credential-free. The nightly integration workflow builds all
 Preview packages once and reuses checksummed candidate-SHA binaries for pinned
 native acceptance. Preserve exact version evidence, bounded processes, complete
