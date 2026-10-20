@@ -945,6 +945,34 @@ mod tests {
         }
     }
 
+    /// A drained Responses capture that attached after the deltas holds only
+    /// the closing events. The enrichment is what the pending row persists,
+    /// so it must carry the answer instead of writing `output_messages = NULL`.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_a_closing_responses_answer() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.created","response":{"id":"resp_close","model":"gpt-5"}}"#,
+            ),
+            make_sse_event(r#"{"type":"response.output_text.done","text":"hello there"}"#),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_close","status":"completed"}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a closing Responses answer must persist");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert!(
+            matches!(&parsed[0].parts[0], MessagePart::Text { content } if content == "hello there"),
+            "got {:?}",
+            parsed[0].parts
+        );
+    }
+
     /// The drain enrichment must carry the cache counters the stream reported,
     /// as the provider reported them: Anthropic's terminal usage keeps them
     /// outside `input_tokens`, while OpenAI-style usage counts the cached part
