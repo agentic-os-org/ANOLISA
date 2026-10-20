@@ -135,6 +135,34 @@ impl std::fmt::Debug for MetricsFileExporter {
     }
 }
 
+/// Process-global Prometheus recorder installed by the first exporter.
+///
+/// `metrics` allows one global recorder per process, while the FFI supports
+/// repeated `AgentSight` construction (`agentsight_new`/`start`/`stop`/`free`
+/// cycles). Building and installing a fresh recorder on every cycle made the
+/// second `start` fail; the handle is kept so later exporters reuse the
+/// existing recorder instead.
+static RECORDER: std::sync::OnceLock<std::sync::Mutex<Option<PrometheusHandle>>> =
+    std::sync::OnceLock::new();
+
+/// Installs the Prometheus recorder on first use and returns a handle to it.
+fn prometheus_handle() -> Result<PrometheusHandle> {
+    let slot = RECORDER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut installed = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(handle) = installed.as_ref() {
+        return Ok(handle.clone());
+    }
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::set_global_recorder(recorder).map_err(|_| {
+        anyhow!("cannot install AgentSight metrics recorder: a global recorder is already set")
+    })?;
+    *installed = Some(handle.clone());
+    Ok(handle)
+}
+
 impl MetricsFileExporter {
     /// Builds and installs an exporter when [`METRICS_FILE_ENV`] names a non-empty path.
     pub(crate) fn from_env() -> Result<Option<Self>> {
@@ -151,12 +179,11 @@ impl MetricsFileExporter {
             Err(std::env::VarError::NotPresent) => DEFAULT_EXPORT_INTERVAL,
             Err(error) => return Err(anyhow!("invalid {METRICS_INTERVAL_ENV}: {error}")),
         };
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        // Validate before touching the process-global recorder so a bad path
+        // leaves the process without a half-installed exporter.
+        validate_output_path(&path)?;
+        let handle = prometheus_handle()?;
         let exporter = Self::new(path, handle, export_interval)?;
-        metrics::set_global_recorder(recorder).map_err(|_| {
-            anyhow!("cannot install AgentSight metrics recorder: a global recorder is already set")
-        })?;
         describe_metrics();
         OBSERVABILITY_ENABLED.store(true, Ordering::Relaxed);
 
@@ -831,5 +858,24 @@ mod tests {
         fs::remove_file(path).expect("remove published snapshot");
         fs::remove_file(foreign).expect("remove seeded foreign temporary");
         fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    /// The FFI supports repeated `AgentSight` construction in one process.
+    /// Installing a fresh Prometheus recorder on every cycle failed the
+    /// second start after its auxiliary threads had already been spawned,
+    /// leaving them running against a permanently-true flag.
+    #[test]
+    fn prometheus_recorder_is_installed_once_and_reused() {
+        let first = prometheus_handle().expect("first install");
+        let second =
+            prometheus_handle().expect("a later AgentSight must reuse the existing recorder");
+
+        metrics::counter!("agentsight_test_recorder_reuse_total").increment(1);
+        let rendered = second.render();
+        assert!(
+            rendered.contains("agentsight_test_recorder_reuse_total"),
+            "the reused handle must observe the shared recorder: {rendered}"
+        );
+        first.run_upkeep();
     }
 }
