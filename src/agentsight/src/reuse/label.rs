@@ -428,12 +428,26 @@ impl SessionLabel {
         now_ns: i64,
     ) {
         let previous_auto = self.auto_label;
+        let new_hash = source_content_hash.into();
+        // A model verdict describes the document it read. Re-collecting the
+        // same session with new bytes invalidates it: keeping it would let a
+        // judgement of the old content outrank the fresh automatic verdict
+        // forever, because the judge only considers rows with no verdict yet.
+        let content_changed =
+            !self.source_content_hash.is_empty() && self.source_content_hash != new_hash;
         self.auto_label = outcome.label;
         self.auto_reason = outcome.reason;
         self.auto_rules = outcome.rules;
         self.metrics = outcome.metrics;
         self.n_findings = outcome.n_findings;
-        self.source_content_hash = source_content_hash.into();
+        self.source_content_hash = new_hash;
+        if content_changed {
+            self.llm_label = None;
+            self.llm_reason = None;
+            self.llm_cited_steps.clear();
+            self.llm_downgraded = false;
+            self.llm_at_ns = None;
+        }
         self.triage_version = triage_version.into();
         // Identity is refreshed here too: a changed source file forces a
         // re-triage, and a re-titled conversation should show its new title.
@@ -552,6 +566,64 @@ mod tests {
         assert_eq!(label.auto_label, TrajectoryLabel::Bad);
         assert_eq!(label.auto_rules, vec!["R1".to_string()]);
         assert!(label.was_overridden());
+    }
+
+    #[test]
+    fn retriage_of_new_content_clears_the_model_verdict() {
+        // The judge verdict describes the document it read. A re-collection
+        // with different bytes must retire it, or a stale `good` keeps
+        // outranking the fresh automatic verdict and the judge never sees the
+        // row again (it only considers labels without an LLM verdict).
+        let mut label = row(TrajectoryLabel::Good);
+        label.apply_judgement(
+            TrajectoryLabel::Good,
+            "looked fine".to_string(),
+            vec![2],
+            false,
+            200,
+        );
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
+
+        assert_eq!(label.llm_label, None);
+        assert_eq!(label.llm_reason, None);
+        assert!(label.llm_cited_steps.is_empty());
+        assert!(!label.llm_downgraded);
+        assert_eq!(label.llm_at_ns, None);
+        assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
+        assert_eq!(label.source_content_hash, "hash-2");
+    }
+
+    #[test]
+    fn retriage_of_identical_content_keeps_the_model_verdict() {
+        // A rules-version bump recomputes the automatic verdict from the same
+        // bytes; the model read those bytes too, so its verdict stays valid.
+        let mut label = row(TrajectoryLabel::Good);
+        label.apply_judgement(
+            TrajectoryLabel::Good,
+            "looked fine".to_string(),
+            vec![2],
+            false,
+            200,
+        );
+
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-1",
+            "triage-v2",
+            300,
+        );
+
+        assert_eq!(label.llm_label, Some(TrajectoryLabel::Good));
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
     }
 
     #[test]

@@ -148,6 +148,54 @@ fn fuse_available() -> bool {
             .unwrap_or(false)
 }
 
+/// The instance id the previous binary derived for a normalized
+/// mountpoint — the sanitization of `instance_id_for` before the
+/// leading-dash fix (map every non-`[a-zA-Z0-9_-]` to `-`, then take 24,
+/// no stripping). Valid ids from that formula — anything not starting
+/// with a dash — are the live upgrade surface: an old supervisor may be
+/// holding exactly these state/pid file names when the binary is
+/// upgraded, so the new derivation must keep them byte-identical.
+fn legacy_instance_id(normalized: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    normalized.as_os_str().hash(&mut hasher);
+    let hash = hasher.finish();
+    let base: String = normalized
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "root".to_string())
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(24)
+        .collect();
+    let base = if base.is_empty() {
+        "root".to_string()
+    } else {
+        base
+    };
+    format!("{base}-{hash:016x}")
+}
+
+/// Comma-separated file names under a runtime dir, for assertion
+/// messages: shows exactly which instance ids the CLI materialized.
+fn list_runtime_files(dir: &Path) -> String {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(_) => "<unreadable>".to_string(),
+    }
+}
+
 /// Path of the running test binary — used as the trusted peer so the
 /// test's own probe connection authenticates and receives a real `pong`.
 fn test_exe() -> String {
@@ -2666,6 +2714,410 @@ fn control_socket_with_decision_command_fails_startup() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn managed_mount_serves_a_dot_prefixed_mountpoint() {
+    // Every test harness's tempdir is dot-prefixed (`tempfile` uses a
+    // `.tmp*` prefix), and the derived instance id used to sanitize the
+    // leading dot into a leading dash — which the supervisor's `--instance`
+    // argument rejects as an option-looking value. The supervisor then
+    // died before writing its pid file, so the client's liveness check
+    // never fired either: it polled the full readiness budget and failed
+    // with "did not become ready" and an empty worker log tail, pointing
+    // every investigation at the wrong layer.
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up a managed mount");
+        return;
+    }
+    let source = empty_source();
+    let mount_parent = tempfile::tempdir().expect("mount parent tempdir");
+    let mount = mount_parent.path().join(".mnt");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.to_str().unwrap(),
+            "--managed",
+        ])
+        .output()
+        .expect("invoke skillfs");
+
+    // Stop the instance before asserting, so a failure does not leak a
+    // detached supervisor and a live FUSE mount into later tests.
+    let stop = Command::new(bin_path())
+        .args(["stop", mount.to_str().unwrap()])
+        .output()
+        .expect("invoke skillfs stop");
+
+    assert!(
+        out.status.success(),
+        "a dot-prefixed mountpoint must be servable, got: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("managed mount ready"),
+        "expected the ready line, got: {combined}"
+    );
+    assert!(
+        stop.status.success(),
+        "stop must clean up the instance, got: {}{}",
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr),
+    );
+}
+
+#[test]
+fn managed_mount_survives_a_slow_environment_probe() {
+    // The managed worker pays the full mount startup cost before the FUSE
+    // session serves: the 24-command environment probe
+    // (`EnvironmentProfile::detect` spawns one `which` per whitelisted
+    // command) plus store discovery and the session start. On a host with
+    // slow process spawns (WSL, network home directories) that probe alone
+    // costs ~10 s, so a 10 s readiness budget tore down a worker that was
+    // still probing — `skillfs mount --managed` failed on hardware the
+    // blocking mode serves fine. The budget must cover that regime.
+    //
+    // Deterministic on any host: a `which` shim prepended to the PATH
+    // sleeps half a second per probe, so the worker's startup holds at
+    // least 24 x 0.5 s = 12 s of wall clock regardless of machine speed —
+    // comfortably past a 10 s budget, well inside a 30 s one.
+    //
+    // A non-dot mountpoint keeps this test about the budget alone: a
+    // dot-prefixed one would fail for the instance-id reason covered by
+    // `managed_mount_serves_a_dot_prefixed_mountpoint` instead.
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up a managed mount");
+        return;
+    }
+    let source = empty_source();
+    let mount_parent = tempfile::tempdir().expect("mount parent tempdir");
+    let mount = mount_parent.path().join("mnt");
+
+    // The shim answers "present" for every probe: claiming the whole
+    // whitelist is harmless for an empty source (nothing compiles against
+    // the profile), and skipping the delegation to the real `which` keeps
+    // the per-probe cost to one shell spawn plus the sleep, so the bounds
+    // hold on slow-spawn hosts (WSL) as well as fast CI runners.
+    let shim_dir = tempfile::tempdir().expect("shim tempdir");
+    let which = shim_dir.path().join("which");
+    std::fs::write(&which, "#!/bin/sh\nsleep 0.5\nexit 0\n").expect("write which shim");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&which, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod which shim");
+    }
+
+    let path = std::env::var_os("PATH").expect("PATH");
+    let mut prefixed_path = std::ffi::OsString::from(shim_dir.path());
+    prefixed_path.push(":");
+    prefixed_path.push(&path);
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.to_str().unwrap(),
+            "--managed",
+        ])
+        .env("PATH", &prefixed_path)
+        .output()
+        .expect("invoke skillfs");
+
+    // Stop the instance before asserting, so a failure does not leak a
+    // detached supervisor and a live FUSE mount into later tests.
+    let stop = Command::new(bin_path())
+        .args(["stop", mount.to_str().unwrap()])
+        .env("PATH", &prefixed_path)
+        .output()
+        .expect("invoke skillfs stop");
+
+    assert!(
+        out.status.success(),
+        "managed mount must survive a slow environment probe, got: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("managed mount ready"),
+        "expected the ready line, got: {combined}"
+    );
+    assert!(
+        stop.status.success(),
+        "stop must clean up the instance, got: {}{}",
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr),
+    );
+}
+
+#[test]
+fn stop_terminates_a_legacy_underscore_instance() {
+    // Upgrade regression (review): instance ids that never started with a
+    // dash — a mount at `/mnt/_skills` used `_skills-<hash>` — were valid
+    // `--instance` values and runtime file-name prefixes, so a live
+    // supervisor can be sitting on those files when the binary is
+    // upgraded. If the new id derivation renamed the instance, `stop`
+    // would miss the incumbent's state/pid files, print "no managed
+    // mount ... (already stopped)", and leave the old supervisor running
+    // — free to remount after any later unmount. Seed the runtime dir
+    // exactly as the previous binary wrote it and prove the new `stop`
+    // resolves and terminates the incumbent. Needs no FUSE: the incumbent
+    // is a stand-in process and the mountpoint stays unmounted.
+    let source = empty_source();
+    let parent = tempfile::tempdir().expect("parent tempdir");
+    let mount = parent.path().join("_skills");
+    std::fs::create_dir(&mount).expect("create mountpoint");
+    let normalized = mount.canonicalize().expect("canonicalize mountpoint");
+
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let dir = runtime.path().join("skillfs");
+    std::fs::create_dir(&dir).expect("create runtime dir");
+    let legacy_id = legacy_instance_id(&normalized);
+    assert!(
+        legacy_id.starts_with("_skills-"),
+        "the seeded id must keep its underscore prefix, got: {legacy_id}"
+    );
+
+    // A stand-in "old supervisor": alive, holding the legacy pid file and
+    // state record exactly as the previous binary would have left them.
+    let mut incumbent = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn stand-in supervisor");
+    let incumbent_pid_num = incumbent.id();
+    std::fs::write(
+        dir.join(format!("{legacy_id}.supervisor.pid")),
+        format!("{}\n", incumbent.id()),
+    )
+    .expect("seed supervisor pid");
+    let source_norm = source.path().canonicalize().expect("canonicalize source");
+    let state = format!(
+        "{{\"schema_version\":1,\"instance_id\":\"{legacy_id}\",\
+         \"mountpoint\":\"{mp}\",\"source\":\"{src}\",\
+         \"worker_program\":\"skillfs\",\"worker_args\":[],\
+         \"desired_state\":\"mounted\"}}",
+        mp = normalized.display(),
+        src = source_norm.display(),
+    );
+    std::fs::write(dir.join(format!("{legacy_id}.state.json")), state).expect("seed managed state");
+
+    // Reap the stand-in the moment it exits (a helper thread): a zombie
+    // still answers kill(pid, 0), so the CLI's liveness wait would
+    // otherwise sit out its full stop timeout on an already-dead process.
+    let incumbent_exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reaped = std::sync::Arc::clone(&incumbent_exited);
+    std::thread::spawn(move || {
+        for _ in 0..1200 {
+            match incumbent.try_wait() {
+                Ok(Some(_)) => {
+                    reaped.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+                Ok(None) => {}
+                Err(_) => return,
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    let out = Command::new(bin_path())
+        .args(["stop", mount.to_str().unwrap()])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .expect("invoke skillfs stop");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Give the reaper a bounded window to observe the exit the CLI's stop
+    // signals caused, and capture that observation BEFORE any leak cleanup.
+    // The fallback below exists only so a failing run does not leak the
+    // stand-in; if it could run before the capture it would satisfy the
+    // very contract under test — a stop that reports success while the
+    // incumbent survives (reproduced by LD_PRELOADing a kill() shim that
+    // suppresses the CLI's SIGTERM/SIGKILL).
+    for _ in 0..100 {
+        if incumbent_exited.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stop_terminated_incumbent = incumbent_exited.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Leak cleanup only, strictly after the observation is captured: if
+    // the CLI's stop missed the stand-in, terminate it directly so a
+    // failing run leaks nothing; the reaper observes the exit.
+    if !stop_terminated_incumbent {
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -TERM {incumbent_pid_num}"))
+            .output();
+        for _ in 0..100 {
+            if incumbent_exited.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    assert!(out.status.success(), "stop must succeed, got: {combined}");
+    assert!(
+        combined.contains("stopped managed mount"),
+        "stop must resolve the legacy state/pid files, got: {combined}"
+    );
+    assert!(
+        stop_terminated_incumbent,
+        "stop must terminate the incumbent supervisor, not just report success"
+    );
+    assert!(
+        !dir.join(format!("{legacy_id}.state.json")).exists(),
+        "stop must remove the legacy state file"
+    );
+    assert!(
+        !dir.join(format!("{legacy_id}.supervisor.pid")).exists(),
+        "stop must remove the legacy supervisor pid file"
+    );
+}
+
+#[test]
+fn managed_mount_reuses_a_legacy_underscore_instance() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up a managed mount");
+        return;
+    }
+    // Upgrade regression (review), live half: a real supervisor serving
+    // under the legacy `_skills-<hash>` id must stay the single owner of
+    // its mountpoint. The id derivation must keep the underscore prefix,
+    // so a repeated managed request resolves the incumbent's pid/state
+    // files ("already active") instead of unmounting it and racing a
+    // competing supervisor, and `stop` must tear the incumbent down.
+    let source = empty_source();
+    let parent = tempfile::tempdir().expect("mount parent tempdir");
+    let mount = parent.path().join("_skills");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+
+    let first = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.to_str().unwrap(),
+            "--managed",
+        ])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .expect("invoke skillfs");
+
+    let normalized = mount.canonicalize().expect("canonicalize mountpoint");
+    let legacy_id = legacy_instance_id(&normalized);
+    let supervisor_pid = runtime
+        .path()
+        .join(format!("skillfs/{legacy_id}.supervisor.pid"));
+
+    let second = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.to_str().unwrap(),
+            "--managed",
+        ])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .expect("invoke skillfs again");
+
+    // Capture the incumbent's pid file before stop removes it.
+    let incumbent_pid = std::fs::read_to_string(&supervisor_pid).ok();
+
+    // Stop before asserting, so a failure does not leak a detached
+    // supervisor and a live FUSE mount into later tests.
+    let stop = Command::new(bin_path())
+        .args(["stop", mount.to_str().unwrap()])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .expect("invoke skillfs stop");
+
+    // RED-shape leak guard: if `stop` missed the legacy instance (the
+    // regression this test pins), tear the incumbent down directly.
+    if let Some(raw) = incumbent_pid.as_deref() {
+        if let Ok(pid) = raw.trim().parse::<i32>() {
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -TERM {pid}"))
+                .output();
+            for _ in 0..100 {
+                if !is_mounted(&mount) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    force_unmount(&mount);
+
+    let first_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+    let second_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+    );
+    let stop_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr),
+    );
+
+    assert!(
+        first.status.success(),
+        "an underscore-prefixed mountpoint must be servable, got: {first_out}"
+    );
+    assert!(
+        first_out.contains("managed mount ready"),
+        "expected the ready line, got: {first_out}"
+    );
+    assert!(
+        incumbent_pid.is_some(),
+        "the instance must keep its legacy underscore-prefixed id \
+         ({legacy_id}.supervisor.pid), runtime files: {}",
+        list_runtime_files(&runtime.path().join("skillfs")),
+    );
+    assert!(
+        second.status.success(),
+        "a repeated managed request must succeed, got: {second_out}"
+    );
+    assert!(
+        second_out.contains("already active"),
+        "a repeated managed request must reuse the incumbent supervisor \
+         instead of racing a competing one, got: {second_out}"
+    );
+    assert!(
+        stop.status.success(),
+        "stop must clean up the instance, got: {stop_out}"
+    );
+    assert!(
+        stop_out.contains("stopped managed mount"),
+        "stop must resolve the legacy state/pid files, got: {stop_out}"
+    );
+    assert!(
+        !supervisor_pid.exists(),
+        "stop must remove the legacy supervisor pid file"
+    );
+}
+
+#[test]
 fn managed_mount_parses_and_rejects_missing_source() {
     // `--managed` must parse, and the managed client must fail fast with a
     // clear source error before detaching a supervisor — proving the flag is
@@ -3754,7 +4206,12 @@ fn mount_file_aggregates_whole_skills_read_only() {
             .unwrap(),
         mount.clone(),
     );
-    for _ in 0..100 {
+    // 30 s readiness budget (50 ms x 600), the same cap the in-process
+    // polling fixtures use: the spawned CLI runs the environment-profile
+    // probe loop before its FUSE session comes up, which alone can take
+    // seconds on a loaded host - the previous 5 s budget raced it and the
+    // assertion reported the startup log instead of the aggregated view.
+    for _ in 0..600 {
         if is_mounted(&mount) || child.0.try_wait().unwrap().is_some() {
             break;
         }

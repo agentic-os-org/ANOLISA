@@ -1,0 +1,11 @@
+[HTML page rendered as Markdown; <main> only, 2 nodes outside it omitted; removed 1 script, 1 style. Retrieve original for the full page.]
+Title: Operations
+# Service status
+
+Inspect every service before starting the deployment. The failed database check must be resolved before the next release is started.
+
+| Service | Status |
+| --- | --- |
+| API | healthy |
+| Database | FAILED |
+[End page]

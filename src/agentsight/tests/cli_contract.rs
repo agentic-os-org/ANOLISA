@@ -897,6 +897,134 @@ fn interruption_stats_scopes_to_the_requested_agent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Insert one interruption per (type, severity) for one session and one
+/// conversation, so a per-id filter changes the returned rows.
+fn per_id_interruption_fixture(dir: &std::path::Path, events: &[(&str, &str, &str)]) -> PathBuf {
+    use agentsight::interruption::{InterruptionEvent, InterruptionType, Severity};
+
+    let db = dir.join("interruption_events.db");
+    let store = agentsight::storage::sqlite::InterruptionStore::new_with_path(&db)
+        .expect("create interruption store");
+    for (index, (itype, severity, agent)) in events.iter().enumerate() {
+        let itype = InterruptionType::from_str(itype).expect("known interruption type");
+        let severity = match *severity {
+            "critical" => Severity::Critical,
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            other => panic!("unknown severity {other}"),
+        };
+        let mut event = InterruptionEvent::new(
+            itype,
+            Some("per-id-session".to_string()),
+            None,
+            Some("per-id-conversation".to_string()),
+            None,
+            Some(4242),
+            Some((*agent).to_string()),
+            now_ns(),
+            None,
+        );
+        event.severity = severity;
+        event.interruption_id = format!("per-id-{index}");
+        store.insert(&event).expect("insert interruption event");
+    }
+    drop(store);
+    db
+}
+
+/// `session` and `conversation` rejected `--type` / `--severity` even though
+/// `list` has both and the store's per-id queries already return the columns
+/// they filter on. Narrowing one session to its critical rows meant dumping
+/// `--json` and filtering by hand. Reverting the wiring (passing `None` for the
+/// two filters) makes the scoped assertions fail.
+#[test]
+fn interruption_session_and_conversation_accept_the_row_filters() {
+    let dir = fixture_dir("interruption_per_id_filters");
+    let db = per_id_interruption_fixture(
+        &dir,
+        &[
+            ("llm_error", "high", "ProbeA"),
+            ("token_limit", "medium", "ProbeB"),
+            ("agent_crash", "critical", "ProbeA"),
+        ],
+    );
+
+    let rows = |subcommand: &str, extra: &[&str]| -> Vec<serde_json::Value> {
+        let mut args = vec![
+            "interruption".to_string(),
+            "--db".to_string(),
+            db.to_str().unwrap().to_string(),
+            subcommand.to_string(),
+            if subcommand == "session" {
+                "per-id-session".to_string()
+            } else {
+                "per-id-conversation".to_string()
+            },
+            "--json".to_string(),
+        ];
+        args.extend(extra.iter().map(|value| (*value).to_string()));
+        let out = agentsight().args(&args).output().expect("run agentsight");
+        assert!(
+            out.status.success(),
+            "{subcommand} {extra:?} must be accepted; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("the view must emit a JSON array")
+    };
+
+    for subcommand in ["session", "conversation"] {
+        // Nothing filtered still prints the id's whole history.
+        assert_eq!(rows(subcommand, &[]).len(), 3, "{subcommand} unfiltered");
+
+        let typed = rows(subcommand, &["--type", "token_limit"]);
+        assert_eq!(typed.len(), 1, "{subcommand} --type: {typed:?}");
+        assert_eq!(typed[0]["interruption_type"], "token_limit");
+
+        let severe = rows(subcommand, &["--severity", "critical"]);
+        assert_eq!(severe.len(), 1, "{subcommand} --severity: {severe:?}");
+        assert_eq!(severe[0]["severity"], "critical");
+
+        // The two filters intersect, and an unmatched value yields nothing
+        // instead of falling back to every row.
+        assert_eq!(
+            rows(
+                subcommand,
+                &["--severity", "critical", "--type", "llm_error"]
+            )
+            .len(),
+            0,
+            "{subcommand} must require every filter to match"
+        );
+        assert_eq!(
+            rows(subcommand, &["--type", "dead_loop"]).len(),
+            0,
+            "{subcommand} must not fall back on an unmatched type"
+        );
+    }
+
+    // A rejected value stays a usage error, the same contract `list` has.
+    for (flag, bad) in [("--type", "not_a_type"), ("--severity", "urgent")] {
+        let out = agentsight()
+            .args([
+                "interruption",
+                "--db",
+                db.to_str().unwrap(),
+                "session",
+                "per-id-session",
+                flag,
+                bad,
+            ])
+            .output()
+            .expect("run agentsight");
+        assert!(
+            !out.status.success(),
+            "session {flag} {bad} must be rejected, not ignored"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A genai database holding two SKILL.md loads of one skill on two different
 /// days inside the same ISO week, so the `--last` window holds both.
 fn skill_loads_on_two_days(dir: &std::path::Path) -> PathBuf {
@@ -908,11 +1036,31 @@ fn skill_loads_on_two_days(dir: &std::path::Path) -> PathBuf {
     .expect("create genai store");
     drop(store);
 
-    // Two consecutive days, both inside the same ISO week (2026-03-03 is a
-    // Tuesday, 2026-03-04 a Wednesday).
+    // The two loads must share one ISO week for the weekly-bucket assertion
+    // and differ by calendar day for the daily one, while staying at or below
+    // now so the query window keeps them. Plain `now - 2d / now - 1d`
+    // straddles a week boundary whenever the run lands on a Monday or Tuesday
+    // (the Sunday before a Monday belongs to the previous ISO week), so the
+    // offsets depend on the weekday:
+    //   Mon        -> last Friday / last Saturday (same previous week)
+    //   Tue        -> yesterday / now (this Monday / Tuesday)
+    //   Wed..Sun   -> now-2d / now-1d already sit inside the current week
     let day_ns = 86_400_000_000_000_i64;
-    let first_ns = now_ns() - 2 * day_ns;
-    let second_ns = now_ns() - day_ns;
+    let now = now_ns();
+    let now_secs = now / 1_000_000_000;
+    let dow = chrono::Datelike::weekday(
+        &chrono::DateTime::from_timestamp(now_secs, 0)
+            .expect("now is a valid timestamp")
+            .naive_utc(),
+    )
+    .number_from_monday();
+    let (first_ns, second_ns) = if dow == 1 {
+        (now - 3 * day_ns, now - 2 * day_ns)
+    } else if dow == 2 {
+        (now - day_ns, now)
+    } else {
+        (now - 2 * day_ns, now - day_ns)
+    };
 
     let output_messages =
         serde_json::to_string(&vec![agentsight::genai::semantic::OutputMessage {

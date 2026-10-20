@@ -801,9 +801,23 @@ mod tests {
             },
         )
         .expect("mount");
-        std::thread::sleep(Duration::from_millis(300));
 
+        // Poll until the mount answers instead of assuming a fixed delay:
+        // the background mount runs the environment-profile probe loop
+        // before the FUSE session comes up, which can take seconds on a
+        // loaded host, and a fixed 300ms sleep made this test fail with
+        // ENOENT before the FUSE session ever started.
         let path = mnt_dir.path().join("skills/web/SKILL.md");
+        let mut ready = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if std::fs::metadata(&path).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ready, "mount never served {}", path.display());
         let before = resolver.open_decision_reads();
         let mut f = std::fs::File::open(&path).expect("open");
         let mut buf = String::new();

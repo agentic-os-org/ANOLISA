@@ -1032,7 +1032,25 @@ fn collect_gemini_call_slots(chunk: &Value, slots: &mut std::collections::BTreeM
 /// Extract role and content from OpenAI message JSON
 fn extract_message(msg: &Value) -> Option<(String, String)> {
     let role = msg.get("role").and_then(|r| r.as_str())?;
-    let content = extract_content(msg.get("content"))?;
+    let mut content = extract_content(msg.get("content")).unwrap_or_default();
+    // A replayed conversation keeps the assistant's tool request as a
+    // `tool_calls` array with `content: null`, so reading the content field
+    // alone dropped the turn that asked for the tool. Render each call as
+    // `name: arguments`, the same shape the response reader emits.
+    if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
+        for call in calls {
+            if let Some(func) = call.get("function") {
+                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let arguments = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                if !name.is_empty() {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(&format!("{name}: {arguments}"));
+                }
+            }
+        }
+    }
 
     if content.is_empty() {
         None
@@ -1157,6 +1175,38 @@ mod tests {
         assert_eq!(data.request_messages.len(), 2);
         assert_eq!(data.request_messages[0].role, "system");
         assert_eq!(data.request_messages[0].content, "You are helpful");
+    }
+
+    /// A replayed conversation carries the assistant's tool request as a
+    /// `tool_calls` array with `content: null`. The request reader builds its
+    /// message from `content` alone, so such a turn extracted to nothing and
+    /// was dropped from `request_messages` — the tool name and its JSON
+    /// arguments vanished from the request token estimate, and the request
+    /// read as if the assistant never asked for the tool whose result follows.
+    #[test]
+    fn test_extract_request_keeps_a_replayed_tool_call() {
+        let request = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "list /tmp"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{\"command\":\"ls /tmp\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}
+            ]
+        });
+
+        let token_data = extract_token_data(Some(&request), None).expect("request yields data");
+        assert_eq!(
+            token_data.request_messages.len(),
+            3,
+            "the replayed assistant tool call must be counted"
+        );
+        let call = &token_data.request_messages[1];
+        assert_eq!(call.role, "assistant");
+        assert!(call.content.contains("Bash"), "got {:?}", call.content);
+        assert!(call.content.contains("ls /tmp"), "got {:?}", call.content);
     }
 
     #[test]

@@ -25,6 +25,15 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// `tool_calls`: the model finished its turn by emitting a function call and
 /// the client executes it before asking again, so the stream completed
 /// normally and must not be treated as truncation.
+///
+/// `other` and `language` (Gemini) are terminal stops the provider does not
+/// explain further: the turn ended for a reason the enum has no specific value
+/// for, or in an unsupported language. `finish_reason_unspecified` is the
+/// enum's placeholder, reported when a gateway omits the reason altogether.
+/// None of them says the stream was cut, so none of them is truncation. Stops
+/// that carry a meaning the rule set has a better home for stay out of this
+/// list: a token cap is rule 9, a safety stop is rule 6, a malformed tool call
+/// is rule 6.5.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     /// The stop reasons a completed turn may report. Compared ASCII
     /// case-insensitively: the casing is the provider's, not the protocol's,
@@ -39,9 +48,44 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
         "stop_sequence",
         "pause_turn",
         "refusal",
+        "other",
+        "language",
+        "finish_reason_unspecified",
     ];
     reason.is_some_and(|reason| {
         NORMAL
+            .iter()
+            .any(|known| reason.eq_ignore_ascii_case(known))
+    })
+}
+
+/// Whether the finish reason is a provider safety stop that withheld the answer.
+///
+/// OpenAI spells it `content_filter`, which rule 6 matches separately. Gemini
+/// reports a whole family instead, all of them meaning the provider's safety
+/// policy stopped the generation rather than the transport: `SAFETY` (prompt
+/// or answer blocked), `RECITATION` (the answer would reproduce training data
+/// verbatim), `BLOCKLIST` (a blocked term), `PROHIBITED_CONTENT`, `SPII`
+/// (sensitive personally identifiable information) and `IMAGE_SAFETY`.
+///
+/// The others in Gemini's enum are not safety stops and stay out of this list:
+/// `MALFORMED_FUNCTION_CALL` is a tool-call formatting failure, `OTHER` and
+/// `LANGUAGE` are unspecific and language-related reasons.
+///
+/// Compared ASCII case-insensitively, like [`is_normal_finish`]: the casing is
+/// the provider's (`SAFETY`), not the protocol's.
+fn is_safety_stop_reason(reason: Option<&str>) -> bool {
+    /// The safety-class finish reasons, lower-cased for comparison.
+    const SAFETY: &[&str] = &[
+        "safety",
+        "recitation",
+        "blocklist",
+        "prohibited_content",
+        "spii",
+        "image_safety",
+    ];
+    reason.is_some_and(|reason| {
+        SAFETY
             .iter()
             .any(|known| reason.eq_ignore_ascii_case(known))
     })
@@ -205,9 +249,11 @@ fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || mentions_failing_http_status(text)
         || lower.contains("error:")
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
         || lower.contains("command not found")
         || lower.contains("eacces")
         || lower.contains("eperm")
@@ -215,25 +261,66 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("\"status\":") && lower.contains("\"error\"")
 }
 
-/// Whether any `exit code N` mention carries a non-zero status.
+/// Whether a line of the payload opens with an HTTP 4xx/5xx status.
 ///
-/// `exit code 0` is the success spelling a passing command's output routinely
+/// A failed fetch reports itself this way when the tool printed the response
+/// headers instead of an error string: a raw response and `curl -i` output
+/// both start `HTTP/1.1 500 …`, and some wrappers drop the version. The
+/// grader's `mentions_failing_http_status` and the grounding classifier's
+/// `outcome::http_error_line` read the same shape, so a payload that both of
+/// them grade a certain failure still produced no ToolFailure here.
+///
+/// The status has to open its line: a payload that merely mentions a code — a
+/// URL, a changelog line, a sentence — is describing something else, the same
+/// anchor the other two scans apply.
+fn mentions_failing_http_status(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|after| after.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        rest.is_some_and(|status| {
+            let mut digits = status.chars();
+            matches!(digits.next(), Some('4' | '5'))
+                && digits.clone().take(2).all(|c| c.is_ascii_digit())
+                && digits.count() >= 2
+        })
+    })
+}
+
+/// Spellings of a reported process exit status, compared case-insensitively.
+///
+/// The wording is the tool's choice, not a protocol field: a live capture
+/// writes `(Command exited with code 1)` and another wrapper reports
+/// `exit status 1`, neither of which spells `exit code`. The grader and the
+/// grounding classifier read all three spellings for the same payloads, so a
+/// scan that knew only the first missed a failed call on two of the three
+/// capture formats.
+const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
+
+/// Whether any reported exit status carries a non-zero value.
+///
+/// A zero status is the success spelling a passing command's output routinely
 /// carries ("60 passing (exit code 0)"), and Anthropic's `is_error` is
 /// optional while `content` may be a plain string, so that success spelling
 /// reaches the bare-text scan with no explicit flag to vouch for it — the
 /// bare `exit code` substring flagged it. Only a non-zero status is a failure
-/// signal; the status may be separated by spaces, a colon, or an equals sign.
+/// signal; the status may be separated by spaces, a colon, or an equals sign,
+/// and more than one wording reports it.
 fn mentions_failing_exit_code(lower: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(found) = lower[search_from..].find("exit code") {
-        let after = &lower[search_from + found + "exit code".len()..];
-        let status = after.trim_start_matches([' ', ':', '=']);
-        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
-            return true;
+    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
+        let mut search_from = 0;
+        while let Some(found) = lower[search_from..].find(marker) {
+            let after = &lower[search_from + found + marker.len()..];
+            let status = after.trim_start_matches([' ', ':', '=']);
+            if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+                return true;
+            }
+            search_from += found + marker.len();
         }
-        search_from += found + "exit code".len();
-    }
-    false
+        false
+    })
 }
 
 fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
@@ -409,8 +496,10 @@ impl InterruptionDetector {
     ///   4. ServiceUnavailable — 502/503
     ///   5. ContextOverflow — keywords in error body
     ///   5.5. ResourceExhaustion — quota/billing keywords
-    ///   6. SafetyFilter    — finish_reason == "content_filter"
-    ///   6.5. StateMachineError — protocol/state keywords
+    ///   6. SafetyFilter    — finish_reason is a provider safety stop
+    ///                        (`content_filter`, or Gemini's `SAFETY` family)
+    ///   6.5. StateMachineError — protocol/state keywords, or a provider
+    ///                        malformed-tool-call finish reason
     ///   7. LlmError        — generic HTTP >= 400 fallback
     ///   8. SseTruncated    — SSE stream ended prematurely
     ///   9. TokenLimit      — finish_reason == "length" + ratio
@@ -662,10 +751,14 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("content_filter")) {
+        // Gemini 用自己的一套安全类 finishReason（见 is_safety_stop_reason），
+        // 同样在 200 响应里表示「供应商安全策略拦下了这次生成」而非流被截断。
+        let is_content_filter =
+            finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("content_filter"));
+        if is_content_filter || is_safety_stop_reason(finish_reason) {
             let detail = serde_json::json!({
                 "model": call.model,
-                "finish_reason": "content_filter",
+                "finish_reason": finish_reason,
                 "error": effective_error,
             });
             events.push(InterruptionEvent::new(
@@ -685,18 +778,24 @@ impl InterruptionDetector {
         // ── 6.5 State machine / protocol error ──────────────────────────────
         // Agent received a response that violates expected protocol state,
         // e.g. malformed response structure or invalid state transition.
+        // Gemini reports a tool call it could not parse as a terminal finish
+        // reason (`MALFORMED_FUNCTION_CALL`) rather than an error body; that is
+        // the same protocol failure with no keyword to match on.
         let is_state_error = combined_error.contains("invalid state")
             || combined_error.contains("protocol error")
             || combined_error.contains("malformed")
             || combined_error.contains("unexpected response")
             || combined_error.contains("invalid transition")
             || combined_error.contains("parse error")
-            || combined_error.contains("deserialization");
+            || combined_error.contains("deserialization")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("malformed_function_call"));
         if is_state_error {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
                 "error": effective_error,
+                "finish_reason": finish_reason,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::StateMachineError,
@@ -738,6 +837,8 @@ impl InterruptionDetector {
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
         // 正常终止标志：finish_reason 为
         // stop/tool_calls/function_call/end_turn/tool_use/stop_sequence/pause_turn/refusal
+        // 以及 Gemini 的 other/language/finish_reason_unspecified（终止了但没有
+        // 更具体的归类，不代表流被截断）
         // token-limit (length/max_tokens) 由 rule 9 单独处理（rule 10 只处理
         // `length` 下的输入溢出启发式）
         if is_sse
@@ -1201,6 +1302,212 @@ mod tests {
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::TokenLimit),
             "an upper-case MAX_TOKENS stop must report TokenLimit, got {events:?}"
+        );
+    }
+
+    /// Gemini turns a generation away with a safety-class `finishReason`
+    /// instead of a `content_filter` spelling: `SAFETY` (prompt or answer
+    /// blocked by a safety policy) and its siblings `RECITATION`, `BLOCKLIST`,
+    /// `PROHIBITED_CONTENT`, `SPII` and `IMAGE_SAFETY`. Folding the case only
+    /// taught the detector the upper-case spelling of the words it already
+    /// knew, so these stops matched no rule and fell through to rule 8, which
+    /// reported a truncated stream (High) for a response the provider had
+    /// delivered in full and deliberately withheld. They are safety stops:
+    /// rule 6 owns them and rule 8 must not see them.
+    #[test]
+    fn test_gemini_safety_stop_is_a_safety_filter() {
+        for reason in [
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+        ] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.interruption_type == InterruptionType::SafetyFilter),
+                "{reason} is a safety stop and must report SafetyFilter, got {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} arrives on a complete stream and must not report \
+                 SseTruncated, got {events:?}"
+            );
+        }
+    }
+
+    /// The safety stop is a property of the last choice, like every other
+    /// finish-reason rule: an earlier choice that was blocked does not make a
+    /// response whose final choice finished normally a safety filter.
+    #[test]
+    fn test_safety_stop_follows_the_last_choice() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("SAFETY".to_string()),
+            },
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("STOP".to_string()),
+            },
+        ];
+        assert!(
+            detector.detect(&call).is_empty(),
+            "a normal last choice must not inherit the first choice's safety stop"
+        );
+    }
+
+    /// `MALFORMED_FUNCTION_CALL` is Gemini's way of saying the model emitted a
+    /// tool call the runtime could not parse — a protocol failure in the Agent
+    /// loop, not a safety decision and not a truncated stream. It is the one
+    /// Gemini reason that is neither a normal stop, nor a token limit, nor a
+    /// safety stop, so it fell to rule 8 and was reported as `sse_truncated`
+    /// (high), which sends the reader looking at the transport. Rule 6.5
+    /// (`state_machine_error`) is the type the rule set has for a response that
+    /// violates the expected protocol shape.
+    #[test]
+    fn test_gemini_malformed_function_call_is_a_state_machine_error() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("MALFORMED_FUNCTION_CALL".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::StateMachineError),
+            "a malformed function call stop is a protocol error, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the stream completed; only the tool call was malformed, got {events:?}"
+        );
+    }
+
+    /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
+    /// provider finished the turn and declined to say more (`OTHER`), or the
+    /// requested language is unsupported (`LANGUAGE`). Neither is a token cap
+    /// and neither says the stream was cut, so rule 8 reported `sse_truncated`
+    /// (high) on a stream that had ended. They are terminal stops without a
+    /// more specific rule, the same way the whitelist already treats
+    /// `stop_sequence`. The enum's own placeholder
+    /// (`FINISH_REASON_UNSPECIFIED`, reported when a gateway omits the reason)
+    /// belongs in that class too: "the provider gave no reason" is not
+    /// evidence of truncation.
+    #[test]
+    fn test_gemini_unspecific_stop_is_not_truncation() {
+        for reason in ["OTHER", "LANGUAGE", "FINISH_REASON_UNSPECIFIED"] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} is a terminal stop, not a cut stream, got {events:?}"
+            );
+        }
+    }
+
+    /// The builder records `incomplete` on every output message when the
+    /// capture was abandoned mid-turn — the call stopped being observed before
+    /// the provider finished (process exited, buffer evicted, budget exceeded)
+    /// — and `abandon_reason` says which. The stream really was cut, so
+    /// `sse_truncated` is the right verdict, but it has to fire from the
+    /// metadata rather than from the finish-reason lists: the word is not a
+    /// provider stop reason, so a fix that whitelists it would suppress the
+    /// one report that is correct. This pins the two together.
+    #[test]
+    fn test_incomplete_capture_still_reports_truncation() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.metadata
+            .insert("incomplete".to_string(), "true".to_string());
+        call.metadata
+            .insert("abandon_reason".to_string(), "evicted".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("incomplete".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated),
+            "an abandoned capture is a cut stream and must stay flagged, got {events:?}"
+        );
+    }
+
+    /// The detail keeps the provider's own spelling: a dashboard reader has to
+    /// tell `SAFETY` from `RECITATION`, and rule 6 used to hard-code the
+    /// OpenAI word for every provider.
+    #[test]
+    fn test_safety_filter_detail_keeps_the_reported_reason() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("RECITATION".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        let detail: serde_json::Value = serde_json::from_str(
+            events[0]
+                .detail
+                .as_deref()
+                .expect("the event carries a detail payload"),
+        )
+        .expect("the detail payload is JSON");
+        assert_eq!(
+            detail["finish_reason"], "RECITATION",
+            "the detail must keep the provider's finish reason, got {detail}"
         );
     }
 
@@ -2386,6 +2693,73 @@ mod tests {
                 "a non-zero exit status must keep the failure signal: {payload}"
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// The exit-status and HTTP-status-line signals the grader and the
+    /// grounding classifier read are read here too, so one stored payload
+    /// cannot be a `tool_failure` finding in one reader and a clean result
+    /// here. Before this scan learned them, a failed fetch that printed
+    /// `HTTP/1.1 500` and a command that reported `(Command exited with code
+    /// 2)` scored `tool_use` 0.45 in the grader while the detector recorded no
+    /// interruption for the same bytes.
+    ///
+    /// The `EPERM` prose spelling is absent here on purpose: the
+    /// unauthorized-action scan already reads it and classifies such a refusal
+    /// as `UnauthorizedAction`, which this scan must not override.
+    #[test]
+    fn the_sibling_failure_spellings_are_read_here_too() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "running the command".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "make check\n(Command exited with code 2)",
+            "make: *** aborted, exit status 1",
+            "curl -i https://example.test/x\nHTTP/1.1 500 Internal Server Error",
+            "HTTP 502",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-sibling".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "a failure spelling the siblings read must be a ToolFailure: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+
+        // The success spellings of the same shapes stay clean, and so does a
+        // code merely mentioned inside a line rather than opening it.
+        for payload in [
+            "make check\n(Command exited with code 0)",
+            "done\nexit status 0",
+            "HTTP/1.1 200 OK",
+            "retried after HTTP/1.1 503; final attempt HTTP/1.1 200 OK",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-sibling".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events.is_empty(),
+                "a success spelling is not a failure: {payload}: {events:?}"
+            );
         }
     }
 

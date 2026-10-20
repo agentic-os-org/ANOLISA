@@ -108,6 +108,13 @@ const FAILURE_SIGNATURES: &[&str] = &[
     "permission denied",
     "eacces",
     "eperm",
+    // The same refusal in the wording the C library prints: `EPERM` reads
+    // "Operation not permitted", which carries neither of the spellings
+    // above. The detector's unauthorized-action scan reads this wording; a
+    // mount or an unprivileged chown that reported it here fell through to
+    // the default arm and was graded a certain success, keeping its result in
+    // the evidence pool to ground the paths the call had just been refused.
+    "operation not permitted",
     "upstream server not found",
     "tool execution failed:",
     "error during web fetch for",

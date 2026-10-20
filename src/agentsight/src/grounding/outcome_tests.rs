@@ -796,3 +796,38 @@ fn case_folding_keeps_os_refusals_failed() {
         assert_eq!(v.matched_rule, rule, "{payload}");
     }
 }
+
+/// The C library's wording of `EPERM` is "Operation not permitted", which
+/// contains neither `permission denied` nor the errno spelling. The
+/// detector's unauthorized-action scan reads it, so the same payload was an
+/// `UnauthorizedAction` interruption there and a certain success here: the
+/// call's result stayed in the evidence pool and could ground the very paths
+/// it had just been refused.
+#[test]
+fn the_eperm_prose_spelling_is_a_failure() {
+    for (call, payload, rule) in [
+        (plain_call(), "mount: Operation not permitted", "R4"),
+        (
+            bash_call("chown root /etc/app.conf"),
+            "chown: changing ownership of '/etc/app.conf': Operation not permitted",
+            "R4",
+        ),
+    ] {
+        let v = classify(&call, payload);
+        assert_eq!(v.status, CallStatus::Failed, "{payload}");
+        assert_eq!(v.matched_rule, rule, "{payload}");
+        assert_eq!(v.confidence, Confidence::High, "{payload}");
+    }
+
+    // A clean payload that merely mentions the wording is not this call's
+    // refusal: the signature is anchored in free text, like its siblings, but
+    // a provider-declared success still short-circuits it in R1.
+    let mut successful = result("chmod finished; no Operation not permitted errors");
+    successful.extra = Some(HashMap::from([(
+        EXTRA_IS_ERROR.to_string(),
+        serde_json::Value::Bool(false),
+    )]));
+    let v = classify_call(&plain_call(), Some(&successful));
+    assert_eq!(v.status, CallStatus::Ok);
+    assert_eq!(v.matched_rule, "R1(success)");
+}

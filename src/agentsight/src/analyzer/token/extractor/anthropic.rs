@@ -152,6 +152,11 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
                     // `tool_result` block, so without this arm the payload
                     // the API actually counts vanishes from the message.
                     Some("tool_result") => tool_result_text(b.get("content")),
+                    // A replayed conversation keeps the assistant's own
+                    // `tool_use` blocks; without this arm the turn that asked
+                    // for the tool extracted to nothing, dropping the tool
+                    // name and its JSON arguments from the request.
+                    Some("tool_use") => tool_use_text(b),
                     _ => None,
                 })
                 .collect::<Vec<String>>()
@@ -186,6 +191,19 @@ fn tool_result_text(content: Option<&Value>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Text of an Anthropic `tool_use` block: the tool name and its input as
+/// JSON, the same `name: input` rendering the response reader emits. `None`
+/// for a block with no serializable input.
+fn tool_use_text(block: &Value) -> Option<String> {
+    let name = block
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("unknown");
+    let input = block.get("input")?;
+    let input_str = serde_json::to_string(input).ok()?;
+    Some(format!("{name}: {input_str}"))
 }
 
 #[cfg(test)]
@@ -324,6 +342,42 @@ mod tests {
             token_data.request_messages[2].content,
             "first second trailing"
         );
+    }
+
+    /// A replayed conversation contains the assistant's own `tool_use`
+    /// blocks: the turn that asked for the tool, followed by the user turn
+    /// carrying the matching `tool_result`. The request reader already counts
+    /// the result half, but not the call that asked for it, so the assistant
+    /// turn extracted to nothing and was dropped from `request_messages` —
+    /// losing the tool name and the JSON arguments, which are a sizeable part
+    /// of an agentic prompt. The response reader in this same file reads the
+    /// block; the request arm was the copy missing it.
+    #[test]
+    fn test_extract_request_keeps_a_replayed_tool_use() {
+        let request = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "messages": [
+                {"role": "user", "content": "list /tmp"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "Bash",
+                     "input": {"command": "ls /tmp"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "a.txt"}
+                ]}
+            ]
+        });
+
+        let token_data = extract_token_data(Some(&request), None).expect("request yields data");
+        assert_eq!(
+            token_data.request_messages.len(),
+            3,
+            "the replayed assistant tool call must be counted"
+        );
+        let call = &token_data.request_messages[1];
+        assert_eq!(call.role, "assistant");
+        assert!(call.content.contains("Bash"), "got {:?}", call.content);
+        assert!(call.content.contains("ls /tmp"), "got {:?}", call.content);
     }
 
     /// Extended thinking arrives as a `thinking` content block. The shared

@@ -555,8 +555,9 @@ impl HttpConnectionAggregator {
         if request.body().len() > self.max_body_bytes
             || content_length.is_some_and(|len| len > self.max_body_bytes)
         {
-            request.reassembled_body =
-                Some(request.body()[..request.body().len().min(self.max_body_bytes)].to_vec());
+            let truncated =
+                request.body()[..request.body().len().min(self.max_body_bytes)].to_vec();
+            request.set_reassembled_body(truncated);
             request.source_event = Rc::new(request.source_event.metadata_only());
             self.insert(connection_id, ConnectionState::RequestPending { request });
             self.abandon(&connection_id, crate::aggregator::RemoveReason::OverBudget);
@@ -597,8 +598,7 @@ impl HttpConnectionAggregator {
             if let Some(content_length) = content_length.filter(|length| request.body_len > *length)
             {
                 let body = request.body()[..content_length].to_vec();
-                request.reassembled_body = Some(body);
-                request.body_len = content_length;
+                request.set_reassembled_body(body);
                 request.source_event = Rc::new(request.source_event.metadata_only());
             }
             log::trace!(
@@ -702,7 +702,7 @@ impl HttpConnectionAggregator {
                     body_buffer.truncate(cl);
                 }
                 let mut completed_request = request;
-                completed_request.reassembled_body = Some(body_buffer);
+                completed_request.set_reassembled_body(body_buffer);
 
                 if response.is_sse() {
                     let mut response_headers = response;
@@ -1019,8 +1019,7 @@ impl HttpConnectionAggregator {
                         body_buffer.shrink_to_fit();
                     }
                     let mut completed_request = request;
-                    completed_request.body_len = body_buffer.len();
-                    completed_request.reassembled_body = Some(body_buffer);
+                    completed_request.set_reassembled_body(body_buffer);
                     self.insert(
                         connection_id,
                         ConnectionState::RequestPending {
@@ -1869,6 +1868,9 @@ mod tests {
             // Since total buffer (17) < content_length (100), truncate does nothing
             let body = pair.request.body();
             assert_eq!(body, b"partial_more_data");
+            // `body_len` describes the same body the reassembly installed; a
+            // zero here makes every `body_len`-gated reader skip the prompt.
+            assert_eq!(pair.request.body_len, body.len());
         } else {
             panic!("Expected HttpComplete result");
         }

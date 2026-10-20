@@ -198,6 +198,7 @@ def load_captured_incremental(
     genai_after_id: int,
     token_after_rowid: int,
     pending_genai_ids: set[int],
+    expected_total_tokens: int | None = None,
 ) -> tuple[Captured, int, int, set[int]]:
     """Read newly inserted records and refresh GenAI rows still pending."""
     captured: Captured = {}
@@ -208,9 +209,7 @@ def load_captured_incremental(
     with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if "token_records" in tables:
             columns = table_columns(connection, "token_records")
@@ -300,7 +299,17 @@ def load_captured_incremental(
                                 record.get("total_tokens"),
                             )
                     if row_id is not None:
-                        if status == "pending":
+                        # GenAI rows may receive their final token totals after
+                        # becoming complete; keep refreshing requested evidence.
+                        if status == "pending" or (
+                            status == "complete"
+                            and expected_total_tokens is not None
+                            and record.get("total_tokens") != expected_total_tokens
+                            and any(
+                                not prefix or identifier.startswith(prefix)
+                                for identifier in identifiers
+                            )
+                        ):
                             next_pending_ids.add(row_id)
                         else:
                             next_pending_ids.discard(row_id)
@@ -412,6 +421,12 @@ def make_report(
     return report
 
 
+def _validation_passed(report: dict[str, Any], minimum: float) -> bool:
+    return report["completeness_ratio"] >= minimum and (
+        report["token_accuracy"] is None or report["token_accuracy"] >= minimum
+    )
+
+
 def wait_for_report(
     db_path: Path,
     prefix: str,
@@ -437,7 +452,7 @@ def wait_for_report(
                 raise
             logging.warning("Capture database busy; retrying within validation deadline: %s", error)
         report = make_report(expected, successful, captured, expected_total_tokens)
-        if report["completeness_ratio"] >= min_completeness:
+        if _validation_passed(report, min_completeness):
             return report
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -474,6 +489,7 @@ def wait_for_streaming_report(
                     genai_after_id,
                     token_after_rowid,
                     pending_genai_ids,
+                    expected_total_tokens=expected_total_tokens,
                 )
             )
         except sqlite3.OperationalError as error:
@@ -494,14 +510,18 @@ def wait_for_streaming_report(
             report = make_report(expected, successful, captured, expected_total_tokens)
             report["validation_mode"] = "streaming_incremental"
             report["retention_safe"] = True
-            if report["completeness_ratio"] >= min_completeness:
+            if _validation_passed(report, min_completeness):
                 return report
             now = time.monotonic()
             if completion_deadline is None:
                 completion_deadline = now + wait_seconds
             if now >= completion_deadline:
                 return report
-        time.sleep(poll_interval)
+        time.sleep(
+            min(poll_interval, completion_deadline - now)
+            if completion_deadline is not None
+            else poll_interval
+        )
 
 
 def main() -> int:
@@ -592,7 +612,7 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    return 0 if report["completeness_ratio"] >= args.min_completeness else 1
+    return 0 if _validation_passed(report, args.min_completeness) else 1
 
 
 if __name__ == "__main__":

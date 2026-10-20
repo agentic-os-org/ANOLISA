@@ -158,8 +158,10 @@ fn text_has_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || mentions_failing_http_status(text)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
         || lower.contains("command not found")
         || lower.contains("eacces")
         || lower.contains("eperm")
@@ -167,24 +169,66 @@ fn text_has_error_signal(text: &str) -> bool {
         || lower.contains("error:")
 }
 
-/// Whether any `exit code N` mention carries a non-zero status.
+/// Whether a line of the payload opens with an HTTP 4xx/5xx status.
 ///
-/// The detector's twin scan (`tool_response_failure_text`) reads the same
-/// payloads with this same rule: `exit code 0` is the success spelling a
-/// passing command's output routinely carries ("60 passing (exit code 0)"),
-/// while any non-zero status is the failure signal. The status may be
-/// separated from the words by spaces, a colon or an equals sign.
+/// A failed fetch reports itself this way when the tool printed the response
+/// headers instead of an error string: a raw response and `curl -i` output
+/// both start `HTTP/1.1 500 …`, and some wrappers drop the version. The
+/// grounding classifier reads exactly this shape (`outcome::http_error_line`)
+/// and grades the call a certain failure, while this scan knew no status-line
+/// signal at all, so the same record scored as a clean tool result and the
+/// root cause could not become a ToolFailure.
+///
+/// The status has to open its line: a payload that merely mentions a code — a
+/// URL, a changelog line, a sentence — is describing something else, the same
+/// anchor the classifier applies.
+fn mentions_failing_http_status(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|after| after.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        rest.is_some_and(|status| {
+            let mut digits = status.chars();
+            matches!(digits.next(), Some('4' | '5'))
+                && digits.clone().take(2).all(|c| c.is_ascii_digit())
+                && digits.count() >= 2
+        })
+    })
+}
+
+/// Spellings of a reported process exit status, compared case-insensitively.
+///
+/// The wording is the tool's choice, not a protocol field: a live capture
+/// writes `(Command exited with code 1)` and another wrapper reports
+/// `exit status 1`, neither of which spells `exit code`. The grounding
+/// classifier reads all three spellings for the same payloads
+/// (`outcome::EXIT_CODE_MARKERS`), so a scan that knew only the first missed
+/// a failed call on two of the three capture formats.
+const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
+
+/// Whether any reported exit status carries a non-zero value.
+///
+/// The detector's twin scan (`tool_response_failure_text`) and the grounding
+/// classifier read the same payloads with this same rule: a zero status is
+/// the success spelling a passing command's output routinely carries
+/// ("60 passing (exit code 0)"), while any non-zero status is the failure
+/// signal. The status may be separated from the words by spaces, a colon or
+/// an equals sign, and more than one wording reports it.
 fn mentions_failing_exit_code(lower: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(found) = lower[search_from..].find("exit code") {
-        let after = &lower[search_from + found + "exit code".len()..];
-        let status = after.trim_start_matches([' ', ':', '=']);
-        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
-            return true;
+    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
+        let mut search_from = 0;
+        while let Some(found) = lower[search_from..].find(marker) {
+            let after = &lower[search_from + found + marker.len()..];
+            let status = after.trim_start_matches([' ', ':', '=']);
+            if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+                return true;
+            }
+            search_from += found + marker.len();
         }
-        search_from += found + "exit code".len();
-    }
-    false
+        false
+    })
 }
 
 pub(super) fn first_event_refs(input: &EvaluationInput, label: &str) -> Vec<EvaluationRef> {
@@ -617,6 +661,7 @@ mod tests {
         for payload in [
             r#"[{"type":"tool_result","content":"open /etc/shadow: EACCES"}]"#,
             r#"[{"type":"tool_result","content":"mount: EPERM"}]"#,
+            r#"[{"type":"tool_result","content":"mount -t tmpfs none /mnt: Operation not permitted"}]"#,
         ] {
             let event = event(None, Some(payload), None);
             assert!(
@@ -671,6 +716,74 @@ mod tests {
             assert!(
                 looks_like_tool_failure(&event),
                 "a real signal still fires: {payload}"
+            );
+        }
+    }
+
+    /// A tool result can report its exit status under more than one wording:
+    /// a live capture writes `(Command exited with code 1)` and another
+    /// wrapper reports `exit status 1`. The grounding classifier reads all of
+    /// them, but this scan only matched the literal `exit code`, so a failed
+    /// call was a certain failure in one reader and a clean tool result in
+    /// the other — `tool_use` scored 1.0 and no `tool_failure` finding was
+    /// emitted for the same stored payload.
+    #[test]
+    fn detects_failing_exit_statuses_the_classifier_reads() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"make check\n(Command exited with code 2)"}]"#,
+            r#"[{"type":"tool_result","content":"make: *** Tool execution aborted, exit status 1"}]"#,
+            r#"[{"type":"tool_result","content":"cargo build\nexit status: 101"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "a failing exit status is a tool failure: {payload}"
+            );
+        }
+
+        // The success spelling stays clean whichever wording carries it.
+        for payload in [
+            r#"[{"type":"tool_result","content":"make check\n(Command exited with code 0)"}]"#,
+            r#"[{"type":"tool_result","content":"done\nexit status 0"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a zero exit status is not a failure: {payload}"
+            );
+        }
+    }
+
+    /// A failed fetch reports itself by printing the response status line,
+    /// with no error string in the body. The grounding classifier reads that
+    /// line (`outcome::http_error_line`) and grades a certain failure, while
+    /// this scan knew no status-line signal: the same record scored as a
+    /// clean tool result and the failure never became a finding.
+    #[test]
+    fn detects_an_http_error_status_line() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"HTTP/1.1 500 Internal Server Error"}]"#,
+            r#"[{"type":"tool_result","content":"HTTP/2 404"}]"#,
+            r#"[{"type":"tool_result","content":"curl -i https://example.test/x\nHTTP/1.1 503 Service Unavailable"}]"#,
+            r#"[{"type":"tool_result","content":"HTTP 502"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "an HTTP error status is a tool failure: {payload}"
+            );
+        }
+
+        // A success status and a code merely mentioned inside a line stay
+        // clean — the classifier applies the same line-start anchor.
+        for payload in [
+            r#"[{"type":"tool_result","content":"HTTP/1.1 200 OK"}]"#,
+            r#"[{"type":"tool_result","content":"retried after HTTP/1.1 503; final attempt HTTP/1.1 200 OK"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a success status is not a failure: {payload}"
             );
         }
     }

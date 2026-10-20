@@ -757,9 +757,9 @@ jobs:
           cargo build -p agentsight-enforcer --no-default-features --features actplane
           ./scripts/build-enforcer.sh
 
-      - name: Test raw packaging
+      - name: Test raw packaging and batch analysis
         working-directory: src/agentsight
-        run: uv run --python 3.11.6 --no-project make test-raw-package
+        run: uv run --python 3.11.6 --no-project make test-raw-package test-batch-analysis
 
       - name: Test doctests
         run: |

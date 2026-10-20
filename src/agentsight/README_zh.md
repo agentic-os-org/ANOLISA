@@ -533,6 +533,11 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 
 > 此配置下 idle 状态 RSS 约 24–30 MB，有事件流量时约 35–40 MB。
 
+## ATIF 导出
+
+使用 `scripts/batch-analyze.py --export-atif DIRECTORY` 可在本地保存转换后的 Claude/Qoder ATIF，无需启动分析器。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
+
 ## 支持的 LLM 提供商
 
 Token 解析支持多种 LLM API 格式：
@@ -541,6 +546,11 @@ Token 解析支持多种 LLM API 格式：
 - Anthropic（Claude，包括缓存 Token 处理）
 - Google Gemini
 - 通义千问 Qwen（支持原生 Chat Template）
+
+## 批量分析并发
+
+批处理脚本可显式启用 `--jobs 1..8`（默认 1），限制并发调用数，并按原始顺序输出结果。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
 
 ## 项目起源
 

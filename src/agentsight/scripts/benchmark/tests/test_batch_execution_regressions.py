@@ -163,5 +163,134 @@ class BatchExecutionTests(unittest.TestCase):
         )
 
 
+class BatchDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory(prefix="batch-discovery-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    @staticmethod
+    def write_session(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Inspect this ordinary project. " * 100,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_project_and_ancestor_names_do_not_mark_child_sessions(self) -> None:
+        for directory in [
+            "subagent-work/project",
+            ".claude/projects/-work-subagent-library",
+            "subagents/project",
+        ]:
+            with self.subTest(directory=directory):
+                project = self.root / directory
+                session = project / "main-session.jsonl"
+                self.write_session(session)
+                self.assertEqual(batch_analyze.find_conversation_files([project]), [session])
+
+    def test_child_locations_and_legacy_filenames_stay_excluded(self) -> None:
+        project = self.root / "project"
+        main = project / "main-session.jsonl"
+        self.write_session(main)
+        for child in [
+            "subagent/child.jsonl",
+            "subagents/agent-child.jsonl",
+            "subagents/nested/agent-child.jsonl",
+            "subagent-run.jsonl",
+        ]:
+            self.write_session(project / child)
+        self.assertEqual(batch_analyze.find_conversation_files([project]), [main])
+        for directory in ["subagent", "subagents"]:
+            self.assertEqual(batch_analyze.find_conversation_files([project / directory]), [])
+
+    def test_size_filter_and_newest_first_order_stay_unchanged(self) -> None:
+        project = self.root / "project"
+        old, new, tiny = [project / name for name in ["old.jsonl", "new.jsonl", "tiny.jsonl"]]
+        for session in [old, new]:
+            self.write_session(session)
+        tiny.write_text("{}\n", encoding="utf-8")
+        os.utime(old, (100, 100))
+        os.utime(new, (200, 200))
+        self.assertEqual(
+            batch_analyze.find_conversation_files([project, self.root / "missing"]), [new, old]
+        )
+
+    def run_cli(self, selection: list[str], home: Path) -> dict:
+        analyzer = self.root / "analyzer.py"
+        analyzer.write_text(
+            f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n"
+            "doc=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))\n"
+            "print(json.dumps({'received_session':doc['session_id']}))\n",
+            encoding="utf-8",
+        )
+        analyzer.chmod(0o755)
+        home.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(batch_analyze.__file__).resolve()),
+                "--dim",
+                "perf",
+                "--min-steps",
+                "1",
+                "--binary",
+                str(analyzer),
+                *selection,
+            ],
+            env={**os.environ, "HOME": str(home)},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip(), result.stderr)
+        self.assertIn("Done: 1 analyzed, 0 skipped, 0 failed", result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["received_session"], "main-session")
+        self.assertEqual(output["_session_id"], "main-session")
+        return output
+
+    @unittest.skipUnless(os.name == "posix", "executable analyzer fixtures require POSIX")
+    def test_cli_explicit_directory_keeps_a_main_session(self) -> None:
+        project = self.root / "subagent-project"
+        session = project / "main-session.jsonl"
+        self.write_session(session)
+        output = self.run_cli(["--dir", str(project)], self.root / "home")
+        self.assertEqual(output["_source_file"], str(session))
+
+    @unittest.skipUnless(os.name == "posix", "executable analyzer fixtures require POSIX")
+    def test_cli_default_scan_keeps_encoded_project_and_home_names(self) -> None:
+        for home_name, project_name in [
+            ("home", "-work-subagent-library"),
+            ("subagent-workspace", "project"),
+            ("subagents", "project"),
+        ]:
+            with self.subTest(home=home_name, project=project_name):
+                home = self.root / home_name
+                session = home / ".claude" / "projects" / project_name / "main-session.jsonl"
+                self.write_session(session)
+                output = self.run_cli([], home)
+                self.assertEqual(output["_source_file"], str(session))
+
+    @unittest.skipUnless(os.name == "posix", "executable analyzer fixtures require POSIX")
+    def test_cli_explicit_file_still_bypasses_directory_filter(self) -> None:
+        session = self.root / "subagents" / "main-session.jsonl"
+        self.write_session(session)
+        output = self.run_cli(["--file", str(session)], self.root / "home")
+        self.assertEqual(output["_source_file"], str(session))
+
+
 if __name__ == "__main__":
     unittest.main()

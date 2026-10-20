@@ -65,11 +65,21 @@ pub fn classify_document(
     blocks: &[ChatMLBlock],
     response: Option<ResponseData>,
 ) -> ClassifiedDocument {
-    let system_content: String = blocks
+    // Concatenate in order. A rendered block does not necessarily end its
+    // content with a newline (the Qwen template does not add one), so insert a
+    // single boundary unless one side already provides it: gluing two messages
+    // into one word also changes the token count.
+    let system_content = blocks
         .iter()
         .filter(|b| b.role == "system")
         .map(|b| b.raw_content.as_str())
-        .collect();
+        .fold(String::new(), |mut content, block| {
+            if !content.is_empty() && !content.ends_with('\n') && !block.starts_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(block);
+            content
+        });
 
     let messages = classify_conversation(blocks);
 
@@ -216,5 +226,44 @@ mod tests {
             "first system block vanished from the system prompt: {:?}",
             doc.system_content
         );
+    }
+    #[test]
+    fn system_blocks_keep_a_boundary_without_a_trailing_newline() {
+        // The Qwen template renders `<|im_start|>system\n` + content +
+        // `<|im_end|>` with no newline appended to content. Concatenating the
+        // raw contents therefore glued two messages into "FirstSecond", which
+        // is both unreadable and a different tokenization from the boundary
+        // the markers put between them.
+        let blocks = vec![
+            make_block("system", "First prompt."),
+            make_block("system", "Second prompt."),
+            make_block("user", "hello"),
+        ];
+        let doc = classify_document(&blocks, None);
+        assert_eq!(doc.system_content, "First prompt.\nSecond prompt.");
+    }
+
+    #[test]
+    fn system_blocks_do_not_gain_a_blank_line() {
+        // A block that already ends its content with a newline keeps the
+        // single boundary it had; the separator must not become a blank line.
+        let blocks = vec![
+            make_block("system", "First prompt.\n"),
+            make_block("system", "Second prompt.\n"),
+        ];
+        let doc = classify_document(&blocks, None);
+        assert_eq!(doc.system_content, "First prompt.\nSecond prompt.\n");
+    }
+    #[test]
+    fn system_blocks_keep_one_boundary_when_the_next_starts_with_a_newline() {
+        // The next block may already begin with the boundary (a template that
+        // keeps it in the content); the separator must not add a blank line.
+        let blocks = vec![
+            make_block("system", "First prompt."),
+            make_block("system", "\nSecond prompt."),
+            make_block("user", "hello"),
+        ];
+        let doc = classify_document(&blocks, None);
+        assert_eq!(doc.system_content, "First prompt.\nSecond prompt.");
     }
 }

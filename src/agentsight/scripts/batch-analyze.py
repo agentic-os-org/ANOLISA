@@ -12,11 +12,14 @@ Environment variables (forwarded to analyze binary):
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from collections import abc, deque
+from io import StringIO
 from pathlib import Path
 from typing import List, Optional
 
@@ -41,9 +44,11 @@ def extract_text(content, *, include_tool_results: bool = True) -> str:
         for block in content:
             if isinstance(block, dict):
                 if block.get("type") == "text":
-                    parts.append(block.get("text", ""))
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
                 elif block.get("type") == "tool_result" and include_tool_results:
-                    parts.append(block.get("content", ""))
+                    parts.append(extract_text(block.get("content", "")))
             elif isinstance(block, str):
                 parts.append(block)
         return "\n".join(parts)
@@ -57,11 +62,13 @@ def extract_tool_calls(content) -> list:
         return calls
     for block in content:
         if isinstance(block, dict) and block.get("type") == "tool_use":
-            calls.append({
-                "tool_call_id": block.get("id", ""),
-                "function_name": block.get("name", ""),
-                "arguments": block.get("input", {}),
-            })
+            calls.append(
+                {
+                    "tool_call_id": block.get("id", ""),
+                    "function_name": block.get("name", ""),
+                    "arguments": block.get("input", {}),
+                }
+            )
     return calls
 
 
@@ -75,7 +82,9 @@ def extract_tool_results(content) -> list:
             result_content = block.get("content", "")
             if isinstance(result_content, list):
                 result_content = " ".join(
-                    b.get("text", "") for b in result_content if isinstance(b, dict)
+                    b.get("text", "")
+                    for b in result_content
+                    if isinstance(b, dict) and isinstance(b.get("text", ""), str)
                 )
             result = {
                 "source_call_id": block.get("tool_use_id"),
@@ -94,7 +103,9 @@ def extract_thinking(content) -> Optional[str]:
     parts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") == "thinking":
-            parts.append(block.get("thinking", ""))
+            thinking = block.get("thinking", "")
+            if isinstance(thinking, str):
+                parts.append(thinking)
     return "\n".join(parts) if parts else None
 
 
@@ -110,9 +121,7 @@ def usage_to_metrics(usage) -> dict:
     """Map a provider usage object onto ATIF metric names."""
     if not isinstance(usage, dict):
         return {}
-    counters = {
-        key: value for key, value in usage.items() if type(value) is int and value >= 0
-    }
+    counters = {key: value for key, value in usage.items() if type(value) is int and value >= 0}
     metrics = {}
     for source, target in (
         ("input_tokens", "prompt_tokens"),
@@ -301,38 +310,198 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
 # ─── File discovery ───────────────────────────────────────────────────────────
 
 
+def export_atif(atif: dict, source: Path, directory: Path) -> Path:
+    """Atomically replace the artifact for one canonical source path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    identity = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()
+    target = directory / f"{identity}.atif.json"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, prefix=".atif-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(atif, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return target
+
+
+def export_files(args: argparse.Namespace) -> None:
+    """Run the local export workflow without entering analyzer execution."""
+    if args.file:
+        files = [Path(args.file)]
+    else:
+        dirs = [Path(d).expanduser() for d in args.dir] if args.dir else DEFAULT_DIRS
+        print(f"Scanning directories: {[str(d) for d in dirs]}", file=sys.stderr)
+        files = find_conversation_files(dirs)
+        print(f"Found {len(files)} conversation files", file=sys.stderr)
+    counts = {"exported": 0, "skipped": 0, "failed": 0}
+    for filepath in files[: args.limit]:
+        print(f"\n{'='*60}\nFile: {filepath}", file=sys.stderr)
+        atif = jsonl_to_atif(filepath)
+        if atif is None or len(atif["steps"]) < args.min_steps:
+            print("  SKIP: cannot parse, empty, or fewer than minimum steps", file=sys.stderr)
+            counts["skipped"] += 1
+            continue
+        try:
+            target = export_atif(atif, filepath, Path(args.export_atif).expanduser())
+        except OSError as error:
+            print(f"  FAIL: cannot export ATIF: {error}", file=sys.stderr)
+            counts["failed"] += 1
+            continue
+        print(
+            json.dumps(
+                {
+                    "_source_file": str(filepath),
+                    "_session_id": atif["session_id"],
+                    "_steps": len(atif["steps"]),
+                    "_atif_file": str(target),
+                },
+                ensure_ascii=False,
+            )
+        )
+        print(f"  EXPORTED: {target}", file=sys.stderr)
+        counts["exported"] += 1
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(
+        f"Done: {counts['exported']} exported, {counts['skipped']} skipped, {counts['failed']} failed",
+        file=sys.stderr,
+    )
+
+
 def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path]:
     """Find JSONL conversation files in given directories."""
     files = []
+    seen = set()
     for d in dirs:
-        if not d.exists():
+        if not d.exists() or d.name in ("subagent", "subagents"):
             continue
         for f in d.rglob("*.jsonl"):
-            # Skip subagent files and small files
-            if "subagent" in str(f):
+            # Only child locations inside this scan root identify a child run;
+            # arbitrary ancestors and encoded project names do not.
+            if "subagent" in f.name or any(
+                part in ("subagent", "subagents") for part in f.relative_to(d).parent.parts
+            ):
                 continue
             try:
-                if f.stat().st_size >= min_size:
-                    files.append(f)
-            except OSError:
+                canonical = f.resolve(strict=True)
+                if canonical in seen:
+                    continue
+                metadata = f.stat()
+                if metadata.st_size >= min_size:
+                    seen.add(canonical)
+                    files.append((metadata.st_mtime, f))
+            except (OSError, RuntimeError):
                 continue
     # Sort by modification time (newest first)
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    return files
+    files.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in files]
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def analyze_file(
+    filepath: Path, min_steps: int, command: list[str], dim: str
+) -> tuple[str, Optional[dict], str]:
+    """Own one invocation and buffer diagnostics so workers cannot mix output."""
+    diagnostics = StringIO()
+    atif = jsonl_to_atif(filepath)
+    if atif is None:
+        return "skipped", None, "  SKIP: cannot parse or empty\n"
+    n_steps = len(atif["steps"])
+    if n_steps < min_steps:
+        return "skipped", None, f"  SKIP: only {n_steps} steps (< {min_steps})\n"
+    print(
+        f"  Session: {atif['session_id']} | Agent: {atif['agent']['name']} | Steps: {n_steps}",
+        file=diagnostics,
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
+    ) as tmp:
+        json.dump(atif, tmp, ensure_ascii=False)
+        temporary = tmp.name
+    output = None
+    status = "failed"
+    try:
+        try:
+            result = subprocess.run(
+                command + [temporary, "--dim", dim],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+        except OSError as error:
+            print(f"  FAIL: cannot run analyzer: {error}", file=diagnostics)
+            return status, None, diagnostics.getvalue()
+        if result.returncode != 0:
+            print(f"  FAIL: {result.stderr.strip()[:200]}", file=diagnostics)
+        else:
+            decoded = json.loads(result.stdout)
+            if not isinstance(decoded, dict):
+                print("  FAIL: expected a JSON object from analyzer", file=diagnostics)
+            else:
+                output = decoded
+                output.update(
+                    _source_file=str(filepath), _session_id=atif["session_id"], _steps=n_steps
+                )
+                print(f"  OK ({dim})", file=diagnostics)
+                status = "analyzed"
+    except subprocess.TimeoutExpired:
+        print("  TIMEOUT (300s)", file=diagnostics)
+    except json.JSONDecodeError:
+        print("  FAIL: invalid JSON output", file=diagnostics)
+    finally:
+        os.unlink(temporary)
+    return status, output, diagnostics.getvalue()
+
+
+def analyze_ordered(
+    files: List[Path], jobs: int, min_steps: int, command: list[str], dim: str
+) -> abc.Iterator[tuple[str, Optional[dict], str]]:
+    """Bound outstanding work as well as running processes, retaining file order."""
+    if jobs == 1:
+        for filepath in files:
+            yield analyze_file(filepath, min_steps, command, dim)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    remaining = iter(files)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        pending = deque()
+        for _ in range(jobs):
+            filepath = next(remaining, None)
+            if filepath is None:
+                break
+            pending.append(executor.submit(analyze_file, filepath, min_steps, command, dim))
+        while pending:
+            yield pending.popleft().result()
+            filepath = next(remaining, None)
+            if filepath is not None:
+                pending.append(executor.submit(analyze_file, filepath, min_steps, command, dim))
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Batch analyze agent trajectories from ~/.claude and ~/.qoder"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--dim",
-        required=True,
         choices=["perf", "cost", "accuracy"],
         help="Analysis dimension",
+    )
+    mode.add_argument(
+        "--export-atif",
+        metavar="DIRECTORY",
+        help="Export converted ATIF files locally without invoking an analyzer",
     )
     parser.add_argument(
         "--dir",
@@ -342,6 +511,14 @@ def main():
     parser.add_argument(
         "--file",
         help="Analyze a single JSONL file directly",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        choices=range(1, 9),
+        default=1,
+        metavar="N",
+        help="Concurrent analyzer invocations (1-8; default: 1). May issue simultaneous LLM requests.",
     )
     parser.add_argument(
         "--limit",
@@ -362,6 +539,12 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.export_atif is not None:
+        if args.binary:
+            parser.error("--binary is only supported with --dim")
+        export_files(args)
+        return
+
     # Determine analyze command
     if args.binary:
         analyze_cmd = [args.binary]
@@ -377,84 +560,23 @@ def main():
         files = find_conversation_files(dirs)
         print(f"Found {len(files)} conversation files", file=sys.stderr)
 
-    # Analyze each file
-    analyzed = 0
-    skipped = 0
-    failed = 0
-
-    for filepath in files[: args.limit]:
+    # Only the coordinator writes stdout/stderr; emit in discovery order.
+    selected = files[: args.limit]
+    counts = {"analyzed": 0, "skipped": 0, "failed": 0}
+    results = analyze_ordered(selected, args.jobs, args.min_steps, analyze_cmd, args.dim)
+    for filepath in selected:
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"File: {filepath}", file=sys.stderr)
-
-        # Convert to ATIF
-        atif = jsonl_to_atif(filepath)
-        if atif is None:
-            print(f"  SKIP: cannot parse or empty", file=sys.stderr)
-            skipped += 1
-            continue
-
-        n_steps = len(atif["steps"])
-        if n_steps < args.min_steps:
-            print(f"  SKIP: only {n_steps} steps (< {args.min_steps})", file=sys.stderr)
-            skipped += 1
-            continue
-
-        print(
-            f"  Session: {atif['session_id']} | Agent: {atif['agent']['name']} | Steps: {n_steps}",
-            file=sys.stderr,
-        )
-
-        # Write ATIF to temp file and run analyze
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
-        ) as tmp:
-            json.dump(atif, tmp, ensure_ascii=False)
-            tmp_path = tmp.name
-
-        try:
-            try:
-                result = subprocess.run(
-                    analyze_cmd + [tmp_path, "--dim", args.dim],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=300,
-                )
-            except OSError as error:
-                print(f"  FAIL: cannot run analyzer: {error}", file=sys.stderr)
-                failed += 1
-                continue
-            if result.returncode == 0:
-                # Output result with file attribution
-                output = json.loads(result.stdout)
-                if not isinstance(output, dict):
-                    print("  FAIL: expected a JSON object from analyzer", file=sys.stderr)
-                    failed += 1
-                    continue
-                output["_source_file"] = str(filepath)
-                output["_session_id"] = atif["session_id"]
-                output["_steps"] = n_steps
-                print(json.dumps(output, ensure_ascii=False, indent=2))
-                print(f"  OK ({args.dim})", file=sys.stderr)
-                analyzed += 1
-            else:
-                print(f"  FAIL: {result.stderr.strip()[:200]}", file=sys.stderr)
-                failed += 1
-        except subprocess.TimeoutExpired:
-            print(f"  TIMEOUT (300s)", file=sys.stderr)
-            failed += 1
-        except json.JSONDecodeError:
-            print(f"  FAIL: invalid JSON output", file=sys.stderr)
-            failed += 1
-        finally:
-            os.unlink(tmp_path)
+        status, output, diagnostics = next(results)
+        if output is not None:
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        print(diagnostics, end="", file=sys.stderr)
+        counts[status] += 1
 
     # Summary
     print(f"\n{'='*60}", file=sys.stderr)
     print(
-        f"Done: {analyzed} analyzed, {skipped} skipped, {failed} failed",
+        f"Done: {counts['analyzed']} analyzed, {counts['skipped']} skipped, {counts['failed']} failed",
         file=sys.stderr,
     )
 

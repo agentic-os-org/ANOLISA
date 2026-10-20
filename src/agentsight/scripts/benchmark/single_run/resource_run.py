@@ -470,6 +470,8 @@ def main() -> int:
         write_json(output / "inputs.json", sources)
         for label, source in sources.items():
             with socket.socket() as check:
+                # Match the mock server's TIME_WAIT reuse across sequential runs.
+                check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 check.bind(("127.0.0.1", args.port))
             if privileged:
                 subprocess.run(["sudo", "-v"], check=True)

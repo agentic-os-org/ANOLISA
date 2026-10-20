@@ -850,6 +850,52 @@ def test_snapshot_contains_deletions_and_untracked_without_staging(tmp_path: Pat
         inputs.close()
 
 
+@pytest.mark.parametrize(
+    ("output_name", "neighbor_name"),
+    [("run[1]", "run1"), ("nested/run[1]", "nested/run1"), ("run", "run-other")],
+)
+def test_snapshot_excludes_only_the_literal_output_directory(
+    tmp_path: Path, output_name: str, neighbor_name: str
+) -> None:
+    repo = fixture_repo(tmp_path)
+    neighbor = repo / neighbor_name
+    neighbor.mkdir(parents=True)
+    (neighbor / "modified").write_text("before")
+    (neighbor / "deleted").write_text("before")
+    git(repo, "add", "--", neighbor_name)
+    git(repo, "commit", "-qm", "add snapshot neighbor")
+    (neighbor / "modified").write_text("staged")
+    git(repo, "add", "--", neighbor_name)
+    (neighbor / "modified").write_text("staged and unstaged")
+    (neighbor / "deleted").unlink()
+    (neighbor / "untracked").write_text("untracked")
+    output = repo / output_name
+    (output / "logs/nested").mkdir(parents=True)
+    (output / "settings.json").write_text("{}")
+    (output / "logs/nested/run.log").write_text("generated output")
+    head_before = git(repo, "rev-parse", "HEAD")
+    status_before = git(repo, "status", "--porcelain")
+    index = Path(git(repo, "rev-parse", "--absolute-git-dir")) / "index"
+    index_before = index.read_bytes()
+    inputs = resource_inputs.Inputs(repo, output)
+    try:
+        source = inputs.prepare("after", "working-tree", None)
+        snapshot = Path(source["component"]).parents[1]
+        assert (snapshot / neighbor_name / "modified").read_text() == "staged and unstaged"
+        assert not (snapshot / neighbor_name / "deleted").exists()
+        assert (snapshot / neighbor_name / "untracked").read_text() == "untracked"
+        assert not (snapshot / output_name).exists()
+        assert source["dirty"]
+        assert index.read_bytes() == index_before
+    finally:
+        inputs.close()
+    assert git(repo, "rev-parse", "HEAD") == head_before
+    assert git(repo, "status", "--porcelain") == status_before
+    assert (neighbor / "modified").read_text() == "staged and unstaged"
+    assert (output / "logs/nested/run.log").read_text() == "generated output"
+    assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
 def test_build_failure_removes_worktrees_and_reports_reason(
     tmp_path: Path, environment: dict[str, str]
 ) -> None:

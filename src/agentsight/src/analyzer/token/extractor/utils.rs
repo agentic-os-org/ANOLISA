@@ -47,6 +47,26 @@ pub fn detect_provider_from_path(path: &str) -> Option<Provider> {
     }
 }
 
+/// Whether a message carries a content block only the Anthropic schema has.
+///
+/// `tool_result`, `tool_use` and `thinking` are Anthropic Messages block
+/// types; the OpenAI-compatible schema spells the same information with
+/// `tool_calls`, `tool_call_id` and plain `text` / `image_url` parts, so one
+/// of these blocks is proof of the protocol no matter which path carried it.
+fn has_anthropic_block(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(|c| c.as_array())
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                matches!(
+                    block.get("type").and_then(|t| t.as_str()),
+                    Some("tool_result" | "tool_use" | "thinking")
+                )
+            })
+        })
+}
+
 /// Detect provider from JSON content structure
 ///
 /// This function analyzes the JSON content to determine the protocol format:
@@ -70,6 +90,25 @@ pub fn detect_provider_from_json(json: &Value) -> Option<Provider> {
         || json.get("parallel_tool_calls").is_some()
     {
         return Some(Provider::OpenAI);
+    }
+
+    // An Anthropic request does not have to carry a top-level `system`: the
+    // field is optional, and a replayed agentic conversation usually omits it.
+    // On a compatible-mode path the path check bows out, so without this arm
+    // such a request fell through to the OpenAI default and the Anthropic
+    // extractor — the one that reads `tool_result`, `tool_use` and `thinking`
+    // blocks — never ran. The OpenAI arm knows only `text` parts, so the whole
+    // tool round vanished from the extracted token data.
+    //
+    // The block type names are the protocol's, not the provider's: OpenAI
+    // spells its calls `tool_calls` with `text` / `input_text` / `image_url`
+    // parts, so these three can only come from the Anthropic schema.
+    if json
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| messages.iter().any(has_anthropic_block))
+    {
+        return Some(Provider::Anthropic);
     }
 
     // Check messages structure
@@ -204,6 +243,48 @@ mod tests {
         });
         let provider = detect_provider_from_json(&request);
         assert_eq!(provider, Some(Provider::Anthropic));
+    }
+
+    /// An Anthropic request does not have to carry a top-level `system`
+    /// prompt: the field is optional and most single-turn and agentic calls
+    /// omit it. On a compatible-mode path the path check bows out and the JSON
+    /// check decides, where Anthropic is currently recognised only by
+    /// `system` — so such a request fell through to the OpenAI default and the
+    /// Anthropic extractor (the one that reads `tool_result`, `tool_use` and
+    /// `thinking` blocks) never ran. Its content blocks were then read by the
+    /// OpenAI arm, which knows only `text`, and the whole turn vanished.
+    ///
+    /// The block type names are the protocol's, not the provider's: OpenAI
+    /// spells its calls `tool_calls` with `text`/`image_url` parts, so a
+    /// `tool_result` block can only come from the Anthropic schema.
+    #[test]
+    fn test_detect_provider_from_json_anthropic_without_system() {
+        let request = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "list /tmp"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "Bash",
+                     "input": {"command": "ls /tmp"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "a.txt"}
+                ]}
+            ]
+        });
+        assert_eq!(
+            detect_provider_from_json(&request),
+            Some(Provider::Anthropic),
+            "an Anthropic block in a system-less request still names the protocol"
+        );
+
+        // The same request through the whole detector: a compatible-mode path
+        // bows out of the path check, so the JSON verdict is the one used.
+        assert_eq!(
+            detect_provider("/compatible-mode/v1/messages", Some(&request)),
+            Some(Provider::Anthropic)
+        );
     }
 
     #[test]
