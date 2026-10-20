@@ -75,13 +75,60 @@ def get_skill_paths(workspace: str) -> dict:
         return {}
 
 
+#: Characters that end a shell word in the commands this script parses.
+#: The set mirrors the name class of the ``skills/([^/\s&|;]+)/`` fallback
+#: below (a skill directory name may contain anything except ``/`` and
+#: these) plus the quoting characters a shell wraps a path in, which are
+#: syntax, never part of a directory name here.
+_SHELL_WORD_DELIMITERS = " \t\n\r&|;'\""
+
+
+def _references_path(command: str, skill_path: str) -> bool:
+    """Whether ``command`` references ``skill_path`` as a whole path.
+
+    A bare substring test misattributes a call to whichever skill the dict
+    iterates first whenever one skill's path is a prefix of another's
+    (``/ws/skills/web`` inside ``/ws/skills/web-search/run.py``), so the
+    reference must start and end at a shell-word boundary: ``web`` no
+    longer matches ``web-search/...``, while ``ls /ws/skills/web`` (the
+    command ends right after the directory) and
+    ``python /ws/skills/web/run.py`` still count.
+    """
+    start = 0
+    while True:
+        idx = command.find(skill_path, start)
+        if idx < 0:
+            return False
+        end = idx + len(skill_path)
+        starts_at_boundary = (
+            idx == 0
+            or command[idx - 1] == "/"
+            or command[idx - 1] in _SHELL_WORD_DELIMITERS
+        )
+        ends_at_boundary = (
+            end == len(command)
+            or command[end] == "/"
+            or command[end] in _SHELL_WORD_DELIMITERS
+        )
+        if starts_at_boundary and ends_at_boundary:
+            return True
+        start = idx + 1
+
+
 def find_skill_in_command(command: str, skill_paths: dict) -> str | None:
     """Identify which skill (if any) is referenced by a shell command."""
     if not command:
         return None
 
-    for skill_name, skill_path in skill_paths.items():
-        if skill_path in command:
+    # Longest (most specific) path first. With the boundary check above a
+    # command that references exactly one skill matches it no matter the
+    # dict order; when a command genuinely references several skills, the
+    # most specific path wins so the attribution stays deterministic
+    # across readdir orders.
+    for skill_name, skill_path in sorted(
+        skill_paths.items(), key=lambda item: (-len(item[1]), item[0])
+    ):
+        if _references_path(command, skill_path):
             return skill_name
 
     match = re.search(r'skills/([^/\s&|;]+)/', command)

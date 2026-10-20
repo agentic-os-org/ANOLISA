@@ -11,6 +11,14 @@ Baseline on unchanged main:
 - ``test_total_is_reported_in_date_and_session_modes`` fails because
   ``--mode date`` / ``--mode session`` printed ``Total skill calls: 0`` while
   the report body listed real calls.
+- ``test_prefixed_skill_path_is_not_misattributed`` and
+  ``test_pipeline_attributes_each_call_to_the_referenced_skill`` fail:
+  ``find_skill_in_command`` matched by raw substring, so a call to
+  ``web-search`` was attributed to ``web`` whenever the dict iterated the
+  shorter path first.
+- ``test_cli_attributes_prefixed_skills_end_to_end`` fails on any host whose
+  readdir lists the shorter name first (the common case) and pins the fixed
+  attribution everywhere.
 """
 
 import json
@@ -168,6 +176,118 @@ class TestFooterTotal(SessionLogsTestCase):
             proc = self.run_cli("--mode", mode)
             self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
             self.assertIn("Total skill calls: 2", proc.stdout, mode)
+
+
+class TestPrefixedSkillAttribution(SessionLogsTestCase):
+    """A skill whose path is a prefix of another skill's path must not
+    swallow that skill's calls.
+
+    ``find_skill_in_command`` matched ``skill_path in command``, so
+    ``/ws/skills/web`` matched inside ``/ws/skills/web-search/run.py`` and
+    the call went to whichever skill the dict happened to iterate first.
+    """
+
+    def import_script(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import skill_usage_from_session_logs as skill_usage
+
+        return skill_usage
+
+    def release_script(self):
+        sys.path.pop(0)
+        sys.modules.pop("skill_usage_from_session_logs", None)
+
+    def test_prefixed_skill_path_is_not_misattributed(self):
+        skill_usage = self.import_script()
+        try:
+            paths = {"web": "/ws/skills/web", "web-search": "/ws/skills/web-search"}
+            # The shorter skill first: the dict order that misattributed on
+            # unchanged main. Dict insertion order is guaranteed, so this
+            # red is deterministic.
+            self.assertEqual(
+                skill_usage.find_skill_in_command(
+                    "python /ws/skills/web-search/run.py", paths
+                ),
+                "web-search",
+            )
+            # And readdir order must not decide the attribution either way.
+            flipped = {
+                "web-search": "/ws/skills/web-search",
+                "web": "/ws/skills/web",
+            }
+            self.assertEqual(
+                skill_usage.find_skill_in_command(
+                    "python /ws/skills/web-search/run.py", flipped
+                ),
+                "web-search",
+            )
+        finally:
+            self.release_script()
+
+    def test_prefix_skill_still_counts_its_own_references(self):
+        skill_usage = self.import_script()
+        try:
+            paths = {"web": "/ws/skills/web", "web-search": "/ws/skills/web-search"}
+            # The boundary check must not over-narrow: every reference shape
+            # the substring loop accepted still counts - a file inside, a
+            # trailing slash, the command ending on the bare directory, and
+            # a shell-quoted directory.
+            for command in (
+                "python /ws/skills/web/run.py",
+                "ls /ws/skills/web/",
+                "ls /ws/skills/web",
+                'rm -rf "/ws/skills/web"',
+            ):
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        skill_usage.find_skill_in_command(command, paths),
+                        "web",
+                    )
+        finally:
+            self.release_script()
+
+    def test_pipeline_attributes_each_call_to_the_referenced_skill(self):
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        (workspace / "skills" / "web-search").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"python {workspace}/skills/web-search/run.py"),
+                tool_call(f"python {workspace}/skills/web/run.py"),
+            ]
+        )
+        skill_usage = self.import_script()
+        try:
+            # The shorter skill first: the readdir order that misattributed
+            # on unchanged main. Each call must land on the skill the
+            # command actually references.
+            ordered = {
+                "web": str(workspace / "skills" / "web"),
+                "web-search": str(workspace / "skills" / "web-search"),
+            }
+            with mock.patch.object(
+                skill_usage, "get_skill_paths", return_value=ordered
+            ):
+                _, by_skill, _ = skill_usage.analyze_session_file(self.log)
+        finally:
+            self.release_script()
+        self.assertEqual(by_skill, {"web": 1, "web-search": 1})
+
+    def test_cli_attributes_prefixed_skills_end_to_end(self):
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        (workspace / "skills" / "web-search").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"python {workspace}/skills/web-search/run.py"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("web-search: 1", proc.stdout)
+        self.assertNotIn("web: 1", proc.stdout)
 
 
 if __name__ == "__main__":
