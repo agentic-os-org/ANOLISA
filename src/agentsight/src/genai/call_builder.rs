@@ -1890,6 +1890,151 @@ mod tests {
         assert_eq!(response.messages[0].finish_reason.as_deref(), Some("STOP"));
     }
 
+    /// The original defect was not just an empty builder: the whole call was
+    /// semantically empty and the compact delivery path discarded it. Drive
+    /// `build_llm_call_with_raw` through the same `HttpContext` shape the
+    /// analyzer produces, with no raw bodies.
+    #[test]
+    fn compact_gemini_call_is_not_semantically_empty() {
+        use crate::analyzer::HttpContext;
+        use crate::analyzer::message::gemini::{
+            GeminiCandidate, GeminiContent, GeminiPart, GeminiRequest, GeminiResponse,
+        };
+
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(path, None, None);
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(GeminiRequest {
+                model: "gemini-2.5-flash".to_string(),
+                contents: vec![GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![GeminiPart {
+                        text: Some("What is 2+2?".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                system_instruction: None,
+                generation_config: None,
+                stream: false,
+            }),
+            response: Some(GeminiResponse {
+                candidates: vec![GeminiCandidate {
+                    content: Some(GeminiContent {
+                        role: Some("model".to_string()),
+                        parts: vec![GeminiPart {
+                            text: Some("4".to_string()),
+                            ..Default::default()
+                        }],
+                    }),
+                    finish_reason: Some("STOP".to_string()),
+                    index: Some(0),
+                }],
+                ..Default::default()
+            }),
+        };
+        let context = HttpContext {
+            retain_raw: false,
+            http,
+            request: None,
+            response: None,
+        };
+
+        let call = build_call(
+            &builder,
+            &[
+                AnalysisResult::HttpContext(context),
+                AnalysisResult::Message(message),
+            ],
+        )
+        .expect("the compact path carries the parsed Gemini message");
+
+        assert!(
+            !call.is_semantically_empty(),
+            "the answer must not be dropped as empty"
+        );
+        assert_eq!(call.request.messages.len(), 1);
+        assert!(!call.request.stream);
+        assert_eq!(call.response.messages[0].parts.len(), 1);
+    }
+
+    /// Exercise the remaining Gemini part shapes and the absent-response
+    /// branch: a `functionResponse` becomes a tool result, an empty
+    /// `functionCall` name is ignored, and `response: None` yields no
+    /// messages instead of panicking.
+    #[test]
+    fn gemini_function_response_and_missing_response_are_handled() {
+        use crate::analyzer::message::gemini::{
+            GeminiContent, GeminiFunctionCall, GeminiFunctionResponse, GeminiPart, GeminiRequest,
+        };
+
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            None,
+            None,
+        );
+        let request = GeminiRequest {
+            model: "gemini-2.5-flash".to_string(),
+            contents: vec![
+                GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart {
+                        function_call: Some(GeminiFunctionCall {
+                            name: "lookup".to_string(),
+                            args: Some(serde_json::json!({"q": "x"})),
+                        }),
+                        ..Default::default()
+                    }],
+                },
+                GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![
+                        GeminiPart {
+                            function_response: Some(GeminiFunctionResponse {
+                                name: "lookup".to_string(),
+                                response: Some(serde_json::json!({"ok": true})),
+                            }),
+                            ..Default::default()
+                        },
+                        GeminiPart {
+                            function_call: Some(GeminiFunctionCall {
+                                name: String::new(),
+                                args: None,
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                },
+            ],
+            system_instruction: None,
+            generation_config: None,
+            stream: false,
+        };
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(request),
+            response: None,
+        };
+        let parsed = Some(&message);
+
+        let built = builder.build_request(&parsed, &http, false);
+        assert_eq!(built.messages.len(), 2);
+        assert_eq!(built.messages[0].role, "assistant");
+        assert!(matches!(
+            &built.messages[0].parts[0],
+            MessagePart::ToolCall { name, .. } if name == "lookup"
+        ));
+        assert_eq!(built.messages[1].parts.len(), 1);
+        assert!(matches!(
+            &built.messages[1].parts[0],
+            MessagePart::ToolCallResponse { response, .. }
+                if response == &serde_json::json!({"ok": true})
+        ));
+
+        let response = builder.build_response(&parsed, &http, &None, true, false);
+        assert!(response.messages.is_empty());
+    }
+
     #[test]
     fn blocked_gemini_completion_keeps_reason_and_classifies_safety() {
         let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
