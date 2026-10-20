@@ -19,6 +19,10 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+Use `aw validate --config next.yaml --against current.yaml` to check policy-only
+edits offline. See [configuration](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#compare-policy-edits);
+this does not update a running instance.
+
 The local service remains available after the Agent exits. Query it and stop it
 when finished.
 

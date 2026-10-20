@@ -47,6 +47,21 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
 完整编辑命令和自定义规则示例见[配置工具参考](../../../../developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。
 
+## 比较策略修改
+
+准备独立的候选文件，与现有配置比较：
+
+```bash
+aw validate --config next.yaml --against current.yaml
+```
+
+两份文件都经过完整校验，只允许 Provider、事件和默认事件预算变化。
+Agent 入口、原生调度、服务路径、审计、观测和元数据必须相同。
+成功打印 `policy update scope valid; runtime activation is not checked`。
+比较不运行 Provider、不修改文件、不检查原生就绪，也不更新运行中的 Agent。
+应用修改仍使用前述停止、编辑、启动流程。
+原有 `aw validate --config FILE` 继续打印 `configuration valid`。
+
 ## 选择 Agent
 
 一个配置可以保存多个目标，`--agent` 选择 `spec.agents` 中的名称。

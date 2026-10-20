@@ -18,6 +18,10 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+用 `aw validate --config next.yaml --against current.yaml` 离线检查仅涉及策略的修改，
+详见[配置](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#比较策略修改)；
+此命令不更新运行中的实例。
+
 退出 Agent 后，本地服务仍可查询，使用结束后显式停止。
 
 ```bash

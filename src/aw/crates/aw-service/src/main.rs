@@ -34,7 +34,7 @@ fn run() -> cli::Result<cli::Exit> {
         println!(
             "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
 aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
-aw validate --config FILE\n\
+aw validate --config FILE [--against BASELINE_FILE]\n\
 aw inspect --config ABS_FILE --json\n\
 aw policy < provider-request.json\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
@@ -81,7 +81,7 @@ install dispatches native Hook installation; it does not install AW or an Agent.
     }
     let flags = &args.flags;
     let allowed: &[&str] = match command.as_str() {
-        "validate" => &["--config"],
+        "validate" => &["--config", "--against"],
         "serve" => &["--config", "--state-dir"],
         "status" | "stop" => &["--socket", "--config"],
         "request" => &["--socket", "--timeout-ms"],
@@ -90,6 +90,19 @@ install dispatches native Hook installation; it does not install AW or an Agent.
     args.check(allowed, false)?;
     let required = |name: &str| args.required(name);
     match command.as_str() {
+        "validate" if flags.contains_key("--against") => {
+            let validator = aw_config::Validator::new()?;
+            let load = |path: &str| -> cli::Result<_> {
+                let bytes = cli::read_file(path, aw_config::MAX_DOCUMENT_BYTES)?;
+                Ok(validator.parse(&bytes)?)
+            };
+            let candidate =
+                load(required("--config")?).map_err(|error| format!("candidate: {error}"))?;
+            let baseline =
+                load(required("--against")?).map_err(|error| format!("baseline: {error}"))?;
+            baseline.validate_policy_update(&candidate)?;
+            println!("policy update scope valid; runtime activation is not checked");
+        }
         "validate" | "serve" => {
             let mut bytes = Vec::new();
             std::fs::File::open(required("--config")?)?
