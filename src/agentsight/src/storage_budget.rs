@@ -52,6 +52,23 @@ impl StorageBudget {
         }
     }
 
+    /// Overrides the measured GenAI database path.
+    ///
+    /// `serve --db` accepts any file name, while [`StorageConfig::genai_path`]
+    /// always appends the fixed default name. Measuring the default file
+    /// excluded the database the server actually opens from the combined cap:
+    /// with per-store size cleanup disabled it was never size-limited at all.
+    pub fn with_genai_path(mut self, path: impl AsRef<Path>) -> Self {
+        if let Some((_, stored)) = self
+            .stores
+            .iter_mut()
+            .find(|(id, _)| *id == DatabaseId::GenAi)
+        {
+            *stored = path.as_ref().to_path_buf();
+        }
+        self
+    }
+
     /// Effective combined limit in MiB, re-read from the config file so
     /// Dashboard edits apply without a restart. Zero disables the budget.
     /// Invalid or partial edits retain the most recently observed valid value.
@@ -252,6 +269,35 @@ mod tests {
         let disabled = budget_with(&base, 0);
         write_db(&base, "genai_events.db", 4 * 1024 * 1024);
         assert_eq!(disabled.effective_limit_mb(DatabaseId::GenAi, 0), 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `serve --db` may name any file, while the config-derived GenAI path
+    /// always carries the default name. Without the override the served
+    /// database was not measured at all, so the combined cap never made it
+    /// shed (and with per-store cleanup disabled nothing bounded it).
+    #[test]
+    fn genai_override_measures_the_served_database() {
+        let base = unique_dir("genai-override");
+        write_db(&base, "genai_events.db", 1024);
+        let served = write_db(&base, "archive.db", 4 * 1024 * 1024);
+        let storage = StorageConfig {
+            base_path: base.clone(),
+            max_total_size_mb: 1,
+            ..StorageConfig::default()
+        };
+
+        let budget = StorageBudget::new(None, &storage).with_genai_path(&served);
+
+        assert!(
+            budget.total_physical_bytes() >= 4 * 1024 * 1024,
+            "the served --db file must be part of the measured allocation"
+        );
+        assert_eq!(
+            budget.effective_limit_mb(DatabaseId::GenAi, 0),
+            1,
+            "the combined cap must bound a served file whose per-store limit is disabled"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
