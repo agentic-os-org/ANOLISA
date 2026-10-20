@@ -486,6 +486,139 @@ impl InterruptionStore {
         Ok(result)
     }
 
+    /// Get all interruptions for a session with optional filters.
+    pub fn list_by_session_filtered(
+        &self,
+        session_id: &str,
+        itype: Option<&str>,
+        severity: Option<&str>,
+        resolved: Option<bool>,
+    ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut conditions = vec!["session_id=?1".to_string()];
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(session_id.to_string())];
+        let mut idx = 2usize;
+
+        if let Some(t) = itype {
+            conditions.push(format!("interruption_type = ?{idx}"));
+            args.push(Box::new(t.to_string()));
+            idx += 1;
+        }
+        if let Some(s) = severity {
+            conditions.push(format!("severity = ?{idx}"));
+            args.push(Box::new(s.to_string()));
+            idx += 1;
+        }
+        if let Some(r) = resolved {
+            conditions.push(format!("resolved = ?{idx}"));
+            args.push(Box::new(r as i32));
+            let _ = idx;
+        }
+
+        let sql = format!(
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
+                    interruption_type, severity, occurred_at_ns, detail, resolved
+             FROM interruption_events
+             WHERE {}
+             ORDER BY occurred_at_ns ASC",
+            conditions.join(" AND "),
+        );
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            args.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(InterruptionRecord {
+                id: row.get(0)?,
+                interruption_id: row.get(1)?,
+                session_id: row.get(2)?,
+                trace_id: row.get(3)?,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Get all interruptions for a conversation with optional filters.
+    pub fn list_by_conversation_filtered(
+        &self,
+        conversation_id: &str,
+        itype: Option<&str>,
+        severity: Option<&str>,
+        resolved: Option<bool>,
+    ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut conditions = vec!["conversation_id=?1".to_string()];
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(conversation_id.to_string())];
+        let mut idx = 2usize;
+
+        if let Some(t) = itype {
+            conditions.push(format!("interruption_type = ?{idx}"));
+            args.push(Box::new(t.to_string()));
+            idx += 1;
+        }
+        if let Some(s) = severity {
+            conditions.push(format!("severity = ?{idx}"));
+            args.push(Box::new(s.to_string()));
+            idx += 1;
+        }
+        if let Some(r) = resolved {
+            conditions.push(format!("resolved = ?{idx}"));
+            args.push(Box::new(r as i32));
+            let _ = idx;
+        }
+
+        let sql = format!(
+            "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
+                    interruption_type, severity, occurred_at_ns, detail, resolved
+             FROM interruption_events
+             WHERE {}
+             ORDER BY occurred_at_ns ASC",
+            conditions.join(" AND "),
+        );
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            args.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(InterruptionRecord {
+                id: row.get(0)?,
+                interruption_id: row.get(1)?,
+                session_id: row.get(2)?,
+                trace_id: row.get(3)?,
+                conversation_id: row.get(4)?,
+                call_id: row.get(5)?,
+                pid: row.get(6)?,
+                agent_name: row.get(7)?,
+                interruption_type: row.get(8)?,
+                severity: row.get(9)?,
+                occurred_at_ns: row.get(10)?,
+                detail: row.get(11)?,
+                resolved: row.get::<_, i32>(12)? != 0,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Statistics: count by (type, severity) within a time range.
     ///
     /// `resolved` filters by resolution state: `Some(false)` yields the
