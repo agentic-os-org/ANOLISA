@@ -16,7 +16,7 @@ fn path_lists_route_by_content_and_origin_without_a_command_name() {
             req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
             let concrete = Arc::new(CountingStore::default());
             let store: Arc<dyn StashStore> = concrete.clone();
-            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store)).unwrap();
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
             assert_eq!(run.response.disposition, Disposition::Applied, "{tool} {origin:?}");
             assert_eq!(run.response.content_type, Some(ContentType::SearchResults));
             assert_eq!(run.response.applied_operations, [AppliedOperation::SearchPathSharing]);
@@ -54,7 +54,7 @@ fn path_lists_respect_file_capability_status_and_policy_gates() {
             8 => config.timeout = Duration::ZERO,
             _ => unreachable!(),
         }
-        let run = PostToolPipeline::run(&req, &config, None).unwrap();
+        let run = PostToolPipeline::run(&req, &config, None);
         assert_eq!(run.response.output, input, "mode={mode}");
         assert!(run.response.applied_operations.is_empty());
         assert!(run.response.stash_keys.is_empty());
@@ -73,7 +73,7 @@ fn path_list_switch_does_not_disable_file_read_json_or_build_logs() {
             let mut req = request(&input);
             req.content_origin = ContentOrigin::FileRead;
             let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-            let run = PostToolPipeline::run(&req, &config, Some(&store)).unwrap();
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
             assert_eq!(run.response.disposition, Disposition::Applied);
             assert!(!run.response.applied_operations.contains(&AppliedOperation::SearchPathSharing));
         }
@@ -87,7 +87,7 @@ fn path_list_dry_run_measures_without_changing_the_response() {
     req.content_origin = ContentOrigin::CommandOutput;
     let mut config = build_log_config();
     config.compression_enabled = false;
-    let run = PostToolPipeline::run(&req, &config, None).unwrap();
+    let run = PostToolPipeline::run(&req, &config, None);
     assert_eq!(run.response.disposition, Disposition::DryRun);
     assert_eq!(run.response.output, input);
     assert_eq!(run.operations, [AppliedOperation::SearchPathSharing]);
@@ -106,7 +106,7 @@ fn path_list_validation_rejects_the_whole_result_after_the_detection_window() {
         for origin in [ContentOrigin::ApiResponse, ContentOrigin::CommandOutput] {
             let mut req = request(&input);
             req.content_origin = origin;
-            let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+            let run = PostToolPipeline::run(&req, &build_log_config(), None);
             assert_eq!(run.response.output, input);
             assert!(run.response.applied_operations.is_empty());
         }
@@ -127,7 +127,7 @@ fn path_lists_cross_the_detection_byte_limit_without_losing_records() {
         for origin in [ContentOrigin::CommandOutput, ContentOrigin::ApiResponse] {
             let mut req = request(&input);
             req.content_origin = origin;
-            let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+            let run = PostToolPipeline::run(&req, &build_log_config(), None);
             assert_eq!(run.response.disposition, Disposition::Applied);
             assert_eq!(run.response.content_type, Some(ContentType::SearchResults));
             let (_, encoded) = run.response.output.split_once('\n').unwrap();
@@ -143,7 +143,7 @@ fn path_lists_cross_the_detection_byte_limit_without_losing_records() {
             assert_eq!(restored, input);
 
             req.content.push_str(&format!("not a path{ending}"));
-            let rejected = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+            let rejected = PostToolPipeline::run(&req, &build_log_config(), None);
             assert_eq!(rejected.response.output, req.content);
             assert!(rejected.response.applied_operations.is_empty());
         }

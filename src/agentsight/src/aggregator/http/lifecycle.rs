@@ -35,7 +35,7 @@ impl RemovedConnection {
                 body_buffer,
                 ..
             } => {
-                request.reassembled_body = Some(body_buffer);
+                request.set_reassembled_body(body_buffer);
                 AggregatedResult::RequestOnly {
                     connection_id: id,
                     request,

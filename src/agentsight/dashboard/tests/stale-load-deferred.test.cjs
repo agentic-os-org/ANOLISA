@@ -139,6 +139,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
   const requireStub = (name) => {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
+    if (name === '../utils/text') return loadPageModule('src/utils/text.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);

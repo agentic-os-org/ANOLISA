@@ -262,6 +262,11 @@ impl GenAIBuilder {
     /// - Plain string: `"content": "text"`.
     /// - Array of content blocks with type `text` / `input_text` / `output_text`:
     ///   `"content": [{"type":"input_text","text":"..."}]`.
+    /// - The DashScope/Bailian native multimodal shape, whose blocks carry no
+    ///   `type` at all: `"content": [{"text":"..."},{"image":"..."}]`. The
+    ///   native response path and `parse_request_body` already accept any
+    ///   block with a `text` field, so the drain path must too; a typed
+    ///   non-text block (`{"type":"image","text":...}`) is still ignored.
     pub(super) fn extract_message_text(message: &serde_json::Value) -> Option<String> {
         let c = message.get("content")?;
         if let Some(s) = c.as_str() {
@@ -272,13 +277,11 @@ impl GenAIBuilder {
         if let Some(arr) = c.as_array() {
             let text: String = arr
                 .iter()
-                .filter_map(|item| {
-                    let ty = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if matches!(ty, "text" | "input_text" | "output_text") {
+                .filter_map(|item| match item.get("type").and_then(|t| t.as_str()) {
+                    None | Some("text" | "input_text" | "output_text") => {
                         item.get("text").and_then(|t| t.as_str())
-                    } else {
-                        None
                     }
+                    Some(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -1646,6 +1649,24 @@ mod tests {
     fn test_extract_message_text_empty() {
         let msg = serde_json::json!({"role": "user", "content": ""});
         assert_eq!(GenAIBuilder::extract_message_text(&msg), None);
+    }
+
+    /// DashScope/Bailian native multimodal blocks carry no `type`:
+    /// `[{"text": "…"}, {"image": "https://…"}]`. The native response path
+    /// reads any block with a `text` field, and `parse_request_body` does the
+    /// same for requests, but the drain extractor required an explicit text
+    /// type — so a drained native call lost its `user_query` and was keyed
+    /// apart from its own turn.
+    #[test]
+    fn test_extract_message_text_dashscope_native_type_less_blocks() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [{"text": "描述这张图"}, {"image": "https://x/y.png"}]
+        });
+        assert_eq!(
+            GenAIBuilder::extract_message_text(&msg),
+            Some("描述这张图".to_string())
+        );
     }
 
     #[test]
