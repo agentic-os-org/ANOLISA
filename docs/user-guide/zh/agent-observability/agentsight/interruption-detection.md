@@ -33,14 +33,14 @@
 | `network_timeout` | high | HTTP 408/504，或网关层超时错误 |
 | `service_unavailable` | high | HTTP 502/503，或错误体含 `overloaded` / `service_unavailable` |
 | `context_overflow` | high | `context_length_exceeded` 或同类上下文超限错误 |
-| `sse_truncated` | high | 流式响应结束时没有正常的 `finish_reason`，且调用已持续 ≥ 1 秒 |
+| `sse_truncated` | high | 流式响应结束时没有终止性的 `finish_reason`，且调用已持续 ≥ 1 秒。Gemini 的 `STOP`、`OTHER`、`LANGUAGE`、`FINISH_REASON_UNSPECIFIED` 都算终止；安全类终止归 `safety_filter`，`MAX_TOKENS` 归 `token_limit` |
 | `empty_response` | high | HTTP 200 但既没有输出消息也没有错误 |
 | `resource_exhaustion` | high | HTTP 402，或错误体涉及配额/计费额度（区别于每分钟限流） |
-| `state_machine_error` | high | 响应格式非法，或 Agent 状态机发生非法跃迁 |
+| `state_machine_error` | high | 响应格式非法、Gemini 返回 `MALFORMED_FUNCTION_CALL`，或 Agent 状态机发生非法跃迁 |
 | `llm_error` | high | 其余 HTTP 状态码 >= 400 的兜底类型 |
 | `rate_limit` | medium | HTTP 429，或错误体含 `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` 且输出 Token ≥ `max_tokens` 的 95% |
-| `safety_filter` | medium | 供应商安全策略返回 `finish_reason = content_filter` |
+| `safety_filter` | medium | 供应商安全策略拦下这次生成：`finish_reason = content_filter`（OpenAI），或 Gemini 的 `SAFETY`、`RECITATION`、`BLOCKLIST`、`PROHIBITED_CONTENT`、`SPII`、`IMAGE_SAFETY` |
 | `slow_response` | medium | 调用成功但耗时 ≥ 120 秒 |
 | `tool_failure` | medium | 工具/函数返回失败结果 |
 | `unauthorized_action` | medium | 工具调用被权限系统或沙箱拒绝（`EPERM`、`EACCES`、sandbox denied） |
@@ -140,6 +140,13 @@ Interruption Event Detail
 sudo agentsight interruption session 00000000-1111-2222-3333-444444444444
 sudo agentsight interruption conversation aaaaaaaabbbbbbbbccccccccdddddddd
 sudo agentsight interruption resolve 11111111222222223333333344444444
+```
+
+这两个按 id 的视图都接受 `--type`、`--severity` 以及 `--unresolved` / `--resolved`，也就是 `list`
+已有的那些过滤，因此可以只把某个繁忙会话里正在排查的那几行取出来，而不必翻整张表：
+
+```bash
+sudo agentsight interruption session 00000000-1111-2222-3333-444444444444 --severity critical
 ```
 
 「解决」只是把事件标记为已处理，不会删除任何数据。

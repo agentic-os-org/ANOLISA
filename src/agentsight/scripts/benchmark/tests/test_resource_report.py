@@ -149,3 +149,72 @@ def test_zero_cpu_baseline_has_no_relative_percentage(tmp_path: Path) -> None:
     assert resource_report.report(tmp_path, {"before": {}, "after": {}})
     summary = json.loads((tmp_path / "resource-summary.json").read_text())
     assert summary["comparison"]["cpu_peak_pct"] == {"percentage_points": -150, "percent": None}
+
+
+def write_counters(directory: Path, counters: list[dict[str, str]]) -> None:
+    path = directory / "metrics.csv"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    for measured, values in zip(rows, counters, strict=True):
+        measured.update(values)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@pytest.mark.parametrize("counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"])
+@pytest.mark.parametrize("value", ["broken", "NaN", "inf", "-1", "1e999"])
+def test_invalid_counter_preserves_reports_and_suppresses_comparison(
+    tmp_path: Path, counter: str, value: str
+) -> None:
+    artifacts(tmp_path, "before", 30, 400)
+    directory = artifacts(tmp_path, "after", 20, 250)
+    write_counters(directory, [{counter: "0"}, {counter: value}, {counter: "0"}])
+    assert not resource_report.report(tmp_path, {"before": {}, "after": {}})
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert not summary["valid"] and not summary["comparison"]
+    run = summary["runs"]["after"]
+    assert not run["valid"]
+    assert counter in run["resource_error"]
+    if counter != "eviction_count":
+        assert run["capture"] == "FAIL"
+    text = (tmp_path / "resource-report.txt").read_text()
+    assert counter in text and "Result: INVALID" in text
+
+
+@pytest.mark.parametrize("counter", ["ring_buffer_dropped", "channel_dropped"])
+def test_valid_drop_evidence_survives_an_invalid_sample(tmp_path: Path, counter: str) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    write_counters(directory, [{counter: "0"}, {counter: "broken"}, {counter: "3"}])
+    run = resource_report.summarize(directory, {})
+    assert not run["valid"] and run["capture"] == "FAIL"
+    assert run["probe_drops"][counter] == 3
+    assert counter in run["resource_error"]
+
+
+@pytest.mark.parametrize("value", ["", "0"])
+def test_optional_blank_and_zero_counters_preserve_validity(tmp_path: Path, value: str) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    counters = {key: value for key in ("eviction_count", "ring_buffer_dropped", "channel_dropped")}
+    write_counters(directory, [counters, counters, counters])
+    run = resource_report.summarize(directory, {})
+    assert run["valid"] and run["capture"] == "PASS"
+    assert run["resource_error"] is None
+    expected = 0 if value else None
+    assert run["connection_evictions"] == expected
+    assert all(observed == expected for observed in run["probe_drops"].values())
+
+
+@pytest.mark.parametrize("counter", ["eviction_count", "ring_buffer_dropped", "channel_dropped"])
+def test_valid_counter_peaks_retain_existing_capture_rules(tmp_path: Path, counter: str) -> None:
+    directory = artifacts(tmp_path, "run", 30, 250)
+    write_counters(directory, [{counter: "0"}, {counter: "3"}, {counter: "2"}])
+    run = resource_report.summarize(directory, {})
+    assert run["resource_error"] is None
+    if counter == "eviction_count":
+        assert run["connection_evictions"] == 3
+        assert run["valid"] and run["capture"] == "PASS"
+    else:
+        assert run["probe_drops"][counter] == 3
+        assert not run["valid"] and run["capture"] == "FAIL"

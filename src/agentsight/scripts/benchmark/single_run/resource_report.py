@@ -73,20 +73,20 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "ring_buffer_dropped": [],
         "channel_dropped": [],
     }
+    counter_samples = {"eviction_count": evictions, **drop_samples}
+    invalid_counters: set[str] = set()
     metrics = directory / "metrics.csv"
     if metrics.exists():
         with metrics.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
             for row in rows:
                 alive.append(row.get("process_alive") == "1")
-                if row.get("eviction_count"):
-                    value = float(row["eviction_count"])
-                    if math.isfinite(value) and value >= 0:
-                        evictions.append(value)
-                for key, values in drop_samples.items():
+                for key, values in counter_samples.items():
                     if row.get(key):
-                        value = float(row[key])
-                        if math.isfinite(value) and value >= 0:
+                        value = numeric(row[key])
+                        if value is None or value < 0:
+                            invalid_counters.add(key)
+                        else:
                             values.append(value)
     window = read_json(directory / "agents/start.json")
     start, end = numeric(window.get("start")), numeric(window.get("end"))
@@ -97,6 +97,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     resource_error = None
     if not window_valid:
         resource_error = "missing or invalid load measurement window"
+    elif invalid_counters:
+        resource_error = "invalid internal counter samples: " + ", ".join(sorted(invalid_counters))
     elif not resources["samples"] or not resources["cpu_samples_valid"]:
         resource_error = "missing or invalid RSS/CPU samples in the load window"
     elif resources["cpu_measurement_seconds"] < (end - start) * 0.95:
@@ -110,6 +112,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and capture.get("completeness_ratio", 0) >= 0.999
         and (capture.get("token_accuracy") or 0) >= 0.999
         and not events_dropped
+        and not invalid_counters.intersection(drop_samples)
     )
     capture_status = (
         "FAIL"

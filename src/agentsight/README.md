@@ -547,6 +547,11 @@ For resource-constrained environments, disable non-essential features and reduce
 
 > With this config: idle RSS ~24–30 MB, with event traffic ~35–40 MB.
 
+## ATIF export
+
+Use `scripts/batch-analyze.py --export-atif DIRECTORY` to save converted Claude/Qoder ATIF locally without invoking an analyzer.
+See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+
 ## Supported LLM Providers
 
 Token parsing supports multiple LLM API formats:
@@ -555,6 +560,11 @@ Token parsing supports multiple LLM API formats:
 - Anthropic (Claude, including cache token handling)
 - Google Gemini
 - Qwen (with native chat template support)
+
+## Batch concurrency
+
+The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
+See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
 
 ## Origins
 

@@ -52,3 +52,6 @@ website/build/
 
 !src/agent-sec-core/codex-plugin/.agents/
 !src/agent-sec-core/codex-plugin/.agents/**
+
+# Local git-bundle salvage artifacts (workflow tooling, not sources)
+*.bundle

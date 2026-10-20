@@ -622,10 +622,15 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .unwrap_or(0);
     let is_sse: bool = call.metadata.get("is_sse").is_some_and(|s| s == "true");
 
+    // Multi-choice responses (`n > 1`) carry one message per choice and the
+    // last choice is decisive, the same way the interruption detector and the
+    // call builder's turn-terminal probe read it. Reading the first choice
+    // exported a finish reason that disagreed with the classification of the
+    // same call.
     let finish_reason = call
         .response
         .messages
-        .first()
+        .last()
         .and_then(|m| m.finish_reason.as_ref())
         .map(|s| safe_cstring(s));
 
@@ -2268,6 +2273,35 @@ mod tests {
             url.to_str().unwrap(),
             "http://127.0.0.1:11434/v1/chat/completions"
         );
+    }
+
+    /// A multi-choice response (`n > 1`) carries one message per choice. The
+    /// exporter read the first choice, so a C consumer saw `length` for a call
+    /// whose decisive (last) choice finished with `stop` — the same call the
+    /// interruption detector classified from the last choice. Export the last
+    /// choice's finish reason so both views of one call agree.
+    #[test]
+    fn test_build_llm_data_reads_the_last_choice_finish_reason() {
+        use crate::genai::semantic::OutputMessage;
+        let mut call = make_llm_call(None, 1234);
+        call.response.messages = vec![
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("length".to_string()),
+            },
+            OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            },
+        ];
+        let holder = build_llm_data(&call);
+        assert!(!holder.c_data.finish_reason.is_null());
+        let reason = unsafe { CStr::from_ptr(holder.c_data.finish_reason) };
+        assert_eq!(reason.to_str().unwrap(), "stop");
     }
 
     /// Without a recorded scheme — an HTTP/1.1 capture, whose header list

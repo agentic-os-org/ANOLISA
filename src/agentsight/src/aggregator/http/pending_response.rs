@@ -427,7 +427,7 @@ impl HttpConnectionAggregator {
                     );
                     return None;
                 }
-                request.reassembled_body = Some(body_buffer);
+                request.set_reassembled_body(body_buffer);
                 (Some(request), assembly)
             }
             other => {

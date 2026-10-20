@@ -35,14 +35,14 @@ needed to enable any of it.
 | `network_timeout` | high | HTTP 408/504, or a gateway-level timeout error |
 | `service_unavailable` | high | HTTP 502/503, or an error body mentioning `overloaded` / `service_unavailable` |
 | `context_overflow` | high | `context_length_exceeded` or a comparable context-bound error |
-| `sse_truncated` | high | A streamed response ends without a normal `finish_reason` and the call lasted at least 1 second |
+| `sse_truncated` | high | A streamed response ends without a terminal `finish_reason` and the call lasted at least 1 second. Gemini `STOP`, `OTHER`, `LANGUAGE` and `FINISH_REASON_UNSPECIFIED` are terminal; `SAFETY` family stops are `safety_filter`, `MAX_TOKENS` is `token_limit` |
 | `empty_response` | high | HTTP 200 with no output messages and no error |
 | `resource_exhaustion` | high | HTTP 402, or an error body about quota / billing limits (distinct from per-minute rate limiting) |
-| `state_machine_error` | high | Malformed provider response or an invalid Agent state transition |
+| `state_machine_error` | high | Malformed provider response, a Gemini `MALFORMED_FUNCTION_CALL` finish reason, or an invalid Agent state transition |
 | `llm_error` | high | Fallback for any other HTTP status >= 400 |
 | `rate_limit` | medium | HTTP 429 or an error containing `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` and output Tokens >= 95% of `max_tokens` |
-| `safety_filter` | medium | `finish_reason = content_filter` from the provider's safety policy |
+| `safety_filter` | medium | A safety stop from the provider's policy: `finish_reason = content_filter` (OpenAI), or Gemini's `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY` |
 | `slow_response` | medium | The call succeeded but took at least 120 seconds |
 | `tool_failure` | medium | A tool or function result reports failure |
 | `unauthorized_action` | medium | A tool call was denied by a permission system or sandbox (`EPERM`, `EACCES`, sandbox denial) |
@@ -145,6 +145,14 @@ Trajectory Viewer to read the actual messages:
 sudo agentsight interruption session 00000000-1111-2222-3333-444444444444
 sudo agentsight interruption conversation aaaaaaaabbbbbbbbccccccccdddddddd
 sudo agentsight interruption resolve 11111111222222223333333344444444
+```
+
+Both per-id views accept `--type`, `--severity`, and `--unresolved` / `--resolved`, the same
+filters `list` has, so the history of one busy session can be narrowed to the rows you are
+triaging instead of scanning the whole table:
+
+```bash
+sudo agentsight interruption session 00000000-1111-2222-3333-444444444444 --severity critical
 ```
 
 Resolving only marks the event as handled; it never deletes data.
