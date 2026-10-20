@@ -1125,6 +1125,24 @@ impl GenAIBuilder {
         Some((parts, finish_reason))
     }
 
+    /// Answer text of a finished `message` output item, or `None`.
+    ///
+    /// Mirrors `OpenAIParser::closing_message_item_text`: reasoning items
+    /// carry thinking rather than the answer and are skipped, and every
+    /// `text` part of a message item is concatenated in order.
+    fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
@@ -1151,6 +1169,13 @@ impl GenAIBuilder {
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         let mut text_buf = String::new();
+        // Whether a non-empty text delta arrived. Closing events repeat the
+        // deltas, so they are read only when this stays false — the same
+        // delta-wins rule as `aggregate_responses_sse_chunks`.
+        let mut saw_text_delta = false;
+        // Answer text carried by a closing event, kept aside until the whole
+        // stream is read: a delta captured later supersedes it.
+        let mut closing_text: Option<String> = None;
         let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
@@ -1180,7 +1205,25 @@ impl GenAIBuilder {
                 "response.output_text.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_text_delta = true;
+                        }
                         text_buf.push_str(delta);
+                    }
+                }
+                // The closing event carries the finalized answer and repeats
+                // what the deltas delivered, so it is read only when no
+                // non-empty delta was captured: a capture that attached after
+                // the deltas has this event as its only copy of the text.
+                "response.output_text.done" => {
+                    if !saw_text_delta
+                        && let Some(text) = chunk
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .filter(|text| !text.is_empty())
+                    {
+                        closing_text = Some(text.to_string());
+                        saw_responses_event = true;
                     }
                 }
                 // Reasoning models stream their thinking as text deltas on the
@@ -1244,14 +1287,21 @@ impl GenAIBuilder {
                     // item instead of an added one; the item router recovers
                     // the complete call from it, so a function_call done item
                     // proves this is a Responses stream with recoverable
-                    // content. Other item types carry no text here (text
-                    // arrives only as deltas) and must not flip the gate.
+                    // content.
                     if chunk
                         .get("item")
                         .and_then(|i| i.get("type"))
                         .and_then(|t| t.as_str())
                         == Some("function_call")
                     {
+                        saw_responses_event = true;
+                    }
+                    // A finished `message` item carries the whole answer in
+                    // its `content[]` parts and is the only copy when capture
+                    // attached after the deltas were emitted. Same delta-wins
+                    // rule as `response.output_text.done` above.
+                    if !saw_text_delta && let Some(text) = Self::closing_message_item_text(chunk) {
+                        closing_text = Some(text);
                         saw_responses_event = true;
                     }
                 }
@@ -1295,6 +1345,12 @@ impl GenAIBuilder {
 
         if !saw_responses_event {
             return None;
+        }
+
+        // Deltas win; a closing event supplies the answer only when no
+        // non-empty delta was captured.
+        if !saw_text_delta && let Some(text) = closing_text {
+            text_buf = text;
         }
 
         let mut tool_parts: Vec<_> = calls
@@ -2284,6 +2340,72 @@ mod tests {
             other => panic!("expected ToolCall part, got {other:?}"),
         }
         assert_eq!(finish.as_deref(), Some("tool_calls"));
+    }
+
+    /// A capture that attached after the text deltas has only the closing
+    /// events. The live parser reads them when no non-empty delta arrived
+    /// (`closing_text` in `analyzer/message/openai.rs`), but the drain merger
+    /// ignored both closing shapes, so a drained Responses answer persisted
+    /// `output_messages = None` while the same capture kept its text live.
+    #[test]
+    fn test_responses_sse_closing_text_keeps_answer() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}},
+            {"type":"response.output_text.done","text":"hello there"},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a closing text event must yield an answer");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "hello there"),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    /// A capture that attached after the item headers has only the finished
+    /// `message` item, whose `content[]` carries the whole answer. The token
+    /// extractor's `read_output_item` and the live parser both read it; the
+    /// drain merger must not drop it.
+    #[test]
+    fn test_responses_sse_closing_message_item_keeps_answer() {
+        let body = r#"[
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"output_text","text":"hel"},
+                {"type":"output_text","text":"lo"}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a finished message item must yield an answer");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "hello"),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    /// Closing events repeat the deltas. When the capture saw a non-empty
+    /// delta, appending the closing copy would double the answer.
+    #[test]
+    fn test_responses_sse_text_delta_wins_over_the_closing_copy() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1"}},
+            {"type":"response.output_text.delta","delta":"hello"},
+            {"type":"response.output_text.done","text":"hello"},
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"output_text","text":"hello"}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "hello"),
+            "deltas must win over their closing copies, got {parts:?}"
+        );
     }
 
     /// A drained Responses stream must keep reasoning deltas the same way the
