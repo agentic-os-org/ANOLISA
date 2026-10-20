@@ -425,13 +425,19 @@ impl GenAISqliteStore {
                     .lock()
                     .map_err(|error| format!("GenAI completion mutex poisoned: {error}"))?;
                 drop(lock_timer);
+                // A completion carries session/conversation only when the id
+                // resolver found one at response time; requests with no user
+                // text (for example a tool-result continuation) resolve none.
+                // The pending row holds the value captured at request time,
+                // so a missing completion value must not erase it — same rule
+                // as the request evidence COALESCEd below.
                 let updated = conn
                     .prepare_cached(
                         "UPDATE genai_events SET
                         status = 'complete',
                         trace_id            = ?1,
-                        conversation_id     = ?2,
-                        session_id          = ?3,
+                        conversation_id     = COALESCE(?2, conversation_id),
+                        session_id          = COALESCE(?3, session_id),
                         end_timestamp_ns    = ?4,
                         duration_ns         = ?5,
                         provider            = ?6,
@@ -542,14 +548,15 @@ impl GenAISqliteStore {
                     // A completion whose parsed request carries no messages
                     // must not erase the evidence the idle snapshot captured:
                     // the snapshot is then the only record of what the caller
-                    // sent. The call-id branch above carries the same guard.
+                    // sent. Session and conversation attribution follow the
+                    // same rule; the call-id branch above carries both guards.
                     let updated = conn
                         .prepare_cached(
                             "UPDATE genai_events SET
                             status = 'complete',
                             trace_id            = ?1,
-                            conversation_id     = ?2,
-                            session_id          = ?3,
+                            conversation_id     = COALESCE(?2, conversation_id),
+                            session_id          = COALESCE(?3, session_id),
                             end_timestamp_ns    = ?4,
                             duration_ns         = ?5,
                             provider            = ?6,
