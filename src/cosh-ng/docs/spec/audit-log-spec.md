@@ -353,7 +353,7 @@ Run the production `build_sls_record()` path using identical fixed Core/session/
 1. A capture/no-op audit sink.
 2. A real tempfile audit sink.
 
-Assert identical serialized SLS bytes, the same 32 fields/types/values/order, the same append count
+Assert identical serialized SLS bytes, the same 33 fields/types/values/order, the same append count
 and turn boundaries, identical pre-created-file output, and unchanged missing/unwritable-file exit
 behavior. The test-only no-op proves side-path independence; it is not a production disable switch.
 
