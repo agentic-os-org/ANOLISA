@@ -495,7 +495,12 @@ pub enum AnthropicContentBlock {
         source: AnthropicImageSource,
     },
     /// Tool use content block
-    #[serde(rename = "tool_use")]
+    ///
+    /// `server_tool_use` is the same call made by a tool the provider runs on
+    /// its side (web search, code execution, the MCP connector); it carries
+    /// the identical `id` / `name` / `input` payload, so it is read as the
+    /// call it is instead of being dropped by the catch-all variant.
+    #[serde(rename = "tool_use", alias = "server_tool_use", alias = "mcp_tool_use")]
     ToolUse {
         /// Tool use ID
         id: String,
@@ -505,7 +510,23 @@ pub enum AnthropicContentBlock {
         input: serde_json::Value,
     },
     /// Tool result content block
-    #[serde(rename = "tool_result")]
+    ///
+    /// The server-tool results (`web_search_tool_result`,
+    /// `web_fetch_tool_result`, the code-execution results, the MCP
+    /// connector's `mcp_tool_result`, and `tool_search_tool_result`) all carry
+    /// `tool_use_id` plus a caller-defined `content`, exactly like
+    /// `tool_result`; they were dropped as unmodelled blocks, which lost the
+    /// result the answer was built from.
+    #[serde(
+        rename = "tool_result",
+        alias = "web_search_tool_result",
+        alias = "web_fetch_tool_result",
+        alias = "code_execution_tool_result",
+        alias = "bash_code_execution_tool_result",
+        alias = "text_editor_code_execution_tool_result",
+        alias = "tool_search_tool_result",
+        alias = "mcp_tool_result"
+    )]
     ToolResult {
         /// Tool use ID this result is for
         tool_use_id: String,
@@ -517,7 +538,7 @@ pub enum AnthropicContentBlock {
         is_error: Option<bool>,
     },
     /// A block type this build does not model, such as `redacted_thinking`
-    /// (extended thinking with redacted content) or the server-tool blocks.
+    /// (extended thinking with redacted content) or `container_upload`.
     ///
     /// Kept as a variant so one unrecognised block cannot fail the whole
     /// response — the streaming path degrades the same way for unknown
@@ -1125,6 +1146,52 @@ mod tests {
         ]"#;
         let blocks: Vec<AnthropicContentBlock> = serde_json::from_str(json_str).unwrap();
         assert_eq!(blocks.len(), 2);
+    }
+
+    /// Anthropic's server-tool blocks carry the same payload as the modelled
+    /// call and result blocks: `server_tool_use` is a `tool_use` the provider
+    /// ran on its side, and `web_search_tool_result` is a `tool_result` for
+    /// it. Both used to fall into the catch-all `Unknown` variant, so the one
+    /// record of what the model asked for and what came back was dropped from
+    /// the parsed response.
+    #[test]
+    fn test_anthropic_server_tool_blocks_map_onto_the_modelled_blocks() {
+        let json_str = r#"[
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+             "input": {"query": "rust 2026"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+             "content": [{"type": "web_search_result", "url": "https://example.com",
+                          "title": "Example"}]},
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_2",
+             "content": {"type": "web_fetch_result", "url": "https://example.com"}}
+        ]"#;
+        let blocks: Vec<AnthropicContentBlock> = serde_json::from_str(json_str)
+            .expect("the server-tool spellings must not fall into Unknown");
+
+        match &blocks[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input, &serde_json::json!({"query": "rust 2026"}));
+            }
+            other => panic!("server_tool_use must read as a tool call, got {other:?}"),
+        }
+        match &blocks[1] {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "srvtoolu_1");
+                assert!(content.is_some(), "the search results must be kept");
+                assert!(is_error.is_none());
+            }
+            other => panic!("web_search_tool_result must read as a tool result, got {other:?}"),
+        }
+        assert!(matches!(
+            &blocks[2],
+            AnthropicContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "srvtoolu_2"
+        ));
     }
 
     #[test]
