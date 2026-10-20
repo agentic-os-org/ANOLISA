@@ -2142,11 +2142,18 @@ fn test_complete_pending_promotion_keeps_captured_request_evidence() {
         .unwrap();
 
     let conn = store.conn.lock().unwrap();
-    let (input_messages, system_instructions, status): (Option<String>, Option<String>, String) =
-        conn.query_row(
-            "SELECT input_messages, system_instructions, status FROM genai_events",
+    let (input_messages, system_instructions, session_id, conversation_id, status): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT input_messages, system_instructions, session_id, conversation_id, status
+             FROM genai_events",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
     assert_eq!(status, "complete");
@@ -2159,6 +2166,16 @@ fn test_complete_pending_promotion_keeps_captured_request_evidence() {
         system_instructions.as_deref(),
         Some("captured system prompt"),
         "promotion must not erase the captured system prompt"
+    );
+    assert_eq!(
+        session_id.as_deref(),
+        Some("s-idle"),
+        "promotion must not erase the captured session attribution"
+    );
+    assert_eq!(
+        conversation_id.as_deref(),
+        Some("c-idle"),
+        "promotion must not erase the captured conversation attribution"
     );
     drop(conn);
     cleanup_db(&path);
@@ -2518,11 +2535,17 @@ fn test_complete_pending_keeps_captured_request_evidence() {
 
     {
         let conn = store.conn.lock().unwrap();
-        let (input, system): (Option<String>, Option<String>) = conn
+        let (input, system, session_id, conversation_id): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT input_messages, system_instructions FROM genai_events WHERE call_id = 'captured-1'",
+                "SELECT input_messages, system_instructions, session_id, conversation_id
+                 FROM genai_events WHERE call_id = 'captured-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert!(
@@ -2534,6 +2557,16 @@ fn test_complete_pending_keeps_captured_request_evidence() {
         assert!(
             system.as_deref().is_some_and(|v| v.contains("be terse")),
             "the captured system instructions must survive too, got {system:?}"
+        );
+        assert_eq!(
+            session_id.as_deref(),
+            Some("s-evidence"),
+            "the captured session attribution must survive a completion that carries none"
+        );
+        assert_eq!(
+            conversation_id.as_deref(),
+            Some("c-evidence"),
+            "the captured conversation attribution must survive a completion that carries none"
         );
     }
 
