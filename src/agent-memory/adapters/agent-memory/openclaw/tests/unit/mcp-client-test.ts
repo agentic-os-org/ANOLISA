@@ -158,6 +158,102 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     });
   }
 
+  // GH-4863: a failed initialize handshake used to leave the worker we had
+  // just spawned alive while `initialized` stayed false. The next tool call
+  // then spawned a replacement and overwrote `this.proc`, orphaning the
+  // first worker where `stop()` could no longer reach it — and leaving its
+  // exit handler behind to be booked as a crash whenever it finally died.
+  const handshakes = [
+    { kind: "error", label: "a JSON-RPC error" },
+    { kind: "null", label: "an empty result" },
+  ] as const;
+  for (const { kind: handshake, label } of handshakes) {
+    it(`releases the worker when initialize returns ${label}`, {
+      timeout: 20_000,
+    }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-init-fail-"));
+      const binaryPath = join(directory, "mcp-server");
+      const pidPath = join(directory, "pids");
+      let pids: number[] = [];
+      context.after(async () => {
+        for (const pid of pids) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
+      });
+      const failedInitialize = handshake === "error"
+        ? `{ jsonrpc: "2.0", id: request.id,
+             error: { code: -32603, message: "handshake boom" } }`
+        : `{ jsonrpc: "2.0", id: request.id, result: null }`;
+      await writeFile(binaryPath, `#!${process.execPath}
+const fs = require("node:fs");
+const readline = require("node:readline");
+fs.appendFileSync(${JSON.stringify(pidPath)}, process.pid + "\\n");
+// Shared across respawns, so only the very first worker fails its handshake
+// and the retry on the same client can succeed.
+const counterPath = ${JSON.stringify(pidPath)} + ".n";
+const attempt = Number(fs.existsSync(counterPath) ? fs.readFileSync(counterPath, "utf8") : 0) + 1;
+fs.writeFileSync(counterPath, String(attempt));
+setInterval(() => {}, 1000);
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === "initialize" && attempt === 1) {
+    process.stdout.write(JSON.stringify(${failedInitialize}) + "\\n");
+    return;
+  }
+  const result = request.method === "initialize" ? {} : {
+    content: [{ type: "text", text: "ready" }],
+  };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o700 });
+
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      const spawnedPids = async (): Promise<number[]> =>
+        (await readFile(pidPath, "utf8")).split("\n").filter(Boolean).map(Number);
+      const assertGone = (pid: number) =>
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, `worker ${pid} is still alive`);
+
+      // 1. The handshake failure reaches the caller unchanged — releasing
+      //    the worker must not replace it with a teardown error.
+      let failure: unknown;
+      try {
+        await client.callTool("memory_get_context", {});
+      } catch (error) {
+        failure = error;
+      }
+      assert.ok(failure instanceof Error, "callTool must reject");
+      assert.match(
+        failure.message,
+        handshake === "error"
+          ? /JSON-RPC error -32603: handshake boom/
+          : /initialize handshake returned no result/,
+      );
+
+      // 2. That worker is already gone, and no replacement was spawned
+      //    behind the caller's back.
+      pids = await spawnedPids();
+      assert.equal(pids.length, 1, "exactly one worker spawned for the failed handshake");
+      assertGone(pids[0]);
+
+      // 3. The same client still recovers — the deliberate teardown is not
+      //    booked as a crash, so the respawn budget is untouched.
+      assert.equal(await client.callTool("memory_get_context", {}), "ready");
+      pids = await spawnedPids();
+      assert.equal(pids.length, 2, "the retry spawns exactly one replacement");
+
+      // 4. ...and stop() reaches every worker it ever started.
+      await client.stop();
+      for (const pid of pids) assertGone(pid);
+      await client.stop();
+    });
+  }
+
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);
     try {
