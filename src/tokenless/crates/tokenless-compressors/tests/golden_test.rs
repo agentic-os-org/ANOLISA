@@ -1,6 +1,7 @@
-//! Fixture goldens for the build-log domain compressor.
+//! Fixture goldens for build logs and content-domain compressors.
+//! Run with `-- --nocapture --test-threads=1` to display input/output comparisons.
 //!
-//! Each `<name>.txt` input has a committed `<name>.expected.txt` baseline.
+//! Each fixture input has a committed `<name>.expected.txt` baseline.
 //! To re-baseline after an intentional engine change:
 //! `REGEN_GOLDENS=1 cargo test -p tokenless-compressors --test golden_test`
 //! then review the diff.
@@ -11,7 +12,10 @@ use std::path::PathBuf;
 use tokenless_ccr::{
     InMemoryStore, RecoveryMethod, StashStore, compute_key, is_valid_hash, recovery_instruction,
 };
-use tokenless_compressors::{BuildLogCompressor, BuildLogOperation, BuildLogOutcome};
+use tokenless_compressors::{
+    BuildLogCompressor, BuildLogOperation, BuildLogOutcome, HtmlExtractor, JsonCompressionContext,
+    JsonCompressor, JsonOperation, SearchResultsCompressor, TabularCompressor, TabularOperation,
+};
 
 const FIXTURES: &[&str] = &[
     "cargo_success",
@@ -124,6 +128,8 @@ fn outputs_match_committed_goldens_and_are_deterministic() {
             first.output, second.output,
             "{name}: non-deterministic output"
         );
+
+        print_case("BUILD LOG", name, &input, &first.output);
 
         let expected_path = fixtures_dir().join(format!("{name}.expected.txt"));
         if regen {
@@ -249,4 +255,240 @@ fn strip_sgr_for_expected_reassembly(input: &str) -> String {
     }
     output.push_str(rest);
     output
+}
+
+fn print_case(category: &str, name: &str, input: &str, output: &str) {
+    let border = "=".repeat(88);
+    let divider = "-".repeat(88);
+    let mut display = format!("\n\n{border}\n  GOLDEN CASE | {category} | {name}\n{border}\n");
+    for (label, text) in [("INPUT / BEFORE", input), ("OUTPUT / AFTER", output)] {
+        display.push_str(&format!(
+            "\n  {label}  [{} bytes, {} lines]\n{divider}\n",
+            text.len(),
+            text.lines().count()
+        ));
+        for line in text.lines() {
+            display.push_str("  | ");
+            display.push_str(line);
+            display.push('\n');
+        }
+        display.push_str(&format!("{divider}\n  END {label}\n"));
+    }
+    display.push_str(&format!("\n  END CASE | {category} | {name}\n{border}\n"));
+    print!("{display}");
+}
+
+fn check(name: &str, input: &str, output: &str) {
+    assert!(
+        tokenless_protocol::estimate_tokens(output) < tokenless_protocol::estimate_tokens(input),
+        "{name}: no estimated token savings"
+    );
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/content")
+        .join(format!("{name}.expected.txt"));
+    let category = if name.starts_with("json_toon") {
+        "TOON"
+    } else if name.starts_with("json_") {
+        "JSON"
+    } else if name.starts_with("html_") {
+        "HTML"
+    } else if name.ends_with(".tsv") {
+        "TSV"
+    } else if name.ends_with(".csv") {
+        "CSV"
+    } else {
+        "SEARCH"
+    };
+    print_case(category, name, input, output);
+    if std::env::var_os("REGEN_GOLDENS").is_some() {
+        fs::write(path, output).unwrap();
+    } else {
+        let expected = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert_eq!(output, expected, "{name}");
+    }
+}
+
+fn input(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/content")
+        .join(name);
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+#[test]
+fn json_goldens() {
+    for (name, operation) in [
+        ("json_cleanup", JsonOperation::Cleanup),
+        ("json_records", JsonOperation::RecordReduction),
+        ("json_toon", JsonOperation::Toon),
+        ("json_nested", JsonOperation::Cleanup),
+        ("json_records_anomaly", JsonOperation::RecordReduction),
+        ("json_toon_unicode", JsonOperation::Toon),
+    ] {
+        let source = input(&format!("{name}.json"));
+        let run = || {
+            let store = InMemoryStore::new();
+            let result = JsonCompressor::default()
+                .compress(
+                    &source,
+                    &JsonCompressionContext {
+                        recovery: &RecoveryMethod::Shell,
+                        stash: Some(&store),
+                        allow_toon: operation == JsonOperation::Toon,
+                        preserve_top_level_shape: false,
+                        min_toon_chars: 0,
+                        allow_unrecoverable: false,
+                    },
+                )
+                .unwrap();
+            assert!(result.operations.contains(&operation), "{name}");
+            if operation == JsonOperation::Toon {
+                let decoded: serde_json::Value =
+                    toon_format::decode_default(&result.output).unwrap();
+                assert_eq!(
+                    decoded,
+                    serde_json::from_str::<serde_json::Value>(&source).unwrap()
+                );
+            }
+            if name == "json_records_anomaly" {
+                assert!(result.output.contains("deployment failed: timeout"));
+            }
+            assert_eq!(
+                result.stash_writes.len(),
+                usize::from(operation == JsonOperation::RecordReduction),
+                "{name}: unexpected stash writes"
+            );
+            for write in &result.stash_writes {
+                assert!(is_valid_hash(&write.key), "{name}: invalid stash key");
+                assert!(
+                    result
+                        .output
+                        .contains(&recovery_instruction(&write.key, &RecoveryMethod::Shell)),
+                    "{name}: missing recovery instruction for {}",
+                    write.key
+                );
+                let recovered = store.retrieve(&write.key).unwrap().unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&recovered).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(&source).unwrap()
+                );
+            }
+            result.output
+        };
+        let output = run();
+        assert_eq!(output, run(), "{name}: non-deterministic output");
+        check(name, &source, &output);
+    }
+}
+
+#[test]
+fn html_goldens() {
+    for (name, retained) in [
+        ("html_page", "service deploy --environment staging"),
+        ("html_article", "Connection timeout after 30 seconds."),
+        ("html_table", "FAILED"),
+        ("html_entities", "timeout=30"),
+    ] {
+        let source = input(&format!("{name}.html"));
+        let output = HtmlExtractor.render(&source).unwrap().output;
+        assert_eq!(output, HtmlExtractor.render(&source).unwrap().output);
+        assert!(output.contains(retained));
+        assert!(!output.contains("trackVisitor"));
+        check(name, &source, &output);
+    }
+}
+
+#[test]
+fn tabular_goldens() {
+    for name in [
+        "table_compaction.csv",
+        "table_compaction.tsv",
+        "table_reduction.csv",
+        "table_special.csv",
+        "table_special.tsv",
+        "table_reduction.tsv",
+    ] {
+        let source = input(name);
+        let run = || {
+            let store = InMemoryStore::new();
+            let result = TabularCompressor.compress_with_recovery(
+                &source,
+                Some(&store),
+                &RecoveryMethod::Shell,
+            );
+            let operation = if name.starts_with("table_reduction") {
+                assert!(result.output.contains("FAILED"));
+                TabularOperation::RowReduction
+            } else {
+                TabularOperation::Compaction
+            };
+            assert!(result.operations.contains(&operation), "{name}");
+            if operation == TabularOperation::Compaction {
+                let delimiter = if name.ends_with(".tsv") { b'\t' } else { b',' };
+                let cells = |text: &str| {
+                    csv::ReaderBuilder::new()
+                        .delimiter(delimiter)
+                        .has_headers(false)
+                        .from_reader(text.as_bytes())
+                        .records()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap()
+                };
+                assert_eq!(cells(&source), cells(&result.output));
+            }
+            assert_eq!(
+                result.stash_writes.len(),
+                usize::from(operation == TabularOperation::RowReduction),
+                "{name}: unexpected stash writes"
+            );
+            for write in &result.stash_writes {
+                assert!(is_valid_hash(&write.key), "{name}: invalid stash key");
+                assert!(
+                    result
+                        .output
+                        .contains(&recovery_instruction(&write.key, &RecoveryMethod::Shell)),
+                    "{name}: missing recovery instruction for {}",
+                    write.key
+                );
+                assert_eq!(store.retrieve(&write.key).unwrap().unwrap(), source);
+            }
+            result.output
+        };
+        let output = run();
+        assert_eq!(output, run(), "{name}: non-deterministic output");
+        check(name, &source, &output);
+    }
+}
+
+#[test]
+fn search_goldens() {
+    for name in [
+        "search_paths",
+        "search_multiple_files",
+        "search_unicode",
+        "search_line_endings",
+    ] {
+        let source = input(&format!("{name}.txt"));
+        let output = SearchResultsCompressor.compress(&source).unwrap();
+        assert_eq!(output, SearchResultsCompressor.compress(&source).unwrap());
+        let mut path = String::new();
+        let mut restored = String::new();
+        let mut lines = output.split_inclusive('\n');
+        assert_eq!(
+            lines.next(),
+            Some("[Search results grouped by file; all received lines retained]\n"),
+            "{name}: unexpected search header"
+        );
+        for line in lines {
+            if let Some(quoted) = line.strip_prefix("File=") {
+                path = serde_json::from_str(quoted).unwrap();
+            } else {
+                assert!(!path.is_empty(), "{name}: record before file header");
+                restored.push_str(&format!("{path}:{line}"));
+            }
+        }
+        assert_eq!(restored, source);
+        check(name, &source, &output);
+    }
 }

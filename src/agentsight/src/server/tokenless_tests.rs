@@ -214,3 +214,21 @@ fn bom_prefixed_config_loads_like_its_unmarked_twin() {
     assert_eq!(client.endpoint, "http://127.0.0.1:8");
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn detail_store_failures_map_to_client_or_server_errors() {
+    use crate::storage::sqlite::genai::TokenlessRecordError;
+
+    // A stored shape that violates the contract is the caller's problem: the
+    // list endpoint already answers 400 for it. Storage failures stay 503.
+    assert_eq!(
+        detail_store_error_status(&TokenlessRecordError::Invalid(
+            "record is not a JSON object"
+        )),
+        400
+    );
+    assert_eq!(
+        detail_store_error_status(&TokenlessRecordError::Poisoned),
+        503
+    );
+}

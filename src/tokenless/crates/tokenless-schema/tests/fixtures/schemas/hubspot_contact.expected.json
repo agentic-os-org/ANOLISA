@@ -1,0 +1,191 @@
+{
+  "function": {
+    "description": "Create a new contact in HubSpot CRM or update an existing contact with provided information. This function handles all contact-related operations including creation, updates, and association with companies and deals.",
+    "name": "create_or_update_contact",
+    "parameters": {
+      "properties": {
+        "associations": {
+          "description": "List of associations to create between this contact and other HubSpot objects like companies, deals, or tickets.",
+          "items": {
+            "properties": {
+              "to": {
+                "description": "The target object to associate with this contact.",
+                "properties": {
+                  "id": {
+                    "description": "The ID of the object to associate with.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "types": {
+                "description": "The types of associations to create.",
+                "items": {
+                  "properties": {
+                    "associationCategory": {
+                      "enum": [
+                        "HUBSPOT_DEFINED",
+                        "USER_DEFINED"
+                      ],
+                      "type": "string"
+                    },
+                    "associationTypeId": {
+                      "description": "The numeric ID of the association type. 1 = Primary company, 279 = Contact to deal.",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "associationCategory",
+                    "associationTypeId"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "to",
+              "types"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "email": {
+          "description": "The primary email address of the contact. This field is used as a unique identifier and must be a valid email format. Example: john.doe@company.com",
+          "format": "email",
+          "type": "string"
+        },
+        "options": {
+          "description": "Additional options controlling how the operation is performed.",
+          "properties": {
+            "idProperty": {
+              "default": "email",
+              "description": "The property to use for identifying existing contacts. Default is 'email'.",
+              "type": "string"
+            },
+            "inputs": {
+              "description": "For batch operations, an array of input objects. Each follows the same schema as the parent.",
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "properties": {
+          "additionalProperties": true,
+          "description": "A collection of standard and custom properties to set on the contact. Standard properties include firstname, lastname, phone, etc.",
+          "properties": {
+            "address": {
+              "description": "The street address of the contact's primary location.",
+              "type": "string"
+            },
+            "annualrevenue": {
+              "description": "The annual revenue of the contact's company in your account's default currency.",
+              "type": "number"
+            },
+            "city": {
+              "description": "The city where the contact is located.",
+              "type": "string"
+            },
+            "company": {
+              "description": "The name of the company where the contact works. This is a text field, not an association.",
+              "maxLength": 200,
+              "type": "string"
+            },
+            "country": {
+              "description": "The country where the contact is located. Use ISO 3166-1 alpha-2 codes.",
+              "type": "string"
+            },
+            "firstname": {
+              "description": "The contact's first name. Will be used in personalization tokens and display.",
+              "maxLength": 100,
+              "type": "string"
+            },
+            "hs_lead_status": {
+              "description": "The current status of the lead in your sales process. Helps track progress through the pipeline.",
+              "enum": [
+                "NEW",
+                "OPEN",
+                "IN_PROGRESS",
+                "OPEN_DEAL",
+                "UNQUALIFIED",
+                "ATTEMPTED_TO_CONTACT",
+                "CONNECTED",
+                "BAD_TIMING"
+              ],
+              "type": "string"
+            },
+            "hs_persona": {
+              "description": "The buyer persona that best describes this contact. Personas are defined in your HubSpot settings.",
+              "type": "string"
+            },
+            "hubspot_owner_id": {
+              "description": "The ID of the HubSpot user who owns this contact. Use the owners API to get valid owner IDs.",
+              "type": "string"
+            },
+            "industry": {
+              "description": "The industry sector in which the contact's company operates.",
+              "type": "string"
+            },
+            "jobtitle": {
+              "description": "The contact's job title or position within their company. Used for segmentation and personalization.",
+              "maxLength": 150,
+              "type": "string"
+            },
+            "lastname": {
+              "description": "The contact's last name or family name. Combined with firstname for full name display.",
+              "maxLength": 100,
+              "type": "string"
+            },
+            "lifecyclestage": {
+              "default": "lead",
+              "description": "The current stage of the contact in your sales/marketing funnel. This is a key property for automation and reporting.",
+              "enum": [
+                "subscriber",
+                "lead",
+                "marketingqualifiedlead",
+                "salesqualifiedlead",
+                "opportunity",
+                "customer",
+                "evangelist",
+                "other"
+              ],
+              "type": "string"
+            },
+            "numberofemployees": {
+              "description": "The approximate number of employees at the contact's company.",
+              "type": "integer"
+            },
+            "phone": {
+              "description": "Primary phone number for the contact. Supports international formats with country codes.",
+              "pattern": "^[+]?[(]?[0-9]{1,4}[)]?[-\\s./0-9]*$",
+              "type": "string"
+            },
+            "state": {
+              "description": "The state, province, or region where the contact is located.",
+              "type": "string"
+            },
+            "website": {
+              "description": "The personal or company website associated with this contact.",
+              "format": "uri",
+              "type": "string"
+            },
+            "zip": {
+              "description": "The postal or ZIP code for the contact's address.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}
