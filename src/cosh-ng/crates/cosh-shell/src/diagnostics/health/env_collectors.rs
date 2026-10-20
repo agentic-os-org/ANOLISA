@@ -353,6 +353,7 @@ const SIMPLE_CONFIG_KEYS: &[&str] = &[
     "ui.startup_hooks",
     "ui.debug",
     "ui.log_level",
+    "logging.level",
     "health.enabled",
     "health.role",
     "health.memory_sensitive",

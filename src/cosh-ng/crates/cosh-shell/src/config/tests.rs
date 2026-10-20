@@ -118,6 +118,11 @@ fn top_level_recommendations_table_does_not_extend_shared_config_schema() {
     assert!(!cfg.recommendations.bash_history);
 }
 
+/// `[logging].level` is the authoritative log-level key shared with
+/// cosh-core; coverage for the shell side lives in
+/// tests/config_logging_level.rs via the public load_config() path,
+/// keeping the lib/bin overlap ceiling unchanged.
+
 #[test]
 fn config_read_path_prefers_shared_copilot_shell_config() {
     let home = temp_home_path("shared-config-wins");
