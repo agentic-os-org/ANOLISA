@@ -39,6 +39,12 @@ const MAX_KEYWORDS = 8;
 export const MAX_QUERY_BYTES = 1024;
 
 /**
+ * UTF-16 code units of the raw prompt kept for the short raw fallback
+ * candidate.  Cut on a code point boundary, never mid surrogate pair.
+ */
+const RAW_PROMPT_FALLBACK_UNITS = 200;
+
+/**
  * Maximum number of results to inject into the prompt.  Aligns with
  * the per-candidate top_k so we never show more than 5 memories.
  */
@@ -128,7 +134,39 @@ export function extractCjkTrigrams(text: string): string[] {
 }
 
 /**
- * Truncate a string so its UTF-8 encoding does not exceed maxBytes.
+ * Snap an exclusive UTF-16 cut point back to a code point boundary.
+ *
+ * `text.slice(0, index)` must never end on the leading half of a
+ * surrogate pair.  An unpaired surrogate is not a valid prefix of the
+ * source: TextEncoder scores it as U+FFFD (3 bytes) instead of the
+ * 4-byte code point it belongs to, and JSON.stringify escapes it as a
+ * lone `\udXXX`, so the Rust MCP server would receive malformed UTF-8
+ * rather than the query we meant to send.
+ *
+ * Only a cut that actually splits a pair moves; text that is already
+ * unpaired upstream is left untouched, keeping ASCII and BMP behaviour
+ * byte-for-byte identical.
+ */
+function toCodePointBoundary(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) return index;
+  const prev = text.charCodeAt(index - 1);
+  if (prev < 0xd800 || prev > 0xdbff) return index;
+  const next = text.charCodeAt(index);
+  if (next < 0xdc00 || next > 0xdfff) return index;
+  return index - 1;
+}
+
+/**
+ * Keep at most `maxUnits` UTF-16 code units of `text`, dropping a
+ * surrogate pair the cut would otherwise split in half.
+ */
+function sliceCodeUnits(text: string, maxUnits: number): string {
+  return text.slice(0, toCodePointBoundary(text, maxUnits));
+}
+
+/**
+ * Truncate a string so its UTF-8 encoding does not exceed maxBytes,
+ * cutting only on code point boundaries.
  */
 function truncateToByteLimit(text: string, maxBytes: number): string {
   if (new TextEncoder().encode(text).byteLength <= maxBytes) return text;
@@ -143,7 +181,12 @@ function truncateToByteLimit(text: string, maxBytes: number): string {
       hi = mid - 1;
     }
   }
-  return text.slice(0, lo);
+  // `lo` is the widest cut whose *encoding* fits, but TextEncoder bills
+  // an unpaired high surrogate 3 bytes (U+FFFD) — one less than the
+  // 4-byte code point it is half of.  So the widest fitting cut can be a
+  // split pair whose real encoding would overflow the budget.  Backing
+  // off to the boundary yields the longest genuinely valid prefix.
+  return text.slice(0, toCodePointBoundary(text, lo));
 }
 
 /**
@@ -156,17 +199,22 @@ function truncateToByteLimit(text: string, maxBytes: number): string {
  *    that have no space-separated keywords.  Each trigram is >= 3
  *    chars so the BM25 backend uses trigram matching, not LIKE AND.
  * 4. CJK trigram top-3 — shorter CJK fallback.
- * 5. Truncated raw prompt (first 200 chars, byte-safe).
+ * 5. Truncated raw prompt (first 200 UTF-16 units, byte-safe).
  * 6. Full raw prompt (byte-safe, <= 1024 bytes) — last resort.
  *
  * All candidates are truncated to MAX_QUERY_BYTES (1024) UTF-8 bytes.
- * The list is deduplicated (order-preserving).
+ * Every cut lands on a code point boundary, so astral characters (emoji,
+ * CJK extension B) are kept whole or dropped — never halved into an
+ * unpaired surrogate.  The list is deduplicated (order-preserving).
  */
 export function buildRecallQueries(text: string): string[] {
   const keywords = extractKeywords(text);
   const cjkTrigrams = extractCjkTrigrams(text);
 
-  const truncated = truncateToByteLimit(text.slice(0, 200), MAX_QUERY_BYTES);
+  const truncated = truncateToByteLimit(
+    sliceCodeUnits(text, RAW_PROMPT_FALLBACK_UNITS),
+    MAX_QUERY_BYTES,
+  );
   const fullText = truncateToByteLimit(text, MAX_QUERY_BYTES);
 
   const candidates: string[] = [];

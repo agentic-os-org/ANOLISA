@@ -19,6 +19,28 @@ const {
   RRF_K,
 } = await import("../../src/keyword-extract.js");
 
+/** Astral character: 2 UTF-16 code units, 4 UTF-8 bytes. */
+const ROCKET = "\u{1F680}";
+
+/**
+ * Count code units that are not part of a well-formed surrogate pair.
+ * Mirrors what a UTF-8 validator on the Rust side would reject.
+ */
+function countUnpairedSurrogates(text: string): number {
+  let unpaired = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) i++;
+      else unpaired++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      unpaired++;
+    }
+  }
+  return unpaired;
+}
+
 describe("extractKeywords", () => {
   it("extracts salient words from English prompts", () => {
     const kw = extractKeywords(
@@ -302,6 +324,108 @@ describe("buildRecallQueries", () => {
       keywordCandidate.split(" ").includes("uk"),
       "keyword candidate should include 'uk'",
     );
+  });
+
+  // GH-4719: both raw-prompt cuts used to index UTF-16 code units
+  // directly, so an astral character straddling a cut was halved into an
+  // unpaired surrogate. TextEncoder bills that half as U+FFFD (3 bytes)
+  // instead of the real code point's 4, so the broken cut could even pass
+  // the 1024-byte budget check and reach the Rust MCP server as
+  // malformed UTF-8 (`\udXXX` in the JSON wire form).
+  it("never halves an emoji at the 200-unit raw fallback cut", () => {
+    const prompt = "x".repeat(199) + ROCKET + "y".repeat(50);
+    const queries = buildRecallQueries(prompt);
+
+    assert.ok(queries.includes("x".repeat(199)), "emoji must be dropped, not split");
+    for (const q of queries) {
+      assert.equal(countUnpairedSurrogates(q), 0, `unpaired surrogate in candidate: ${JSON.stringify(q).slice(-12)}`);
+    }
+  });
+
+  it("keeps an emoji that fits entirely inside the 200-unit cut", () => {
+    // High surrogate at unit 197, low at 198 — the cut at 200 is past
+    // the whole pair, so nothing may be dropped.
+    const prompt = "x".repeat(197) + ROCKET + "y";
+    assert.equal(prompt.length, 200);
+    const queries = buildRecallQueries(prompt);
+
+    assert.ok(queries.includes(prompt), "intact pair inside the cut must survive");
+    for (const q of queries) {
+      assert.equal(countUnpairedSurrogates(q), 0, "no candidate may carry an unpaired surrogate");
+    }
+  });
+
+  it("never halves an emoji at the MAX_QUERY_BYTES budget cut", () => {
+    // 1021 ASCII bytes leave 3 bytes of budget: enough for the U+FFFD a
+    // lone high surrogate encodes to, but not for the emoji's real 4.
+    // The old binary search settled on the split; the fix must back off.
+    const prompt = "a".repeat(1021) + ROCKET + "b".repeat(50);
+    const queries = buildRecallQueries(prompt);
+    const encoder = new TextEncoder();
+
+    const rawFallback = queries[queries.length - 1];
+    assert.equal(rawFallback, "a".repeat(1021), "budget cut must drop the emoji, not split it");
+    for (const q of queries) {
+      assert.equal(countUnpairedSurrogates(q), 0, "no candidate may carry an unpaired surrogate");
+      assert.ok(encoder.encode(q).byteLength <= MAX_QUERY_BYTES, "byte cap still applies");
+    }
+  });
+
+  it("keeps an emoji that fits inside the MAX_QUERY_BYTES budget", () => {
+    const prompt = "a".repeat(1020) + ROCKET + "b".repeat(50);
+    const queries = buildRecallQueries(prompt);
+
+    assert.ok(
+      queries.includes("a".repeat(1020) + ROCKET),
+      "a pair that fits the budget must be preserved whole",
+    );
+    for (const q of queries) {
+      assert.equal(countUnpairedSurrogates(q), 0, "no candidate may carry an unpaired surrogate");
+    }
+  });
+
+  it("round-trips every candidate through UTF-8 unchanged", () => {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const prompts = [
+      "x".repeat(199) + ROCKET + "y".repeat(50),
+      "a".repeat(1021) + ROCKET + "b".repeat(50),
+      ROCKET.repeat(400),
+      "\u{1F1E6}\u{1F1E8} flag ".repeat(60),
+      "\u4e00".repeat(350) + ROCKET,
+      "plain ascii prompt about the secret codeword",
+    ];
+
+    for (const prompt of prompts) {
+      for (const q of buildRecallQueries(prompt)) {
+        assert.equal(countUnpairedSurrogates(q), 0, `unpaired surrogate for prompt of ${prompt.length} units`);
+        // fatal:true throws on malformed input, so a clean decode plus
+        // string equality proves the candidate is well-formed UTF-8.
+        assert.equal(decoder.decode(encoder.encode(q)), q);
+      }
+    }
+  });
+
+  it("leaves ASCII cut points and candidate order untouched", () => {
+    const prompt = "word ".repeat(400);
+    const queries = buildRecallQueries(prompt);
+
+    assert.equal(queries[queries.length - 2], prompt.slice(0, 200), "200-unit raw fallback unchanged");
+    assert.equal(queries[queries.length - 1], prompt.slice(0, 1024), "1024-byte raw fallback unchanged");
+    for (const q of queries) {
+      assert.equal(countUnpairedSurrogates(q), 0);
+    }
+  });
+
+  it("still deduplicates candidates after boundary-safe truncation", () => {
+    // Short enough that the 200-unit cut and the byte-budget cut are the
+    // whole prompt: the two raw candidates must collapse into one.
+    const prompt = ROCKET + " secret codeword";
+    const queries = buildRecallQueries(prompt);
+
+    assert.equal(new Set(queries).size, queries.length, "candidates must stay deduplicated");
+    assert.equal(queries.filter((q) => q === prompt).length, 1, "raw candidate emitted once");
+    assert.equal(queries[queries.length - 1], prompt, "intact short prompt survives whole");
   });
 
   it("exports MAX_RESULTS and RRF_K constants", () => {
