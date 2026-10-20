@@ -251,6 +251,7 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
+        || opens_with_an_exception(&lower)
         || mentions_failing_exit_code(&lower)
         || mentions_failing_http_status(text)
         || lower.contains("error:")
@@ -262,6 +263,33 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("eperm")
         || lower.contains("\"status\": \"error\"")
         || lower.contains("\"status\":") && lower.contains("\"error\"")
+}
+
+/// Whether the text opens with a JVM or SQL exception class name.
+///
+/// `traceback` is the Python spelling of "the tool crashed and this is why",
+/// and the grounding classifier accepts the JVM/SQL spelling of the same
+/// thing: `find_signature` returns R4 at High confidence for a payload that
+/// *starts* with one of `outcome::EXCEPTION_MARKERS`, and the grader's
+/// `text_has_error_signal` was aligned to it. This scan knew only the Python
+/// one, so a call that died with its exception as the first line was a
+/// certain failure in the classifier and produced no ToolFailure here.
+///
+/// The class name has to open the payload, the anchor the other two readers
+/// apply: an exception the tool merely quotes deeper in its output describes
+/// something it reported, not something it did. Leading whitespace is skipped
+/// because output is routinely indented, and the comparison is
+/// case-insensitive like the rest of this scan.
+fn opens_with_an_exception(lower: &str) -> bool {
+    /// The class names the grounding classifier reads, in
+    /// `outcome::EXCEPTION_MARKERS`.
+    const EXCEPTION_MARKERS: &[&str] = &["java.lang.", "NullPointerException", "SQLException"];
+    let head = lower.trim_start();
+    EXCEPTION_MARKERS.iter().any(|marker| {
+        let marker = marker.to_ascii_lowercase();
+        head.get(..marker.len())
+            .is_some_and(|prefix| prefix == marker)
+    })
 }
 
 /// Whether a line of the payload opens with an HTTP 4xx/5xx status.
@@ -2731,6 +2759,74 @@ mod tests {
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
         }
+    }
+
+    /// A JVM tool that crashes with its exception as the payload's first line
+    /// is this call's own failure, and both sibling readers of the same stored
+    /// payload grade it that way: the grounding classifier reads a payload
+    /// that *opens* with one of the class names (`outcome::EXCEPTION_MARKERS`)
+    /// as R4 at High confidence, and the grader's `text_has_error_signal` now
+    /// reads the same anchor. This scan knew a Python traceback but none of
+    /// those class names, so one record was a certain failure in the
+    /// classifier and a clean tool result here: no ToolFailure was recorded
+    /// for the call that crashed.
+    ///
+    /// The class name counts only where it opens the payload, the anchor the
+    /// other two readers apply: an exception the tool merely quotes deeper in
+    /// its output describes something else.
+    #[test]
+    fn an_exception_that_opens_the_payload_is_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "running the query".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "java.lang.NullPointerException: Cannot invoke \"java.util.List.size()\" because \"rows\" is null",
+            "NullPointerException: rows is null",
+            "SQLException: no suitable driver found",
+            "  java.lang.IllegalStateException: closed",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-jvm".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "an exception that opens the payload is a tool failure: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+
+        // Quoted deeper in the output it belongs to something the tool merely
+        // reported, so it stays clean.
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-jvm".to_string()),
+                response: serde_json::json!(
+                    "result ok; tool method invocation failed, java.lang.NullPointerException at Foo.bar"
+                ),
+            }],
+            name: None,
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "an exception quoted inside the payload is not a failure: {events:?}"
+        );
     }
 
     /// The exit-status and HTTP-status-line signals the grader and the
