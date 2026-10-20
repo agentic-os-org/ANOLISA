@@ -560,11 +560,60 @@ there is a usage error, the same refusal `GET /api/skill-metrics/downloads` and 
 return. Without the flag the trend keeps its weekly buckets, and the text and JSON output are
 unchanged.
 
+## Export batch ATIF locally
+
+From `src/agentsight` in a source checkout:
+
+```bash
+python3 scripts/batch-analyze.py --file session.jsonl --export-atif ./atif-export --min-steps 1
+```
+
+`--export-atif DIRECTORY` writes the converted document without launching an analyzer
+or making model requests. It is mutually exclusive with `--dim`, and rejects `--binary`.
+Selection is shared with analysis: `--file`, repeatable `--dir`, `--limit` (default 10),
+and `--min-steps` (default 3). Directory scans keep the existing 1 KiB minimum file size
+and subagent exclusion; use `--file` to export a small file explicitly.
+
+Each name is the full SHA-256 of the canonical absolute source path followed by
+`.atif.json`. Same-name inputs in different directories remain distinct; exporting the
+same path again atomically replaces its previous artifact. Moving the source changes
+its artifact name. Existing unrelated destination files and source files are preserved.
+The directory is created on demand. Stdout emits one JSON record per exported file with
+`_atif_file`, `_source_file`, `_session_id`, and `_steps`.
+
+Exports use UTF-8 and the existing converter's filtering and truncation rules; they are
+not a lossless backup of raw logs. They contain conversation content, so keep them in a
+local directory intended for that data. Write failures are counted in stderr's summary,
+temporary files are removed, and later files are attempted. As in existing batch analysis,
+a completed batch returns 0 even if its summary includes per-file failures.
+
 ## Related pages
 
 - [Configuration](configuration.md) — what the config file controls
 - [Dashboard guide](dashboard.md) — UI equivalents of these queries
 - [Data and storage](data-and-storage.md) — HTTP API and database layout
+
+## Parallel batch analysis
+
+The source-checkout batch tool can run independent analyzer invocations concurrently.
+From `src/agentsight`, build the analyzer once and opt in to up to four workers:
+
+```bash
+cargo build -p agentsight-opt --bin analyze
+python3 scripts/batch-analyze.py --dir /path/to/sessions --dim perf --binary target/debug/analyze --jobs 4
+```
+
+`--jobs N` accepts 1 through 8 and defaults to 1. Both running invocations and outstanding
+work are bounded by N. Documents and per-file diagnostics are emitted in the original
+discovery order, even when later invocations finish first; this may delay visible output
+behind a slow earlier file. Each document retains its source/session metadata.
+
+Existing selection, minimum-step filtering, timeout, failure counters, exit behavior and
+temporary-file cleanup remain in effect. Prebuilding avoids concurrent Cargo build-lock
+contention. Full analysis still requires model credentials; choosing N above 1 may issue
+simultaneous paid requests and encounter endpoint rate limits. This reduces elapsed time
+for independent sessions where concurrency is available; it does not reduce per-request
+model latency, token use or prices.
 
 ## Benchmark artifacts
 

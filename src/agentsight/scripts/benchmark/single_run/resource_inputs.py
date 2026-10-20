@@ -194,7 +194,8 @@ class Inputs:
             paths = ["."]
             if self.output.is_relative_to(self.repo):
                 relative = self.output.relative_to(self.repo).as_posix()
-                paths.extend([f":(exclude){relative}", f":(exclude){relative}/**"])
+                # Directory pathspecs include descendants; names must not act as globs.
+                paths.append(f":(exclude,literal){relative}")
             self.git("add", "-A", "--", *paths, env=env)
             snapshot = self.git("write-tree", env=env)
             dirty = snapshot != tree

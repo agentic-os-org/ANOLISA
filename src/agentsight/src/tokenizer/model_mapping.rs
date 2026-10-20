@@ -68,6 +68,22 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-5-mini", "Xenova/gpt-4o");
     m.insert("gpt-5-nano", "Xenova/gpt-4o");
     m.insert("gpt-5-chat-latest", "Xenova/gpt-4o");
+    // The production `gpt-5-` names outside the chat aliases. tiktoken routes
+    // the whole `gpt-5-` prefix to `o200k_base`, so `gpt-5-pro` and the Codex
+    // sibling `gpt-5-codex` take the same repo as the rest of the family.
+    m.insert("gpt-5-pro", "Xenova/gpt-4o");
+    m.insert("gpt-5-codex", "Xenova/gpt-4o");
+    // The dotted `gpt-5.x` versions. tiktoken's extra-prefix table maps the
+    // `gpt-5.` prefix to `o200k_base` for exactly these versioned names, and
+    // Codex CLI sessions carry them (`gpt-5.6-sol`); without the entries they
+    // took the Qwen fallback.
+    m.insert("gpt-5.1", "Xenova/gpt-4o");
+    m.insert("gpt-5.2", "Xenova/gpt-4o");
+    m.insert("gpt-5.4", "Xenova/gpt-4o");
+    m.insert("gpt-5.4-pro", "Xenova/gpt-4o");
+    m.insert("gpt-5.1-codex", "Xenova/gpt-4o");
+    m.insert("gpt-5.3-codex", "Xenova/gpt-4o");
+    m.insert("gpt-5.6-sol", "Xenova/gpt-4o");
     m.insert("gpt-4.1", "Xenova/gpt-4o");
     m.insert("gpt-4.1-mini", "Xenova/gpt-4o");
     m.insert("gpt-4.1-nano", "Xenova/gpt-4o");
@@ -75,6 +91,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-4.5-preview", "Xenova/gpt-4o");
     m.insert("chatgpt-4o", "Xenova/gpt-4o");
     m.insert("chatgpt-4o-latest", "Xenova/gpt-4o");
+
+    // The Codex mini family. tiktoken's extra-prefix table maps `codex-mini`
+    // to `o200k_base` as well, and the `codex-mini-latest` alias the API echoes
+    // resolves through that prefix; `Xenova/gpt-4o` carries the encoding, so
+    // both names take it like the families above instead of the Qwen fallback.
+    m.insert("codex-mini", "Xenova/gpt-4o");
+    m.insert("codex-mini-latest", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
     // No Claude model has a repo on the Hub, so `anthropic/<model>` never
@@ -612,6 +635,89 @@ mod tests {
             "gpt-4.1-nano",
             "gpt-4.1-nano-2025-04-14",
             "openai/gpt-5-mini",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The Codex mini family.
+    ///
+    /// tiktoken's extra-prefix table maps `codex-mini` to `o200k_base`, and
+    /// the `codex-mini-latest` alias the API echoes resolves through that
+    /// prefix. Neither name was in the table, so the Codex model took the
+    /// unrelated Qwen fallback even though `Xenova/gpt-4o` carries its
+    /// encoding.
+    #[test]
+    fn test_codex_mini_names_take_the_o200k_tokenizer() {
+        let names = [
+            "codex-mini",
+            "codex-mini-latest",
+            "codex-mini-2025-05-16",
+            "openai/codex-mini-latest",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The production `gpt-5-` names outside the chat and mini aliases.
+    ///
+    /// tiktoken routes the whole `gpt-5-` prefix to `o200k_base`, which covers
+    /// `gpt-5-pro` and the Codex sibling `gpt-5-codex`. Neither was in the
+    /// table, so both took the unrelated Qwen fallback while their family
+    /// already resolved to the repo carrying that encoding.
+    #[test]
+    fn test_gpt_5_pro_and_codex_take_the_o200k_tokenizer() {
+        let names = [
+            "gpt-5-pro",
+            "gpt-5-pro-2025-10-06",
+            "gpt-5-codex",
+            "gpt-5-codex-2025-09-15",
+            "openai/gpt-5-pro",
+            "openai/gpt-5-codex",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The dotted `gpt-5.x` names.
+    ///
+    /// tiktoken's extra-prefix table maps `gpt-5.` to `o200k_base` for the
+    /// versioned names the API accepts, and Codex CLI sessions carry them
+    /// (`gpt-5.6-sol` in the collector fixture). The table knew neither the
+    /// bare versions nor a dotted name, so they took the unrelated Qwen
+    /// fallback.
+    #[test]
+    fn test_dotted_gpt_5_names_take_the_o200k_tokenizer() {
+        let names = [
+            "gpt-5.1",
+            "gpt-5.2",
+            "gpt-5.4",
+            "gpt-5.4-pro",
+            "gpt-5.1-codex",
+            "gpt-5.3-codex",
+            "gpt-5.6-sol",
+            "openai/gpt-5.4",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
