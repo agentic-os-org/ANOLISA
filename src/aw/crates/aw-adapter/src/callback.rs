@@ -85,11 +85,13 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
                 _ => on_error == "block",
             }
         }
-        ("claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
+        ("claude-sdk" | "agentscope" | "qwenpaw" | "codex", Some(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw", None) => on_error == "block",
+        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw" | "codex", None) => {
+            on_error == "block"
+        }
         _ => false,
     }
 }
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
-        for adapter in ["agentscope", "claude-sdk", "qwenpaw"] {
+        for adapter in ["agentscope", "claude-sdk", "qwenpaw", "codex"] {
             for (exit, on_error, expected) in [
                 (Exit::Code(0), "block", false),
                 (Exit::Code(0), "report", false),

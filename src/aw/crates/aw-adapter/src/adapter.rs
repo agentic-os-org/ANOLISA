@@ -167,7 +167,9 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
         return Err("block reason must be nonempty and bounded".into());
     }
     match adapter {
-        "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
+        "qoder" | "qwenpaw" | "agentscope" | "codex" => {
+            reply.stderr = format!("{text}\n").into_bytes()
+        }
         "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
@@ -308,12 +310,13 @@ mod tests {
             "pi",
             "claude-sdk",
             "agentscope",
+            "codex",
         ] {
             let mut reply = select(name).unwrap().reply(true);
             let was_success = matches!(reply.exit, Exit::Code(0));
             block_reason(name, &mut reply, message).unwrap();
             assert_eq!(matches!(reply.exit, Exit::Code(0)), was_success);
-            if matches!(name, "qoder" | "qwenpaw" | "agentscope") {
+            if matches!(name, "qoder" | "qwenpaw" | "agentscope" | "codex") {
                 assert!(matches!(reply.exit, Exit::Code(2)));
                 assert!(reply.stdout.is_empty());
                 assert_eq!(reply.stderr, format!("{message}\n").as_bytes());

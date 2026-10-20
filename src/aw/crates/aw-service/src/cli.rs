@@ -2,6 +2,7 @@
 
 mod adapter;
 mod hook;
+mod hook_chain;
 mod policy;
 mod readiness;
 mod run;
@@ -99,6 +100,7 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "run" => run::launch(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
+        "codex-hook" => hook_chain::callback(args, "codex", "AW_CODEX_CONFIG"),
         "policy" => {
             args.check(&[], false)?;
             policy::run()?;

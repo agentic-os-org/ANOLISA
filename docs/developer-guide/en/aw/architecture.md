@@ -53,7 +53,8 @@ can develop and distribute Providers independently; see the [collaboration guide
 
 1. `aw run` calls `aw-adapter` to check the native entrypoint and prepare registration,
    then the launcher starts the Agent.
-2. The Agent triggers a callback; the Adapter translates it into a service request.
+2. The Agent triggers a callback; the Adapter normalizes its native payload and
+   `aw-service` sends the request.
 3. `aw-service` manages the binding, event deadline, and audit, then delegates the
    step to `aw-host`.
 4. The Host validates protocol messages with `aw-provider` and starts the configured
@@ -66,6 +67,12 @@ can develop and distribute Providers independently; see the [collaboration guide
 Native Hook scripts also run through `aw-exec`, preserving raw output and exit
 status without a Provider handshake. AgentSight is a separate optional observation
 source; read-only `aw inspect` views do not participate in Hook admission.
+
+For Codex, `aw-adapter` probes and registers native Hooks and maps their payloads
+and replies. `aw-service/src/cli/hook_chain.rs` owns ordered callback transport,
+private bindings, event closure and cancellation. `NativeContext` and
+`LaunchFiles` cross the Adapter boundary; service RPC and runtime state do not.
+See the [Codex design](../../../../src/aw/docs/design/codex-cli-adapter.md).
 
 ### Where `aw-core` fits
 

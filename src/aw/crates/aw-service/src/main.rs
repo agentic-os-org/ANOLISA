@@ -47,6 +47,7 @@ AgentScope 2.0.6: run requires Python script/-m entrypoint and explicit AwBridge
 QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
 Hermes 952c941e: run and install require --native-profile; run requires the installed AW plugin.\n\
 Claude SDK 0.2.88: run requires a foreground Python worker using aw_claude.create_client; bundled CLI 2.1.161.\n\
+Codex CLI 0.162.1: install stable Hooks, review native /hooks trust, then run a local TUI or exec session.\n\
 install dispatches native Hook installation; it does not install AW or an Agent."
         );
         return Ok(cli::Exit::Code(0));
@@ -76,7 +77,10 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         println!("{}", serde_json::to_string(&snapshot)?);
         return Ok(cli::Exit::Code(0));
     }
-    if matches!(command.as_str(), "run" | "hook" | "install" | "policy") {
+    if matches!(
+        command.as_str(),
+        "run" | "hook" | "codex-hook" | "install" | "policy"
+    ) {
         return cli::dispatch(&command, &args);
     }
     let flags = &args.flags;

@@ -263,6 +263,69 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## Start Codex CLI
+
+Use Codex CLI **0.162.1** and Python 3 on Linux. The [Codex example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.codex.yaml)
+contains a neutral boolean Hook; replace it with your policy or existing Providers.
+Keep model credentials and native settings in the existing Codex configuration.
+
+```bash
+aw install --config aw.yaml --agent codex
+codex
+# In Codex, open /hooks and review/trust both AW command hooks, then exit.
+aw run --config aw.yaml --agent codex
+```
+
+`aw install` adds two stable commands to `$CODEX_HOME/hooks.json` (default
+`~/.codex/hooks.json`), retaining existing groups and unrelated fields. Reinstalling
+an unchanged definition preserves file bytes. It does not install Codex, grant
+hook trust, or change model/sandbox/approval configuration. A changed AW executable
+path requires reviewing the new definitions and removing the old AW entries.
+
+`aw run` checks the pinned version and the native `hooks/list` inventory before
+binding an instance or starting a model turn. Required AW hooks must be enabled,
+synchronous, trusted, match `.*`, and have a 60-second timeout. Disabled, modified,
+untrusted, missing or duplicated AW definitions reject launch. Python runs only the
+bounded inventory bridge. Interactive runs use `--no-daemon` for foreground ownership.
+To use noninteractive execution, set `argv: [codex, exec]` and pass, for example,
+`-- --ephemeral "Inspect this repository"` to `aw run`.
+
+Codex supports `tool.before` observation/blocking and `tool.after` observation.
+Security denial wins within AW's ordered chain. Tokenless `pre_tool` suggestions
+block the original call; the new call must pass security and native permissions
+again. `replace_result` is rejected during admission. AW preserves original tool
+results, including failed commands; after-observation failure does not replace them.
+Boolean Hooks and `aw-provider/v1alpha1` are supported. Keep independent native
+Hooks in Codex; `native-hook/v1alpha1` steps inside the AW chain are not admitted.
+Native matching Hooks may run concurrently, so AW orders only its own steps.
+
+This adapter admits new local TUI/exec sessions with model, sandbox, approval and
+basic output flags. It rejects config/profile overrides, directory/worktree changes,
+resume/fork, remote entrypoints and feature switches. AW never inserts a trust or
+sandbox bypass. An explicitly supplied native `--dangerously-bypass-hook-trust`
+remains an explicit per-run choice; it is used only with disposable, vetted Hook
+sources by the automated acceptance suite.
+
+Native acceptance uses the real CLI with a deterministic local Responses server,
+Provider fixtures and temporary homes. It verifies trust refusal, tool denials,
+fresh-call retry, failed output preservation and long-command completion. It does
+not certify hosted inference, sandbox enforcement, TUI trust interaction, MCP or
+code-mode adoption. Hook callbacks are not an OS isolation boundary: an outer native
+hook timeout/crash can behave differently from an AW step failure. Hosted tools and
+`write_stdin` input do not acquire new AW pre-tool authorization. See the
+[official Hooks contract](https://learn.chatgpt.com/docs/hooks).
+
+Exit the Agent before stopping AW with `aw stop --config aw.yaml`. Launch artifacts
+and bindings are released; the shared service survives Agent exit until stopped.
+For rollback, remove only the two commands containing `codex-hook --event tool.before`
+and `codex-hook --event tool.after` for this AW executable from native `hooks.json`,
+and restore the previous AW configuration/binary. Other native Hooks and trust state
+remain user-owned. Installed AW hooks are neutral when Codex is launched without AW.
+
+The Adapter owns native registration, probes and dialect mapping. The CLI/service
+owns the ordered callback chain, private bindings, RPC and cleanup; see
+[Codex responsibilities](../../../../src/aw/docs/design/codex-cli-adapter.md#ownership-after-the-workspace-split).
+
 ## Start AgentScope SDK
 
 Use a Python environment with `agentscope==2.0.6`; the SDK is separate from

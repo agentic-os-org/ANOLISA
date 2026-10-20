@@ -1,14 +1,13 @@
 //! Bounded callback transport dispatches only dialect mapping to native adapters.
 
 use super::{
-    adapter::{self, Adapter, HookBinding, HookOutput},
+    adapter::{self, Adapter, HookOutput},
     Arguments, Exit, Result,
 };
 use aw_service::{Client, EventHandle, Operation};
 use std::{
-    fs::OpenOptions,
-    io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    io::Write,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -68,27 +67,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     let event = args.required("--event")?;
     let step = args.required("--step")?;
     let on_error = args.required("--on-error")?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(args.required("--binding")?)?;
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid has no arguments and does not mutate process state.
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.len() > 1024 * 1024
-    {
-        return Err("unsafe or oversized hook binding".into());
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("hook binding exceeds byte limit".into());
-    }
-    let binding: HookBinding = serde_json::from_slice(&bytes)?;
+    let binding = adapter::read_binding(Path::new(args.required("--binding")?))?;
     if binding.adapter != args.required("--adapter")? {
         return Err("callback adapter does not match the binding".into());
     }
@@ -195,7 +174,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
     emit(result?)
 }
 
-fn emit(output: HookOutput) -> Result<Exit> {
+pub(super) fn emit(output: HookOutput) -> Result<Exit> {
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&output.stderr)?;
@@ -203,7 +182,7 @@ fn emit(output: HookOutput) -> Result<Exit> {
     Ok(output.exit)
 }
 
-fn read_input(deadline: Instant) -> Result<Vec<u8>> {
+pub(super) fn read_input(deadline: Instant) -> Result<Vec<u8>> {
     let mut input = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {

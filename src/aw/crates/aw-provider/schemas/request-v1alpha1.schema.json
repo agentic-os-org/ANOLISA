@@ -168,7 +168,8 @@
                     "qwenpaw",
                     "pi",
                     "claude-sdk",
-                    "agentscope"
+                    "agentscope",
+                    "codex"
                   ]
                 },
                 "binding_id": {

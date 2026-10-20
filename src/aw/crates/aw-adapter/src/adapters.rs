@@ -6,3 +6,5 @@ pub(super) mod hermes;
 pub(super) mod openclaw;
 pub(super) mod pi;
 pub(super) mod qwenpaw;
+
+pub(super) mod codex;

@@ -31,6 +31,10 @@ Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.
 
+Codex CLI 0.162.1 supports pre-tool observation/blocking and post-tool observation.
+Install and review its native Hooks before launching; follow the
+[Codex setup](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#codex).
+
 ## Documentation
 
 | Task | Guide |
@@ -61,6 +65,7 @@ for supported versions, tool types, and text replacement boundaries.
 | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
+| `codex` | ✓ | ✓ | ✓ | — |
 | `hermes` | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |

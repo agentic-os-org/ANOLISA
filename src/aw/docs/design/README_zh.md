@@ -26,7 +26,7 @@ flowchart LR
 | 阅读顺序 | 负责的部分 |
 | --- | --- |
 | [配置](configuration_zh.md) | `aw-config` 在运行前校验期望配置 |
-| [Adapter 分发](adapter-dispatch_zh.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
+| [Adapter 分发](adapter-dispatch_zh.md) | `aw-adapter` 负责原生注册、标准化和效果采纳，CLI 负责传输 |
 | [本地服务](local-service_zh.md) | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
 | [Provider Host](provider-host_zh.md) | `aw-host` 准备 Provider，执行已准入的步骤 |
 | [Provider 协议](provider-protocol_zh.md) | `aw-provider` 校验请求、响应和能力 |
@@ -36,7 +36,7 @@ flowchart LR
 
 | 接入对象 | 文档 |
 | --- | --- |
-| 原生 Agent 回调 | [AgentScope](agentscope-adapter_zh.md)、[Claude SDK](claude-sdk-adapter_zh.md)、[Hermes](hermes-adapter_zh.md)、[OpenClaw](openclaw-adapter_zh.md)、[Pi](pi-adapter_zh.md)、[QwenPaw](qwenpaw-adapter_zh.md)；Qoder 见 [Adapter 分发](adapter-dispatch_zh.md)与[本地服务](local-service_zh.md) |
+| 原生 Agent 回调 | [AgentScope](agentscope-adapter_zh.md)、[Claude SDK](claude-sdk-adapter_zh.md)、[Codex CLI](codex-cli-adapter_zh.md)、[Hermes](hermes-adapter_zh.md)、[OpenClaw](openclaw-adapter_zh.md)、[Pi](pi-adapter_zh.md)、[QwenPaw](qwenpaw-adapter_zh.md)；Qoder 见 [Adapter 分发](adapter-dispatch_zh.md)与[本地服务](local-service_zh.md) |
 | Provider 独立开发与收录 | [协作目录](../../../../providers/README_zh.md)与[开发分发指南](../../../../docs/developer-guide/zh/aw/providers.md) |
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](sec-core-provider_zh.md)，再读 [sec-core 健康检查](sec-core-health_zh.md) |
 | Tokenless Provider | [接入参考](../../../../docs/developer-guide/zh/aw/tokenless.md) |

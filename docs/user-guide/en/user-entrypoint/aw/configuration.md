@@ -98,6 +98,28 @@ Wait for `AW openclaw native hooks ready`, then use a client connected to that G
 Add the Provider arguments above when generating configuration for compression or safety checks.
 `agent --local` bypasses this Gateway.
 
+### Codex
+
+Use Codex CLI **0.162.1** and Python 3 on Linux. Start from the
+[Codex example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.codex.yaml),
+set its absolute executable and state paths, and replace the neutral rule with
+an observation or blocking rule. Model settings remain in Codex configuration.
+
+```bash
+aw install --config "$AW_HOME/aw.yaml" --agent codex
+codex
+# In Codex, open /hooks and review/trust both AW command hooks, then exit.
+aw run --config "$AW_HOME/aw.yaml" --agent codex
+```
+
+Installation adds two definitions to `$CODEX_HOME/hooks.json` (default
+`~/.codex/hooks.json`) and preserves existing Hooks. Launch requires enabled,
+trusted definitions. New local TUI and `exec` sessions support pre-tool observation
+and blocking, plus post-tool observation; result replacement is rejected.
+For noninteractive runs, set `argv: [codex, exec]` and pass `-- --ephemeral "Inspect this repository"`.
+See the [native reference](../../../../developer-guide/en/aw/native-agents.md#start-codex-cli)
+for supported options, trust review, validation limits and rollback.
+
 ## Add your own rules
 
 A simple rule reads a tool event from stdin and writes JSON `true` or `false` to stdout.

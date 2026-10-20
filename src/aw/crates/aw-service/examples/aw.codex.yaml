@@ -1,0 +1,45 @@
+# Codex CLI 0.162.1 and Python 3; retain the existing native model configuration.
+# This neutral boolean Hook demonstrates wiring, not a security policy.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: codex-native-hooks
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    codex:
+      adapter: codex
+      argv: [codex]
+  providers:
+    neutral:
+      transport:
+        type: stdio
+        location: agent
+        argv: [python3, -c, 'import json,sys; json.load(sys.stdin); print("false")']
+      timeout_ms: 1000
+      max_output_bytes: 32
+      config: {}
+  events:
+    tool.before:
+      enabled: true
+      steps:
+        - id: check
+          provider: neutral
+          effects: [block]
+          on_error: block
+    tool.after:
+      enabled: true
+      steps:
+        - id: record
+          provider: neutral
+          effects: [observe]
+          on_error: report

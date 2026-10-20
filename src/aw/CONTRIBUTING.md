@@ -37,9 +37,13 @@ fails, find the failing command in the job log and rerun it locally from `src/aw
 [tests/regression-matrix.json](tests/regression-matrix.json) maps each registered
 Agent, Hook event/effect and lifecycle to exact runnable Rust tests. The compiled
 Adapter catalog must match the matrix and configuration schema. Shared PreTool
-and PostTool cases iterate all matrix Agents with explicit native payloads;
+and PostTool cases iterate Agents supporting the relevant effect with explicit native payloads;
 adding an Agent without its fixture, omitting a Hook cell, deleting a referenced
 test or marking it ignored fails the existing `AW / required` gate.
+
+Every capability cell declares support or tested admission rejection. Partial
+profiles retain security and fresh-call retry coverage when blocking is supported;
+replacement coverage applies only to profiles that adopt `replace_result`.
 
 Security coverage includes denial, scan errors, cancellation and offline
 observation. Tokenless coverage includes fresh-call retry ownership, rejection
@@ -98,13 +102,19 @@ migration. Native jobs reuse checksummed binaries from that exact build.
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
 Agent. The nightly job matrix is generated from this inventory. AgentScope,
-Claude SDK/CLI, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
+Claude SDK/CLI, Codex CLI, Hermes, OpenClaw, Pi and QwenPaw have automated suites. Qoder remains
 manual because CI has no provisioned native CLI/model environment; it appears as
 **MANUAL — not tested**, never as a native pass. OpenClaw covers official Hook
 runners. The QwenPaw suite covers native AgentScope middleware and AW plugin
 registration against a simulated API; QwenPaw plugin loading, App/API startup
 and model turns remain manual. Full OpenClaw Gateway model flows also require
 explicit acceptance. Deterministic local models need no cloud keys.
+
+Codex uses the pinned native CLI with temporary homes and a local Responses model.
+It checks Hook inventory/trust refusal, ordered policies, native denial, retries,
+unchanged failures and delayed completion. Explicit trust bypass and unrestricted
+execution are confined to this fixture; TUI trust interaction, sandbox enforcement,
+hosted models, MCP and code mode remain outside this acceptance boundary.
 
 Every native command declares a report contract: `unittest`/`tap` requires an exact
 test count; `json` requires result files with exact case names or observed counts.
