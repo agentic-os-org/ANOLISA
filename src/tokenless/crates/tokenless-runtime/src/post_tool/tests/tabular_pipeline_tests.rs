@@ -14,7 +14,7 @@ fn tabular_pipeline_commits_original_text_once() {
         let concrete = Arc::new(CountingStore::default());
         let store: Arc<dyn StashStore> = concrete.clone();
         let run =
-            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store)).unwrap();
+            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
         assert_eq!(run.response.disposition, Disposition::Applied);
         assert_eq!(run.response.content_type, Some(ContentType::Tabular));
         assert_eq!(
@@ -51,7 +51,7 @@ fn rectangular_source_and_prose_never_lose_lines() {
             let store: Arc<dyn StashStore> = concrete.clone();
             let mut req = request(&input);
             req.content_origin = origin;
-            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store)).unwrap();
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
             assert_eq!(run.response.output, input);
             assert!(run.response.applied_operations.is_empty());
             assert!(run.response.stash_keys.is_empty());
@@ -72,7 +72,7 @@ fn tabular_dry_run_and_timeout_do_not_leave_originals() {
         } else {
             config.timeout = Duration::ZERO;
         }
-        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
         assert_eq!(run.response.output, input);
         assert_eq!(
             run.response.disposition,
@@ -112,7 +112,7 @@ fn tabular_respects_origin_status_and_text_capability() {
             3 => req.capabilities.replace_with_text = false,
             _ => unreachable!(),
         }
-        let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+        let run = PostToolPipeline::run(&req, &build_log_config(), None);
         assert_eq!(run.response.output, input);
         assert_eq!(run.response.disposition, Disposition::Passthrough);
         assert!(run.operations.is_empty());
@@ -124,7 +124,7 @@ fn tabular_full_candidate_needs_no_recovery_and_small_input_has_no_savings() {
     let input = "\"a\",\"b\"\r\n\"x\",\"y\"\r\n\"z\",\"w\"\r\n";
     let mut req = request(input);
     req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
-    let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+    let run = PostToolPipeline::run(&req, &build_log_config(), None);
     assert_eq!(
         run.response.applied_operations,
         [AppliedOperation::TabularCompaction]
@@ -132,7 +132,7 @@ fn tabular_full_candidate_needs_no_recovery_and_small_input_has_no_savings() {
     assert_eq!(run.response.recoverability, Recoverability::Lossless);
     assert!(run.response.stash_keys.is_empty());
     req.content = "a,b\nx,y\nz,w".into();
-    let run = PostToolPipeline::run(&req, &build_log_config(), None).unwrap();
+    let run = PostToolPipeline::run(&req, &build_log_config(), None);
     assert_eq!(run.response.disposition, Disposition::NoSavings);
     assert_eq!(run.response.output, req.content);
 }

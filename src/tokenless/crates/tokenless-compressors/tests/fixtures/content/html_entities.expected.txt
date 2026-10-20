@@ -1,0 +1,8 @@
+[HTML page rendered as Markdown; <main> only, 2 nodes outside it omitted; removed 1 script, 1 style. Retrieve original for the full page.]
+Title: Operations
+# 配置 & verification
+
+部署前请检查配置、数据库连接和健康检查结果。 Verify that the value satisfies a < b && b > 0 before proceeding with the deployment.
+
+Keep `timeout=30` and **rollback enabled**.
+[End page]

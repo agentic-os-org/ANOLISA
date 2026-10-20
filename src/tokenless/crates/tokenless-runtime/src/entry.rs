@@ -830,8 +830,7 @@ pub(crate) fn post_tool_with_store(
                 },
             },
             attached_store,
-        )
-        .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+        );
         if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
             return Err(RuntimeError::StashWrite { count });
         }
@@ -2734,6 +2733,37 @@ mod tests {
                 assert_eq!(outcome.response.output, content);
             }
         }
+    }
+
+    #[test]
+    fn html_stash_write_failure_reports_stashwrite_not_pipeline() {
+        // When the stash backend rejects the pre-candidate write, the HTML
+        // domain degrades to the unchanged candidate and counts the failed
+        // write. The lifecycle must then classify the failure as a stash
+        // write (the taxonomy every other domain already uses), never as
+        // the generic Pipeline compressor error that used to fail the call.
+        let page = format!(
+            "<!DOCTYPE html><html><head><title>Doc</title><style>{}</style></head>\
+             <body><main><h1>Title</h1>{}</main></body></html>",
+            "body{margin:0;padding:0}".repeat(64),
+            (0..10)
+                .map(|i| format!("<p>Paragraph {i}: {}</p>", "readable words ".repeat(12)))
+                .collect::<String>()
+        );
+        let request = PostToolRequest {
+            capabilities: PostToolCapabilities {
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                ..post_tool_request(&page).capabilities
+            },
+            ..post_tool_request(&page)
+        };
+        let mut opts = options();
+        opts.html_extraction_enabled = true;
+        let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
+        assert!(matches!(
+            post_tool_with_store(&request, &opts, Some(&failing)),
+            Err(RuntimeError::StashWrite { count }) if count == 1
+        ));
     }
 
     fn post_tool_request(content: &str) -> PostToolRequest {

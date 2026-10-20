@@ -49,7 +49,17 @@ const MAX_FAST_FAILURES: u32 = 5;
 /// Poll interval while waiting on the worker child.
 const WORKER_POLL_MS: u64 = 200;
 /// How long the client waits for the mount to become ready before failing.
-const READY_TIMEOUT_MS: u64 = 10_000;
+///
+/// The worker pays the full mount startup cost before the FUSE session
+/// serves: the 24-command environment probe (`EnvironmentProfile::detect`
+/// spawns one `which` per whitelisted command) plus store discovery and the
+/// session start. On a host with slow process spawns (WSL, network home
+/// directories) that probe alone was measured at ~10 s, so a 10 s budget
+/// tore down a worker that was still probing — the readiness failure
+/// surfaced an empty worker log tail, the classic still-starting shape.
+/// 30 s keeps the same slow-startup regime inside the budget while the
+/// failure path (supervisor died, worker crashed) still reports quickly.
+const READY_TIMEOUT_MS: u64 = 30_000;
 /// How long `stop` waits for processes to exit / the mount to disappear.
 const STOP_TIMEOUT_MS: u64 = 10_000;
 
@@ -295,7 +305,26 @@ pub fn normalize_mountpoint(mountpoint: &Path) -> PathBuf {
 /// Stable, collision-resistant instance id derived from a normalized path.
 ///
 /// Combines a sanitized basename (for human readability) with a hash of the
-/// full path (for uniqueness).
+/// full path (for uniqueness). The id must never start with a dash: it is
+/// passed as the value of `--instance` (a leading `-` makes the argument
+/// parser read it as an option, so the supervisor dies before writing its
+/// pid file) and it prefixes every runtime file name. A dot-prefixed
+/// mountpoint — the shape every test harness's tempdir has — sanitizes to a
+/// leading dash, so leading dashes are stripped before the readable prefix
+/// is cut.
+///
+/// Only dashes are stripped. Every other id shape the sanitizer can emit —
+/// in particular a leading underscore — was already a valid `--instance`
+/// value and file-name prefix, so a live supervisor may be sitting on those
+/// exact runtime files when the binary is upgraded. Stripping a leading
+/// underscore too would silently rename such an instance (`/mnt/_skills`
+/// used `_skills-<hash>`): `stop` would miss the incumbent's state and pid
+/// files and report success while the old supervisor kept running — free to
+/// remount after any later unmount — and a new `mount --managed` would race
+/// a competing supervisor for the mountpoint. Preserving every non-dash
+/// prefix keeps pre-existing ids byte-identical, and dash-leading ids never
+/// worked (the supervisor died in argument parsing, before writing any
+/// state), so there is nothing to migrate.
 pub fn instance_id_for(normalized: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     normalized.as_os_str().hash(&mut hasher);
@@ -313,6 +342,7 @@ pub fn instance_id_for(normalized: &Path) -> String {
                 '-'
             }
         })
+        .skip_while(|c| *c == '-')
         .take(24)
         .collect();
     let base = if base.is_empty() {
@@ -1159,6 +1189,47 @@ mod tests {
         let id = instance_id_for(Path::new("/var/run/my.mount point"));
         // Non-alphanumerics in the basename become dashes.
         assert!(id.starts_with("my-mount-point-"), "got: {id}");
+    }
+
+    #[test]
+    fn instance_id_never_leads_with_a_dash() {
+        // A dot-prefixed mountpoint — the shape every test harness tempdir
+        // has — used to sanitize to a leading dash, which the supervisor's
+        // `--instance` argument rejected as an option-looking value: the
+        // supervisor died before writing its pid file and the client
+        // reported a readiness timeout with an empty worker log.
+        let id = instance_id_for(Path::new("/tmp/.tmpAbCdEf"));
+        assert!(
+            id.starts_with("tmpAbCdEf-"),
+            "the dot must not become a leading dash, got: {id}"
+        );
+        assert!(
+            id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()),
+            "ids are argv values and file-name prefixes; they must start alphanumeric, got: {id}"
+        );
+        // A basename of only non-alphanumerics still yields the root
+        // fallback, and uniqueness rides on the path hash either way.
+        let dots = instance_id_for(Path::new("/tmp/..."));
+        assert!(dots.starts_with("root-"), "got: {dots}");
+    }
+
+    #[test]
+    fn instance_id_preserves_the_legacy_underscore_prefix() {
+        // Ids that never started with a dash were always valid
+        // `--instance` values and runtime file-name prefixes, so a live
+        // supervisor may be sitting on their state/pid files when the
+        // binary is upgraded. Stripping the leading underscore as well
+        // would rename the instance across the upgrade: `stop` would miss
+        // the incumbent's files and report success while the old
+        // supervisor kept running (free to remount later), and a new
+        // `mount --managed` would race a competing supervisor. Only the
+        // leading dash — the one shape that never worked — is stripped.
+        let id = instance_id_for(Path::new("/mnt/_skills"));
+        assert!(id.starts_with("_skills-"), "got: {id}");
+        // A legacy-valid id that already mixes allowed non-alphanumerics
+        // must survive verbatim too.
+        let mixed = instance_id_for(Path::new("/mnt/_-skills"));
+        assert!(mixed.starts_with("_-skills-"), "got: {mixed}");
     }
 
     #[test]
