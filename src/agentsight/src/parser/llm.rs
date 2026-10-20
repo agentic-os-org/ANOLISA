@@ -146,6 +146,29 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
         if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
             return Some((arr.clone(), None));
         }
+        // The native protocol's `result_format: text` — its default — carries
+        // the conversation input on `input.prompt`, the request-side twin of
+        // the `output.text` answer the response readers already handle. The
+        // prompt is a string or, for a batch, an array of strings; each element
+        // is its own prompt, so each becomes its own user message, and an empty
+        // one is not a turn. Without this arm a text-format call drained with
+        // no request message: `input_tokens` stayed NULL, the turn had no
+        // `user_query`, and the breakdown counted no request side.
+        if let Some(prompt) = input.get("prompt") {
+            let prompts: Vec<&str> = match prompt {
+                Value::String(text) => vec![text.as_str()],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let messages: Vec<Value> = prompts
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .map(|text| serde_json::json!({"role": "user", "content": text}))
+                .collect();
+            if !messages.is_empty() {
+                return Some((messages, None));
+            }
+        }
     }
     // Legacy `/v1/completions` puts its input on the top-level `prompt`
     // field, a string or (for the batch form) an array of strings, with no
@@ -528,14 +551,59 @@ mod tests {
         assert!(instructions.is_none());
     }
 
-    /// An `input` object without a `messages` array carries no conversation.
+    /// An `input` object with neither a `messages` array nor a `prompt`
+    /// carries no conversation.
     #[test]
     fn test_extract_messages_view_dashscope_native_input_object_without_messages() {
         let body = serde_json::json!({
             "model": "qwen-plus",
-            "input": {"prompt": "hi"}
+            "input": {}
         });
         assert!(extract_messages_view(&body).is_none());
+    }
+
+    /// The native protocol's `result_format: text` — its default — puts the
+    /// conversation input on `input.prompt` instead of `input.messages`, the
+    /// same way the answer arrives on `output.text` instead of
+    /// `output.choices[].message`. The response side reads both spellings, but
+    /// the request view only looked for the `messages` array, so a text-format
+    /// call drained with no request message at all: `input_tokens` stayed
+    /// NULL, the turn had no `user_query`, and the token breakdown counted no
+    /// request side.
+    #[test]
+    fn test_extract_messages_view_dashscope_native_input_prompt() {
+        let body = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {"prompt": "1, 2, 3"},
+            "parameters": {"result_format": "text"}
+        });
+        let (msgs, instructions) =
+            extract_messages_view(&body).expect("a text-format prompt is a request message");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("user"));
+        assert_eq!(
+            msgs[0].get("content").and_then(|c| c.as_str()),
+            Some("1, 2, 3")
+        );
+        assert!(instructions.is_none());
+
+        // The batch spelling is one prompt per element, like the legacy
+        // `/v1/completions` array above.
+        let batch = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {"prompt": ["first", "second"]}
+        });
+        let (msgs, _) = extract_messages_view(&batch).expect("batch prompts");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs[1].get("content").and_then(|c| c.as_str()),
+            Some("second")
+        );
+
+        // An empty prompt is not a turn, the same rule the string shorthand
+        // and the legacy `prompt` arm already follow.
+        let empty = serde_json::json!({"model": "qwen-plus", "input": {"prompt": ""}});
+        assert!(extract_messages_view(&empty).is_none());
     }
 
     #[test]
