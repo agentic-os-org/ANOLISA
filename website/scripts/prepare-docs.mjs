@@ -96,14 +96,20 @@ async function rewriteLinks(markdown, source) {
   for (const match of markdown.matchAll(linkPattern)) {
     const rawTarget = match[3].trim();
     if (/^(?:[a-z]+:|#|\/)/i.test(rawTarget)) continue;
-    const [targetWithoutHash, hash = ''] = rawTarget.split('#', 2);
+    const [targetWithQuery, hash = ''] = rawTarget.split('#', 2);
+    const queryIndex = targetWithQuery.indexOf('?');
+    const targetWithoutQuery = queryIndex === -1
+      ? targetWithQuery
+      : targetWithQuery.slice(0, queryIndex);
+    const query = queryIndex === -1 ? '' : targetWithQuery.slice(queryIndex);
+    const suffix = `${query}${hash ? `#${hash}` : ''}`;
 
     // Images live outside the generated docs tree, so relative paths cannot
     // survive the copy. Point them at the static directory with a root-relative
     // path: Docusaurus applies `baseUrl` itself, so hard-coding it here would
     // double the prefix on sub-path deployments (fork Pages).
     if (match[1] === '!') {
-      const resolvedImage = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
+      const resolvedImage = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutQuery));
       if (resolvedImage.startsWith(imagePrefix) && (await exists(path.join(repoRoot, resolvedImage)))) {
         referencedImages.add(resolvedImage);
         replacements.push({
@@ -115,16 +121,16 @@ async function rewriteLinks(markdown, source) {
       continue;
     }
 
-    if (!targetWithoutHash.endsWith('.md')) continue;
+    if (!targetWithoutQuery.endsWith('.md')) continue;
 
-    let resolved = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
+    let resolved = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutQuery));
     if (!(await exists(path.join(repoRoot, resolved)))) {
       resolved = knownAlias(source, resolved) || resolved;
     }
 
     let replacement;
     if (publicPaths.has(resolved)) {
-      replacement = `${publicPaths.get(resolved)}${hash ? `#${hash}` : ''}`;
+      replacement = `${publicPaths.get(resolved)}${suffix}`;
       const sourceIsChinese = source.includes('/zh/') || source.endsWith('_zh.md');
       const targetIsChinese = replacement.startsWith('/zh/');
       if (sourceIsChinese && targetIsChinese) {
@@ -133,7 +139,7 @@ async function rewriteLinks(markdown, source) {
         replacement = new URL(`${baseUrl}${replacement.replace(/^\//, '')}`, siteUrl).toString();
       }
     } else if (await exists(path.join(repoRoot, resolved))) {
-      replacement = `${repository}/blob/main/${resolved}${hash ? `#${hash}` : ''}`;
+      replacement = `${repository}/blob/main/${resolved}${suffix}`;
     }
     if (replacement) {
       replacements.push({start: match.index, end: match.index + match[0].length, value: `${match[1]}[${match[2]}](${replacement})`});
