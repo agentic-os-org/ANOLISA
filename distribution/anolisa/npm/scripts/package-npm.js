@@ -129,8 +129,18 @@ function validatePackageTemplates() {
 
 function parseArgs(hostPlatform, hostArch) {
   const args = process.argv.slice(2);
-  if (args.includes('--all')) return targetsForHost(hostPlatform);
   const targetIdx = args.indexOf('--target');
+  const unexpected = args.findIndex(
+    (argument, index) =>
+      argument !== '--all' &&
+      argument !== '--target' &&
+      index !== targetIdx + 1,
+  );
+  if (unexpected !== -1) {
+    console.error(`Error: unknown package option ${args[unexpected]}`);
+    process.exit(1);
+  }
+  if (args.includes('--all')) return targetsForHost(hostPlatform);
   if (targetIdx !== -1 && args[targetIdx + 1]) {
     try {
       return [targetForSelector(args[targetIdx + 1])];
