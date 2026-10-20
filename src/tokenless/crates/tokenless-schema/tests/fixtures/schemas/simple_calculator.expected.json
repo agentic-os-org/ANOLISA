@@ -1,0 +1,35 @@
+{
+  "function": {
+    "description": "Perform basic arithmetic operations.",
+    "name": "calculate",
+    "parameters": {
+      "properties": {
+        "a": {
+          "description": "First operand.",
+          "type": "number"
+        },
+        "b": {
+          "description": "Second operand.",
+          "type": "number"
+        },
+        "operation": {
+          "description": "The operation to perform.",
+          "enum": [
+            "add",
+            "subtract",
+            "multiply",
+            "divide"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "a",
+        "b"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

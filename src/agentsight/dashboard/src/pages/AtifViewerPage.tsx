@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { roundMatchesText } from '../utils/trajectoryTextFilter';
+import { truncateText } from '../utils/text';
 import { useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
@@ -178,7 +179,7 @@ const ExpandableText: React.FC<{ text: string; className?: string }> = ({ text, 
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const isLong = text.length > TEXT_THRESHOLD;
-  const display = isLong && !expanded ? text.slice(0, TEXT_THRESHOLD) + '\u2026' : text;
+  const display = isLong && !expanded ? truncateText(text, TEXT_THRESHOLD) : text;
 
   return (
     <div>

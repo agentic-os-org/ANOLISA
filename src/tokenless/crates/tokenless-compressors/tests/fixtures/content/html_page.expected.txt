@@ -1,0 +1,12 @@
+[HTML page rendered as Markdown; <main> only, 2 nodes outside it omitted; removed 1 script, 1 style. Retrieve original for the full page.]
+Title: Deployment guide
+# Deploy the service
+
+Run the following command to deploy the service. Check the health endpoint after deployment and keep the previous release available for rollback.
+
+```sh
+service deploy --environment staging
+```
+
+See [health checks](https://example.com/health) for verification.
+[End page]

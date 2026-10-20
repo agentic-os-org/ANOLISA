@@ -291,6 +291,12 @@ impl GenAISqliteStore {
         rows.next()?
             .map(|row| {
                 let record: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+                // `record_json` is external data. A top-level array or scalar
+                // used to reach the redaction path and `associated_session`,
+                // both of which index by string and panic on a non-object.
+                if !record.is_object() {
+                    return Err(TokenlessRecordError::Invalid("record is not a JSON object"));
+                }
                 Ok(SavedTokenlessRecord {
                     cache_id,
                     source: row.get(0)?,
@@ -803,6 +809,45 @@ mod tests {
         let result = store.list_tokenless_records(0, i64::MAX, None, None, 10, None);
 
         assert!(matches!(result, Err(TokenlessRecordError::Invalid(_))));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn detail_rejects_a_non_object_record_without_panicking() {
+        // The detail path redacts fields through `Value::index_mut` and
+        // associates the record by string key. Neither is valid for a stored
+        // top-level array or scalar, and both panicked before the shape check.
+        let dir = std::env::temp_dir().join(format!("stats-detail-shape-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai.db"),
+            PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tokenless_statistics
+                 (source,record_id,record_timestamp,timestamp_ns,content_included,record_json)
+                 VALUES ('fixture',1,'2026-01-01T00:00:00Z',1,0,'[]')",
+                [],
+            )
+            .unwrap();
+
+        match store.tokenless_record(1) {
+            Err(TokenlessRecordError::Invalid(_)) => {}
+            Ok(Some(mut saved)) => {
+                // What the detail handler does; `IndexMut` panics for a
+                // non-object document. Reaching it means the shape check is
+                // missing, so reproduce the panic instead of passing it on.
+                saved.record["before_text"] = Value::Null;
+                panic!("a non-object stored record reached the redaction path");
+            }
+            other => panic!("unexpected detail lookup result: {other:?}"),
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
