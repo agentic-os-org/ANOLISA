@@ -3,7 +3,7 @@
 [English](watcher-topology.md)
 
 本文记录 ws-ckpt 的 watcher 拓扑决策:全部 workspace 共享一个进程级 inotify 实例,而不是每个
-workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的理由、它固有的代价(共享的内核事件队列可能溢出)、该代价的封闭与可观测设计、共享架构本身,以及后续改动必须保持的不变量。目标是让维护者改动
+workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的理由、它固有的代价(共享的内核事件队列可能溢出;任意注册 walk 期间全进程事件投递暂停)、这些代价的封闭与可观测设计、共享架构本身,以及后续改动必须保持的不变量。目标是让维护者改动
 `src/crates/daemon/src/fs_watcher.rs` 时不必从评审记录里重新推导一遍结论。
 
 范围说明:本文只讨论 watcher *拓扑*——inotify 实例的数量与事件到达 workspace 的路径。静默期判定模型(latch 清零 vs 最近活动窗口)是 #4049 处理的独立问题。
@@ -53,6 +53,16 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
   - restore 把 watcher 启动失败聚合成一条 ERROR(失败数/总数、workspace id 列表、`fs.inotify` sysctl 提示)。
 - **运维指引。** 任何非零溢出都值得告警:它意味着事件被丢弃、受影响 workspace 在窗口内被按"活跃"对待。溢出持续增长时应调高 `fs.inotify.max_queued_events`、降低 restore/rollback 重挂扫描的并行度,或在静默期重建后安排受影响 checkpoint 重跑。
 - **后续加固选项(未实现;记录下来让取舍空间可见):** 基于*速率*的溢出阈值升级为 ERROR 状态行;溢出窗口后对 checkpoint 被拒的 workspace 做重扫;若某部署持续溢出,按 workspace 类别拆成少量实例池。单实例拓扑不妨碍其中任何一项——它们都是路由表之上的增量改动。
+
+### walk 暂停代价(静默;已建后续 issue 跟踪)
+
+上面的溢出是共享队列代价的一半;另一半没有计数器:notify 6.1.1 在其唯一的事件循环线程上执行 `watch()`(对整棵树的 `WalkDir`)以及对新建/移入目录的 auto-add,且 walk 进行期间不读 inotify fd。共享单实例下该线程服务整个 daemon,因此*所有* workspace 的事件都要在内核队列里等到 walk 结束。
+
+`check_workspace_quiescent` 依据 forwarder 在最后 100 ms 静默期内投递的内容做决策。当该窗口落进一次长于 ~100 ms 的 walk 时,标志保持检查自己存入的 `false`,决策在 workspace 仍在被写入时返回错误的 `Safe`。per-route coverage epoch 检测不到它:被检查 route 的 epoch、degraded 标记与 watcher 身份都没有变化,因为 walk 属于另一个 workspace。
+
+#7592 评审中的 release 构建实测:写入方每 10 ms 追加一次,检查开始 80 ms 后注册一个无关的 1000 目录 / 100000 文件 workspace(walk 约 170 ms),本设计下检查 5/5 返回 `Safe`,每 workspace 实例拓扑下 0/5;每目录 50 文件(walk 约 87 ms)时 0/5。触发场景包括回滚 re-arm、大 workspace init、heal 路径、启动时 watcher restore,以及 agent 新建/移入大目录时 notify 的 auto-add(`npm install`、`git clone`、`mv`)。
+
+与溢出不同,该暂停不产生 `IN_Q_OVERFLOW`、没有计数、没有 latch——它是静默的。它源自单实例/单线程拓扑而非注册代码的具体 bug,因此按后续 issue 跟踪,不阻塞共享实例改动。后续候选方向:返回 `Safe` 前穿过共享队列的投递屏障;实例级注册 epoch(部分方案——覆盖不到 notify 内部 auto-add);或分片 / 每 workspace 实例。
 
 ## 共享架构设计
 

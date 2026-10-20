@@ -5,9 +5,11 @@
 This document records the watcher topology decision for ws-ckpt: all
 workspaces share one process-wide inotify instance instead of one
 `notify::recommended_watcher` per workspace. It covers why that topology was
-chosen, the inherent cost it carries (a shared kernel event queue that can
-overflow), how that cost is contained and made observable, the shared
-architecture itself, and the invariants future changes must preserve. It is
+chosen, the inherent costs it carries (a shared kernel event queue that can
+overflow, and event delivery pausing for every workspace while any
+registration walk runs), how those costs are contained and made observable,
+the shared architecture itself, and the invariants future changes must
+preserve. It is
 aimed at maintainers touching `src/crates/daemon/src/fs_watcher.rs` so the
 reasoning does not have to be re-derived from review threads.
 
@@ -71,7 +73,7 @@ of this PR's head (`39db95fa7`) against #7669 (`771b2977e`) posted in the
   1000+ instances (cap 128) under per-workspace arming, before any pooling
   complexity is added.
 
-## The overflow cost, and the alerting design
+## The inherent costs, and the alerting design
 
 The shared-queue overflow is an inherent property of the topology and is
 treated as a first-class failure mode, not logged-and-forgotten:
@@ -107,6 +109,41 @@ treated as a first-class failure mode, not logged-and-forgotten:
   sustained overflow, splitting into a small pool of instances along workspace
   classes. The single-instance topology does not preclude any of these; they
   are additive to the route table.
+
+### The walk-pause cost (silent; tracked as a follow-up issue)
+
+The overflow above is one half of the shared-queue cost. The other half has
+no counter: notify 6.1.1 runs `watch()` (a `WalkDir` over the whole tree) and
+the auto-add of created or moved-in directories on its single event-loop
+thread, and it does not read the inotify fd while a walk is in progress.
+With one shared instance that thread serves the whole daemon, so events from
+*every* workspace wait in the kernel queue until the walk finishes.
+
+`check_workspace_quiescent` decides from what the forwarder delivered during
+its final 100 ms quiet period. When that window falls inside a walk longer
+than ~100 ms, the flag keeps the `false` the check itself stored, and the
+decision returns a false `Safe` while the workspace is still being written.
+The per-route coverage epoch cannot detect this: the checked route's epoch,
+degraded mark, and watcher identity are all unchanged, because the walk
+belongs to another workspace.
+
+Measured on a release build during the #7592 review: with a writer appending
+every 10 ms and an unrelated 1,000-directory / 100,000-file workspace
+registering 80 ms into the check (walk of about 170 ms), the check returned
+`Safe` 5/5 under this design and 0/5 under the per-workspace topology; with
+50 files per directory (walk of about 87 ms) it returned 0/5. Triggers
+include the rollback re-arm, large-workspace init, the heal path, watcher
+restore at startup, and notify's auto-add when an agent creates or moves in
+a large directory (`npm install`, `git clone`, `mv`).
+
+Unlike the overflow, this pause produces no `IN_Q_OVERFLOW`, no counter, and
+no latch — it is silent. It follows from the one-instance/one-thread
+topology rather than from any specific bug in the registration code, and is
+tracked as a follow-up issue rather than a blocker for the shared-instance
+change. Candidate directions for that follow-up: a delivery barrier through
+the shared queue before returning `Safe`; an instance-wide registration
+epoch (partial — it misses notify's internal auto-add); or sharding /
+per-workspace instances.
 
 ## Shared architecture
 
