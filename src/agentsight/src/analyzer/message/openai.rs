@@ -58,6 +58,39 @@ struct ResponseToolCall {
     done: bool,
 }
 
+/// Name of a Responses output item that spells a tool call.
+///
+/// `function_call` and `custom_tool_call` carry it in `name`; a Codex
+/// `local_shell_call` names the tool implicitly, the same way the collector
+/// crate and the non-streaming reader default it to `shell`.
+fn response_item_call_name(item: &serde_json::Value) -> String {
+    item.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            if item.get("type").and_then(|v| v.as_str()) == Some("local_shell_call") {
+                "shell"
+            } else {
+                ""
+            }
+        })
+        .to_owned()
+}
+
+/// Payload of a Responses output item that spells a tool call, as text.
+///
+/// `function_call`/`custom_tool_call` stream their payload as a string under
+/// `arguments` or `input`; `local_shell_call` keeps its argv in an `action`
+/// object, which the chat shape carries as its JSON text, exactly as the
+/// non-streaming reader renders it.
+fn response_item_call_arguments(item: &serde_json::Value) -> String {
+    item.get("arguments")
+        .or_else(|| item.get("input"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| item.get("action").map(|action| action.to_string()))
+        .unwrap_or_default()
+}
+
 impl ResponsesToolCalls {
     /// Apply a call lifecycle event without redirecting unknown item IDs.
     pub(crate) fn observe(&mut self, event: &serde_json::Value) {
@@ -95,7 +128,7 @@ impl ResponsesToolCalls {
                 let Some(item) = item else { return };
                 if !matches!(
                     item.get("type").and_then(|v| v.as_str()),
-                    Some("function_call" | "custom_tool_call")
+                    Some("function_call" | "custom_tool_call" | "local_shell_call")
                 ) {
                     return;
                 }
@@ -127,17 +160,8 @@ impl ResponsesToolCalls {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_owned(),
-                    name: item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
-                    arguments: item
-                        .get("arguments")
-                        .or_else(|| item.get("input"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
+                    name: response_item_call_name(item),
+                    arguments: response_item_call_arguments(item),
                     done: false,
                 });
                 self.current = Some(self.calls.len() - 1);
@@ -193,17 +217,13 @@ impl ResponsesToolCalls {
                 let Some(item) = item else { return };
                 if !matches!(
                     item.get("type").and_then(|v| v.as_str()),
-                    Some("function_call" | "custom_tool_call")
+                    Some("function_call" | "custom_tool_call" | "local_shell_call")
                 ) {
                     return;
                 }
                 let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let arguments = item
-                    .get("arguments")
-                    .or_else(|| item.get("input"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let name = response_item_call_name(item);
+                let arguments = response_item_call_arguments(item);
                 if let Some(p) = position {
                     // The done item is authoritative: it supersedes whatever
                     // partial deltas the capture caught, and fills identity
@@ -213,10 +233,10 @@ impl ResponsesToolCalls {
                         call.id = call_id.to_owned();
                     }
                     if !name.is_empty() {
-                        call.name = name.to_owned();
+                        call.name = name;
                     }
                     if !arguments.is_empty() {
-                        call.arguments = arguments.to_owned();
+                        call.arguments = arguments;
                     }
                     call.done = true;
                     // After a completed item, an unidentified follow-up event
@@ -249,8 +269,8 @@ impl ResponsesToolCalls {
                     index,
                     item_id: item_id.map(str::to_owned),
                     id: call_id.to_owned(),
-                    name: name.to_owned(),
-                    arguments: arguments.to_owned(),
+                    name,
+                    arguments,
                     done: true,
                 });
             }
@@ -3114,6 +3134,35 @@ mod tests {
         assert_eq!(
             tc[0]["function"]["arguments"],
             serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+    }
+
+    /// The same Codex shell turn streamed instead of replayed. The item
+    /// router in `ResponsesToolCalls` accepted only `function_call` and
+    /// `custom_tool_call`, so a `local_shell_call` item was dropped from the
+    /// streamed answer while the non-streaming reader kept it.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_local_shell_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_lsc002", "model": "gpt-5-codex"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "local_shell_call", "id": "lsc_002", "call_id": "call_ls", "action": {"type": "exec", "command": ["ls", "-l"]}}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "local_shell_call", "id": "lsc_002", "call_id": "call_ls", "status": "completed", "action": {"type": "exec", "command": ["ls", "-l"]}}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_lsc002", "model": "gpt-5-codex", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed shell call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_ls"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("shell"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("{\"type\":\"exec\",\"command\":[\"ls\",\"-l\"]}")
         );
     }
 
