@@ -101,3 +101,18 @@ python3 src/aw/scripts/check.py
 门禁编译双组件和各自单独启用的配置，核对必需 SDK 测试清单，
 与真实 Tokenless Runtime 对照结果，验证恢复授权、可复现源码导出和仓库外消费者构建，并检查单组件构建不引入另一组件。
 本地 RTK fixture 验证调用和结果映射，不能代替真实 RTK 与 root daemon 的发行验收。
+
+验证已安装组件时，提供运行中的 sec-core daemon 和受管 RTK 可执行文件。
+在 `src/aw/sdk/rust/` 或源码包解压后的同名目录执行：
+
+```bash
+cargo run --locked --example component_check -- \
+  /run/agent-sec-core/daemon.sock \
+  "$PWD/target/component-check/state" \
+  /absolute/path/to/managed/rtk
+```
+
+此检查要求两个组件均可用，缺少依赖会失败。它验证当前扫描规则的 pass/warn 结果、
+Tokenless 四项操作、未授权恢复被拒绝，以及失败或 RTK 已处理的输出保持原样。
+结果输出为 JSON，指定的状态目录保留供检查。危险扫描片段仅作为源码数据，
+不会执行；检查也不安装服务、不执行建议的工具命令，不证明原生 Hook 已采用结果。

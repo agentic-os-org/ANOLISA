@@ -36,3 +36,7 @@ tempfile.workspace = true
 [[example]]
 name = "application"
 required-features = ["sec-core", "tokenless"]
+
+[[example]]
+name = "component_check"
+required-features = ["sec-core", "tokenless"]

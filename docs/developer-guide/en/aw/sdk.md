@@ -113,3 +113,22 @@ tests, compares Tokenless results against its real Runtime, checks authorized
 recovery, exports a reproducible source archive, builds an external consumer, and verifies that component-only builds exclude the other component.
 The local RTK fixture checks invocation and result mapping; it does not replace
 the real RTK and root-daemon release acceptance.
+
+To check installed components, provide a running sec-core daemon and the managed
+RTK executable. From `src/aw/sdk/rust/`, or that directory in an extracted source
+package:
+
+```bash
+cargo run --locked --example component_check -- \
+  /run/agent-sec-core/daemon.sock \
+  "$PWD/target/component-check/state" \
+  /absolute/path/to/managed/rtk
+```
+
+This check requires both components and fails on missing dependencies. It checks
+the shipped scanner's pass/warn results, all four Tokenless operations, rejected
+unauthorized recovery and preservation of failed or RTK-owned output. It prints a
+JSON report; the supplied state directory remains available for inspection.
+The dangerous scan snippet is source data and is never executed. The check does
+not install services, execute the suggested tool command or certify native Hook
+adoption.

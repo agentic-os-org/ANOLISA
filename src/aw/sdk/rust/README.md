@@ -24,3 +24,6 @@ Public source archives include the complete local library closure; use
 `python3 src/aw/scripts/export_sdk.py --output src/aw/target/aw-sdk-source.tar.gz`
 from the repository root (Python 3.11+). The gate builds an external consumer
 without needing OS implementation packages.
+
+The guide also provides `component_check`, an executable acceptance against a
+running sec-core daemon, real Tokenless state and a managed RTK binary.
