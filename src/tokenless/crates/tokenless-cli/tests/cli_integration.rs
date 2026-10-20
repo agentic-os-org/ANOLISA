@@ -3164,6 +3164,63 @@ fn stats_clear_prompt_maps_an_unwritable_stdout_to_an_operation_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
+/// The EPIPE shape of the same prompt, and the reason it is not covered by the
+/// graceful broken-pipe policy: a consumer that stopped reading means the
+/// destructive question was never asked, so the command must fail before it
+/// waits on stdin - and before it clears anything. Swallowing the broken pipe
+/// here reported an undelivered prompt as delivered: the command blocked on the
+/// read, then cleared every record and exited 0 with an empty stderr.
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let mut child = fixture
+        .command()
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["stats", "clear"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(closed_pipe_stdout())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Park the answer in the pipe, so a command that still waits on stdin would
+    // read it, clear the records and exit 0. A write error only means the child
+    // had already given up on the prompt and exited.
+    {
+        use std::io::Write;
+        let _ = child.stdin.as_mut().unwrap().write_all(b"y\n");
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an undelivered confirmation prompt must not be reported as success: {stderr}"
+    );
+    assert!(
+        stderr.starts_with("Error: Failed to write output:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Broken pipe"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+
+    // The destructive action never ran: the record the fixture wrote is still
+    // in the database.
+    let recorder = StatsRecorder::new(&fixture.path).unwrap();
+    assert_eq!(
+        recorder.count().unwrap(),
+        1,
+        "records were cleared behind a prompt nobody saw"
+    );
+    assert!(
+        recorder.record_by_id(fixture.record_id).unwrap().is_some(),
+        "the fixture record was cleared behind a prompt nobody saw"
+    );
+}
+
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
 fn toon_encodable_response() -> String {

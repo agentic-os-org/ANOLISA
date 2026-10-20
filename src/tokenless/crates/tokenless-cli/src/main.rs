@@ -512,11 +512,12 @@ fn write_stdout(payload: &str) -> Result<(), (String, i32)> {
 
 /// `write_stdout` without the trailing LF, for a payload the caller has
 /// already shaped. Flushed before returning so the bytes reach the consumer
-/// while the command is still in the write - the `stats clear` confirmation
-/// prompt has a stdin read waiting on it, and `retrieve` / `compress-toon`
-/// must reproduce their payload byte-for-byte because the documented detection
+/// while the command is still in the write - `retrieve` / `compress-toon` must
+/// reproduce their payload byte-for-byte because the documented detection
 /// contract compares that stdout against the input. Same broken-pipe policy,
 /// same operation-error shape.
+///
+/// A confirmation prompt must not go through here - see `write_prompt_raw`.
 fn write_stdout_raw(payload: &str) -> Result<(), (String, i32)> {
     let mut stdout = io::stdout().lock();
     stdout_result(
@@ -526,6 +527,27 @@ fn write_stdout_raw(payload: &str) -> Result<(), (String, i32)> {
     )
 }
 
+/// `write_stdout_raw` for a prompt that gates a destructive action: same bytes,
+/// same flush ahead of the stdin read that follows it, but a write that did not
+/// land fails the command instead of ending it gracefully.
+///
+/// The broken-pipe policy exists because the output it covers was already
+/// earned: the consumer left once the work was done. A confirmation prompt is
+/// the inverse shape - the destructive work has not happened yet, and happens
+/// only if the user answers a question they must actually have seen. Answering
+/// EPIPE with `Ok(())` reported an undelivered prompt as delivered, so
+/// `stats clear` went on to block on stdin and, once something typed `y`,
+/// cleared every record and exited 0 with an empty stderr. Every prompt write
+/// failure - a closed pipe as much as a full device - therefore fails the
+/// command before it waits for an answer it cannot act on.
+fn write_prompt_raw(payload: &str) -> Result<(), (String, i32)> {
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(payload.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(stdout_write_error)
+}
+
 /// Map a stdout write result onto the CLI's error contract: a broken pipe is a
 /// pipeline condition and ends the command gracefully, any other failure is an
 /// operation error.
@@ -533,8 +555,13 @@ fn stdout_result(result: io::Result<()>) -> Result<(), (String, i32)> {
     match result {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err((format!("Failed to write output: {error}"), 1)),
+        Err(error) => Err(stdout_write_error(error)),
     }
+}
+
+/// The single body and code the CLI reports for a stdout write that failed.
+fn stdout_write_error(error: io::Error) -> (String, i32) {
+    (format!("Failed to write output: {error}"), 1)
 }
 
 /// Resolve the stash database path under a trusted state root.
@@ -1040,7 +1067,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 StatsCommands::Clear { yes } => {
                     let recorder = open_recorder()?;
                     if !yes {
-                        write_stdout_raw("Are you sure you want to clear all statistics? [y/N] ")?;
+                        // The prompt gates the destructive clear below, so an
+                        // undelivered one fails here instead of waiting on stdin.
+                        write_prompt_raw("Are you sure you want to clear all statistics? [y/N] ")?;
                         let mut input = String::new();
                         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
                             write_stdout("Cancelled.")?;
