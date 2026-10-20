@@ -13,6 +13,11 @@
 
 AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-security/owasp-agentic-top10.md)。
 
+Rust 应用可通过[类型化客户端](v2/crates/asc-daemon-client/src/code_scan.rs)调用
+`asc_daemon_client::code_scan::Client::scan_code`。扫描结论、daemon 拒绝和传输错误
+分别返回，并保留服务端请求 ID；发送源码前先验证 daemon 身份。构造客户端不会启动
+服务，调用超时也不代表服务端已经取消执行。
+
 ## 背景
 
 随着 AI Agent 逐步获得操作系统级别的执行能力（文件读写、网络访问、进程管理等），传统应用安全边界已不再适用。Agent Sec Core 从 **OS 层面** 为 Agent 构建纵深防御体系，确保 Agent 在受控、可审计、最小权限的环境中运行。

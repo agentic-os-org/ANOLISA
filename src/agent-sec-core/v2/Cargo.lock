@@ -298,6 +298,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "rustix",
+ "serde",
  "serde_json",
  "socket2",
  "thiserror",
