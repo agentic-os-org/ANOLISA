@@ -48,11 +48,19 @@ export function persistConfig(partial: Partial<PersistableKeys>): string {
     const dir = path.dirname(configPath);
     fs.mkdirSync(dir, { recursive: true });
     const tmpPath = `${configPath}.tmp.${process.pid}`;
-    fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2) + "\n", {
-      encoding: "utf-8",
-      mode: 0o600,
-    });
-    fs.renameSync(tmpPath, configPath);
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2) + "\n", {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
+      fs.renameSync(tmpPath, configPath);
+    } finally {
+      // A partial write or a failed rename must not strand the temp file in
+      // the state directory; repeated failures would otherwise accumulate
+      // one .tmp.<pid> residue per attempt. After a successful rename the
+      // temp path is gone, and force tolerates that ENOENT natively.
+      fs.rmSync(tmpPath, { force: true });
+    }
     return "";
   } catch (err) {
     return err instanceof Error ? err.message : String(err);

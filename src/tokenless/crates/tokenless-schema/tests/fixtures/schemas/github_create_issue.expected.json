@@ -1,0 +1,69 @@
+{
+  "function": {
+    "description": "Create a new issue in a GitHub repository. This tool allows you to create issues with titles, descriptions, labels, assignees, and milestones. Issues are used to track bugs, feature requests, and other tasks in a repository.",
+    "name": "create_issue",
+    "parameters": {
+      "properties": {
+        "assignees": {
+          "description": "An array of usernames to assign to this issue. Each user must have write access to the repository.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "body": {
+          "description": "The body text of the issue. Supports GitHub Flavored Markdown for formatting, including headers, lists, code blocks, and links.",
+          "type": "string"
+        },
+        "labels": {
+          "description": "An array of label names to associate with this issue. Labels help categorize and filter issues.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "milestone": {
+          "description": "The number of the milestone to associate this issue with. Use null to remove any milestone.",
+          "type": "integer"
+        },
+        "owner": {
+          "description": "The account owner of the repository. The name is not case sensitive.",
+          "type": "string"
+        },
+        "priority": {
+          "description": "The priority level of the issue, used for project management and triage.",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "type": "string"
+        },
+        "projects": {
+          "description": "An array of project board IDs to associate this issue with.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repo": {
+          "description": "The name of the repository without the .git extension. The name is not case sensitive.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The title of the issue. This is a required field and should be a concise summary of the problem or feature request.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner",
+        "repo",
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}
