@@ -594,8 +594,11 @@ impl GenAIBuilder {
         let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut finish_reason: Option<String> = None;
-        // tool_call delta merging: index -> (id, name, arguments_accumulated)
-        let mut tc_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // tool_call delta merging: (choice index, index) ->
+        // (id, name, arguments_accumulated). OpenAI defines the wire index
+        // per choice, so every choice starts its calls at index 0 and the
+        // key must carry both or two choices' calls fold into one slot.
+        let mut tc_map: HashMap<(u64, u32), (String, String, String)> = HashMap::new();
         // Slot each choice's latest fragment landed in, so an index-less
         // fragment without a name extends the call its choice is holding.
         let mut current_slot: HashMap<u64, u32> = HashMap::new();
@@ -709,10 +712,15 @@ impl GenAIBuilder {
                                     .and_then(|v| v.as_str())
                                     .is_some_and(|name| !name.is_empty());
                                 if starts_call {
+                                    // Allocate within the current choice so a
+                                    // second choice's first call does not
+                                    // extend the first choice's last slot.
                                     tc_map
                                         .keys()
+                                        .filter(|(choice, _)| *choice == choice_index)
+                                        .map(|(_, slot)| u64::from(*slot))
                                         .max()
-                                        .map_or(0, |slot| u64::from(*slot).saturating_add(1))
+                                        .map_or(0, |slot| slot.saturating_add(1))
                                 } else {
                                     u64::from(current_slot.get(&choice_index).copied().unwrap_or(0))
                                 }
@@ -727,7 +735,7 @@ impl GenAIBuilder {
                         let idx = idx as u32;
                         current_slot.insert(choice_index, idx);
                         let entry = tc_map
-                            .entry(idx)
+                            .entry((choice_index, idx))
                             .or_insert_with(|| (String::new(), String::new(), String::new()));
                         if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                             if !id.is_empty() {
@@ -805,7 +813,7 @@ impl GenAIBuilder {
         }
         // Merged tool calls
         if !tc_map.is_empty() {
-            let mut indices: Vec<u32> = tc_map.keys().cloned().collect();
+            let mut indices: Vec<(u64, u32)> = tc_map.keys().cloned().collect();
             indices.sort();
             for idx in indices {
                 if let Some((id, name, arguments)) = tc_map.remove(&idx) {
@@ -2429,6 +2437,34 @@ mod tests {
             _ => panic!("expected ToolCall"),
         }
         assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// OpenAI scopes `tool_calls[].index` to its choice: every choice starts
+    /// its calls at index 0. Keying the merger by the wire index alone folded
+    /// two choices' first calls into one slot, so a multi-choice stream
+    /// reported one call with the later choice's id/name and both fragments
+    /// spliced into unparseable arguments.
+    #[test]
+    fn test_extract_parts_from_sse_body_multi_choice_tool_calls() {
+        let body = r#"[
+            {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"first","arguments":"{\"a\":1}"}}]}}]},
+            {"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"id":"call_b","function":{"name":"second","arguments":"{\"b\":2}"}}]},"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        let calls: Vec<(&str, Option<&serde_json::Value>)> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    name, arguments, ..
+                } => Some((name.as_str(), arguments.as_ref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2, "one call per choice, got {parts:?}");
+        assert_eq!(calls[0].0, "first");
+        assert_eq!(calls[0].1, Some(&serde_json::json!({"a": 1})));
+        assert_eq!(calls[1].0, "second");
+        assert_eq!(calls[1].1, Some(&serde_json::json!({"b": 2})));
     }
 
     /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
