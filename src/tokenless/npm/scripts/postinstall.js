@@ -37,7 +37,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch, homedir } from 'node:os';
@@ -246,7 +246,8 @@ if (result.error) { console.error(result.error.message); process.exit(1); }
 process.exit(result.status ?? 1);
 `);
     } else {
-      symlinkSync(nativeBinary, linkPath);
+      // Keep the launcher usable when the entire npm prefix moves.
+      symlinkSync(relative(binDir, nativeBinary), linkPath);
       chmodSync(linkPath, 0o755);
     }
   }
