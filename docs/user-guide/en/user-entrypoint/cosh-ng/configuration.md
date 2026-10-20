@@ -50,7 +50,6 @@ level = "info"
 
 [ui]
 language = "auto"
-log_level = "info"
 
 [shell]
 default = "auto"
@@ -174,6 +173,29 @@ the system-scope update check because it needs write access to
 `sudo anolisa --install-mode system update cosh-ng --dry-run`. RPM-backend
 installations are not affected.
 
+## Logging
+
+`[logging].level` sets the log filter for both `cosh-shell` and `cosh-core`
+(default `info`). The resolution order is:
+
+1. `COSH_LOG` environment variable
+2. `RUST_LOG` environment variable
+3. `[logging].level`
+
+`[ui].log_level` is still accepted as a legacy alias for existing configs;
+`[logging].level` wins when both are set. `[ui].debug = true` raises the
+effective level to `debug` while the level is still the default `info`.
+
+The value is a `tracing` `EnvFilter` expression, so per-module control works:
+`COSH_LOG=cosh_core=debug` turns on cosh-core debug records only.
+
+Logs are written to `~/.copilot-shell/logs/` as `cosh-shell.log.<date>` and
+`cosh-core.log.<date>`. If the directory is not writable, records go to
+stderr instead. Retention keeps today plus the previous two UTC dates within
+a per-user budget of 20 MiB shared by both components; when the budget is
+exhausted, the process stops writing log records (announced on stderr) until
+older files are removed and the session restarts.
+
 ## Audit settings
 
 Audit settings come from the system file when it has an `[audit]` table;
@@ -236,5 +258,5 @@ required.
 | `COSH_AUDIT_DIR` | Audit storage root |
 
 Environment values take precedence when the relevant binary supports them.
-Logs rotate daily under `~/.copilot-shell/logs/` and old files are kept for
-seven days.
+Logs rotate daily under `~/.copilot-shell/logs/`; see [Logging](#logging) for
+retention.

@@ -45,7 +45,6 @@ level = "info"
 
 [ui]
 language = "auto"
-log_level = "info"
 
 [shell]
 default = "auto"
@@ -144,6 +143,27 @@ POSIX 启动无法导入的函数名时都会自动回退。zsh 不受影响。
 
 如果 `cosh-ng` 由 `anolisa` 以 system 作用域、默认 raw 后端安装，只有 root 会话会显示升级提示。普通用户无法执行 system 作用域的更新检查（需要写入 `/var/cache/anolisa`），因此不会看到提示。如需手动检查，请运行 `sudo anolisa --install-mode system update cosh-ng --dry-run`。RPM 后端安装不受影响。
 
+## 日志
+
+`[logging].level` 同时设置 `cosh-shell` 与 `cosh-core` 的日志过滤级别
+（默认 `info`）。解析顺序为：
+
+1. 环境变量 `COSH_LOG`
+2. 环境变量 `RUST_LOG`
+3. `[logging].level`
+
+`[ui].log_level` 仍被接受，作为存量配置的兼容别名；两者同时设置时
+`[logging].level` 优先。级别仍为默认 `info` 时，`[ui].debug = true` 会把
+有效级别提升为 `debug`。
+
+取值是 `tracing` `EnvFilter` 表达式，支持按模块控制：例如
+`COSH_LOG=cosh_core=debug` 只打开 cosh-core 的 debug 记录。
+
+日志写入 `~/.copilot-shell/logs/` 下的 `cosh-shell.log.<日期>` 与
+`cosh-core.log.<日期>`；目录不可写时降级输出到 stderr。保留策略为今天
+加前两个 UTC 日期，且两个组件共享每用户 20 MiB 预算；预算耗尽后该进程
+停止写日志（stderr 有提示），删除旧日志并重启会话后恢复。
+
 ## 审计设置
 
 系统文件包含 `[audit]` 表时，以系统设置为准；否则使用用户设置。项目审计表会被忽略。
@@ -197,4 +217,4 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |
 | `COSH_AUDIT_DIR` | 审计存储根目录 |
 
-相关二进制支持时，环境变量优先于配置文件。日志在 `~/.copilot-shell/logs/` 下按日轮转，旧文件保留七天。
+相关二进制支持时，环境变量优先于配置文件。日志在 `~/.copilot-shell/logs/` 下按日轮转，保留策略见[日志](#日志)。
