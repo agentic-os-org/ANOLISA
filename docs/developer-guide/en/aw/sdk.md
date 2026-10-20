@@ -27,6 +27,38 @@ aw-sdk = { path = "/absolute/path/to/ANOLISA/src/aw/sdk/rust", default-features 
 | `sec-core` | `scan_code` | Reachable sec-core daemon; client verifies server UID 0 |
 | `tokenless` | `before_model`, `pre_tool`, `post_tool`, `retrieve` | Explicit state directory; PreTool requires an explicit RTK executable |
 
+## Export public sources
+
+A component owner can export the committed SDK and public Provider libraries
+without including AW Service, Provider implementations or backend executables.
+From the repository root, using Python 3.11 or newer:
+
+```bash
+python3 src/aw/scripts/export_sdk.py \
+  --output src/aw/target/aw-sdk-source.tar.gz
+mkdir -p /tmp/aw-sdk-sources
+tar -xzf src/aw/target/aw-sdk-source.tar.gz -C /tmp/aw-sdk-sources
+cd /tmp/aw-sdk-sources/aw-sdk-0.1.0/src/aw/sdk/rust
+cargo test --locked
+```
+
+Successful AW CI runs retain the verified source archive and `result.json`
+under `aw-sdk-source-<tested SHA>` for 14 days. These are candidate build
+artifacts, not a registry release.
+
+The exporter reads committed `HEAD`; use `--revision` to select another commit.
+It refuses to overwrite an existing archive and prints its SHA-256. `source.json`
+records component versions, original Git blobs and packaged file digests.
+Workspace manifests retain dependency inheritance but include only public members.
+Schemas, shared taxonomy data, test fixtures and licenses travel with the source.
+Registry dependencies remain pinned by Cargo.lock and require registry access or
+an already populated Cargo cache.
+
+An external application points its `aw-sdk` dependency at the extracted SDK
+directory. Its own Cargo.lock records its dependency resolution. The archive does
+not install RTK or the sec-core daemon. End-user binary installation is a separate
+[distribution responsibility](../../../../src/aw/docs/design/provider-distribution.md).
+
 ## Configure and call
 
 Pass absolute paths to `Client::new(Config)`. Components omitted from configuration
@@ -78,6 +110,6 @@ python3 src/aw/scripts/check.py
 
 The gate compiles both features and each separately, inventories required SDK
 tests, compares Tokenless results against its real Runtime, checks authorized
-recovery, and verifies that component-only builds exclude the other component.
+recovery, exports a reproducible source archive, builds an external consumer, and verifies that component-only builds exclude the other component.
 The local RTK fixture checks invocation and result mapping; it does not replace
 the real RTK and root-daemon release acceptance.

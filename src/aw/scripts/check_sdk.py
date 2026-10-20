@@ -103,3 +103,6 @@ def check(aw: Path, run: Callable) -> None:
              "--", "-D", "warnings"], root)
         run(["cargo", "test", "--workspace", "--locked", *features], root)
     run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)
+    from check_sdk_source import check as check_source
+
+    check_source(aw, run)

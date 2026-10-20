@@ -17,3 +17,7 @@ cargo doc --no-deps --locked
 
 仓库门禁 `python3 src/aw/scripts/check.py` 还验证各组件的独立选择，
 禁止 SDK 引入 AW Service 或具体 Provider 实现。
+
+公共源码归档包含完整的本地库依赖闭包。在仓库根目录使用 Python 3.11+ 执行
+`python3 src/aw/scripts/export_sdk.py --output src/aw/target/aw-sdk-source.tar.gz`。
+门禁会构建仓库外消费者，验证它不需要 OS 实现包。

@@ -189,6 +189,8 @@ sys.exit(not result.wasSuccessful())
 
 def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
+    if sys.version_info < (3, 11):
+        raise ValueError("AW SDK source validation requires Python 3.11 or newer")
     actual = candidate()
     selftest()
     run(["cargo", "fmt", "--all", "--", "--check"], AW)

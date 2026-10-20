@@ -27,6 +27,33 @@ aw-sdk = { path = "/absolute/path/to/ANOLISA/src/aw/sdk/rust", default-features 
 | `sec-core` | `scan_code` | 可连接的 sec-core daemon；客户端验证服务端 UID 为 0 |
 | `tokenless` | `before_model`、`pre_tool`、`post_tool`、`retrieve` | 显式状态目录；PreTool 需要显式 RTK 可执行文件 |
 
+## 导出公共源码
+
+组件 owner 可以导出已提交的 SDK 和公共 Provider 库，无需包含 AW Service、
+具体 Provider 实现或后端可执行文件。在仓库根目录使用 Python 3.11 及以上版本执行：
+
+```bash
+python3 src/aw/scripts/export_sdk.py \
+  --output src/aw/target/aw-sdk-source.tar.gz
+mkdir -p /tmp/aw-sdk-sources
+tar -xzf src/aw/target/aw-sdk-source.tar.gz -C /tmp/aw-sdk-sources
+cd /tmp/aw-sdk-sources/aw-sdk-0.1.0/src/aw/sdk/rust
+cargo test --locked
+```
+
+AW CI 通过后，在 `aw-sdk-source-<tested SHA>` 中保留已验证的源码归档和
+`result.json`，有效期 14 天。这是候选构建产物，不是注册中心发行版。
+
+导出工具读取已提交的 `HEAD`，可用 `--revision` 选择其他提交；不会覆盖已有归档，
+并输出归档 SHA-256。`source.json` 记录组件版本、原始 Git blob 和包内文件摘要。
+Workspace 清单保留依赖继承，只收录公共成员；Schema、共享工具分类数据、
+测试 fixture 和许可证一并交付。注册中心依赖由 Cargo.lock 固定，构建时需要访问
+注册中心或使用已有 Cargo 缓存。
+
+仓库外应用将 `aw-sdk` 依赖指向解压后的 SDK 目录，由自身 Cargo.lock 记录依赖解析。
+源码包不安装 RTK 或 sec-core daemon。面向终端用户的二进制安装由
+[发行流程](../../../../src/aw/docs/design/provider-distribution_zh.md)负责。
+
 ## 配置与调用
 
 通过 `Client::new(Config)` 传入绝对路径。未配置的组件返回
@@ -72,5 +99,5 @@ python3 src/aw/scripts/check.py
 ```
 
 门禁编译双组件和各自单独启用的配置，核对必需 SDK 测试清单，
-与真实 Tokenless Runtime 对照结果，验证恢复授权，并检查单组件构建不引入另一组件。
+与真实 Tokenless Runtime 对照结果，验证恢复授权、可复现源码导出和仓库外消费者构建，并检查单组件构建不引入另一组件。
 本地 RTK fixture 验证调用和结果映射，不能代替真实 RTK 与 root daemon 的发行验收。
