@@ -918,7 +918,14 @@ impl InterruptionDetector {
 
         // ── 9. Token limit (output capped by max_tokens) ──────────────────────
         if is_token_limit_finish(finish_reason) {
-            if let Some(max_tokens) = call.request.max_tokens {
+            // A cap of 0 is "no cap" — a lenient gateway accepts
+            // `max_tokens: 0` and the request parser stores it verbatim —
+            // not a limit the output can be measured against: dividing by it
+            // makes the ratio +inf, which passed the threshold
+            // unconditionally and fabricated a TokenLimit whose detail
+            // serialised the ratio as JSON `null`. The same "zero disables"
+            // reading the runtime limits config uses.
+            if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                 if let Some(usage) = &call.token_usage {
                     let ratio = usage.output_tokens as f64 / max_tokens as f64;
                     if ratio >= self.config.token_limit_ratio {
@@ -949,7 +956,11 @@ impl InterruptionDetector {
         // 通过 input_tokens >> max_tokens 启发式判定（input > max_tokens * 4）
         if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("length")) {
             if let Some(usage) = &call.token_usage {
-                if let Some(max_tokens) = call.request.max_tokens {
+                // Same guard as rule 9: a zero cap means "no cap", and with
+                // no cap `input > max_tokens * 4` held for any input at all,
+                // fabricating a ContextOverflow for every `length` finish a
+                // lenient gateway answered with `max_tokens: 0`.
+                if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
                     // Widen before multiplying: a large (but legal) max_tokens
@@ -1354,6 +1365,75 @@ mod tests {
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::TokenLimit),
             "an upper-case MAX_TOKENS stop must report TokenLimit, got {events:?}"
+        );
+    }
+
+    /// A request with `max_tokens: 0` — which a lenient gateway accepts and
+    /// the request parser stores verbatim (`openai_parse` copies the value
+    /// through `as_u64`) — means "no cap", not a cap of zero. Rule 9 divided
+    /// by it anyway: a `length` finish produced ratio `+inf`, which passed the
+    /// 0.95 threshold unconditionally and fabricated a TokenLimit whose
+    /// detail serialised the ratio as JSON `null`; rule 10's
+    /// `input > max_tokens * 4` then held for any input at all and fabricated
+    /// a ContextOverflow on top, blaming the context window for a call the
+    /// gateway simply did not cap. Zero gates both rules, the same
+    /// "zero disables" reading the runtime limits config already uses.
+    #[test]
+    fn a_zero_max_tokens_cap_limits_nothing() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(0);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "partial".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::TokenLimit),
+            "a zero cap is no cap, so no output-ratio limit can be claimed, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::ContextOverflow),
+            "a zero cap is no cap, so no input overflow can be claimed, got {events:?}"
+        );
+
+        // The same rules still fire under a real cap: an output ratio past
+        // the threshold and an input beyond four times the cap.
+        call.request.max_tokens = Some(100);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 500,
+            output_tokens: 96, // 96/100 = 0.96 >= 0.95
+            total_tokens: 596,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "a positive cap still reports the output limit, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "a positive cap still reports the input overflow heuristic, got {events:?}"
         );
     }
 
