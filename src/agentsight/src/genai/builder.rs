@@ -558,7 +558,14 @@ impl GenAIBuilder {
         // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
         let metadata_session: Option<String> = llm_body
             .and_then(|b| b.get("metadata"))
-            .and_then(crate::analyzer::message::types::session_id_from_metadata);
+            .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            // The wrapper may carry metadata beside `llmParamString`; decoding
+            // the parameters must not hide it.
+            .or_else(|| {
+                body.as_ref()
+                    .and_then(|b| b.get("metadata"))
+                    .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            });
 
         // 双层兜底计算 session_id / conversation_id（详见上方注释）。
         // 这里不使用 unwrap_or_else(|| "") 是为了让“同 PID 同 agent”上下文下
@@ -1605,6 +1612,44 @@ mod tests {
         assert!(pending.system_instructions.is_some());
         assert_eq!(pending.user_query.as_deref(), Some("hello"));
         assert!(pending.input_messages.is_some());
+    }
+
+    /// Decoding must not hide metadata that sits on the wrapper rather than
+    /// inside `llmParamString`.
+    #[test]
+    fn test_build_pending_from_request_sysom_keeps_outer_metadata() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"{\"model\":\"qwen\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}","metadata":{"session_id":"outer-session"}}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a SysOM POP request is an LLM call");
+
+        assert_eq!(pending.session_id.as_deref(), Some("outer-session"));
+        assert_eq!(pending.model.as_deref(), Some("qwen"));
+    }
+
+    /// A malformed `llmParamString` must fall back to the outer body instead
+    /// of failing the pending record.
+    #[test]
+    fn test_build_pending_from_request_sysom_malformed_params_fall_back() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"not-json"}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("the path still identifies a SysOM call");
+
+        assert!(pending.model.is_none());
+        assert!(pending.input_messages.is_none());
+        assert!(pending.user_query.is_none());
+        assert!(!pending.is_sse);
     }
 
     #[test]
