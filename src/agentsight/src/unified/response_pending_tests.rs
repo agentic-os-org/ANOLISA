@@ -3,6 +3,7 @@
 use super::*;
 use crate::aggregator::{AggregatedResult, ConnectionState};
 use crate::config::RuntimeLimits;
+use crate::parser::Parser;
 use crate::probes::sslsniff::SslEvent;
 use crate::storage::sqlite::PendingOrigin;
 

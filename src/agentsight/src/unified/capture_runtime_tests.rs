@@ -126,9 +126,7 @@ impl RuntimeFixture {
                     live: None,
                     events: RefCell::new(VecDeque::new()),
                 },
-                parser: Parser::default(),
-                aggregator: Aggregator::new(),
-                analyzer: Analyzer::new(),
+                core: PipelineCore::new(&config, Analyzer::new()),
                 genai_builder: GenAIBuilder::new(),
                 genai_exporters: vec![Box::new(Arc::clone(&store))],
                 genai_sqlite_store: Some(store),
@@ -190,4 +188,124 @@ impl Drop for RuntimeFixture {
         drop(self.sight.take());
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+#[test]
+fn event_processing_keeps_owned_completions_behind_cpu_admission() {
+    use crate::utils::cpu_budget::WorkClass;
+
+    let mut fixture = RuntimeFixture::new(100);
+    let budget = fixture.completions.budget.clone().unwrap();
+    let permit = budget.acquire(WorkClass::Maintenance).unwrap();
+    let request = r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}]}"#;
+    let response = r#"{"id":"core-runtime","object":"chat.completion","created":1,"model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}"#;
+    for (rw, bytes) in [
+        (
+            1,
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: fixture.test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",
+                request.len()
+            ),
+        ),
+        (
+            0,
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{response}",
+                response.len()
+            ),
+        ),
+    ] {
+        fixture
+            .probes
+            .events
+            .borrow_mut()
+            .push_back(captured(rw, bytes.into_bytes()));
+    }
+    assert_eq!(fixture.try_process(), Some(1));
+    assert_eq!(fixture.try_process(), Some(2));
+    assert_eq!(fixture.try_process(), None);
+    assert_eq!(fixture.completions.len(), 1);
+    assert!(fixture.rows().is_empty());
+    drop(permit);
+    fixture.flush_completions();
+    assert_eq!(fixture.rows(), ["core-runtime"]);
+    assert_eq!(fixture.completions.bytes, 0);
+    assert!(fixture.core.drain_pending().is_empty());
+}
+
+#[test]
+fn raw_sse_fragmentation_matches_pre_extraction_delivery() {
+    let mut config = AgentsightConfig::default();
+    config.runtime_limits.retain_raw_sse = true;
+    let mut core = PipelineCore::new(&config, Analyzer::new());
+    let parser = crate::parser::Parser::with_max_headers(config.max_headers);
+    let mut aggregator =
+        Aggregator::with_limits(config.connection_capacity, &config.runtime_limits)
+            .with_http_max_headers(config.max_headers);
+    let analyzer = Analyzer::new();
+    let request =
+        r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"stream":true}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: fixture.test\r\nContent-Length: {}\r\n\r\n{request}",
+        request.len()
+    );
+    let chunk = br#"data: {"id":"fragment-fixture","model":"fixture","choices":[{"index":0,"delta":{"content":"reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
+
+"#;
+    let split = chunk.len() / 2;
+    let mut reference = Vec::new();
+    let mut actual = Vec::new();
+    for (rw, bytes) in [
+        (1, request.into_bytes()),
+        (
+            0,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec(),
+        ),
+        (0, chunk[..split].to_vec()),
+        (0, chunk[split..].to_vec()),
+        (0, b"data: [DONE]\n\n".to_vec()),
+    ] {
+        // Raw retention bypassed the compact fast path before extraction as well.
+        for result in aggregator.process_result(parser.parse_event(captured(rw, bytes.clone()))) {
+            reference.extend(analyzer.analyze_for_owned_delivery(result, true));
+        }
+        for result in core.process_event(captured(rw, bytes)) {
+            actual.extend(core.analyze_for_owned_delivery(result, true));
+        }
+    }
+    let semantic = |analysis: &[_]| {
+        let (output, _) = GenAIBuilder::new().build_with_pending(
+            analysis,
+            &ResponseSessionMapper::new(),
+            &HashMap::new(),
+        );
+        let [GenAISemanticEvent::LLMCall(call)] = output.events.as_slice() else {
+            panic!("expected one call from retained evidence");
+        };
+        serde_json::json!({
+            "model": call.model,
+            "request": call.request,
+            "response": call.response,
+            "usage": call.token_usage,
+        })
+    };
+    assert_eq!(semantic(&actual), semantic(&reference));
+    assert!(core.drain_pending().is_empty());
+}
+
+fn captured(rw: i32, bytes: Vec<u8>) -> Event {
+    Event::Ssl(crate::probes::sslsniff::SslEvent {
+        source: 0,
+        timestamp_ns: 1_000_000_000,
+        delta_ns: 0,
+        pid: std::process::id(),
+        tid: 1,
+        uid: 0,
+        len: bytes.len() as u32,
+        rw,
+        comm: "fixture".into(),
+        buf: bytes,
+        is_handshake: false,
+        ssl_ptr: 0x4242,
+    })
 }

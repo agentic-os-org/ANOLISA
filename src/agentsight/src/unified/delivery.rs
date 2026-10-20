@@ -326,7 +326,7 @@ impl AgentSight {
         aggregated_results: Vec<crate::aggregator::AggregatedResult>,
     ) {
         for agg_result in aggregated_results {
-            let mut analysis_results = self.analyzer.analyze_for_owned_delivery(
+            let mut analysis_results = self.core.analyze_for_owned_delivery(
                 agg_result,
                 self.runtime_limits.retain_raw_sse
                     || (self.ffi_sender.is_none() && self.features.sqlite_storage_enabled)
