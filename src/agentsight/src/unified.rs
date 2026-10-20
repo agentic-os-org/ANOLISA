@@ -976,6 +976,12 @@ impl AgentSight {
         }
         database_manager.start_maintenance(maintenance_jobs)?;
 
+        // Configure the metrics exporter before any auxiliary thread starts:
+        // a failure here used to return after those threads were spawned, and
+        // their clones of `running` stayed true forever.
+        let metrics_exporter = MetricsFileExporter::from_env()
+            .context("failed to configure AgentSight runtime metrics export")?;
+
         // Start auxiliary threads only after every fallible database target and
         // the maintenance worker are ready, so constructor errors cannot leave
         // detached workers observing a permanently-true running flag.
@@ -998,8 +1004,6 @@ impl AgentSight {
             Arc::clone(&resource_targets),
             Arc::clone(&running),
         );
-        let metrics_exporter = MetricsFileExporter::from_env()
-            .context("failed to configure AgentSight runtime metrics export")?;
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
