@@ -191,31 +191,33 @@ check_bundle() {
   pass "$label [$fw] declares only skills that exist on disk"
 }
 
-# The two manifests are not interchangeable. src/os-skills/component.toml is the
-# source-tree manifest the *next* os-skills artifact is built from, so a new skill
-# belongs there immediately. distribution/anolisa/manifests/components/os-skills/
-# component.toml is the distribution contract for an artifact that is *already
-# published*: index.toml pins its version to a sha256 and a byte size. Declaring a
-# skill here that the pinned artifact does not contain makes `anolisa adapter
-# enable os-skills <framework>` fail while copying a source that does not exist,
-# so this one may only gain the skill together with a version bump and a new
-# index.toml entry.
+# The catalog version tracks the source component, while index.toml records
+# independently published artifacts and may lag behind it. A version sync alone
+# does not publish a new bundle, so install-tokenless belongs in the source
+# manifest until a release ships it through the managed distribution path.
 INDEX_TOML="$REPO_ROOT/distribution/anolisa/manifests/components/index.toml"
 [ -f "$INDEX_TOML" ] || { echo "FAIL missing file: $INDEX_TOML" >&2; exit 1; }
+SOURCE_VERSION=$(awk -F'"' '/^version = /{ print $2; exit }' "$BUNDLE_COMPONENT")
+[ -n "$SOURCE_VERSION" ] || fail "cannot read the os-skills source component version"
 DIST_VERSION=$(awk -F'"' '/^version = /{ print $2; exit }' "$BUNDLE_DISTRIBUTION")
 [ -n "$DIST_VERSION" ] || fail "cannot read the os-skills distribution contract version"
-pass "the os-skills distribution contract declares version $DIST_VERSION"
-grep -A2 '^component = "os-skills"$' "$INDEX_TOML" | grep -qF "version = \"$DIST_VERSION\"" \
-  || fail "os-skills $DIST_VERSION is not pinned in index.toml, so the contract describes no published artifact"
-pass "the os-skills distribution contract version is pinned to a published artifact"
+[ "$DIST_VERSION" = "$SOURCE_VERSION" ] \
+  || fail "os-skills catalog version $DIST_VERSION differs from source version $SOURCE_VERSION"
+pass "the os-skills catalog version $DIST_VERSION matches the source component"
+PUBLISHED_VERSIONS=$(awk -F'"' '
+  /^\[\[entries\]\]$/ { component = "" }
+  /^component = / { component = $2 }
+  component == "os-skills" && /^version = / { print $2 }
+' "$INDEX_TOML")
+[ -n "$PUBLISHED_VERSIONS" ] || fail "index.toml has no published os-skills artifact"
+pass "index.toml records published os-skills versions independently of the catalog"
 
 for fw in openclaw hermes; do
   check_bundle "src/os-skills/component.toml" "$BUNDLE_COMPONENT" "$fw"
-  # The distribution contract must stay consistent with the artifact it is pinned
-  # to: it may not declare the new skill yet, and everything it does declare must
-  # still exist on disk.
+  # The catalog may not advertise the new skill before its bundle is published,
+  # and everything it already declares must still exist on disk.
   if declared_skills "$BUNDLE_DISTRIBUTION" "$fw" | grep -qxF "$SKILL_NAME"; then
-    fail "manifests os-skills component.toml [$fw] declares $SKILL_NAME, which the pinned $DIST_VERSION artifact does not ship"
+    fail "manifests os-skills component.toml [$fw] declares $SKILL_NAME before a published bundle ships it"
   fi
   pass "manifests os-skills component.toml [$fw] does not declare $SKILL_NAME ahead of its artifact"
   while IFS= read -r name; do
@@ -245,7 +247,7 @@ pass "every on-disk OS Skill is declared in both bundle lists of the component m
 has "$BUNDLE_COMPONENT" 'source = "{datadir}/skills/install-tokenless/"' \
   "the component bundle points at the flattened RPM skill path"
 hasnt "$BUNDLE_DISTRIBUTION" 'source = "{datadir}/skills/install-tokenless/"' \
-  "the distribution bundle does not point at a skill its pinned artifact lacks"
+  "the distribution bundle does not point at a skill its published artifacts lack"
 has "$OS_SKILLS_INDEX_EN" "**install-tokenless**" "en OS Skills index lists the new skill"
 has "$OS_SKILLS_INDEX_ZH" "**install-tokenless**" "zh OS Skills index lists the new skill"
 
@@ -557,9 +559,8 @@ has "$DOC_ZH_TROUBLE" "都会保留**，脚本以非 0 退出" \
   "zh troubleshooting documents the retryable uninstall"
 has "$DOC_SKILL" "stops short" "SKILL documents the retryable uninstall"
 has "$DOC_SKILL" "fail-closed" "SKILL documents that staging is fail-closed"
-# The Skill is declared in the source-tree manifest, which the next os-skills
-# artifact is built from — not in the distribution contract, which is pinned to an
-# artifact that already exists and therefore cannot contain it yet.
+# The source-tree manifest can declare the Skill before a published bundle
+# provides it through the distribution catalog.
 has "$DOC_EN_QUICKSTART" "does not list it yet" \
   "en QUICKSTART does not claim the published os-skills bundle already ships the Skill"
 has "$DOC_ZH_QUICKSTART" "还没有它" \

@@ -5,6 +5,7 @@
 import React from 'react';
 import type { TrajNode, PositionedNode } from '../utils/trajectoryTree';
 import { layoutTree, pathKeys, encodeNodePath, NODE_W, NODE_H } from '../utils/trajectoryTree';
+import { truncateText } from '../utils/text';
 import { useI18n } from '../i18n';
 
 interface SubagentGraphProps {
@@ -73,7 +74,7 @@ const NodeBox: React.FC<{
         fill={isSelected ? '#4338ca' : '#1f2937'}
         style={{ fontSize: 12, fontWeight: 500 }}
       >
-        {node.label.length > 20 ? node.label.slice(0, 20) + '…' : node.label}
+        {truncateText(node.label, 20)}
       </text>
       <text x={x + 10} y={y + 36} fill="#94a3b8" style={{ fontSize: 11 }}>
         {isExternal
