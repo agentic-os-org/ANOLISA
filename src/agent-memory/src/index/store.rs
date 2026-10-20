@@ -267,14 +267,18 @@ impl BM25Store {
     /// per-file unlinks for every leaf. Without the cascade those rows
     /// would linger as stale FTS hits forever.
     ///
+    /// `%` / `_` / `\` in `rel_path` are escaped and the cascade prefix is
+    /// bound under `ESCAPE '\'`, so only real descendants cascade: removing
+    /// `notes_v2` must not take the still-indexed `notesXv2/**` rows with it.
+    ///
     /// Wraps everything in one transaction so `files` and `files_fts` stay
     /// consistent on partial failure.
     pub fn remove(&mut self, rel_path: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let prefix = format!("{rel_path}/");
+        let prefix = format!("{}/%", escape_like(rel_path));
         let rowids: Vec<i64> = {
             let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'")?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +289,7 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
@@ -1150,24 +1154,28 @@ fn agent_scope_sql_like(scope: &AgentScope) -> (String, Option<String>) {
     }
 }
 
-/// Build a `LIKE` pattern matching `token` as a substring, backslash-escaping
-/// the `%` / `_` / `\` wildcards so they match literally. `sanitize_fts_query`
-/// keeps `_` (and drops `%`), but escaping all three is defensive against
-/// future sanitisation changes.
-fn like_pattern(token: &str) -> String {
-    let mut s = String::with_capacity(token.len() + 4);
-    s.push('%');
-    for c in token.chars() {
+/// Backslash-escape the `%` / `_` / `\` LIKE wildcards in `s` so it matches
+/// literally in a pattern bound with `ESCAPE '\'`. Callers add their own
+/// anchoring wildcards around the result.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
         match c {
             '_' | '%' | '\\' => {
-                s.push('\\');
-                s.push(c);
+                out.push('\\');
+                out.push(c);
             }
-            other => s.push(other),
+            other => out.push(other),
         }
     }
-    s.push('%');
-    s
+    out
+}
+
+/// Build a `LIKE` pattern matching `token` as a substring. `sanitize_fts_query`
+/// keeps `_` (and drops `%`), but escaping all three wildcards is defensive
+/// against future sanitisation changes.
+fn like_pattern(token: &str) -> String {
+    format!("%{}%", escape_like(token))
 }
 
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
@@ -1477,6 +1485,97 @@ mod tests {
         // FTS row for the cascaded body is also gone.
         let hits = s.search("alpha", 5, true).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn remove_escapes_underscore_in_prefix() {
+        // Regression: the cascade bound the raw path into `LIKE ?2 || '%'`
+        // with no ESCAPE clause, so `_` acted as a single-char wildcard and
+        // `remove("notes_v2")` also dropped the `notesXv2` rows — files that
+        // are still on disk vanished from BM25 *and* vector search until the
+        // next full re-scan.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes_v2/a.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("notes_v2/sub/b.md", 0, 0, "beta", None).unwrap();
+        s.upsert("notesXv2/c.md", 0, 0, "gamma", None).unwrap();
+        s.upsert("other/d.md", 0, 0, "delta", None).unwrap();
+        s.upsert_vec("notes_v2/a.md", &[1.0, 0.0]).unwrap();
+        s.upsert_vec("notes_v2/sub/b.md", &[1.0, 0.0]).unwrap();
+        s.upsert_vec("notesXv2/c.md", &[0.0, 1.0]).unwrap();
+
+        assert!(s.remove("notes_v2").unwrap());
+
+        // Real descendants still cascade; the `_` lookalike survives.
+        let mut paths = s.known_paths().unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["notesXv2/c.md".to_string(), "other/d.md".to_string()],
+            "`_` must match literally: notesXv2 must survive remove(notes_v2)"
+        );
+        assert!(
+            s.search("alpha", 5, true).unwrap().is_empty(),
+            "the removed subtree must leave no FTS hit behind"
+        );
+        // The vector cascade is escaped too, so the sibling keeps its
+        // embedding while the removed subtree loses its own.
+        let vec_paths: Vec<String> = s
+            .search_vec(&[0.0, 1.0], 10)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            vec_paths,
+            vec!["notesXv2/c.md".to_string()],
+            "files_vec must keep the sibling row and drop the removed subtree"
+        );
+    }
+
+    #[test]
+    fn remove_escapes_percent_in_prefix() {
+        // `%` in a removed path used to widen the cascade to *every* row
+        // matching it as "any sequence", so `remove("r%2")` deleted `rAB2/…`
+        // as well.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("r%2/a.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("r%2/sub/b.md", 0, 0, "beta", None).unwrap();
+        s.upsert("rAB2/victim.md", 0, 0, "gamma", None).unwrap();
+        s.upsert_vec("rAB2/victim.md", &[1.0, 0.0]).unwrap();
+
+        assert!(s.remove("r%2").unwrap());
+
+        assert_eq!(
+            s.known_paths().unwrap(),
+            vec!["rAB2/victim.md".to_string()],
+            "`%` must match literally: rAB2 must survive remove(r%2)"
+        );
+        let vec_paths: Vec<String> = s
+            .search_vec(&[1.0, 0.0], 10)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(vec_paths, vec!["rAB2/victim.md".to_string()]);
+    }
+
+    #[test]
+    fn remove_escapes_backslash_in_prefix() {
+        // `\` is the ESCAPE character itself: an unescaped backslash in the
+        // prefix would swallow the byte after it, turning `a\b/` into a
+        // pattern for `ab/` — dropping the wrong subtree and keeping the
+        // removed one.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("a\\b/x.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("ab/y.md", 0, 0, "beta", None).unwrap();
+
+        assert!(s.remove("a\\b").unwrap());
+
+        assert_eq!(
+            s.known_paths().unwrap(),
+            vec!["ab/y.md".to_string()],
+            "a literal backslash must match literally and still cascade its own subtree"
+        );
     }
 
     #[test]
