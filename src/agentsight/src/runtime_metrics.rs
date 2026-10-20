@@ -878,4 +878,36 @@ mod tests {
         );
         first.run_upkeep();
     }
+
+    /// A second `AgentSight` lifecycle must be able to build its exporter from
+    /// the same environment; this is the path that failed before the recorder
+    /// was made process-global.
+    #[test]
+    fn from_env_builds_an_exporter_on_a_second_lifecycle() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("create metrics directory");
+        let path = directory.join("metrics.prom");
+
+        // SAFETY: only this module reads the variable, and ENV_LOCK serializes
+        // the tests that mutate it.
+        unsafe {
+            std::env::set_var(METRICS_FILE_ENV, &path);
+            std::env::remove_var(METRICS_INTERVAL_ENV);
+        }
+        let first = MetricsFileExporter::from_env();
+        let second = MetricsFileExporter::from_env();
+        unsafe { std::env::remove_var(METRICS_FILE_ENV) };
+
+        assert!(first.expect("first lifecycle").is_some());
+        assert!(
+            second
+                .expect("second lifecycle must reuse the installed recorder")
+                .is_some()
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
 }
