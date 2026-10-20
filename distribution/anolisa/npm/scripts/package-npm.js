@@ -129,8 +129,12 @@ function validatePackageTemplates() {
 
 function parseArgs(hostPlatform, hostArch) {
   const args = process.argv.slice(2);
-  if (args.includes('--all')) return targetsForHost(hostPlatform);
   const targetIdx = args.indexOf('--target');
+  if (args.includes('--all') && targetIdx !== -1) {
+    console.error('Error: --all and --target cannot be used together');
+    process.exit(1);
+  }
+  if (args.includes('--all')) return targetsForHost(hostPlatform);
   if (targetIdx !== -1 && args[targetIdx + 1]) {
     try {
       return [targetForSelector(args[targetIdx + 1])];
