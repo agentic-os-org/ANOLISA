@@ -1347,8 +1347,15 @@ impl GenAIBuilder {
                 // chat-completions "length" finish rather than a clean "stop",
                 // and a safety-filter cut as "content_filter" — the same
                 // reason mapping the live parser's aggregator applies.
+                //
+                // Every incomplete reason is a terminal event, including
+                // `max_messages` and `steered`: leaving `completed` false made
+                // the finish fall through to None, which the detector reports
+                // as `sse_truncated` — a transport failure — for a turn the
+                // provider ended itself.
                 "response.incomplete" => {
                     saw_responses_event = true;
+                    completed = true;
                     if let Some(resp) = chunk.get("response") {
                         if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
                             match resp
@@ -2526,6 +2533,30 @@ mod tests {
             MessagePart::Text { content } if content == "partial"
         ));
         assert_eq!(finish.as_deref(), Some("content_filter"));
+    }
+
+    /// OpenAI documents `max_messages` and `steered` as `response.incomplete`
+    /// reasons too. They are terminal like the cap/filter reasons, but they
+    /// set neither flag; because the arm never set `completed`, the finish
+    /// fell through to None and the detector reported a transport truncation
+    /// for a turn the provider had ended.
+    #[test]
+    fn test_responses_sse_incomplete_other_reasons_keep_a_finish() {
+        for reason in ["max_messages", "steered"] {
+            let body = format!(
+                r#"[
+                    {{"type":"response.output_text.delta","delta":"partial"}},
+                    {{"type":"response.incomplete","response":{{"id":"resp_o","status":"incomplete","incomplete_details":{{"reason":"{reason}"}}}}}}
+                ]"#
+            );
+            let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(&body).unwrap();
+            assert_eq!(parts.len(), 1, "{reason}: the answer must survive");
+            assert_eq!(
+                finish.as_deref(),
+                Some("stop"),
+                "{reason}: a provider-terminated turn must not look truncated"
+            );
+        }
     }
 
     /// The cap reason keeps its "length" mapping, and a stream that ends
