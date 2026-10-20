@@ -538,6 +538,10 @@ fn extract_tool_results(content: &serde_json::Value) -> Vec<ExtractedToolResult>
                     .collect();
                 text_parts.join("\n")
             }
+            // An explicit null is "the producer recorded no output", not the
+            // four-character string "null": stringifying it here hands every
+            // consumer of the observation a result the tool never produced.
+            serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
 
@@ -949,5 +953,29 @@ mod tests {
         let traj = convert_qoder_events(&[], "qoder").unwrap();
         assert!(traj.steps.is_empty());
         assert!(traj.final_metrics.is_none());
+    }
+
+    #[test]
+    fn test_convert_null_tool_result_is_empty_not_the_text_null() {
+        // An explicit null content is "the tool produced no output", not the
+        // four-character string "null". Stringifying it fabricated a result
+        // the tool never produced, which the analyzers then scanned as real
+        // output.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t8\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t8\",\"content\":null}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0]
+            .observation
+            .as_ref()
+            .expect("the null result still attaches to its call");
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t8"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String(String::new())),
+            "a null tool result records no text"
+        );
     }
 }
