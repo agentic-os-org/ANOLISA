@@ -733,6 +733,55 @@ impl GenAIBuilder {
                     };
                 }
             }
+            Some(ParsedApiMessage::GeminiMessage { request, .. }) => {
+                if let Some(req) = request.as_ref() {
+                    let mut msgs = Vec::with_capacity(req.contents.len() + 1);
+                    // `systemInstruction` sits outside `contents`, but every
+                    // downstream consumer (SQLite `system_instructions`, SLS
+                    // `gen_ai.system_instructions`, classification) reads a
+                    // system-role message. Without the synthetic entry a
+                    // Gemini call's instructions vanished even when the request
+                    // was fully captured.
+                    if let Some(system) = req.system_instruction.as_ref() {
+                        let parts = Self::gemini_parts_to_message_parts(&system.parts);
+                        if !parts.is_empty() {
+                            msgs.push(InputMessage {
+                                role: "system".to_string(),
+                                parts,
+                                name: None,
+                            });
+                        }
+                    }
+                    msgs.extend(req.contents.iter().map(|content| {
+                        let role = match content.role.as_deref() {
+                            // Gemini names the assistant turns `model`.
+                            Some("model") => "assistant",
+                            Some(role) => role,
+                            None => "user",
+                        };
+                        InputMessage {
+                            role: role.to_string(),
+                            parts: Self::gemini_parts_to_message_parts(&content.parts),
+                            name: None,
+                        }
+                    }));
+                    let generation = req.generation_config.as_ref();
+                    return LLMRequest {
+                        messages: msgs,
+                        temperature: generation.and_then(|config| config.temperature),
+                        max_tokens: generation.and_then(|config| config.max_output_tokens),
+                        frequency_penalty: None,
+                        presence_penalty: None,
+                        top_p: generation.and_then(|config| config.top_p),
+                        top_k: generation.and_then(|config| config.top_k.map(f64::from)),
+                        seed: None,
+                        stop_sequences: generation.and_then(|config| config.stop_sequences.clone()),
+                        stream: req.stream,
+                        tools: None,
+                        raw_body: raw_body(),
+                    };
+                }
+            }
             _ => {}
         }
 
@@ -768,6 +817,52 @@ impl GenAIBuilder {
     // parse_request_body / extract_response_id / openai_msg_to_input /
     // openai_msg_to_output / parse_openai_tool_call_value / parse_sse_response_body /
     // extract_parts_from_sse_body live in `openai_parse.rs` (same impl block).
+
+    /// Convert Gemini content parts into the shared parts-based representation.
+    ///
+    /// Gemini marks part kinds with a key rather than a type tag: text,
+    /// `thought` text (reasoning), whole `functionCall` objects, and
+    /// `functionResponse` results. `inlineData`/`fileData` stay unmodelled
+    /// because [`MessagePart`] has no binary variant, matching the other
+    /// providers' opaque-media handling.
+    fn gemini_parts_to_message_parts(
+        parts: &[crate::analyzer::message::gemini::GeminiPart],
+    ) -> Vec<MessagePart> {
+        let mut converted = Vec::with_capacity(parts.len());
+        for part in parts {
+            if let Some(text) = part.text.as_deref().filter(|text| !text.is_empty()) {
+                if part.thought == Some(true) {
+                    converted.push(MessagePart::Reasoning {
+                        content: text.to_string(),
+                    });
+                } else {
+                    converted.push(MessagePart::Text {
+                        content: text.to_string(),
+                    });
+                }
+            }
+            if let Some(call) = part
+                .function_call
+                .as_ref()
+                .filter(|call| !call.name.is_empty())
+            {
+                converted.push(MessagePart::ToolCall {
+                    // Gemini identifies a call by name; the provider does not
+                    // assign an id on the wire.
+                    id: None,
+                    name: call.name.clone(),
+                    arguments: call.args.clone(),
+                });
+            }
+            if let Some(result) = part.function_response.as_ref() {
+                converted.push(MessagePart::ToolCallResponse {
+                    id: None,
+                    response: result.response.clone().unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+        converted
+    }
 
     fn anthropic_message_content_to_parts(
         content: &crate::analyzer::message::AnthropicMessageContent,
@@ -935,19 +1030,43 @@ impl GenAIBuilder {
                     })
                     .unwrap_or_else(|| (vec![], None))
             }
-            Some(ParsedApiMessage::GeminiMessage { response, .. }) => response
-                .as_ref()
-                .and_then(|resp| serde_json::to_string(resp).ok())
-                .and_then(|body| Self::parse_sse_response_body(&body, None))
-                .map(|messages| {
-                    let finish_reason = messages.first().and_then(|msg| msg.finish_reason.clone());
-                    (messages, finish_reason)
-                })
-                .unwrap_or_else(|| (vec![], None)),
+            Some(ParsedApiMessage::GeminiMessage { response, .. }) => {
+                response
+                    .as_ref()
+                    .map(|resp| {
+                        // One message per candidate, like the OpenAI arm's one
+                        // per choice. Gemini reports the stop reason per
+                        // candidate, and the pipeline treats the last one as
+                        // decisive.
+                        let msgs: Vec<OutputMessage> = resp
+                            .candidates
+                            .iter()
+                            .map(|candidate| {
+                                let parts = candidate
+                                    .content
+                                    .as_ref()
+                                    .map(|content| {
+                                        Self::gemini_parts_to_message_parts(&content.parts)
+                                    })
+                                    .unwrap_or_default();
+                                OutputMessage {
+                                    role: "assistant".to_string(),
+                                    parts,
+                                    name: None,
+                                    finish_reason: candidate
+                                        .finish_reason
+                                        .clone()
+                                        .filter(|reason| !reason.is_empty()),
+                                }
+                            })
+                            .collect();
+                        let finish = resp.finish_reason().map(str::to_string);
+                        (msgs, finish)
+                    })
+                    .unwrap_or_else(|| (vec![], None))
+            }
             _ => (vec![], None),
         };
-
-        // SysOM response handling
         let (messages, finish_reason) = if messages.is_empty() {
             match message {
                 Some(ParsedApiMessage::SysomMessage { response, .. }) => response
@@ -1673,6 +1792,102 @@ mod tests {
             call.response.messages[0].finish_reason.as_deref(),
             Some("STOP")
         );
+    }
+
+    /// The compact delivery path hands the builder a parsed `GeminiMessage`
+    /// and an HTTP record whose raw bodies were not retained. Neither builder
+    /// had a Gemini arm, so both sides fell back to the (absent) raw bodies and
+    /// the call became semantically empty — dropped before storage even though
+    /// the analyzer had parsed the whole exchange.
+    #[test]
+    fn compact_gemini_call_keeps_request_and_answer() {
+        use crate::analyzer::message::gemini::{
+            GeminiCandidate, GeminiContent, GeminiFunctionCall, GeminiGenerationConfig, GeminiPart,
+            GeminiRequest, GeminiResponse,
+        };
+
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(path, None, None);
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(GeminiRequest {
+                model: "gemini-2.5-flash".to_string(),
+                contents: vec![GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![GeminiPart {
+                        text: Some("What is 2+2?".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                system_instruction: Some(GeminiContent {
+                    role: None,
+                    parts: vec![GeminiPart {
+                        text: Some("Be brief.".to_string()),
+                        ..Default::default()
+                    }],
+                }),
+                generation_config: Some(GeminiGenerationConfig {
+                    temperature: Some(0.2),
+                    max_output_tokens: Some(64),
+                    ..Default::default()
+                }),
+                stream: false,
+            }),
+            response: Some(GeminiResponse {
+                candidates: vec![GeminiCandidate {
+                    content: Some(GeminiContent {
+                        role: Some("model".to_string()),
+                        parts: vec![
+                            GeminiPart {
+                                text: Some("4".to_string()),
+                                ..Default::default()
+                            },
+                            GeminiPart {
+                                thought: Some(true),
+                                text: Some("two plus two".to_string()),
+                                ..Default::default()
+                            },
+                            GeminiPart {
+                                function_call: Some(GeminiFunctionCall {
+                                    name: "lookup".to_string(),
+                                    args: Some(serde_json::json!({"value": 4})),
+                                }),
+                                ..Default::default()
+                            },
+                        ],
+                    }),
+                    finish_reason: Some("STOP".to_string()),
+                    index: Some(0),
+                }],
+                ..Default::default()
+            }),
+        };
+        let parsed = Some(&message);
+
+        let request = builder.build_request(&parsed, &http, false);
+        let response = builder.build_response(&parsed, &http, &None, true, false);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, "system");
+        assert_eq!(request.messages[1].role, "user");
+        assert_eq!(request.temperature, Some(0.2));
+        assert_eq!(request.max_tokens, Some(64));
+
+        assert_eq!(response.messages.len(), 1);
+        let parts = &response.messages[0].parts;
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "4"),
+            "answer text must survive, got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::Reasoning { content } if content == "two plus two"),
+            "thought parts must be reasoning, got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[2], MessagePart::ToolCall { name, .. } if name == "lookup"),
+            "functionCall parts must be tool calls, got {parts:?}"
+        );
+        assert_eq!(response.messages[0].finish_reason.as_deref(), Some("STOP"));
     }
 
     #[test]
