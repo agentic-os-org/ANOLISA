@@ -399,11 +399,72 @@ done
 run_postinstall dangling-launchers
 assert_eq "postinstall repairs dangling launchers" "$STATUS" "0"
 for b in tokenless rtk; do
-  assert_eq "the $b launcher targets the installed platform package" \
-    "$(readlink "$PKG/bin/$b")" "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
+  assert_eq "the $b launcher resolves to the installed platform package" \
+    "$("$NODE_BIN" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PKG/bin/$b")" \
+    "$("$NODE_BIN" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PKG/node_modules/$PLATFORM_PKG/bin/$b")"
   assert_eq "the repaired $b launcher executes" "$("$PKG/bin/$b")" "$b"
 done
 run_postinstall dangling-launchers
 assert_eq "rebuilding repaired launchers is idempotent" "$STATUS" "0"
+
+# =============================================================================
+# 10. Missing platform payloads fail without replacing their existing launcher
+# =============================================================================
+PLATFORM_DIR="$PKG/node_modules/$PLATFORM_PKG"
+TOKENLESS_LINK_BEFORE="$(readlink "$PKG/bin/tokenless")"
+mv "$PLATFORM_DIR" "$TEST_DIR/held-platform"
+run_postinstall missing-package
+assert_eq "a missing platform package fails postinstall" "$STATUS" "1"
+assert_eq "a missing package preserves the launcher entry" \
+  "$(readlink "$PKG/bin/tokenless")" "$TOKENLESS_LINK_BEFORE"
+mv "$TEST_DIR/held-platform" "$PLATFORM_DIR"
+for b in tokenless rtk; do
+  LINK_BEFORE="$(readlink "$PKG/bin/$b")"
+  mv "$PLATFORM_DIR/bin/$b" "$TEST_DIR/held-$b"
+  run_postinstall "missing-$b"
+  assert_eq "a missing $b payload fails postinstall" "$STATUS" "1"
+  assert_eq "a missing $b payload preserves its launcher entry" \
+    "$(readlink "$PKG/bin/$b")" "$LINK_BEFORE"
+  mv "$TEST_DIR/held-$b" "$PLATFORM_DIR/bin/$b"
+done
+run_postinstall restored-payloads
+assert_eq "restored payloads allow postinstall again" "$STATUS" "0"
+
+# =============================================================================
+# 11. Move the complete installation, including native dependencies, not one pkg
+# =============================================================================
+ORIGINAL_PKG="$PKG"
+for layout in nested hoisted; do
+  PREFIX="$TEST_DIR/$layout/initial prefix"
+  RELOCATED="$TEST_DIR/$layout/relocated prefix"
+  PKG="$PREFIX/lib/node_modules/anolisa-tokenless"
+  mkdir -p "$(dirname "$PKG")" "$PREFIX/bin"
+  cp -R "$ORIGINAL_PKG" "$PKG"
+  if [ "$layout" = "hoisted" ]; then
+    mkdir -p "$PREFIX/lib/node_modules/@anolisa"
+    mv "$PKG/node_modules/$PLATFORM_PKG" "$PREFIX/lib/node_modules/$PLATFORM_PKG"
+    rm -rf "$PKG/node_modules"
+  fi
+  run_postinstall "relocate-$layout"
+  assert_eq "$layout postinstall succeeds" "$STATUS" "0"
+  for b in tokenless rtk; do
+    ln -s "../lib/node_modules/anolisa-tokenless/bin/$b" "$PREFIX/bin/$b"
+    assert_eq "$layout $b executes before relocation" "$("$PREFIX/bin/$b")" "$b"
+  done
+  mv "$PREFIX" "$RELOCATED"
+  assert_no_file "$layout old prefix is gone" "$PREFIX"
+  for b in tokenless rtk; do
+    if [ "$layout" = "nested" ]; then
+      NATIVE="$RELOCATED/lib/node_modules/anolisa-tokenless/node_modules/$PLATFORM_PKG/bin/$b"
+    else
+      NATIVE="$RELOCATED/lib/node_modules/$PLATFORM_PKG/bin/$b"
+    fi
+    assert_file "$layout $b native payload moved with the prefix" "$NATIVE"
+    OUTPUT="$("$RELOCATED/bin/$b" 2>&1)" && EXEC_STATUS=0 || EXEC_STATUS=$?
+    assert_eq "$layout $b still executes after relocation" "$EXEC_STATUS" "0"
+    assert_eq "$layout $b still reaches its native payload" "$OUTPUT" "$b"
+  done
+done
+PKG="$ORIGINAL_PKG"
 
 echo "npm-postinstall test passed"

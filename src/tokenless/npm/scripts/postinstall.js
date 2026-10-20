@@ -26,17 +26,9 @@
  * are already rejected by the root package's os/cpu constraints.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  symlinkSync,
-  unlinkSync,
-  chmodSync,
-  cpSync,
-  rmSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, unlinkSync, chmodSync, cpSync, rmSync } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch, homedir } from 'node:os';
@@ -134,7 +126,10 @@ function readOwnerMarker(dest) {
 
 function writeOwnerMarker(dest, pkgVersion) {
   try {
-    writeFileSync(join(dest, OWNER_MARKER_FILE), `${NPM_OWNER_PREFIX}anolisa-tokenless@${pkgVersion}\n`);
+    writeFileSync(
+      join(dest, OWNER_MARKER_FILE),
+      `${NPM_OWNER_PREFIX}anolisa-tokenless@${pkgVersion}\n`,
+    );
   } catch {
     // The tree is usable without the marker; the next run then treats it as
     // unowned rather than failing the install over a bookkeeping file.
@@ -170,10 +165,10 @@ function main() {
   const pkgName = PLATFORM_MAP[key];
 
   if (!pkgName) {
+    console.warn(`anolisa-tokenless: No prebuilt binary available for ${platform()}-${arch()}.`);
     console.warn(
-      `anolisa-tokenless: No prebuilt binary available for ${platform()}-${arch()}.`,
+      'You can build from source: https://github.com/alibaba/anolisa/tree/main/src/tokenless',
     );
-    console.warn('You can build from source: https://github.com/alibaba/anolisa/tree/main/src/tokenless');
     process.exit(0);
   }
 
@@ -190,15 +185,9 @@ function main() {
   const pkgDir = resolvePackageDir(pkgName);
 
   if (!pkgDir || !existsSync(pkgDir)) {
-    console.error(
-      `anolisa-tokenless: Platform package ${pkgName} not found.`,
-    );
-    console.error(
-      'This usually means optionalDependencies were skipped during install.',
-    );
-    console.error(
-      'Try: npm install --include=optional  or  check npm install logs for details.',
-    );
+    console.error(`anolisa-tokenless: Platform package ${pkgName} not found.`);
+    console.error('This usually means optionalDependencies were skipped during install.');
+    console.error('Try: npm install --include=optional  or  check npm install logs for details.');
     console.error(
       'You can also build from source: https://github.com/alibaba/anolisa/tree/main/src/tokenless',
     );
@@ -230,7 +219,8 @@ function main() {
       if (err.code !== 'ENOENT') throw err;
     }
 
-    symlinkSync(nativeBinary, linkPath);
+    // Preserve the launcher when its package and native dependency move together.
+    symlinkSync(relative(binDir, nativeBinary), linkPath);
     chmodSync(linkPath, 0o755);
   }
 
@@ -269,22 +259,16 @@ function enableClaudeAdapter(adapterDir) {
     }).toString();
     // install.sh exits 0 but prints a "skipping" line when claude CLI is absent.
     if (out.includes('skipping plugin installation')) {
-      console.log(
-        `anolisa-tokenless: claude-code adapter skipped (${claudeBin} not found)`,
-      );
-      console.log(
-        `anolisa-tokenless: Install Claude Code, then run: bash ${installScript}`,
-      );
+      console.log(`anolisa-tokenless: claude-code adapter skipped (${claudeBin} not found)`);
+      console.log(`anolisa-tokenless: Install Claude Code, then run: bash ${installScript}`);
     } else {
       console.log(`anolisa-tokenless: Enabled claude-code adapter (CLAUDE_BIN=${claudeBin})`);
     }
   } catch (err) {
-    console.warn(
-      `anolisa-tokenless: Could not enable claude-code adapter: ${err.message}`,
-    );
+    console.warn(`anolisa-tokenless: Could not enable claude-code adapter: ${err.message}`);
     console.warn(
       `anolisa-tokenless: Prerequisite: the claude CLI must be installed and reachable` +
-      ` (CLAUDE_BIN=${claudeBin}).`,
+        ` (CLAUDE_BIN=${claudeBin}).`,
     );
     console.warn('anolisa-tokenless: Once the prerequisite is met, re-enable with:');
     console.warn(`  bash ${installScript}`);
@@ -320,7 +304,9 @@ function installAdapters() {
     console.warn('anolisa-tokenless: Keeping it unchanged. Replacing it would leave that');
     console.warn("anolisa-tokenless: installation's component record and its framework");
     console.warn('anolisa-tokenless: registrations pointing at resources it no longer has.');
-    console.log(`anolisa-tokenless: The adapter resources this package ships are at ${adaptersSrc}`);
+    console.log(
+      `anolisa-tokenless: The adapter resources this package ships are at ${adaptersSrc}`,
+    );
     console.log(`anolisa-tokenless: Set ${FORCE_ADAPTERS_ENV}=1 to replace them anyway.`);
     return;
   }
@@ -370,7 +356,9 @@ function installAdapters() {
     rmSync(staged, { recursive: true, force: true });
     console.warn(`anolisa-tokenless: Could not install adapters to ${dest}: ${err.message}`);
     if (existsSync(dest)) {
-      console.warn(`anolisa-tokenless: The adapter resources already in ${dest} were left in place.`);
+      console.warn(
+        `anolisa-tokenless: The adapter resources already in ${dest} were left in place.`,
+      );
     } else if (existsSync(previous)) {
       console.warn(`anolisa-tokenless: The previous adapter resources are kept at ${previous};`);
       console.warn(`anolisa-tokenless: move them back with: mv ${previous} ${dest}`);
