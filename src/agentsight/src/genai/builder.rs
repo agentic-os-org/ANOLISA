@@ -429,9 +429,22 @@ impl GenAIBuilder {
             match_body.as_deref(),
         );
 
-        // Determine if streaming
-        let is_sse = body
+        // A SysOM POP request wraps the LLM parameters in a JSON string
+        // (`llmParamString`). The match key above deliberately keeps the raw
+        // outer body (the completing call builds the same key from it), but
+        // every field below is an LLM parameter and has to come from the
+        // decoded object: reading the wrapper left `stream`, `model`, the
+        // messages and the conversation keys empty on every drained SysOM
+        // call.
+        let decoded_llm_body = body
             .as_ref()
+            .and_then(|value| value.get("llmParamString"))
+            .and_then(|value| value.as_str())
+            .and_then(|params| serde_json::from_str::<serde_json::Value>(params).ok());
+        let llm_body = decoded_llm_body.as_ref().or(body.as_ref());
+
+        // Determine if streaming
+        let is_sse = llm_body
             .and_then(|v| v.get("stream"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -455,10 +468,7 @@ impl GenAIBuilder {
             first_user_text,
             last_user_text,
             user_message_count,
-        ) = if let Some(view) = body
-            .as_ref()
-            .and_then(crate::parser::llm::extract_messages_view)
-        {
+        ) = if let Some(view) = llm_body.and_then(crate::parser::llm::extract_messages_view) {
             let (messages, instructions_text) = view;
 
             // First user message raw text — used as `session_key` material
@@ -524,8 +534,7 @@ impl GenAIBuilder {
             super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
 
         // Extract model from request body JSON "model" field
-        let model = body
-            .as_ref()
+        let model = llm_body
             .and_then(|v| v.get("model"))
             .and_then(|m| m.as_str())
             .filter(|s| !s.is_empty())
@@ -547,8 +556,7 @@ impl GenAIBuilder {
         .or_else(|| Some(request.source_event.comm_str()));
 
         // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
-        let metadata_session: Option<String> = body
-            .as_ref()
+        let metadata_session: Option<String> = llm_body
             .and_then(|b| b.get("metadata"))
             .and_then(crate::analyzer::message::types::session_id_from_metadata);
 
@@ -1573,6 +1581,30 @@ mod tests {
         assert_eq!(pending.provider.as_deref(), Some("openai"));
         assert!(pending.system_instructions.is_some());
         assert!(pending.user_query.as_deref() == Some("hello"));
+    }
+
+    /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
+    /// The pending builder read the wrapper only, so a drained SysOM call
+    /// lost its model, streaming flag, messages and user query — every
+    /// conversation from one process then collapsed into the same crash
+    /// fallback bucket.
+    #[test]
+    fn test_build_pending_from_request_sysom_decodes_llm_params() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"{\"model\":\"qwen3-coder-plus\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"hello\"}]}"}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a SysOM POP request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("qwen3-coder-plus"));
+        assert!(pending.is_sse, "stream:true lives inside llmParamString");
+        assert!(pending.system_instructions.is_some());
+        assert_eq!(pending.user_query.as_deref(), Some("hello"));
+        assert!(pending.input_messages.is_some());
     }
 
     #[test]
