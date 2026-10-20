@@ -14,6 +14,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -79,14 +80,27 @@ pub(crate) fn validate_snapshot_id(id: &str) -> Result<()> {
 pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<SnapshotInfo> {
     validate_snapshot_id(id)?;
     let dir = snapshots_dir(mount);
-    std::fs::create_dir_all(&dir)?;
+    crate::mount::ensure_owner_only_dir(&dir)?;
 
     let archive_path = dir.join(format!("{id}.tar.gz"));
     let tmp_path = dir.join(format!("{id}.tar.gz.partial"));
 
     // 1. Stream mount tree → tmp tarball, skipping .anolisa/.
     {
-        let f = File::create(&tmp_path)?;
+        // 0600 + O_NOFOLLOW: the archive packs the entire memory tree, and
+        // a `.partial` left by a crashed run (or an archive replaced by a
+        // re-snapshot of the same id) must not end up group/other-readable.
+        // The atomic rename below carries this inode's mode to the final
+        // archive path, which also repairs a stale 0644 archive in place.
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&tmp_path)
+            .map_err(|e| MemoryError::Other(format!("cannot open {}: {e}", tmp_path.display())))?;
+        crate::mount::tighten_owner_only(&f, &tmp_path, 0o600)?;
         let gz = GzEncoder::new(f, Compression::default());
         let mut tar = ::tar::Builder::new(gz);
         // SECURITY: tar::Builder::follow_symlinks defaults to true, which

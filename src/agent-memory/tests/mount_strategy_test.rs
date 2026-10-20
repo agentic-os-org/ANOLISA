@@ -1,5 +1,7 @@
 //! Phase 2: unit tests for the mount strategy layer.
 
+use std::os::unix::fs::PermissionsExt;
+
 use tempfile::tempdir;
 
 use agent_memory::config::AppConfig;
@@ -47,4 +49,68 @@ fn userland_strategy_resolves_under_base_dir() {
     assert!(root.exists());
     assert!(root.join("README.md").exists());
     assert!(root.join(".anolisa").join("manifest.toml").exists());
+}
+
+#[test]
+fn anolisa_metadata_dir_is_owner_only() {
+    let tmp = tempdir().unwrap();
+    let picked = pick_strategy(MountStrategyKind::Userland).unwrap();
+    let ns = Namespace::user("alice").unwrap();
+    let root = picked.strategy.ensure(&ns, tmp.path()).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(root.join(".anolisa"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the .anolisa metadata tree must not be reachable by group/other"
+    );
+}
+
+#[test]
+fn anolisa_metadata_dir_tightens_a_pre_existing_0755_layout() {
+    // A mount created by an older build keeps whatever the umask gave
+    // the metadata dir (0755); re-ensuring must repair it.
+    let tmp = tempdir().unwrap();
+    let ns = Namespace::user("alice").unwrap();
+    let root = tmp.path().join("user-alice");
+    std::fs::create_dir_all(root.join(".anolisa")).unwrap();
+    std::fs::set_permissions(
+        root.join(".anolisa"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let picked = pick_strategy(MountStrategyKind::Userland).unwrap();
+    picked.strategy.ensure(&ns, tmp.path()).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(root.join(".anolisa"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "a mount from an older build must be re-tightened on start"
+    );
+}
+
+#[test]
+fn manifest_is_created_owner_only() {
+    let tmp = tempdir().unwrap();
+    let picked = pick_strategy(MountStrategyKind::Userland).unwrap();
+    let ns = Namespace::user("alice").unwrap();
+    let root = picked.strategy.ensure(&ns, tmp.path()).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(root.join(".anolisa").join("manifest.toml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "manifest.toml carries namespace metadata and must be owner-only"
+    );
 }

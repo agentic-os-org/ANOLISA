@@ -65,8 +65,12 @@ impl IndexHandle {
     ) -> Result<Self> {
         let db_path = mount.meta_dir.join("index").join("bm25.db");
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::mount::ensure_owner_only_dir(parent)?;
         }
+        // Pre-create / repair the database at 0600 before sqlite adopts
+        // it (sqlite opens at its own default 0644 and the -wal/-shm
+        // siblings it creates later are fenced off by the 0700 dir).
+        crate::mount::ensure_owner_only_file(&db_path)?;
         let store = BM25Store::open(&db_path, time_decay_lambda, time_decay_alpha, exclude_cold)?;
         let store = Arc::new(Mutex::new(store));
 
