@@ -71,9 +71,12 @@ python3 tests/release_regression/run.py \
 - 原有 L1 Records Fixture 验证完整 TOON。派生 Fixture 将 Message 重复一次，使 TOON
   独自节省低于无损候选选择门槛。这个 Fixture 只验证恢复契约，其节省不代表真实工作负载
   表现。先从 Core 确实遗漏的记录中选择目标，再要求模型恢复。
-- 每个真实 Shell 任务必须观察到一次生效压缩、一个发出的 Stash Entry、一次模型主动执行的
-  独立 Retrieve 命令，以及一次 CLI Retrieve Hit。恢复输出必须旁路压缩。最终回答需要
-  引用遗漏的测试或目标记录。
+- CSV/TSV 检查保留全部 100 行及每个单元格，报告无损压紧，不产生 Stash Entry 或恢复提示。
+  对应真实 Shell 任务直接从完整输出回答，不调用 Retrieve。报告中的取回 Token 数为零，
+  仅适用于恢复的字节一致性检查为 `null`；`saved_minus_retrieved_tokens` 等于总节省。
+- BuildLog 或记录缩减的真实 Shell 任务必须观察到一次生效压缩、一个发出的 Stash Entry、
+  一次模型主动执行的独立 Retrieve 命令，以及一次 CLI Retrieve Hit。恢复输出必须旁路压缩。
+  最终回答需要引用遗漏的测试或目标记录。
 - AgentScope 使用自定义静态 Retrieve Tool 执行合成记录任务，不提供 Shell Tool。记录实际
   模型输入输出，验证工具列表不变、BeforeModel 可见性授权、字节一致恢复、一次 `embedded`
   Retrieve Hit 和不二次压缩。`embedded` 与 CLI 事件分开统计。记录器失败属于测试脚本问题，

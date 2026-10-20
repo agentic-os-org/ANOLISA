@@ -302,11 +302,7 @@ impl PostToolPipeline {
                 unrecoverable_truncations: None,
             }
         } else {
-            let outcome = TabularCompressor.compress_with_recovery(
-                &request.content,
-                attached_store,
-                &request.capabilities.recovery,
-            );
+            let outcome = TabularCompressor.compress(&request.content);
             DomainCandidate {
                 output: outcome.output,
                 operations: outcome

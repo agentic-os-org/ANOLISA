@@ -45,7 +45,7 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 | JSON | 无损结构清理；文本替换槽还会考虑 TOON |
 | 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
 | 来自命令输出的构建/测试/包管理日志 | 终端输出清理与常规进度缩减；每段省略都带有就地取回标记 |
-| 宿主支持文本替换时的 CSV/TSV 表格 | 整表压紧；数据行超过 32 行的表格在 Stash 支持的恢复可用时可做行缩减 |
+| 宿主支持文本替换时的 CSV/TSV 表格 | 仅在字符数和估算 Token 数同时减少时做保留全部单元格的整表压紧，否则透传；不写 Stash，无需恢复能力 |
 | 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
 | 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |

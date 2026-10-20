@@ -151,7 +151,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 |------|------|------|------|
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
-| `tabular` | 宿主支持文本替换 | `TabularCompressor`：CSV/TSV 视图，保留单元格或可恢复选取整行 | 启用 |
+| `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
 | `search_results` | 宿主支持文本替换；带行号记录要求 `api_response`，纯路径列表允许 `api_response` 或 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |

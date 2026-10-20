@@ -1,26 +1,18 @@
-//! CSV/TSV model views that preserve cells or recoverably select complete rows.
-//! Original text, including quoting and line endings, backs every row omission.
-
-use std::collections::BTreeSet;
+//! Cell-preserving format compaction for complete CSV/TSV tables.
 
 use csv::StringRecord;
-use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, compute_key, recovery_instruction};
+use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite};
 use tokenless_protocol::estimate_tokens;
 
 const DETECTION_BYTES: usize = 64 * 1024;
 const DETECTION_RECORDS: usize = 10;
-const FULL_SAVINGS_PERCENT: usize = 15;
-const TARGET_ROWS: usize = 32;
-const EDGE_ROWS: usize = 4;
-const MAX_ROW_RANGES_BYTES: usize = 1024;
 
-/// Transformations that can reach the model through the tabular domain.
+/// Current and historical transformations of CSV/TSV text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabularOperation {
     /// Quoting and record terminators changed without changing any cells.
     Compaction,
-    /// Complete rows were omitted behind a reference to the original text.
-    /// Includes the same cell-preserving normalization as compaction.
+    /// Legacy row-selection operation; retained for compatibility and never emitted.
     RowReduction,
 }
 
@@ -31,20 +23,20 @@ pub struct TabularMetrics {
     pub original_rows: usize,
     /// Data rows in the selected view.
     pub retained_rows: usize,
-    /// Failed original-text writes: zero or one per compression attempt.
+    /// Legacy storage error count; always zero because compaction needs no storage.
     pub stash_errors: usize,
 }
 
-/// Candidate and tentative storage writes for Runtime arbitration.
+/// Complete-table candidate for Runtime arbitration.
 #[derive(Debug)]
 pub struct TabularOutcome {
-    /// CSV/TSV text, with an external recovery note when rows were omitted.
+    /// Complete CSV/TSV text with every original cell in source order.
     pub output: String,
     /// Operations in the selected candidate.
     pub operations: Vec<TabularOperation>,
-    /// Full views preserve cells, while reduced views require retrieval.
+    /// Always lossless at the cell level; source formatting may change.
     pub recoverability: crate::Recoverability,
-    /// Runtime commits or rolls back these writes after final arbitration.
+    /// Legacy storage writes; always empty for cell-preserving compaction.
     pub stash_writes: Vec<StashWrite>,
     /// Table and storage measurements.
     pub metrics: TabularMetrics,
@@ -62,16 +54,11 @@ impl TabularCompressor {
         detect_delimiter(input).is_some()
     }
 
-    /// Builds a full cell-equivalent view or a recoverable row selection.
-    /// Malformed, ambiguous and unsupported tables stay unchanged. Row selection
-    /// requires a reachable recovery method and a successful Stash write.
+    /// Compacts formatting only when characters and estimated tokens both decrease.
+    /// Preserves all cells and their order. Malformed, ambiguous and unsupported
+    /// tables stay unchanged; no external storage or retrieval is required.
     #[must_use]
-    pub fn compress_with_recovery(
-        &self,
-        input: &str,
-        stash: Option<&dyn StashStore>,
-        recovery: &RecoveryMethod,
-    ) -> TabularOutcome {
+    pub fn compress(&self, input: &str) -> TabularOutcome {
         let mut outcome = TabularOutcome {
             output: input.to_owned(),
             operations: Vec::new(),
@@ -85,67 +72,24 @@ impl TabularCompressor {
         let count = table.records.len() - 1;
         outcome.metrics.original_rows = count;
         outcome.metrics.retained_rows = count;
-        let full = table.render(0..count);
+        let full = table.render();
         if saves_both(&full, input) {
             outcome.output = full;
             outcome.operations.push(TabularOperation::Compaction);
         }
-        let before = estimate_tokens(input);
-        let after = estimate_tokens(&outcome.output);
-        if (saves_both(&outcome.output, input)
-            && (before - after) * 100 >= before * FULL_SAVINGS_PERCENT)
-            || count <= TARGET_ROWS
-        {
-            return outcome;
-        }
-        // Rectangular text alone is not evidence of a header. Restrict omissions
-        // to column labels; source calls and comma-separated prose keep all rows.
-        let header = &table.records[0];
-        if !header.iter().any(|cell| !cell.is_empty())
-            || !header.iter().all(|cell| {
-                cell.char_indices().all(|(index, c)| {
-                    c.is_alphabetic()
-                        || c == '_'
-                        || (index > 0 && (c.is_numeric() || matches!(c, '-' | '.')))
-                })
-            })
-        {
-            return outcome;
-        }
-        let Some(store) = stash.filter(|_| recovery.is_available()) else {
-            return outcome;
-        };
-        let selected = select_rows(&table.records[1..]);
-        if selected.len() == count {
-            return outcome;
-        }
-        let Some(ranges) = row_ranges(&selected) else {
-            return outcome;
-        };
-        let mut reduced = table.render(selected.iter().copied());
-        let hash = compute_key(input.as_bytes());
-        let instruction = recovery_instruction(&hash, recovery);
-        reduced.push_str(&format!(
-            "\n\n[Table: kept {} of {count} data rows; selected data rows \
-             (1-based, excluding header): {ranges}. Incomplete table; retrieve original \
-             for complete enumeration or calculations. {instruction}]",
-            selected.len()
-        ));
-        if !saves_both(&reduced, &outcome.output) || !saves_both(&reduced, input) {
-            return outcome;
-        }
-        match store.stash(input) {
-            Ok(write) => outcome.stash_writes.push(write),
-            Err(_) => {
-                outcome.metrics.stash_errors = 1;
-                return outcome;
-            }
-        }
-        outcome.output = reduced;
-        outcome.operations = vec![TabularOperation::RowReduction];
-        outcome.recoverability = crate::Recoverability::Retrievable;
-        outcome.metrics.retained_rows = selected.len();
         outcome
+    }
+
+    /// Compatibility entry point for callers that supplied recovery capabilities.
+    /// Storage and recovery arguments are ignored; delegates to full-table compaction.
+    #[must_use]
+    pub fn compress_with_recovery(
+        &self,
+        input: &str,
+        _stash: Option<&dyn StashStore>,
+        _recovery: &RecoveryMethod,
+    ) -> TabularOutcome {
+        self.compress(input)
     }
 }
 
@@ -168,12 +112,13 @@ impl Table {
         Some(Self { delimiter, records })
     }
 
-    fn render(&self, indices: impl IntoIterator<Item = usize>) -> String {
+    fn render(&self) -> String {
         let mut output = String::new();
-        write_record(&mut output, &self.records[0], self.delimiter);
-        for index in indices {
-            output.push('\n');
-            write_record(&mut output, &self.records[index + 1], self.delimiter);
+        for (index, record) in self.records.iter().enumerate() {
+            if index > 0 {
+                output.push('\n');
+            }
+            write_record(&mut output, record, self.delimiter);
         }
         output
     }
@@ -280,73 +225,6 @@ fn write_record(output: &mut String, record: &StringRecord, delimiter: u8) {
 fn saves_both(candidate: &str, original: &str) -> bool {
     candidate.chars().count() < original.chars().count()
         && estimate_tokens(candidate) < estimate_tokens(original)
-}
-
-fn select_rows(rows: &[StringRecord]) -> BTreeSet<usize> {
-    let mut selected = BTreeSet::new();
-    selected.extend(0..EDGE_ROWS);
-    selected.extend(rows.len() - EDGE_ROWS..rows.len());
-    for (index, row) in rows.iter().enumerate() {
-        if row.iter().any(has_diagnostic) {
-            selected.insert(index);
-        }
-    }
-    let ordinary: Vec<_> = (0..rows.len()).filter(|i| !selected.contains(i)).collect();
-    let slots = TARGET_ROWS
-        .saturating_sub(selected.len())
-        .min(ordinary.len());
-    for slot in 0..slots {
-        selected.insert(ordinary[(2 * slot + 1) * ordinary.len() / (2 * slots)]);
-    }
-    selected
-}
-
-fn has_diagnostic(cell: &str) -> bool {
-    const ENGLISH: &[&str] = &[
-        "error",
-        "failed",
-        "failure",
-        "fatal",
-        "panic",
-        "exception",
-        "warn",
-        "warning",
-    ];
-    ["错误", "失败", "警告"]
-        .iter()
-        .any(|signal| cell.contains(signal))
-        || cell
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| {
-                ENGLISH
-                    .iter()
-                    .any(|signal| word.eq_ignore_ascii_case(signal))
-            })
-}
-
-fn row_ranges(indices: &BTreeSet<usize>) -> Option<String> {
-    let mut ranges = String::new();
-    let mut iter = indices.iter().copied().peekable();
-    while let Some(start) = iter.next() {
-        let mut end = start;
-        while iter.peek() == Some(&(end + 1)) {
-            end += 1;
-            iter.next();
-        }
-        let range = if start == end {
-            (start + 1).to_string()
-        } else {
-            format!("{}-{}", start + 1, end + 1)
-        };
-        if ranges.len() + usize::from(!ranges.is_empty()) + range.len() > MAX_ROW_RANGES_BYTES {
-            return None;
-        }
-        if !ranges.is_empty() {
-            ranges.push(',');
-        }
-        ranges.push_str(&range);
-    }
-    Some(ranges)
 }
 
 #[cfg(test)]

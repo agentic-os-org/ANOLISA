@@ -8,29 +8,25 @@ fn tabular_input(delimiter: char) -> String {
 }
 
 #[test]
-fn tabular_pipeline_commits_original_text_once() {
+fn tabular_pipeline_preserves_all_rows_without_storing_originals() {
     for delimiter in [',', '\t'] {
         let input = tabular_input(delimiter);
         let concrete = Arc::new(CountingStore::default());
         let store: Arc<dyn StashStore> = concrete.clone();
-        let run =
-            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
+        let run = PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
         assert_eq!(run.response.disposition, Disposition::Applied);
         assert_eq!(run.response.content_type, Some(ContentType::Tabular));
         assert_eq!(
             run.response.applied_operations,
-            [AppliedOperation::TabularRowReduction]
+            [AppliedOperation::TabularCompaction]
         );
-        assert_eq!(run.response.recoverability, Recoverability::Retrievable);
-        assert_eq!(run.response.stash_keys.len(), 1);
+        assert_eq!(run.response.recoverability, Recoverability::Lossless);
         assert_eq!(
-            store
-                .retrieve(&run.response.stash_keys[0])
-                .unwrap()
-                .as_deref(),
-            Some(input.as_str())
+            run.response.output,
+            input.replace("\r\n", "\n").trim_end_matches('\n')
         );
-        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
         assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
     }
 }
@@ -85,16 +81,10 @@ fn tabular_dry_run_and_timeout_do_not_leave_originals() {
         assert!(run.response.applied_operations.is_empty());
         assert!(run.response.stash_keys.is_empty());
         assert!(concrete.is_empty());
-        assert_eq!(
-            concrete.stash_calls.load(Ordering::Relaxed),
-            usize::from(!dry_run)
-        );
-        assert_eq!(
-            concrete.delete_calls.load(Ordering::Relaxed),
-            usize::from(!dry_run)
-        );
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
         if dry_run {
-            assert_eq!(run.operations, [AppliedOperation::TabularRowReduction]);
+            assert_eq!(run.operations, [AppliedOperation::TabularCompaction]);
             assert!(run.response.after_tokens < run.response.before_tokens);
         }
     }

@@ -54,7 +54,7 @@ fn full_compaction_preserves_cells_headers_and_order() {
             writer.write_record(row).unwrap();
         }
         let input = String::from_utf8(writer.into_inner().unwrap()).unwrap();
-        let outcome = TabularCompressor.compress_with_recovery(&input, None, &RecoveryMethod::None);
+        let outcome = TabularCompressor.compress(&input);
         assert_eq!(outcome.operations, [TabularOperation::Compaction]);
         assert_eq!(cells(&input, delimiter), cells(&outcome.output, delimiter));
         assert_eq!(outcome.metrics.retained_rows, 4);
@@ -72,8 +72,7 @@ fn full_compaction_keeps_a_leading_bom_inside_the_first_cell() {
                 "{prefix}\"\u{feff}id\"{separator}\"name\"\r\n{}",
                 format!("\"001\"{separator}\"alpha\"\r\n").repeat(50)
             );
-            let outcome =
-                TabularCompressor.compress_with_recovery(&input, None, &RecoveryMethod::None);
+            let outcome = TabularCompressor.compress(&input);
             assert_eq!(outcome.operations, [TabularOperation::Compaction]);
             assert_eq!(&cells(&input, delimiter)[0][0], "\u{feff}id");
             assert_eq!(cells(&input, delimiter), cells(&outcome.output, delimiter));
@@ -81,179 +80,6 @@ fn full_compaction_keeps_a_leading_bom_inside_the_first_cell() {
             assert!(outcome.stash_writes.is_empty());
         }
     }
-}
-
-#[test]
-fn row_reduction_requires_column_labels() {
-    for input in [
-        (0..100)
-            .map(|i| format!("def function_{i:03}(a, b): return a + b\n"))
-            .collect::<String>(),
-        (0..60)
-            .map(|i| format!("assert_equal(expected_value_number_{i}, actual_value_number_{i})\n"))
-            .collect(),
-        (0..60)
-            .map(|i| format!("- Note {i}, the parser rejected the header row while processing request {i} in the ingestion pipeline\n"))
-            .collect(),
-    ] {
-        let store = InMemoryStore::new();
-        let outcome =
-            TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-        assert!(!outcome.operations.contains(&TabularOperation::RowReduction));
-        assert_eq!(cells(&input, b','), cells(&outcome.output, b','));
-        assert!(store.is_empty());
-    }
-    // All-string data, two columns and non-ASCII labels still support reduction.
-    for header in ["id,message", "编号,内容", "id,", "id,id"] {
-        let input = format!(
-            "{header}\n{}",
-            "record,ordinary payload that is long enough to benefit from selection\n".repeat(100)
-        );
-        let store = InMemoryStore::new();
-        let outcome =
-            TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-        assert_eq!(outcome.operations, [TabularOperation::RowReduction]);
-    }
-}
-
-#[test]
-fn fragmented_diagnostics_keep_all_rows_without_a_large_range_notice() {
-    let input = format!(
-        "id,status,message\n{}",
-        (0..2000)
-            .map(|i| format!(
-                "{i},{},{}\n",
-                if i % 2 == 0 { "ERROR" } else { "ok" },
-                "payload ".repeat(10)
-            ))
-            .collect::<String>()
-    );
-    let store = InMemoryStore::new();
-    let outcome =
-        TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-    assert!(!outcome.operations.contains(&TabularOperation::RowReduction));
-    assert_eq!(outcome.metrics.retained_rows, 2000);
-    assert_eq!(cells(&input, b','), cells(&outcome.output, b','));
-    assert!(!outcome.output.contains("[Table:"));
-    assert!(store.is_empty());
-}
-
-#[test]
-fn full_data_wins_before_sampling_when_it_saves_fifteen_percent() {
-    let input = format!(
-        "\"a\",\"b\",\"c\"\r\n{}",
-        "\"x\",\"y\",\"z\"\r\n".repeat(100)
-    );
-    let store = InMemoryStore::new();
-    let outcome =
-        TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-    assert_eq!(outcome.operations, [TabularOperation::Compaction]);
-    assert_eq!(outcome.metrics.retained_rows, 100);
-    assert_eq!(cells(&input, b','), cells(&outcome.output, b','));
-    assert!(store.is_empty());
-}
-
-#[test]
-fn row_selection_preserves_diagnostics_and_recovers_exact_source() {
-    for delimiter in [',', '\t'] {
-        for recovery in [
-            RecoveryMethod::Shell,
-            RecoveryMethod::tool("table_retrieve").unwrap(),
-        ] {
-            let input = large_table(delimiter);
-            let store = InMemoryStore::new();
-            let result = TabularCompressor.compress_with_recovery(&input, Some(&store), &recovery);
-            assert_eq!(result.operations, [TabularOperation::RowReduction]);
-            assert_eq!(result.recoverability, crate::Recoverability::Retrievable);
-            assert_eq!(result.metrics.retained_rows, 32);
-            let (view, note) = result.output.split_once("\n\n[Table:").unwrap();
-            let original = cells(&input, delimiter as u8);
-            let kept = cells(view, delimiter as u8);
-            assert_eq!(kept.len(), 33);
-            assert_eq!(kept[0], original[0]);
-            let indices = kept[1..]
-                .iter()
-                .map(|row| row[0].parse::<usize>().unwrap())
-                .collect::<Vec<_>>();
-            assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(indices.contains(&61));
-            assert_eq!(&indices[..4], &[0, 1, 2, 3]);
-            assert_eq!(&indices[28..], &[116, 117, 118, 119]);
-            for (row, index) in kept[1..].iter().zip(&indices) {
-                assert_eq!(row, &original[index + 1]);
-            }
-            assert!(note.contains("kept 32 of 120"));
-            let ranges = note
-                .split_once("excluding header): ")
-                .unwrap()
-                .1
-                .split_once(". Incomplete")
-                .unwrap()
-                .0;
-            let reported: Vec<usize> = ranges
-                .split(',')
-                .flat_map(|range| {
-                    let (start, end) = range.split_once('-').unwrap_or((range, range));
-                    start.parse::<usize>().unwrap()..=end.parse::<usize>().unwrap()
-                })
-                .collect();
-            assert_eq!(reported, indices.iter().map(|i| i + 1).collect::<Vec<_>>());
-            assert!(note.contains("Incomplete table"));
-            assert_eq!(
-                store
-                    .retrieve(&result.stash_writes[0].key)
-                    .unwrap()
-                    .as_deref(),
-                Some(input.as_str())
-            );
-            assert!(result.output.contains(&recovery_instruction(
-                &result.stash_writes[0].key,
-                &recovery
-            )));
-            assert!(saves_both(&result.output, &input));
-            let second = TabularCompressor.compress_with_recovery(&input, Some(&store), &recovery);
-            assert_eq!(second.output, result.output);
-        }
-    }
-}
-
-#[test]
-fn diagnostic_rows_are_not_capped_and_signals_use_word_boundaries() {
-    for value in [
-        "ERROR",
-        "failed",
-        "failure",
-        "fatal",
-        "panic",
-        "exception",
-        "warn",
-        "warning",
-        "发生错误",
-        "任务失败",
-        "警告",
-    ] {
-        assert!(has_diagnostic(value), "{value}");
-    }
-    for value in [
-        "error_count",
-        "warnings",
-        "prefailed",
-        "panicology",
-        "forward",
-    ] {
-        assert!(!has_diagnostic(value), "{value}");
-    }
-    let rows: Vec<_> = (0..100)
-        .map(|i| {
-            StringRecord::from(vec![
-                i.to_string(),
-                if (10..60).contains(&i) { "error" } else { "ok" }.to_string(),
-            ])
-        })
-        .collect();
-    let selected = select_rows(&rows);
-    assert_eq!(selected.len(), 58);
-    assert!((10..60).all(|i| selected.contains(&i)));
 }
 
 #[test]
@@ -278,7 +104,7 @@ fn unsupported_or_malformed_tables_pass_through_without_storage() {
     }
     let input = format!("{}ragged,row,with,extra,fields\n", large_table(','));
     assert!(TabularCompressor::detect(&input));
-    let outcome = TabularCompressor.compress_with_recovery(&input, None, &RecoveryMethod::None);
+    let outcome = TabularCompressor.compress(&input);
     assert_eq!(outcome.output, input);
 }
 
@@ -295,80 +121,127 @@ fn detection_is_bounded_and_ignores_a_partial_trailing_record() {
 }
 
 #[test]
-fn no_recovery_no_savings_and_small_tables_never_omit_rows() {
-    let store = InMemoryStore::new();
-    for input in ["a,b\n1,2\n3,4".to_string(), large_table(',')] {
-        for (stash, recovery) in [
-            (None, RecoveryMethod::Shell),
-            (Some(&store as &dyn StashStore), RecoveryMethod::None),
-        ] {
-            let outcome = TabularCompressor.compress_with_recovery(&input, stash, &recovery);
-            assert_eq!(cells(&outcome.output, b','), cells(&input, b','));
-            assert!(outcome.stash_writes.is_empty());
-        }
+fn compaction_applies_when_savings_are_small() {
+    for delimiter in [',', '\t'] {
+        let input = large_table(delimiter);
+        let outcome = TabularCompressor.compress(&input);
+        assert_eq!(outcome.operations, [TabularOperation::Compaction]);
+        assert_eq!(outcome.metrics.original_rows, 120);
+        assert_eq!(outcome.metrics.retained_rows, 120);
+        assert_eq!(
+            cells(&input, delimiter as u8),
+            cells(&outcome.output, delimiter as u8)
+        );
+        assert!(saves_both(&outcome.output, &input));
+        let before = estimate_tokens(&input);
+        let after = estimate_tokens(&outcome.output);
+        assert!((before - after) * 100 < before * 15);
+        assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+        assert!(outcome.stash_writes.is_empty());
+        assert_eq!(outcome.metrics.stash_errors, 0);
+        assert!(!outcome.output.contains("[Table:"));
     }
-    let input = format!("a,b\n{}", "x,y\n".repeat(33));
-    let result =
-        TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-    assert_eq!(result.metrics.retained_rows, 33);
-    assert!(store.is_empty());
 }
 
 #[test]
-fn reduction_starts_above_thirty_two_data_rows() {
-    for count in [32, 33] {
-        let input = format!(
-            "id,message\n{}",
-            (0..count)
-                .map(|i| format!("{i},record-{i}-{}", "payload ".repeat(100)))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        let store = InMemoryStore::new();
-        let result =
-            TabularCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-        assert_eq!(result.metrics.retained_rows, 32);
-        if count == 32 {
-            assert_eq!(result.output, input);
-            assert!(store.is_empty());
-        } else {
-            assert_eq!(result.operations, [TabularOperation::RowReduction]);
-            assert_eq!(store.len(), 1);
+fn compact_tables_keep_all_rows_at_and_above_the_old_selection_boundary() {
+    for delimiter in [',', '\t'] {
+        for count in [32, 33, 120, 2000] {
+            let input = format!(
+                "id{delimiter}status{delimiter}message\n{}",
+                (0..count)
+                    .map(|i| format!(
+                        "{i:04}{delimiter}{}{delimiter}record-{i}-{}",
+                        if i == 17 { "FAILED" } else { "ok" },
+                        "payload ".repeat(10)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let outcome = TabularCompressor.compress(&input);
+            assert_eq!(outcome.output, input);
+            assert!(outcome.operations.is_empty());
+            assert_eq!(outcome.metrics.original_rows, count);
+            assert_eq!(outcome.metrics.retained_rows, count);
+            assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
         }
     }
+}
+
+#[test]
+fn recovery_capabilities_never_change_full_table_compaction_or_access_storage() {
+    let store = InMemoryStore::new();
+    let unavailable = FailingStore;
+    for delimiter in [',', '\t'] {
+        for input in [
+            large_table(delimiter),
+            format!("a{delimiter}b\n1{delimiter}2\n3{delimiter}4"),
+        ] {
+            let expected = TabularCompressor.compress(&input);
+            for recovery in [
+                RecoveryMethod::None,
+                RecoveryMethod::Shell,
+                RecoveryMethod::tool("table_retrieve").unwrap(),
+            ] {
+                for stash in [
+                    None,
+                    Some(&store as &dyn StashStore),
+                    Some(&unavailable as &dyn StashStore),
+                ] {
+                    let result = TabularCompressor.compress_with_recovery(&input, stash, &recovery);
+                    assert_eq!(result.output, expected.output);
+                    assert_eq!(result.operations, expected.operations);
+                    assert_eq!(result.metrics, expected.metrics);
+                    assert!(result.stash_writes.is_empty());
+                    assert_eq!(result.recoverability, crate::Recoverability::Lossless);
+                }
+            }
+        }
+    }
+    assert!(store.is_empty());
 }
 
 struct FailingStore;
 
 impl StashStore for FailingStore {
     fn stash(&self, _: &str) -> Result<StashWrite, StashError> {
-        Err(StashError::Backend("disk full".into()))
+        panic!("tabular compaction must not write storage")
     }
     fn retrieve(&self, _: &str) -> Result<Option<String>, StashError> {
-        unreachable!()
+        panic!("tabular compaction must not read storage")
     }
     fn len(&self) -> usize {
-        0
+        panic!("tabular compaction must not inspect storage")
     }
     fn evict_expired(&self) -> Result<usize, StashError> {
-        unreachable!()
+        panic!("tabular compaction must not evict storage")
     }
     fn delete(&self, _: &str, _: u64) -> Result<bool, StashError> {
-        unreachable!()
+        panic!("tabular compaction must not delete storage")
     }
 }
 
 #[test]
-fn storage_failure_keeps_all_cells_and_reports_the_failure() {
-    let input = large_table(',');
-    let result = TabularCompressor.compress_with_recovery(
-        &input,
-        Some(&FailingStore),
-        &RecoveryMethod::Shell,
-    );
-    assert_eq!(result.metrics.stash_errors, 1);
-    assert_eq!(result.metrics.retained_rows, 120);
-    assert_eq!(result.recoverability, crate::Recoverability::Lossless);
-    assert!(!result.output.contains("[Table:"));
-    assert_eq!(cells(&input, b','), cells(&result.output, b','));
+fn trailing_record_separator_is_removed_only_when_estimated_tokens_decrease() {
+    for delimiter in [',', '\t'] {
+        for (last, compacted) in [("45", true), ("4", false)] {
+            let input = format!("a{delimiter}b\n1{delimiter}2\n3{delimiter}{last}\n");
+            let result = TabularCompressor.compress(&input);
+            if compacted {
+                assert_eq!(result.output, input.trim_end_matches('\n'));
+                assert_eq!(result.operations, [TabularOperation::Compaction]);
+                assert_eq!(estimate_tokens(&input) - estimate_tokens(&result.output), 1);
+            } else {
+                assert_eq!(result.output, input);
+                assert!(result.operations.is_empty());
+            }
+            assert_eq!(
+                cells(&input, delimiter as u8),
+                cells(&result.output, delimiter as u8)
+            );
+            assert_eq!(result.metrics.original_rows, 2);
+            assert_eq!(result.metrics.retained_rows, 2);
+            assert!(result.stash_writes.is_empty());
+        }
+    }
 }
