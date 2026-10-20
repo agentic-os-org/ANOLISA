@@ -161,6 +161,23 @@ impl AnalyzeChatmlCommand {
                                         serde_json::Value::String(text) => text.clone(),
                                         other => other.to_string(),
                                     };
+                                    // SysOM's non-streaming POP response wraps
+                                    // the provider payload in
+                                    // `{"data": "<json string>"}`, the envelope
+                                    // the SysOM parser and the client both
+                                    // unwrap. Read the inner payload, or the
+                                    // wrapper is offered as the frame and
+                                    // nothing in it matches.
+                                    let payload =
+                                        serde_json::from_str::<serde_json::Value>(&payload)
+                                            .ok()
+                                            .and_then(|value| {
+                                                value
+                                                    .get("data")
+                                                    .and_then(|inner| inner.as_str())
+                                                    .map(str::to_string)
+                                            })
+                                            .unwrap_or(payload);
                                     Self::extract_response_from_sse(&[serde_json::json!({
                                         "data": payload
                                     })])
@@ -1320,6 +1337,31 @@ mod tests {
         let mut event = ChromeTraceEvent::instant("200 OK", "http.response", 1, 1, ts);
         event.args = Some(json!({ "body": body }));
         event
+    }
+
+    /// SysOM's non-streaming POP response wraps the provider payload in
+    /// `{"data": "<json string>"}`; the SysOM parser unwraps it and so does
+    /// the client, but the breakdown offered the envelope itself as the
+    /// frame. Nothing matched, so an answer the parser read broke down as an
+    /// empty response.
+    #[test]
+    fn a_sysom_data_envelope_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let inner = json!({
+            "choices": [{
+                "message": {"content": "hello there", "tool_use": null}
+            }]
+        })
+        .to_string();
+        let events = vec![response_event(json!({ "data": inner }), 1)];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a SysOM envelope body must still break down");
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
+        );
     }
 
     /// The trace writer stores a non-streaming response under `body`, but the
