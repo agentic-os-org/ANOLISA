@@ -447,6 +447,18 @@ def normalize_sbom(
             if not isinstance(target, str):
                 die("cargo-sbom output contains an invalid dependency target")
             targets.add(target)
+    root_refs = {
+        child["bom-ref"]
+        for child in root.get("components", [])
+        if isinstance(child, dict) and isinstance(child.get("bom-ref"), str)
+    }
+    if not root_refs:
+        root_refs = {
+            child["bom-ref"]
+            for child in components
+            if isinstance(child, dict) and isinstance(child.get("bom-ref"), str)
+        }
+    merged_dependencies.setdefault(artifact_id, set()).update(root_refs)
     data["dependencies"] = [
         {"ref": reference, "dependsOn": sorted(targets)}
         for reference, targets in sorted(merged_dependencies.items())

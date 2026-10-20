@@ -76,6 +76,17 @@ class PlanMatrixTests(unittest.TestCase):
     def test_component_without_prebuilt_targets(self) -> None:
         self.assertEqual(plan_matrix.build_matrix("blaze"), {"include": []})
 
+    def test_sec_core_has_only_linux_x86_64(self) -> None:
+        self.assertEqual(
+            plan_matrix.build_matrix("agent-sec-core"),
+            {"include": [{
+                "component": "agent-sec-core",
+                "target-os": "linux",
+                "target-arch": "x86_64",
+                "profile": "gnu2.28-x86_64",
+            }]},
+        )
+
     def test_ws_ckpt_requires_both_linux_targets(self) -> None:
         matrix = plan_matrix.build_matrix("ws-ckpt")
         self.assertEqual(

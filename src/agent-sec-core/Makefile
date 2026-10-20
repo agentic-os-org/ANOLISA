@@ -230,6 +230,9 @@ OFFLINE_BUILD ?= 0
 CARGO_OFFLINE_FLAGS = $(if $(filter 1,$(OFFLINE_BUILD)),--offline,)
 CARGO_BUILD_ENV = $(if $(filter 1,$(OFFLINE_BUILD)),CARGO_HOME="$(abspath $(BUILD_DIR)/cargo-home)",)
 NPM_INSTALL = $(if $(filter 1,$(OFFLINE_BUILD)),npm ci --offline --include=dev --omit=optional --ignore-scripts --cache .npm-cache --no-audit --no-fund,npm install --include=dev)
+RAW_RUST_BUILDER ?= cargo
+RAW_RUST_TARGET ?=
+RAW_RUST_RELEASE_SUBDIR = $(if $(RAW_RUST_TARGET),$(RAW_RUST_TARGET)/,)release
 
 # Component targets shared by the V1 and V2 aggregates. Only the CLI/daemon
 # build differs between them, so one list prevents the two aggregates from
@@ -260,9 +263,9 @@ endef
 
 .PHONY: build-sandbox
 build-sandbox: ## Build linux-sandbox binary
-	cd linux-sandbox && $(CARGO_BUILD_ENV) cargo build --release --locked $(CARGO_OFFLINE_FLAGS)
+	cd linux-sandbox && $(CARGO_BUILD_ENV) $(RAW_RUST_BUILDER) build --release --locked $(CARGO_OFFLINE_FLAGS)
 	install -d -m 0755 $(BUILD_DIR)
-	cp -p linux-sandbox/target/release/linux-sandbox $(BUILD_DIR)/
+	cp -p linux-sandbox/target/$(RAW_RUST_RELEASE_SUBDIR)/linux-sandbox $(BUILD_DIR)/
 
 .PHONY: build-cli
 build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
@@ -276,11 +279,11 @@ build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
 
 .PHONY: build-cli-v2
 build-cli-v2: ## Build V2 Rust CLI and daemon binaries
-	cd v2 && $(CARGO_BUILD_ENV) CARGO_TARGET_DIR="$(abspath $(V2_CARGO_TARGET_DIR))" cargo build --release --locked $(CARGO_OFFLINE_FLAGS) --workspace
+	cd v2 && $(CARGO_BUILD_ENV) CARGO_TARGET_DIR="$(abspath $(V2_CARGO_TARGET_DIR))" $(RAW_RUST_BUILDER) build --release --locked $(CARGO_OFFLINE_FLAGS) --workspace
 	install -d -m 0755 $(V2_BIN_BUILD_DIR)
-	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-cli" \
-		"$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-daemon" \
-		"$(abspath $(V2_CARGO_TARGET_DIR))/release/agent-sec-daemon-health" \
+	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-cli" \
+		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-daemon" \
+		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-daemon-health" \
 		$(V2_BIN_BUILD_DIR)/
 
 .PHONY: setup
@@ -410,6 +413,10 @@ package-raw: prepare-raw-python ## Build the deterministic V2 raw archive
 		TARGET_ARCH="$(TARGET_ARCH)" \
 		SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
 		./packaging/raw/package.sh package
+
+.PHONY: test-package-raw
+test-package-raw: ## Verify the V2 raw package contract with fixtures
+	./tests/packaging/test-package-raw.sh
 
 # =============================================================================
 # INSTALL

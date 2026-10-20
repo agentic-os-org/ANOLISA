@@ -4,6 +4,9 @@ from __future__ import annotations
 
 
 TARGETS = {
+    "agent-sec-core": (
+        {"target-os": "linux", "target-arch": "x86_64", "profile": "gnu2.28-x86_64"},
+    ),
     "os-skills": (
         {"target-os": "linux", "target-arch": "x86_64", "profile": "static-linux"},
         {"target-os": "linux", "target-arch": "aarch64", "profile": "static-linux"},

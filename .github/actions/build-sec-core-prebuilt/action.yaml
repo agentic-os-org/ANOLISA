@@ -1,0 +1,59 @@
+name: Build sec-core prebuilt package
+description: Build the sec-core V2 raw archive on the release Cross runner.
+
+inputs:
+  version:
+    description: Component version without the v prefix.
+    required: true
+  target-os:
+    description: Package target operating system.
+    required: true
+  target-arch:
+    description: Package target architecture.
+    required: true
+  profile:
+    description: Prepared Cross release profile.
+    required: true
+  tag:
+    description: Release tag to bind to the checked-out commit. Empty for previews.
+    required: false
+    default: ''
+
+outputs:
+  artifact-directory:
+    description: Directory containing the tar, checksums, and CycloneDX SBOM.
+    value: ${{ steps.build.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Select Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.23.2'
+
+    - name: Build precompiled package
+      id: build
+      shell: bash
+      env:
+        SEC_CORE_OUTPUT_DIR: ${{ runner.temp }}/sec-core-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        SEC_CORE_VERSION: ${{ inputs.version }}
+        SEC_CORE_TARGET_OS: ${{ inputs.target-os }}
+        SEC_CORE_TARGET_ARCH: ${{ inputs.target-arch }}
+        SEC_CORE_PROFILE: ${{ inputs.profile }}
+        SEC_CORE_TAG: ${{ inputs.tag }}
+      run: |
+        "$GITHUB_ACTION_PATH/build.sh" \
+          --source-repo "$GITHUB_WORKSPACE" \
+          --output-dir "$SEC_CORE_OUTPUT_DIR" \
+          --version "$SEC_CORE_VERSION" \
+          --target-os "$SEC_CORE_TARGET_OS" \
+          --target-arch "$SEC_CORE_TARGET_ARCH" \
+          --profile "$SEC_CORE_PROFILE" \
+          --tag "$SEC_CORE_TAG"
+        echo "artifact-directory=$SEC_CORE_OUTPUT_DIR" >> "$GITHUB_OUTPUT"

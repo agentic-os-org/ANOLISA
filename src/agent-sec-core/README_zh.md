@@ -192,13 +192,16 @@ capability。
 | **Python** | 3.11.6（已固定；RPM 要求 `>= 3.11, < 3.12`） |
 | **Rust** | >= 1.93（用于构建 `linux-sandbox` 与 CLI 原生扩展） |
 | **bubblewrap** | `linux-sandbox` 运行依赖 |
-| **ANOLISA CLI** | >= 0.2.17 |
+| **ANOLISA CLI** | >= 0.3.15 |
 
 ### 安装 AgentSecCore
 
-源码和 RPM 安装支持 Linux x86_64、aarch64。已发布的 ANOLISA raw 包仅支持
-Linux x86_64 和 system mode，需要使用 0.2.17 或更高版本的 CLI。请根据 CLI
-的安装来源完成更新。
+源码和 RPM 安装支持 Linux x86_64、aarch64。ANOLISA raw 包仅支持 Linux x86_64
+和 system mode，需要使用 0.3.15 或更高版本的 CLI。从下一个 `sec-core/v*` tag
+开始，GitHub Release 也会提供 `sec-core-<version>-linux-x86_64.tar.gz`、SHA-256
+校验文件及 CycloneDX SBOM。raw 包包含 Rust V2 CLI 和 daemon 二进制，并为适配器
+hooks 自带固定的 Python 3.11.6 运行时；不包含 V1 Python CLI。请根据 CLI 的安装
+来源完成更新。
 
 ```bash
 # 通过 get.agentic-os.sh 安装的 CLI

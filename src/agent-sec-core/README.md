@@ -205,13 +205,17 @@ variable to `true` does not re-enable a capability disabled in plugin configurat
 | **Python** | 3.11.6 (pinned; the RPM requires `>= 3.11, < 3.12`) |
 | **Rust** | >= 1.93 (for building `linux-sandbox` and the CLI native extension) |
 | **bubblewrap** | required by `linux-sandbox` |
-| **ANOLISA CLI** | >= 0.2.17 |
+| **ANOLISA CLI** | >= 0.3.15 |
 
 ### Install AgentSecCore
 
 Source and RPM installations support Linux x86_64 and aarch64. The published
 ANOLISA raw package is limited to Linux x86_64 in system mode and requires CLI
-version 0.2.17 or later. Update the CLI through its installation owner:
+version 0.3.15 or later. From the next `sec-core/v*` tag, GitHub Releases also
+provide `sec-core-<version>-linux-x86_64.tar.gz` with SHA-256 and CycloneDX SBOM
+sidecars. The raw package ships Rust V2 CLI and daemon binaries and a pinned
+Python 3.11.6 runtime for adapter hooks; it does not ship the V1 Python CLI.
+Update the CLI through its installation owner:
 
 ```bash
 # CLI installed by get.agentic-os.sh
