@@ -216,18 +216,42 @@ const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", 
 /// ("60 passing (exit code 0)"), while any non-zero status is the failure
 /// signal. The status may be separated from the words by spaces, a colon or
 /// an equals sign, and more than one wording reports it.
-fn mentions_failing_exit_code(lower: &str) -> bool {
-    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
-        let mut search_from = 0;
-        while let Some(found) = lower[search_from..].find(marker) {
-            let after = &lower[search_from + found + marker.len()..];
-            let status = after.trim_start_matches([' ', ':', '=']);
-            if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
-                return true;
-            }
-            search_from += found + marker.len();
+///
+/// The marker has to *report* the status: it must open its line, optionally
+/// inside the parenthetical and `Command ` wrapper a live capture uses. A
+/// payload that merely quotes the wording — a file the agent read, a log
+/// line, a comment — describes something else entirely, the anchor the
+/// grounding classifier applies (`outcome::reported_exit_code`). Without it a
+/// successful `Read` of a file mentioning `exit code 1` in a sentence scored a
+/// certain tool failure here while the classifier graded the same bytes `Ok`.
+fn mentions_failing_exit_code(text: &str) -> bool {
+    text.lines().any(reports_failing_exit_status)
+}
+
+/// Whether one line reports a non-zero exit status.
+///
+/// The marker has to open the line, optionally inside a leading `(` and the
+/// `Command ` wrapper, exactly as `outcome::reported_exit_code` reads it, so
+/// both readers agree on which payloads report their own status.
+fn reports_failing_exit_status(line: &str) -> bool {
+    /// Wrapper a live capture puts in front of the marker, as in
+    /// `(Command exited with code 1)`.
+    const WRAPPER: &str = "Command ";
+    let mut rest = line.trim_start();
+    if let Some(after_paren) = rest.strip_prefix('(') {
+        rest = after_paren;
+    }
+    if let Some(head) = rest.get(..WRAPPER.len()) {
+        if head.eq_ignore_ascii_case(WRAPPER) {
+            rest = &rest[WRAPPER.len()..];
         }
-        false
+    }
+    let lower = rest.to_ascii_lowercase();
+    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
+        lower.strip_prefix(marker).is_some_and(|after| {
+            let status = after.trim_start_matches([' ', ':', '=']);
+            status.starts_with(|c: char| c.is_ascii_digit() && c != '0')
+        })
     })
 }
 
@@ -635,7 +659,7 @@ mod tests {
     fn detects_a_non_zero_exit_code_other_than_one() {
         for payload in [
             r#"[{"type":"tool_result","content":"make check\n(exit code 2)"}]"#,
-            r#"[{"type":"tool_result","content":"tool runner (exit code 127)"}]"#,
+            r#"[{"type":"tool_result","content":"(Command exited with code 127)"}]"#,
         ] {
             let event = event(None, Some(payload), None);
             assert!(
@@ -731,7 +755,7 @@ mod tests {
     fn detects_failing_exit_statuses_the_classifier_reads() {
         for payload in [
             r#"[{"type":"tool_result","content":"make check\n(Command exited with code 2)"}]"#,
-            r#"[{"type":"tool_result","content":"make: *** Tool execution aborted, exit status 1"}]"#,
+            r#"[{"type":"tool_result","content":"make: *** Tool execution aborted\nexit status 1"}]"#,
             r#"[{"type":"tool_result","content":"cargo build\nexit status: 101"}]"#,
         ] {
             let event = event(None, Some(payload), None);
@@ -750,6 +774,46 @@ mod tests {
             assert!(
                 !looks_like_tool_failure(&event),
                 "a zero exit status is not a failure: {payload}"
+            );
+        }
+    }
+
+    /// A payload that merely quotes the exit-status wording — a file the agent
+    /// read, a log line, a comment — describes something else, not this call's
+    /// status. The grounding classifier anchors the marker to a line that
+    /// reports it (`outcome::reported_exit_code`, which also accepts the
+    /// parenthetical and `Command ` wrapper of a live capture) and grades such
+    /// a payload clean, while this scan matched the wording anywhere and only
+    /// looked at the digit: a successful `Read` of a file carrying
+    /// `exit code 1` in a sentence scored `tool_use` 0.45 with a
+    /// `tool_failure` finding for the same bytes the classifier judged `Ok`.
+    #[test]
+    fn a_quoted_exit_status_is_not_a_tool_failure() {
+        for payload in [
+            r##"[{"type":"tool_result","content":"# build notes\nrun with exit code 1 to reproduce"}]"##,
+            r#"[{"type":"tool_result","content":"// Exit code 255 is returned when ssh fails.\nfn main() {}"}]"#,
+            r#"[{"type":"tool_result","content":"    58→            \"exit status 1\\nssh: connect failed\","}]"#,
+            r#"[{"type":"tool_result","content":"notes: the previous run exited with code 2, then recovered"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a quoted exit status is not this call's failure: {payload}"
+            );
+        }
+
+        // The reported forms keep firing, whichever wrapper and separator
+        // carries them.
+        for payload in [
+            r#"[{"type":"tool_result","content":"make check\nexit code 1"}]"#,
+            r#"[{"type":"tool_result","content":"make check\n(Command exited with code 2)"}]"#,
+            r#"[{"type":"tool_result","content":"build stopped\nExit status: 101"}]"#,
+            r#"[{"type":"tool_result","content":"(Command exited with code 2)"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "a reported exit status is a tool failure: {payload}"
             );
         }
     }

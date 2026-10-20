@@ -302,6 +302,10 @@ fn mentions_failing_http_status(text: &str) -> bool {
 /// capture formats.
 const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
 
+/// Wrapper a live capture puts in front of the marker, as in
+/// `(Command exited with code 1)`.
+const FAILING_EXIT_STATUS_WRAPPER: &str = "Command ";
+
 /// Whether any reported exit status carries a non-zero value.
 ///
 /// A zero status is the success spelling a passing command's output routinely
@@ -311,18 +315,34 @@ const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", 
 /// bare `exit code` substring flagged it. Only a non-zero status is a failure
 /// signal; the status may be separated by spaces, a colon, or an equals sign,
 /// and more than one wording reports it.
-fn mentions_failing_exit_code(lower: &str) -> bool {
-    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
-        let mut search_from = 0;
-        while let Some(found) = lower[search_from..].find(marker) {
-            let after = &lower[search_from + found + marker.len()..];
-            let status = after.trim_start_matches([' ', ':', '=']);
-            if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
-                return true;
-            }
-            search_from += found + marker.len();
+///
+/// The marker has to *report* the status: it must open its line, optionally
+/// inside the parenthetical and `Command ` wrapper a live capture uses, the
+/// same anchor the grader's scan and the grounding classifier apply
+/// (`outcome::reported_exit_code`). A payload that merely quotes the wording —
+/// a file the agent read, a log line — describes something else, and reading
+/// it as this call's status recorded a ToolFailure for a successful `Read`.
+fn mentions_failing_exit_code(text: &str) -> bool {
+    text.lines().any(reports_failing_exit_status)
+}
+
+/// Whether one line reports a non-zero exit status.
+fn reports_failing_exit_status(line: &str) -> bool {
+    let mut rest = line.trim_start();
+    if let Some(after_paren) = rest.strip_prefix('(') {
+        rest = after_paren;
+    }
+    if let Some(head) = rest.get(..FAILING_EXIT_STATUS_WRAPPER.len()) {
+        if head.eq_ignore_ascii_case(FAILING_EXIT_STATUS_WRAPPER) {
+            rest = &rest[FAILING_EXIT_STATUS_WRAPPER.len()..];
         }
-        false
+    }
+    let lower = rest.to_ascii_lowercase();
+    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
+        lower.strip_prefix(marker).is_some_and(|after| {
+            let status = after.trim_start_matches([' ', ':', '=']);
+            status.starts_with(|c: char| c.is_ascii_digit() && c != '0')
+        })
     })
 }
 
@@ -2717,7 +2737,7 @@ mod tests {
         // zero status itself is the success spelling.
         for payload in [
             "sh -c missing-tool\nexit code 127",
-            "first run: exit code 1, rerun: exit code 0",
+            "first run\nexit code 1\nrerun\nexit code 0",
         ] {
             call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
                 id: Some("toolu-build".to_string()),
@@ -2759,7 +2779,7 @@ mod tests {
 
         for payload in [
             "make check\n(Command exited with code 2)",
-            "make: *** aborted, exit status 1",
+            "make: *** aborted\nexit status 1",
             "curl -i https://example.test/x\nHTTP/1.1 500 Internal Server Error",
             "HTTP 502",
         ] {
@@ -2797,6 +2817,67 @@ mod tests {
                 events.is_empty(),
                 "a success spelling is not a failure: {payload}: {events:?}"
             );
+        }
+    }
+
+    /// A payload that merely quotes the exit-status wording — a file the agent
+    /// read, a log line, a comment — describes something else, not this
+    /// call's status. The grader's scan and the grounding classifier anchor
+    /// the marker to a line that reports it (`outcome::reported_exit_code`),
+    /// while this scan matched the wording anywhere: a successful `Read` of a
+    /// file carrying `exit code 1` in a sentence recorded a ToolFailure here
+    /// for the same bytes the classifier judged a clean result.
+    #[test]
+    fn a_quoted_exit_status_is_not_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "read the build notes".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "# build notes\nrun with exit code 1 to reproduce",
+            "// Exit code 255 is returned when ssh fails.\nfn main() {}",
+            "notes: the previous run exited with code 2, then recovered",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-quoted".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events.is_empty(),
+                "a quoted exit status is not this call's failure: {payload}: {events:?}"
+            );
+        }
+
+        // The reported forms keep firing, with the wrapper and separators a
+        // live capture uses.
+        for payload in [
+            "make check\nexit code 1",
+            "make check\n(Command exited with code 2)",
+            "build stopped\nExit status: 101",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-quoted".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "a reported exit status is a ToolFailure: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
         }
     }
 
