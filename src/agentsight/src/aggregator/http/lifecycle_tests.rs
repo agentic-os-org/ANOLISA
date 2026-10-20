@@ -183,7 +183,27 @@ fn fragmented_body_detaches_the_first_capture_and_reserves_once() {
     };
     assert!(request.source_event.buf.is_empty());
     assert_eq!(request.body().len(), 1024);
+    assert_eq!(request.body_len, 1024);
     assert_eq!(request.reassembled_body.as_ref().unwrap().capacity(), 1024);
+}
+
+#[test]
+fn drain_of_a_partial_body_describes_the_buffer_it_keeps() {
+    let mut http = HttpConnectionAggregator::new();
+    // A declared 100-byte body that never completes: the drain keeps the six
+    // bytes it saw, so `body_len` has to describe those six bytes rather than
+    // the zero the split-request handoff left behind.
+    http.process_request(request(1, b"prompt", 100));
+    http.drain_pending(RemoveReason::PidExited);
+    let results = http.take_ready();
+    let AggregatedResult::Abandoned { partial, .. } = &results[0] else {
+        unreachable!()
+    };
+    let AggregatedResult::RequestOnly { request, .. } = partial.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(request.body(), b"prompt");
+    assert_eq!(request.body_len, request.body().len());
 }
 
 #[test]
@@ -202,8 +222,33 @@ fn append_limits_emit_truncated_request_immediately() {
         unreachable!()
     };
     assert_eq!(request.body().len(), 1024);
+    assert_eq!(request.body_len, 1024);
     assert_eq!(http.active_connections(), 0);
     assert_eq!(http.metrics().connection_cache_bytes, 0);
+}
+
+/// A request that arrives over the body cap with its body already buffered is
+/// truncated and abandoned by `process_request` itself. The kept prefix must
+/// carry its own length: the site used to assign `reassembled_body` alone, so
+/// the abandoned request advertised the pre-truncation length for a shorter
+/// buffer, and every `body_len`-gated reader (the trace arguments and
+/// `build_pending_from_request`) then disagreed with `body()`.
+#[test]
+fn over_budget_request_keeps_body_len_matching_the_truncated_body() {
+    let mut http = HttpConnectionAggregator::with_limits(4, 1024, Duration::from_secs(60));
+    let oversized = vec![b'x'; 2048];
+    http.process_request(request(1, &oversized, oversized.len()));
+    let results = http.take_ready();
+    reason(&results, RemoveReason::OverBudget);
+    let AggregatedResult::Abandoned { partial, .. } = &results[0] else {
+        unreachable!()
+    };
+    let AggregatedResult::RequestOnly { request, .. } = partial.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(request.body().len(), 1024, "the kept prefix is the cap");
+    assert_eq!(request.body_len, request.body().len());
+    assert_eq!(http.active_connections(), 0);
 }
 
 #[test]

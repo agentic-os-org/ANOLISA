@@ -334,6 +334,7 @@ const viewerT = (key, params) => {
 function loadViewer(searchParamsInit, driver, apiStubs) {
   const roundModel = realModule('src/utils/roundModel.ts');
   const trajectoryTree = realModule('src/utils/trajectoryTree.ts');
+  const text = realModule('src/utils/text.ts');
   const trajectoryTextFilter = realModule('src/utils/trajectoryTextFilter.ts');
   const spHolder = { params: new URLSearchParams(searchParamsInit) };
   const moduleStubs = {
@@ -347,6 +348,7 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     '../utils/apiClient': apiStubs,
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
+    '../utils/text': text,
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
     '../components/SubagentGraph': { SubagentGraph: () => null },

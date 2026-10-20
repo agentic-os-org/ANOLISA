@@ -1,0 +1,82 @@
+{
+  "function": {
+    "description": "Describes the specified EC2 instances or all instances. If you specify one or more instance IDs, Amazon EC2 returns information for those instances. If you do not specify instance IDs, Amazon EC2 returns information for all relevant instances.",
+    "name": "describe_instances",
+    "parameters": {
+      "properties": {
+        "dry_run": {
+          "description": "Checks whether you have the required permissions for the action, without actually making the request, and provides an error response.",
+          "type": "boolean"
+        },
+        "filters": {
+          "description": "The filters to apply when describing instances. Multiple filters are combined using AND logic. Wildcards (* and ?) are supported in filter values.",
+          "items": {
+            "properties": {
+              "name": {
+                "description": "The name of the filter. Common filter names include: architecture, availability-zone, block-device-mapping.device-name, block-device-mapping.",
+                "enum": [
+                  "architecture",
+                  "availability-zone",
+                  "dns-name",
+                  "group-id",
+                  "group-name",
+                  "image-id",
+                  "instance-id",
+                  "instance-state-name",
+                  "instance-type",
+                  "ip-address",
+                  "key-name",
+                  "private-dns-name",
+                  "private-ip-address",
+                  "subnet-id",
+                  "tag",
+                  "tag-key",
+                  "vpc-id"
+                ],
+                "type": "string"
+              },
+              "values": {
+                "description": "One or more filter values. Filter values are case-sensitive.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "values"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "include_all_instances": {
+          "description": "Include all instances, including those that are in the terminated state. By default, terminated instances are not included.",
+          "type": "boolean"
+        },
+        "instance_ids": {
+          "description": "The IDs of the instances to describe. You can specify up to 1000 instance IDs in a single request. If you specify an invalid instance ID, an error is returned.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_results": {
+          "default": 100,
+          "description": "The maximum number of items to return for this request. To get the next page of items, make another request and include the token from the previous response in",
+          "maximum": 1000,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "next_token": {
+          "description": "The token returned from a previous paginated request. Pagination continues from the end of the items returned by the previous request.",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

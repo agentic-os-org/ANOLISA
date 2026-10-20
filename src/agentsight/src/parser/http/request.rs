@@ -36,6 +36,18 @@ impl ParsedRequest {
         std::str::from_utf8(self.body()).unwrap_or("")
     }
 
+    /// Install a reassembled body and keep `body_len` describing it.
+    ///
+    /// `body()` prefers `reassembled_body`, so assigning the field alone leaves
+    /// two disagreeing views of the same body: readers that gate on `body_len`
+    /// — the trace argument, and the pending-call builder that skips the body
+    /// entirely when it is zero — then see an empty body while `body()` holds
+    /// the prompt. Assigning through this method keeps the pair in step.
+    pub fn set_reassembled_body(&mut self, body: Vec<u8>) {
+        self.body_len = body.len();
+        self.reassembled_body = Some(body);
+    }
+
     /// `Content-Encoding` of the request, the same view `ParsedResponse` uses.
     pub fn content_encoding(&self) -> Option<&str> {
         self.headers.get("content-encoding").map(|e| e.as_str())

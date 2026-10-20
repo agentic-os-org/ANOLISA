@@ -908,11 +908,31 @@ fn skill_loads_on_two_days(dir: &std::path::Path) -> PathBuf {
     .expect("create genai store");
     drop(store);
 
-    // Two consecutive days, both inside the same ISO week (2026-03-03 is a
-    // Tuesday, 2026-03-04 a Wednesday).
+    // The two loads must share one ISO week for the weekly-bucket assertion
+    // and differ by calendar day for the daily one, while staying at or below
+    // now so the query window keeps them. Plain `now - 2d / now - 1d`
+    // straddles a week boundary whenever the run lands on a Monday or Tuesday
+    // (the Sunday before a Monday belongs to the previous ISO week), so the
+    // offsets depend on the weekday:
+    //   Mon        -> last Friday / last Saturday (same previous week)
+    //   Tue        -> yesterday / now (this Monday / Tuesday)
+    //   Wed..Sun   -> now-2d / now-1d already sit inside the current week
     let day_ns = 86_400_000_000_000_i64;
-    let first_ns = now_ns() - 2 * day_ns;
-    let second_ns = now_ns() - day_ns;
+    let now = now_ns();
+    let now_secs = now / 1_000_000_000;
+    let dow = chrono::Datelike::weekday(
+        &chrono::DateTime::from_timestamp(now_secs, 0)
+            .expect("now is a valid timestamp")
+            .naive_utc(),
+    )
+    .number_from_monday();
+    let (first_ns, second_ns) = if dow == 1 {
+        (now - 3 * day_ns, now - 2 * day_ns)
+    } else if dow == 2 {
+        (now - day_ns, now)
+    } else {
+        (now - 2 * day_ns, now - day_ns)
+    };
 
     let output_messages =
         serde_json::to_string(&vec![agentsight::genai::semantic::OutputMessage {
