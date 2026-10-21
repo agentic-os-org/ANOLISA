@@ -75,7 +75,7 @@
       }
     },
     "qwenwork": {
-      "compatibleVersions": "1.2.5",
+      "compatibleVersions": "1.2.5 || 1.3.2",
       "method": "plugin",
       "pluginId": "tokenless",
       "capabilities": {

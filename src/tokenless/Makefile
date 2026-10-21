@@ -376,7 +376,7 @@ test-qwenwork-hooks:
 	python3 tests/test_resolve_agent_id.py
 
 test-qwenwork-install:
-	@echo "==> Testing QwenWork macOS local-mode sideloading..."
+	@echo "==> Testing QwenWork macOS sideloading..."
 	python3 tests/test_qwenwork_install.py
 
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
@@ -693,7 +693,7 @@ qoder-uninstall:
 
 # Explicit opt-in only; bulk adapter actions must not modify desktop plugins.
 qwenwork-install:
-	@echo "==> Sideloading tokenless for QwenWork (macOS local mode)..."
+	@echo "==> Sideloading tokenless for QwenWork (macOS)..."
 	@bash "$(SHARE_DIR)/qwenwork/scripts/install.sh"
 
 qwenwork-uninstall:
@@ -875,7 +875,7 @@ help:
 	@echo "  hermes-uninstall  Uninstall Hermes Agent plugin"
 	@echo "  qoder-install     Register Qoder CLI plugin"
 	@echo "  qoder-uninstall   Unregister Qoder CLI plugin"
-	@echo "  qwenwork-install  Sideload QwenWork plugin (macOS local mode, opt-in)"
+	@echo "  qwenwork-install  Sideload QwenWork plugin (macOS, opt-in)"
 	@echo "  qwenwork-uninstall Remove the QwenWork sideload"
 	@echo "  test-qwenwork     Test QwenWork installer and shared hooks (no Rust build)"
 	@echo "  claude-code-install   Register Claude Code plugin via claude CLI"

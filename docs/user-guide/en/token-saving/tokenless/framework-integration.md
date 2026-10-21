@@ -14,7 +14,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
-| QwenWorkCN (macOS local) | `qwenwork` | — | Replaces Bash input | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
+| QwenWorkCN (macOS) | `qwenwork` | — | Replaces native Bash and workspace Shell input | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
@@ -87,15 +87,17 @@ compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
-### QwenWork (macOS local mode)
+### QwenWork (macOS)
 
 The `qwenwork` adapter targets QwenWorkCN (千问办公), independently of Qoder CLI,
 Qwen Code, and QwenPaw. QwenWorkCN 1.2.5 macOS local sessions have been tested for
 Bash rewriting, full MCP response replacement, JSON-to-TOON output, and Read
-passthrough. Security-workspace/Linux VM sessions are unsupported and the hook
-dispatcher passes through outside macOS.
+passthrough. The adapter also accepts the macOS workspace Shell contract observed
+in QwenWorkCN 1.3.2. Linux VM execution remains unsupported; the hook dispatcher
+passes through outside macOS.
 
-PreToolUse matches **Bash only** and rewrites supported commands through RTK.
+PreToolUse matches `Bash`, `mcp__workspace__bash`, and
+`mcp__qw-builtin__mcp_workspace_bash`, and rewrites supported commands through RTK.
 PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
 the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
 pass through because replacing their real output with telemetry would lose content;
@@ -104,6 +106,16 @@ the original through `updatedToolOutput`; objects and arrays retain their types,
 while text slots can use TOON. File-content protection, unsupported-content
 passthrough, and RTK deduplication still apply. Statistics use the separate Agent
 ID `qwenwork`. Tool Ready and Schema hooks are not registered.
+
+A workspace Shell result containing exactly one plain MCP text block enters the
+text slot, enabling JSON-to-TOON compression. Multi-block, multimodal, or annotated
+block arrays pass through. Other MCP tools retain their existing structured-output
+handling. Workspace Shell statistics and Pre/Post deduplication state live in
+`<cwd>/.tokenless`; native Bash keeps its existing data location. If a standalone
+installation includes `bin/` inside the plugin, the adapter uses those binaries.
+Workspace Shell and plugin-private binaries do not advertise bare
+`tokenless retrieve` recovery, since the model shell does not inherit the hook
+environment. Their PostTool compression therefore requires a lossless result.
 
 Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
 Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but
@@ -120,11 +132,12 @@ anolisa adapter status tokenless
 ```
 
 The CLI copies a self-contained plugin to `~/.qwenworkcn/plugins-custom/tokenless`
-and records file ownership. Restart QwenWorkCN and open a new **local** session;
+and records file ownership. Restart QwenWorkCN and open a new session;
 check plugin activation in the application. `status` verifies application presence
 and managed files, while loading and activation remain `unknown`. Sideloading
 never changes settings, permissions, databases, or disabled/blocked plugin lists.
-Versions other than the validated 1.2.5 produce a compatibility warning.
+Compatibility baselines are 1.2.5 native Bash and 1.3.2 workspace Shell; other
+versions produce a compatibility warning.
 
 `TOKENLESS_QWENWORK_APP` selects a non-default application bundle;
 `TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults search `/Applications`

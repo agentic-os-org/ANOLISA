@@ -289,11 +289,14 @@ fn lifecycle_dry_run_upgrade_and_source_free_disable() {
 fn foreign_install_and_modified_files_are_preserved() {
     let f = Fixture::new();
     std::fs::create_dir_all(f.target()).unwrap();
-    std::fs::write(f.target().join(".tokenless-qwenwork-owned.json"), "{}").unwrap();
+    let foreign_receipt = f.target().join(".tokenless-qwenwork-owned.json");
+    std::fs::write(&foreign_receipt, "{}").unwrap();
     failure(
         f.run(&[], &["enable", "tokenless", "qwenwork"]),
-        "scripts/uninstall.sh",
+        "content ANOLISA does not own",
     );
+    assert_eq!(std::fs::read_to_string(foreign_receipt).unwrap(), "{}");
+    assert!(!f.target().join(".qoder-plugin/plugin.json").exists());
     assert!(
         f.ok(&[], &["status", "tokenless"])["data"]["receipts"]
             .as_array()

@@ -15,7 +15,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 在模型消费前替换单文本工具结果 | Core 为可替换文本选择 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
-| 千问办公（macOS 本地模式） | `qwenwork` | — | 替换 Bash 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
+| 千问办公（macOS） | `qwenwork` | — | 替换原生 Bash 和工作区 Shell 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
@@ -81,19 +81,26 @@ Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
-### 千问办公（macOS 本地模式）
+### 千问办公（macOS）
 
 `qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。
 已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 改写、完整 MCP 响应替换、
-JSON 转 TOON 输出及 Read 透传。不支持安全工作区／Linux VM，Hook 会在非 macOS
-环境直接透传。
+JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
+macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse **仅匹配 Bash**，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
+PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
+`mcp__qw-builtin__mcp_workspace_bash`，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
 符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
 被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
 文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
 不注册 Tool Ready 或 Schema Hook。
+
+工作区 Shell 的结果恰好包含一个普通 MCP 文本块时，内容进入文本槽，支持 JSON 转 TOON。
+多个块、混合媒体或带注解的块数组保持透传，其他 MCP 工具保留已有结构化结果处理。
+工作区 Shell 的统计及 Pre/Post 去重状态保存在 `<cwd>/.tokenless`；原生 Bash 保留原有数据位置。
+独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。模型 Shell 不会继承 Hook 的环境，
+因此工作区 Shell 或插件私有二进制不声明裸 `tokenless retrieve` 恢复能力，PostTool 只应用无损压缩。
 
 先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
 和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。
@@ -109,9 +116,9 @@ anolisa adapter status tokenless
 ```
 
 CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
-完成后重启千问办公、开启新的**本地**会话，并在应用内检查插件激活状态。
+完成后重启千问办公、开启新会话，并在应用内检查插件激活状态。
 `status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
-旁加载不修改 settings、权限、数据库或禁用／阻止列表。已验证版本为 1.2.5，
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。兼容性基线为 1.2.5 原生 Bash 和 1.3.2 工作区 Shell；
 其他版本会显示兼容性未验证的警告。
 
 `TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。

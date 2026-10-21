@@ -210,7 +210,7 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return shutil.which("tokenless") is not None
+    return not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
@@ -384,6 +384,62 @@ _OPTIMIZATION_STATE_MAX_FILES = 1024
 # -- Binary resolution (cached) -----------------------------------------------
 
 _resolved_cache: dict[tuple, str | None] = {}
+
+_QWENWORK_WORKSPACE_SHELLS = frozenset(
+    {
+        "mcp__workspace__bash",
+        "mcp__qw-builtin__mcp_workspace_bash",
+    }
+)
+_QWENWORK_PRIVATE_RUNTIME = False
+
+
+def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
+    """Map QwenWork workspace shell events to the shared Bash contract."""
+    global _CONTEXT_DIR, _CONTEXT_FILE, _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
+    if agent_id != "qwenwork":
+        return input_data
+
+    plugin_root = os.environ.get("QODER_PLUGIN_ROOT", "")
+    private_bin = os.path.join(plugin_root, "bin")
+    if os.path.isabs(plugin_root) and os.path.isdir(private_bin):
+        os.environ["PATH"] = private_bin + os.pathsep + os.environ.get("PATH", "")
+        _resolved_cache.clear()
+        # The hook's private PATH is not the model's shell PATH.
+        _QWENWORK_PRIVATE_RUNTIME = True
+
+    tool_name = input_data.get("tool_name")
+    if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
+        return input_data
+
+    cwd = input_data.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+        warn("workspace shell hook has no valid cwd. Passing through unchanged.")
+        skip()
+    # RTK receives this path in its rewritten command; future conversations
+    # must not depend on grants to a previous conversation's state directory.
+    data_dir = os.path.join(cwd, ".tokenless")
+    os.environ["TOKENLESS_DATA_DIR"] = data_dir
+    _CONTEXT_DIR = data_dir
+    _CONTEXT_FILE = os.path.join(data_dir, ".rewrite-context")
+    _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
+    # Bare retrieval commands do not carry the hook's workspace data setting.
+    _QWENWORK_PRIVATE_RUNTIME = True
+
+    normalized = {**input_data, "tool_name": "Bash"}
+    response = input_data.get("tool_response")
+    if isinstance(response, list):
+        if not (
+            len(response) == 1
+            and isinstance(response[0], dict)
+            and set(response[0]) == {"type", "text"}
+            and response[0]["type"] == "text"
+            and isinstance(response[0]["text"], str)
+        ):
+            # Preserve multimodal blocks and metadata we cannot round-trip.
+            skip()
+        normalized["tool_response"] = response[0]["text"]
+    return normalized
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:

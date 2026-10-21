@@ -352,9 +352,10 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
-### 千问办公插件（macOS 本地模式）
+### 千问办公插件（macOS）
 
-`qwenwork` Adapter 面向千问办公 QwenWorkCN 的本地会话。PreToolUse **只改写 Bash 输入**；
+`qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
+PreToolUse 匹配两种 Shell 的工具名；
 PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
 保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
@@ -368,11 +369,12 @@ anolisa adapter enable tokenless qwenwork
 anolisa adapter status tokenless
 ```
 
-完成后重启千问办公并开启新的本地会话，在应用内检查激活状态。CLI 验证受管理文件，
+完成后重启千问办公并开启新会话，在应用内检查激活状态。CLI 验证受管理文件，
 加载和激活状态保持 `unknown`。旁加载不修改 settings，也不自动启用已禁用的插件。
-当前不支持安全工作区／VM 会话。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
+Linux VM 会话仍不受支持。工作区 Shell 的状态保存在对话工作目录中，
+其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
-安装、卸载及 1.2.5 验证范围参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos)。
 
 ### QwenPaw 安装
 

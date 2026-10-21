@@ -691,11 +691,11 @@ compression so the recovered payload reaches the model unchanged.
 make qoder-install
 ```
 
-## QwenWork Plugin (macOS Local Mode)
+## QwenWork Plugin (macOS)
 
-The `qwenwork` adapter targets QwenWorkCN (千问办公) local sessions. PreToolUse
-rewrites **Bash input only**; PostToolUse observes **all tools** and compresses
-eligible full results through the shared policy. Metadata-only callbacks from
+The `qwenwork` adapter targets QwenWorkCN (千问办公) native Bash and macOS workspace
+Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
+**all tools** and compresses eligible full results through the shared policy. Metadata-only callbacks from
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
 output; full MCP responses remain compressible. File-content protection and RTK
 deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
@@ -709,13 +709,15 @@ anolisa adapter enable tokenless qwenwork
 anolisa adapter status tokenless
 ```
 
-Restart QwenWorkCN and open a new local session; check activation in the application.
+Restart QwenWorkCN and open a new session; check activation in the application.
 The CLI verifies managed files, while loading and activation remain `unknown`.
-It does not change settings or enable a disabled plugin. Security-workspace/VM
-sessions are unsupported. Uninstall previous script-managed installations with
-their original script before enabling through the CLI; CLI-managed copies use
-`anolisa adapter disable tokenless qwenwork`. Installation, removal, and the 1.2.5
-validation scope are covered in [QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos-local-mode).
+It does not change settings or enable a disabled plugin. Linux VM sessions remain
+unsupported. Workspace Shell state uses the conversation working directory, and
+its single MCP text block is handled as shell output. Uninstall previous
+script-managed installations with their original script before enabling through
+the CLI; CLI-managed copies use `anolisa adapter disable tokenless qwenwork`.
+Installation, removal, and compatibility baselines are covered in
+[QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos).
 
 ## Claude Code Plugin
 
