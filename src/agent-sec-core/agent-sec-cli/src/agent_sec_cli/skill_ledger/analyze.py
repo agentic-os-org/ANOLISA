@@ -3,6 +3,7 @@
 import os
 import stat
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -248,7 +249,8 @@ def _scanner_error(name: str, version: str, error: dict[str, Any]) -> dict[str, 
 
 
 def _finding_error(finding: dict[str, Any]) -> dict[str, Any]:
-    metadata = dict(finding.get("metadata") or {})
+    raw_metadata = finding.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
     metadata.pop("error", None)
     return _error(
         str(finding.get("rule", "scanner-error")),
@@ -305,12 +307,24 @@ def _error(
     return item
 
 
+def _line_number(value: Any) -> int:
+    """Coerce a scanner-provided line marker to a sortable integer.
+
+    Third-party scanner output may carry a non-numeric ``line`` value; those
+    sort as line 0 so one malformed finding cannot abort the analysis result.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _sort_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         findings,
         key=lambda item: (
             str(item.get("file", "")),
-            int(item.get("line") or 0),
+            _line_number(item.get("line")),
             str(item.get("rule", "")),
         ),
     )

@@ -4,7 +4,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agent_sec_cli.skill_ledger.analyze import _sanitize_payload, analyze_skill
+from agent_sec_cli.skill_ledger.analyze import (
+    _build_scanner_result,
+    _sanitize_payload,
+    analyze_skill,
+)
 
 
 def _write_skill(root: Path, body: str = "Use this Skill safely.\n") -> None:
@@ -215,3 +219,63 @@ def test_analysis_does_not_open_network_connections() -> None:
 
     assert exit_code == 0
     assert payload["coverage_complete"] is True
+
+
+def test_malformed_scanner_error_metadata_is_treated_as_empty() -> None:
+    result = _build_scanner_result(
+        "code-scanner",
+        "1.0.0",
+        [
+            {
+                "rule": "code-scanner-error",
+                "message": "scanner failed",
+                "file": "SKILL.md",
+                "metadata": ["not", "a", "mapping"],
+            }
+        ],
+        frozenset({"code-scanner-error"}),
+    )
+
+    assert result["coverage_complete"] is False
+    assert result["status"] == "error"
+    assert result["errors"] == [
+        {"code": "code-scanner-error", "message": "scanner failed", "file": "SKILL.md"}
+    ]
+
+
+def test_scanner_error_metadata_mapping_is_preserved_without_error_key() -> None:
+    result = _build_scanner_result(
+        "code-scanner",
+        "1.0.0",
+        [
+            {
+                "rule": "code-scanner-error",
+                "message": "scanner failed",
+                "metadata": {"stage": "parse", "error": "raw traceback"},
+            }
+        ],
+        frozenset({"code-scanner-error"}),
+    )
+
+    assert result["errors"][0]["metadata"] == {"stage": "parse"}
+
+
+def test_non_numeric_line_values_sort_deterministically() -> None:
+    result = _build_scanner_result(
+        "code-scanner",
+        "1.0.0",
+        [
+            {"rule": "rule-b", "file": "SKILL.md", "line": "not-a-number"},
+            {"rule": "rule-d", "file": "SKILL.md", "line": 3},
+            {"rule": "rule-c", "file": "SKILL.md"},
+            {"rule": "rule-a", "file": "SKILL.md", "line": 1.9},
+        ],
+        frozenset(),
+    )
+
+    assert [finding["rule"] for finding in result["findings"]] == [
+        "rule-b",
+        "rule-c",
+        "rule-a",
+        "rule-d",
+    ]
