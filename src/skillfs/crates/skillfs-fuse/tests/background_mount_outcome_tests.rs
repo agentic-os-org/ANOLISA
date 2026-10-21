@@ -149,3 +149,137 @@ fn a_failed_deprecated_background_mount_returns_its_error() {
         "the deprecated background entry points must surface failures too"
     );
 }
+
+/// kongche-jbw P2 (path aliases, `..` arm): an absolute mountpoint
+/// spelling that contains `..` names the same directory, but the kernel
+/// mount table renders the resolved path. The entry must keep one
+/// canonical spelling for mounting, `is_mounted` and unmount, or a
+/// mount through the alias is reported as not live and unmount cannot
+/// find it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dotdot_mountpoint_spelling_is_mounted_and_unmounted() {
+    if !common::fuse_available() {
+        return;
+    }
+    let source = tempfile::tempdir().expect("source tempdir");
+    common::create_skill_dir(source.path(), "web");
+    let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+    let canonical = mountpoint.path().canonicalize().expect("canonical");
+    let parent = canonical.parent().expect("parent").to_path_buf();
+    let alias = parent
+        .join("..")
+        .join(parent.file_name().expect("parent name"))
+        .join(canonical.file_name().expect("leaf"));
+
+    let handle = mount_background_configured(
+        &alias,
+        source.path(),
+        shared_store(source.path()),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("a mount through a `..` spelling must succeed");
+    assert!(
+        mount_is_live(&canonical),
+        "the mount must be live under its resolved spelling"
+    );
+    assert!(
+        handle.is_mounted(),
+        "the handle must report the aliased mount as live"
+    );
+    handle.unmount().expect("unmount");
+    assert!(
+        !mount_is_live(&canonical),
+        "unmount must tear the aliased mount down"
+    );
+}
+
+/// kongche-jbw P2 (path aliases, symlink arm): mounting through a
+/// symlink to the real directory — the kernel table carries the resolved
+/// target, so the handle must address the canonical path too.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symlinked_mountpoint_spelling_is_mounted_and_unmounted() {
+    if !common::fuse_available() {
+        return;
+    }
+    let source = tempfile::tempdir().expect("source tempdir");
+    common::create_skill_dir(source.path(), "web");
+    let real = tempfile::tempdir().expect("real mountpoint tempdir");
+    let link_parent = tempfile::tempdir().expect("link parent tempdir");
+    let link = link_parent.path().join("mountpoint-link");
+    std::os::unix::fs::symlink(real.path(), &link).expect("symlink");
+    let canonical = real.path().canonicalize().expect("canonical");
+
+    let handle = mount_background_configured(
+        &link,
+        source.path(),
+        shared_store(source.path()),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("a mount through a symlinked spelling must succeed");
+    assert!(
+        mount_is_live(&canonical),
+        "the mount must be live under the symlink's target"
+    );
+    assert!(
+        handle.is_mounted(),
+        "the handle must report the symlinked mount as live"
+    );
+    handle.unmount().expect("unmount");
+    assert!(
+        !mount_is_live(&canonical),
+        "unmount must tear the symlinked mount down"
+    );
+}
+
+/// kongche-jbw P2 (path aliases, relative arm): a relative mountpoint
+/// spelling resolves against the caller's working directory; the mount
+/// and the handle must agree on the resolved path.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_relative_mountpoint_spelling_is_mounted_and_unmounted() {
+    if !common::fuse_available() {
+        return;
+    }
+    let source = tempfile::tempdir().expect("source tempdir");
+    common::create_skill_dir(source.path(), "web");
+    let cwd = std::env::current_dir().expect("cwd");
+    let name = format!("cs25-relative-mount-{}", std::process::id());
+    let mountpoint = cwd.join(&name);
+    std::fs::create_dir(&mountpoint).expect("mkdir in cwd");
+    let relative = std::path::Path::new(".").join(&name);
+    let canonical = mountpoint.canonicalize().expect("canonical");
+
+    let result = mount_background_configured(
+        &relative,
+        source.path(),
+        shared_store(source.path()),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    );
+    match result {
+        Ok(handle) => {
+            assert!(
+                mount_is_live(&canonical),
+                "the mount must be live under the resolved spelling"
+            );
+            assert!(
+                handle.is_mounted(),
+                "the handle must report the relatively-mounted mount as live"
+            );
+            handle.unmount().expect("unmount");
+            assert!(
+                !mount_is_live(&canonical),
+                "unmount must tear the relatively-mounted mount down"
+            );
+        }
+        Err(error) => panic!("a mount through a relative spelling must succeed, got: {error:?}"),
+    }
+    let _ = std::fs::remove_dir(&mountpoint);
+}

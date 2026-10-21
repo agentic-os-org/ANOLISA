@@ -76,6 +76,11 @@ pub struct SkillFs {
     skill_layout: SkillLayout,
     /// Channel to send sync events to the background sync worker.
     sync_tx: Option<std::sync::mpsc::Sender<SyncEvent>>,
+    /// Set by the [`Filesystem::init`](fuser::Filesystem::init) callback
+    /// (the kernel's FUSE_INIT) when `Some`: the per-session readiness
+    /// signal the background mount entry waits on. `None` on filesystems
+    /// mounted through the blocking entries, which have no waiter.
+    session_ready_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Skill Security policy. The S1 default is
     /// [`SkillMetaProtectionPolicy`], which denies mutating operations
     /// under `.skill-meta/**`. Embedders/tests can swap it for
@@ -223,6 +228,7 @@ impl SkillFs {
             in_place,
             skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
+            session_ready_signal: None,
             policy: Arc::new(SkillMetaProtectionPolicy),
             event_sink: Arc::new(NoopEventSink),
             active_resolver: None,
@@ -382,6 +388,16 @@ impl SkillFs {
 
     pub fn with_staging_matcher(mut self, matcher: Arc<StagingMatcher>) -> Self {
         self.staging_matcher = Some(matcher);
+        self
+    }
+
+    /// Attach this session's readiness signal: set once the kernel
+    /// delivers FUSE_INIT, i.e. the session is serving. The background
+    /// mount entry's wait loop polls it instead of inferring the
+    /// session's identity from mount-table presence (kongche-jbw P2 on
+    /// #7780).
+    pub fn with_session_ready_signal(mut self, signal: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.session_ready_signal = Some(signal);
         self
     }
 
@@ -708,6 +724,23 @@ impl SkillFs {
 }
 
 impl Filesystem for SkillFs {
+    /// The kernel delivers FUSE_INIT as soon as this session serves the
+    /// mountpoint — the authoritative per-session readiness signal. The
+    /// background mount entry's wait loop polls it rather than inferring
+    /// this session's identity from mount-table presence, which a stale
+    /// mount on the same mountpoint (or a session that completed before
+    /// the first probe) made ambiguous (kongche-jbw P2 on #7780).
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        _config: &mut fuser::KernelConfig,
+    ) -> Result<(), std::os::raw::c_int> {
+        if let Some(signal) = &self.session_ready_signal {
+            signal.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+
     fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
         self.inodes.forget(ino, nlookup);
     }

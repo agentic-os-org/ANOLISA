@@ -7,6 +7,7 @@
 //! functions are deprecated but remain for backward compatibility.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -131,31 +132,35 @@ fn take_background_mount_failure(slot: &BackgroundMountFailure) -> Option<FuseEr
 ///
 /// * A failure recorded by the mounting thread is returned as `Err` — the
 ///   original error, not a generic timeout.
-/// * A thread that exited without recording anything panicked inside
-///   [`mount_inner`] (its `Ok` is only reachable after an unmount); that is
-///   reported as `Err` as well.
-/// * Once the mountpoint appears in `/proc/mounts` the FUSE session is
-///   serving, so `Ok` means the mount is live — not "hopefully starting".
-///   `mount_inner` tears a stale mount on the same mountpoint down before
-///   creating the new session, so when one is present at spawn time,
-///   readiness additionally requires it to have gone away first; the new
-///   mount is what must show up, not the leftover.
-/// * If [`BACKGROUND_MOUNT_READINESS_TIMEOUT`] elapses with neither outcome
-///   (a pathologically slow environment probe), the historical optimistic
-///   success is preserved: the handle is handed out and the mount keeps
-///   coming up on its own thread.
+/// * This session's readiness is its own FUSE_INIT callback
+///   ([`SkillFs::init`] stores it in the shared flag the thread's
+///   filesystem carries): the kernel delivers FUSE_INIT as soon as the
+///   session serves, so `Ok` means this mount is live. The mount table is
+///   deliberately not consulted to infer readiness — an entry at the
+///   mountpoint cannot say which session produced it: a stale mount torn
+///   down and remounted by this thread raced every presence-based probe,
+///   and a session that completed before the first probe was
+///   indistinguishable from the leftover it replaced (kongche-jbw P2 on
+///   #7780).
+/// * A thread that exited is joined and the failure slot re-read once
+///   more, so an error recorded in the window between the last empty read
+///   and the thread's exit is still the one reported; only a slot that is
+///   empty after the join is an abnormal exit (kongche-jbw P2 on #7780).
+/// * If `budget` elapses with neither outcome (a pathologically slow
+///   environment probe), an explicit [`FuseError::MountPending`] is
+///   returned instead of the historical optimistic success — and the
+///   still-running thread is handed to a reaper that tears a late mount
+///   down again, so no unmanaged session is left behind (kongche-jbw P1
+///   on #7780).
 #[cfg(target_os = "linux")]
 fn wait_for_background_mount(
     mountpoint: &Path,
     session: std::thread::JoinHandle<()>,
     failure: &BackgroundMountFailure,
+    session_ready: Arc<AtomicBool>,
+    budget: Duration,
 ) -> Result<std::thread::JoinHandle<()>, FuseError> {
-    // Snapshot taken before the mounting thread could have torn anything
-    // down: mount_inner's stale-mount cleanup runs several process spawns
-    // deep inside the thread.
-    let stale_mount_present = MountHandle::path_is_mounted(mountpoint);
-    let mut stale_mount_gone = !stale_mount_present;
-    let deadline = std::time::Instant::now() + BACKGROUND_MOUNT_READINESS_TIMEOUT;
+    let deadline = std::time::Instant::now() + budget;
     loop {
         if let Some(error) = take_background_mount_failure(failure) {
             // The mounting thread exits right after recording a failure,
@@ -163,27 +168,76 @@ fn wait_for_background_mount(
             let _ = session.join();
             return Err(error);
         }
-        if session.is_finished() {
-            // `mount_inner` returns `Ok` only after the session was
-            // unmounted, which cannot have happened yet; the thread
-            // panicked before recording a failure.
-            let _ = session.join();
-            return Err(FuseError::MountFailed(
-                "background mount thread exited without reporting a failure".to_string(),
-            ));
-        }
-        let mounted = MountHandle::path_is_mounted(mountpoint);
-        if stale_mount_gone && mounted {
+        if session_ready.load(Ordering::Acquire) {
+            // This session's own FUSE_INIT: it is serving.
             return Ok(session);
         }
-        if !mounted {
-            stale_mount_gone = true;
+        if session.is_finished() {
+            return Err(finish_after_thread_exit(session, failure));
         }
         if std::time::Instant::now() >= deadline {
-            return Ok(session);
+            reap_late_background_mount(session, session_ready, mountpoint.to_path_buf());
+            return Err(FuseError::MountPending(format!(
+                "mountpoint {}: no ready session within the {:?} readiness \
+                 budget; a late mount is torn down automatically",
+                mountpoint.display(),
+                budget,
+            )));
         }
         std::thread::sleep(BACKGROUND_MOUNT_POLL_INTERVAL);
     }
+}
+
+/// Join an exited mounting thread and re-read the failure slot once more:
+/// the thread may have recorded its error in the window between the wait
+/// loop's last empty read and its exit — `is_finished()` only proves the
+/// thread exited, not that it failed silently. Only a slot that is still
+/// empty after the join is reported as an abnormal exit.
+fn finish_after_thread_exit(
+    session: std::thread::JoinHandle<()>,
+    failure: &BackgroundMountFailure,
+) -> FuseError {
+    let _ = session.join();
+    take_background_mount_failure(failure).unwrap_or_else(|| {
+        FuseError::MountFailed(
+            "background mount thread exited without reporting a failure".to_string(),
+        )
+    })
+}
+
+/// Tear down a late background mount after the caller gave up on it: the
+/// readiness budget expired, the mounting thread keeps running, and a
+/// session that still comes up would be unmanaged — nobody holds the
+/// handle that would unmount it. The reaper polls until the thread exits,
+/// unmounting whenever this session reports ready and its mountpoint is
+/// actually mounted, and is bounded so a wedged session cannot leak the
+/// reaper thread forever.
+fn reap_late_background_mount(
+    session: std::thread::JoinHandle<()>,
+    session_ready: Arc<AtomicBool>,
+    mountpoint: PathBuf,
+) {
+    std::thread::spawn(move || {
+        let deadline =
+            std::time::Instant::now() + BACKGROUND_MOUNT_READINESS_TIMEOUT.saturating_mul(2);
+        while !session.is_finished() {
+            if session_ready.load(Ordering::Acquire) && MountHandle::path_is_mounted(&mountpoint) {
+                let _ = std::process::Command::new("fusermount3")
+                    .arg("-u")
+                    .arg(mountpoint.as_os_str())
+                    .output();
+            }
+            if std::time::Instant::now() >= deadline {
+                error!(
+                    mountpoint = %mountpoint.display(),
+                    "giving up on reaping a late background mount"
+                );
+                return;
+            }
+            std::thread::sleep(BACKGROUND_MOUNT_POLL_INTERVAL);
+        }
+        let _ = session.join();
+    });
 }
 
 /// Non-Linux fallback: without `/proc/mounts` there is no authoritative
@@ -194,6 +248,8 @@ fn wait_for_background_mount(
     _mountpoint: &Path,
     session: std::thread::JoinHandle<()>,
     failure: &BackgroundMountFailure,
+    _session_ready: Arc<AtomicBool>,
+    _budget: Duration,
 ) -> Result<std::thread::JoinHandle<()>, FuseError> {
     std::thread::sleep(Duration::from_millis(100));
     if let Some(error) = take_background_mount_failure(failure) {
@@ -222,17 +278,35 @@ pub fn mount_background_configured(
     in_place: bool,
     config: MountConfig,
 ) -> Result<MountHandle, FuseError> {
-    let mountpoint_path = mountpoint.to_path_buf();
+    // One canonical spelling for the whole mount lifecycle
+    // (kongche-jbw P2 on #7780): the kernel mount table renders the
+    // resolved path, so the readiness probe, the handle's `is_mounted`
+    // and the unmount must all address it. The caller's spelling —
+    // relative, containing `..`, or through a symlink — would never
+    // match the table's entry. A path that cannot be canonicalized
+    // (it does not exist yet) keeps the raw spelling and fails inside
+    // mount_inner as before. Raw OS strings flow through: non-UTF-8
+    // mountpoints canonicalize and compare as bytes end to end.
+    let mountpoint_path =
+        std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     let source_path = source.to_path_buf();
 
     let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
     let record = Arc::clone(&failure);
+    // This session's own readiness signal, set by the filesystem's
+    // FUSE_INIT callback: the one signal that unambiguously belongs to
+    // this mount (kongche-jbw P2 on #7780).
+    let session_ready = Arc::new(AtomicBool::new(false));
+    // The thread takes its own mountpoint clone; the wait below keeps
+    // this one.
+    let mountpoint_for_thread = mountpoint_path.clone();
+    let thread_session_ready = Arc::clone(&session_ready);
 
     let session = std::thread::spawn(move || {
         let mut opts = options;
         opts.foreground = true;
-        if let Err(e) = mount_inner(
-            &mountpoint_path,
+        if let Err(e) = mount_inner_with_session_ready(
+            &mountpoint_for_thread,
             &source_path,
             store,
             opts,
@@ -253,24 +327,27 @@ pub fn mount_background_configured(
             config.os_adapter,
             config.directive_enabled,
             config.skill_discover_root,
+            Some(thread_session_ready),
         ) {
             error!(error = %e, "background mount failed");
             record_background_mount_failure(&record, e);
         }
     });
 
-    let session = wait_for_background_mount(mountpoint, session, &failure)?;
+    let session = wait_for_background_mount(
+        &mountpoint_path,
+        session,
+        &failure,
+        Arc::clone(&session_ready),
+        BACKGROUND_MOUNT_READINESS_TIMEOUT,
+    )?;
 
     Ok(MountHandle {
-        mountpoint: mountpoint.to_path_buf(),
+        mountpoint: mountpoint_path,
         session: Some(session),
     })
 }
 
-/// Internal mount that accepts optional Skill Security overrides. Public
-/// `mount` and `mount_background` keep their existing signatures and pass
-/// `None` for both; test/embedder callers reach the sink/policy injection
-/// path through [`mount_background_with_security`].
 #[allow(clippy::too_many_arguments)]
 fn mount_inner(
     mountpoint: &Path,
@@ -294,6 +371,61 @@ fn mount_inner(
     os_adapter: Option<OsAdapterStage>,
     directive_enabled: Option<bool>,
     skill_discover_root: Option<PathBuf>,
+) -> Result<(), FuseError> {
+    mount_inner_with_session_ready(
+        mountpoint,
+        source,
+        store,
+        options,
+        in_place,
+        event_sink,
+        policy,
+        active_resolver,
+        refresh_controller,
+        notify_controller,
+        trusted_writer,
+        staging_matcher,
+        staging_controller,
+        quiet_timeout_controller,
+        pending_install_controller,
+        post_publish_controller,
+        runtime_metrics,
+        skill_layout,
+        os_adapter,
+        directive_enabled,
+        skill_discover_root,
+        None,
+    )
+}
+
+/// Internal mount that accepts optional Skill Security overrides. Public
+/// `mount` and `mount_background` keep their existing signatures and pass
+/// `None` for both; test/embedder callers reach the sink/policy injection
+/// path through [`mount_background_with_security`].
+#[allow(clippy::too_many_arguments)]
+fn mount_inner_with_session_ready(
+    mountpoint: &Path,
+    source: &Path,
+    store: SharedSkillStore,
+    options: MountOptions,
+    in_place: bool,
+    event_sink: Option<Arc<dyn SkillEventSink>>,
+    policy: Option<Arc<dyn SecurityPolicy>>,
+    active_resolver: Option<Arc<ActiveSkillResolver>>,
+    refresh_controller: Option<Arc<RefreshController>>,
+    notify_controller: Option<Arc<NotifyController>>,
+    trusted_writer: Option<TrustedWriterConfig>,
+    staging_matcher: Option<Arc<StagingMatcher>>,
+    staging_controller: Option<Arc<InstallerStagingController>>,
+    quiet_timeout_controller: Option<Arc<QuietTimeoutController>>,
+    pending_install_controller: Option<Arc<PendingInstallController>>,
+    post_publish_controller: Option<Arc<PostPublishGraceController>>,
+    runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
+    skill_layout: Option<SkillLayout>,
+    os_adapter: Option<OsAdapterStage>,
+    directive_enabled: Option<bool>,
+    skill_discover_root: Option<PathBuf>,
+    session_ready: Option<Arc<AtomicBool>>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -358,6 +490,11 @@ fn mount_inner(
         in_place,
         TransformPipeline::empty(),
     );
+    // This session's readiness signal: FUSE_INIT sets it, and the
+    // background entry's wait loop polls it (kongche-jbw P2 on #7780).
+    if let Some(signal) = session_ready {
+        fs = fs.with_session_ready_signal(signal);
+    }
     if let Some(root) = skill_discover_root {
         fs = fs.with_skill_discover_root(root);
     }
@@ -795,17 +932,35 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
     refresh_controller: Option<Arc<RefreshController>>,
     trusted_writer: Option<TrustedWriterConfig>,
 ) -> Result<MountHandle, FuseError> {
-    let mountpoint_path = mountpoint.to_path_buf();
+    // One canonical spelling for the whole mount lifecycle
+    // (kongche-jbw P2 on #7780): the kernel mount table renders the
+    // resolved path, so the readiness probe, the handle's `is_mounted`
+    // and the unmount must all address it. The caller's spelling —
+    // relative, containing `..`, or through a symlink — would never
+    // match the table's entry. A path that cannot be canonicalized
+    // (it does not exist yet) keeps the raw spelling and fails inside
+    // mount_inner as before. Raw OS strings flow through: non-UTF-8
+    // mountpoints canonicalize and compare as bytes end to end.
+    let mountpoint_path =
+        std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     let source_path = source.to_path_buf();
 
     let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
     let record = Arc::clone(&failure);
+    // This session's own readiness signal, set by the filesystem's
+    // FUSE_INIT callback: the one signal that unambiguously belongs to
+    // this mount (kongche-jbw P2 on #7780).
+    let session_ready = Arc::new(AtomicBool::new(false));
+    // The thread takes its own mountpoint clone; the wait below keeps
+    // this one.
+    let mountpoint_for_thread = mountpoint_path.clone();
+    let thread_session_ready = Arc::clone(&session_ready);
 
     let session = std::thread::spawn(move || {
         let mut opts = options;
         opts.foreground = true;
-        if let Err(e) = mount_inner(
-            &mountpoint_path,
+        if let Err(e) = mount_inner_with_session_ready(
+            &mountpoint_for_thread,
             &source_path,
             store,
             opts,
@@ -826,16 +981,195 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             None,
             None,
             None,
+            Some(thread_session_ready),
         ) {
             error!(error = %e, "background mount failed");
             record_background_mount_failure(&record, e);
         }
     });
 
-    let session = wait_for_background_mount(mountpoint, session, &failure)?;
+    let session = wait_for_background_mount(
+        &mountpoint_path,
+        session,
+        &failure,
+        Arc::clone(&session_ready),
+        BACKGROUND_MOUNT_READINESS_TIMEOUT,
+    )?;
 
     Ok(MountHandle {
-        mountpoint: mountpoint.to_path_buf(),
+        mountpoint: mountpoint_path,
         session: Some(session),
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn fuse_available() -> bool {
+        if !std::path::Path::new("/dev/fuse").exists() {
+            return false;
+        }
+        // /dev/fuse may exist without permission to open it.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/fuse")
+            .is_ok()
+    }
+
+    /// kongche-jbw P2 ("completion before the first probe"): a session
+    /// that is already ready when the wait starts returns Ok on the
+    /// first check — no probe interval, no budget.
+    #[test]
+    fn a_ready_session_returns_immediately() {
+        let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+        let ready = Arc::new(AtomicBool::new(true));
+        let session = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        let started = std::time::Instant::now();
+        let _handle = wait_for_background_mount(
+            std::path::Path::new("/nonexistent"),
+            session,
+            &failure,
+            ready,
+            Duration::from_secs(30),
+        )
+        .expect("a ready session is Ok");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "readiness must return without polling, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// kongche-jbw P1: a session that is neither ready nor failed within
+    /// the budget returns the explicit `MountPending` error — not a
+    /// handle to a mount that may not exist.
+    #[test]
+    fn a_never_ready_session_times_out_as_pending() {
+        let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+        let ready = Arc::new(AtomicBool::new(false));
+        let session = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let started = std::time::Instant::now();
+        let error = wait_for_background_mount(
+            std::path::Path::new("/nonexistent"),
+            session,
+            &failure,
+            ready,
+            Duration::from_millis(100),
+        )
+        .expect_err("a never-ready session must not return Ok");
+        assert!(
+            matches!(error, FuseError::MountPending(ref message) if message.contains("/nonexistent")),
+            "the timeout must be the explicit pending outcome, got: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the timeout must honor the budget, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// kongche-jbw P2 (error publication): joining an exited thread and
+    /// re-reading the slot preserves an error the thread recorded just
+    /// before exiting — the window an earlier empty read cannot see.
+    #[test]
+    fn a_late_recorded_error_survives_the_thread_exit() {
+        let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+        let thread_failure = Arc::clone(&failure);
+        let session = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            record_background_mount_failure(
+                &thread_failure,
+                FuseError::InvalidMountPoint("late failure".to_string()),
+            );
+        });
+        while !session.is_finished() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let error = finish_after_thread_exit(session, &failure);
+        assert!(
+            matches!(error, FuseError::InvalidMountPoint(ref message) if message.contains("late failure")),
+            "the original error must be preserved after the join, got: {error:?}"
+        );
+    }
+
+    /// The end-to-end interleaving: whichever way the record/exit race
+    /// against the wait loop's reads resolves, the caller always sees the
+    /// original error — never the generic abnormal-exit one.
+    #[test]
+    fn an_exiting_thread_always_publishes_its_original_error() {
+        for round in 0..25 {
+            let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+            let thread_failure = Arc::clone(&failure);
+            let session = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(round % 5));
+                record_background_mount_failure(
+                    &thread_failure,
+                    FuseError::PermissionDenied(format!("round {round}")),
+                );
+            });
+            let error = wait_for_background_mount(
+                std::path::Path::new("/nonexistent"),
+                session,
+                &failure,
+                Arc::new(AtomicBool::new(false)),
+                Duration::from_secs(10),
+            )
+            .expect_err("a failed session must surface its error");
+            assert!(
+                matches!(error, FuseError::PermissionDenied(ref message) if message.contains(&format!("round {round}"))),
+                "round {round}: the original error must win the race, got: {error:?}"
+            );
+        }
+    }
+
+    /// kongche-jbw P1 (late-mount cleanup): a live session handed to the
+    /// reaper is unmounted and its thread joined — the shape a timeout
+    /// hands off when the mount still comes up after the caller gave up.
+    #[test]
+    fn a_late_live_mount_is_torn_down_and_reaped() {
+        if !fuse_available() {
+            return;
+        }
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mut store = skillfs_core::store::SkillStore::new();
+        store.load_from_directory(source.path(), &skillfs_core::ParseConfig::default());
+        let store: skillfs_core::SharedSkillStore = Arc::new(parking_lot::RwLock::new(store));
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+
+        let mut handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            store,
+            MountOptions::default(),
+            false,
+            MountConfig::default(),
+        )
+        .expect("background mount");
+        assert!(handle.is_mounted(), "precondition: the session is live");
+
+        let session = handle
+            .session
+            .take()
+            .expect("the handle owns the session thread");
+        reap_late_background_mount(
+            session,
+            Arc::new(AtomicBool::new(true)),
+            handle.mountpoint.clone(),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while MountHandle::path_is_mounted(&handle.mountpoint) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reaper must tear the late mount down"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

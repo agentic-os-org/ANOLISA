@@ -50,6 +50,13 @@ pub use mount::{
 pub enum FuseError {
     #[error("mount failed: {0}")]
     MountFailed(String),
+    /// The background mount did not become ready within its readiness
+    /// budget (kongche-jbw P1 on #7780): distinct from `MountFailed` so
+    /// callers can tell a failed mount from a still-pending one. The
+    /// mounting thread keeps running and a session that still comes up
+    /// is torn down again, so no unmanaged mount is left behind.
+    #[error("background mount pending: {0}")]
+    MountPending(String),
     #[error("unmount failed: {0}")]
     UnmountFailed(String),
     #[error("invalid mount point: {0}")]
