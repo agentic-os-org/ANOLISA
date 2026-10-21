@@ -1036,6 +1036,58 @@ impl BM25Store {
         Ok(out)
     }
 
+    /// Paths stored under `dir` (i.e. beginning with `dir/`), via a range
+    /// scan on the `path` UNIQUE index instead of a full-table scan.
+    ///
+    /// The half-open range `[dir + "/", dir + "0")` matches exactly the
+    /// strings starting with `dir/` under BINARY collation: `/` is 0x2F,
+    /// `0` is 0x30, and no byte lies strictly between them, so a path is in
+    /// the range iff it begins with `dir/`. Literal semantics — `_` and `%`
+    /// in a directory name are not treated as LIKE wildcards (#3797).
+    pub fn known_paths_under(&self, dir: &str) -> Result<Vec<String>> {
+        let lo = format!("{dir}/");
+        let hi = format!("{dir}0");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files WHERE path >= ?1 AND path < ?2")?;
+        let rows = stmt.query_map(params![lo, hi], |r| r.get::<_, String>(0))?;
+        let out: Vec<String> = rows.flatten().collect();
+        Ok(out)
+    }
+
+    /// Delete the given paths exactly — no descendant cascade — in a single
+    /// transaction. Returns the number of `files` rows removed.
+    ///
+    /// Used by the flush prune, which enumerates every stale path itself.
+    /// `remove`'s cascade would be wrong there: a stale row whose path is
+    /// now a directory (a file later replaced by a dir, #4634 review) sits
+    /// above live entries the walk just re-indexed, and cascading would
+    /// delete them.
+    pub fn remove_many(&mut self, rel_paths: &[String]) -> Result<usize> {
+        if rel_paths.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare("SELECT rowid FROM files WHERE path = ?1")?;
+            for p in rel_paths {
+                let rowids: Vec<i64> = stmt
+                    .query_map(params![p], |r| r.get::<_, i64>(0))?
+                    .flatten()
+                    .collect();
+                for rid in rowids {
+                    tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![rid])?;
+                    tx.execute("DELETE FROM files WHERE rowid = ?1", params![rid])?;
+                    removed += 1;
+                }
+                tx.execute("DELETE FROM files_vec WHERE path = ?1", params![p])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Paths present in the `files` (BM25) table that have no matching row
     /// in `files_vec`. Used by full_scan's backfill pass to compute vectors
     /// for files that exist on disk and are BM25-indexed but were never
