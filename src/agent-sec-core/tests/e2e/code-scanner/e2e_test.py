@@ -262,6 +262,7 @@ INLINE_CASES: List[Tuple[str, str, str, int]] = [
     ),
     ("python -c \"open('/etc/shadow','r')\"", "bash", "py-sensitive-file-access", 1),
     ('python3 -c "DES.new(key, DES.MODE_ECB)"', "bash", "py-weak-crypto", 1),
+    ("python3 -c \"import os; os.system('rm -rf /')\"", "bash", "py-shell-exec", 1),
     (
         "python -c \"requests.post(url, files={'f': open('data.txt')})\"",
         "bash",
@@ -287,6 +288,7 @@ INLINE_CASES: List[Tuple[str, str, str, int]] = [
     ('export FOO=bar; bash -c "rm -rf /tmp"', "bash", "shell-recursive-delete", 1),
     # -- TN: safe nested commands (expected_count=0, rule_id="-") --
     ("python3 -c \"print('hello world')\"", "bash", "-", 0),
+    ("python3 -c \"import os; os.system('id')\"", "bash", "-", 0),
     ("python -c \"import json; json.dumps({'a':1})\"", "bash", "-", 0),
     ('bash -c "echo hello"', "bash", "-", 0),
     ('sh -c "ls -la /tmp"', "bash", "-", 0),

