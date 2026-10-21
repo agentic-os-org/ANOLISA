@@ -100,6 +100,11 @@ impl Core {
                 return Err(Error::Preparation("runtime scope mismatch"));
             }
         }
+        if runtime.get("session_id").is_none() && plan["scope"].get("session_id").is_some() {
+            return Err(Error::Preparation(
+                "scope session is not confirmed by the runtime binding",
+            ));
+        }
         if plan["scope"]["runtime_generation"] != runtime["generation"]
             || runtime["state"] != "running"
             || (runtime.get("session_id").is_some()
