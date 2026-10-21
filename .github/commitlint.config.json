@@ -20,6 +20,7 @@
         "ktuner",
         "aw",
         "benchmark",
+        "semantic-arbiter",
         "deps",
         "ci",
         "docs",

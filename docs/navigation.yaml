@@ -233,3 +233,8 @@ groups:
         description:
           en: Inspect Linux kernel parameters, get tuning recommendations, and apply or roll back changes.
           zh: 检查 Linux 内核参数，给出调优建议，并支持应用和回滚改动。
+      - component: semantic-arbiter
+        label: {en: semantic-arbiter, zh: semantic-arbiter}
+        description:
+          en: Incubating deterministic checks and model-backed judgments for preservation and task scope; no live execution.
+          zh: 孵化中的语义判断组件，支持成果保护与任务范围的确定性检查和模型求值，不执行真实动作。
