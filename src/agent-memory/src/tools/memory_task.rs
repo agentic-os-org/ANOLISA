@@ -203,13 +203,19 @@ fn validate_task_id(id: &str) -> Result<()> {
 
 /// Parse a task from markdown content with YAML frontmatter.
 fn parse_task(content: &str) -> Result<Task> {
-    // Split frontmatter and body.
+    // Split frontmatter and body. `to_markdown` puts a blank separator line
+    // between the closing fence and the body ("---\n\n"); that line belongs to
+    // the delimiter, not to the context, so exactly one leading newline is
+    // dropped here. Keeping it would prepend one more blank line to the stored
+    // context on every load -> save round trip. Hand-written task files without
+    // the separator parse unchanged (`strip_prefix` is a no-op there).
     let (frontmatter, body) = content
         .strip_prefix("---\n")
         .and_then(|rest| {
             rest.find("\n---\n")
                 .map(|pos| (&rest[..pos], &rest[pos + 5..]))
         })
+        .map(|(frontmatter, body)| (frontmatter, body.strip_prefix('\n').unwrap_or(body)))
         .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
 
     // Parse frontmatter as YAML (using serde_yaml via serde_json roundtrip).
@@ -764,6 +770,156 @@ mod tests {
         assert_eq!(parsed.progress, 75);
         assert_eq!(parsed.next_steps.len(), 2);
         assert_eq!(parsed.files_modified.len(), 1);
+    }
+
+    /// Build a task carrying `context` for frontmatter round-trip tests.
+    fn task_with_context(context: &str) -> Task {
+        Task {
+            id: "task-ctx".into(),
+            title: "Context task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-10-03T10:00:00Z".into(),
+            updated_at: "2026-10-03T10:00:00Z".into(),
+            context: context.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_task_does_not_leak_frontmatter_separator_into_context() {
+        // `to_markdown` writes "---\n\n" before the body: the blank separator
+        // line is part of the delimiter and must not end up in the context.
+        let md = task_with_context("Some context here.").to_markdown();
+        let parsed = parse_task(&md).unwrap();
+        assert!(
+            !parsed.context.starts_with('\n'),
+            "parsed context must not include the blank separator line after the \
+             frontmatter fence: {:?}",
+            parsed.context
+        );
+        assert_eq!(parsed.context, "Some context here.\n");
+    }
+
+    #[test]
+    fn parse_task_empty_context_stays_empty() {
+        // A task saved without context must not come back with a phantom "\n",
+        // which callers (e.g. `memory_task_close`) read as real content.
+        let md = task_with_context("").to_markdown();
+        assert_eq!(parse_task(&md).unwrap().context, "");
+    }
+
+    #[test]
+    fn parse_task_roundtrip_is_byte_stable() {
+        // Regression for the per-save growth: re-serializing a parsed task must
+        // reproduce the file it came from, so repeated saves stop prepending
+        // one blank line per hop.
+        let first = task_with_context("alpha").to_markdown();
+        let mut md = first.clone();
+        for _ in 0..5 {
+            md = parse_task(&md).unwrap().to_markdown();
+            assert_eq!(md, first, "load -> save round trip must be byte-stable");
+        }
+        assert_eq!(parse_task(&md).unwrap().context, "alpha\n");
+    }
+
+    #[test]
+    fn parse_task_keeps_multi_paragraph_context() {
+        let md = task_with_context("first para\n\nsecond para\n").to_markdown();
+        assert_eq!(
+            parse_task(&md).unwrap().context,
+            "first para\n\nsecond para\n"
+        );
+    }
+
+    #[test]
+    fn parse_task_strips_only_the_separator_line() {
+        // A blank line the author put after the separator is content, so only
+        // one leading newline may be dropped.
+        let md = task_with_context("\nintentional leading blank\n").to_markdown();
+        assert_eq!(
+            parse_task(&md).unwrap().context,
+            "\nintentional leading blank\n"
+        );
+    }
+
+    #[test]
+    fn parse_task_accepts_file_without_separator_blank_line() {
+        // Hand-written task files may omit the blank line after the fence;
+        // their body must come through unchanged.
+        let md = "---\n\
+                  id: hand-written\n\
+                  title: Hand written\n\
+                  status: blocked\n\
+                  progress: 10\n\
+                  created_at: 2026-10-03T10:00:00Z\n\
+                  updated_at: 2026-10-03T10:00:00Z\n\
+                  ---\n\
+                  Body without separator\n";
+        let parsed = parse_task(md).unwrap();
+        assert_eq!(parsed.id, "hand-written");
+        assert_eq!(parsed.status, TaskStatus::Blocked);
+        assert_eq!(parsed.context, "Body without separator\n");
+    }
+
+    #[test]
+    fn close_task_without_context_does_not_add_blank_lines() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Task to close",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("close-no-context"),
+        )
+        .unwrap();
+        assert!(result.contains("close-no-context"));
+
+        memory_task_close(&svc, "close-no-context", Some("All done")).unwrap();
+
+        let path = svc.mount.root.join(TASKS_DIR).join("close-no-context.md");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.ends_with("---\n\n**Closed**: All done\n"),
+            "closing a context-free task must write exactly the Closed marker \
+             after the fence: {content:?}"
+        );
+    }
+
+    #[test]
+    fn close_task_with_context_keeps_one_blank_line_before_marker() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Task with context",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alpha"),
+            Some("close-with-context"),
+        )
+        .unwrap();
+
+        memory_task_close(&svc, "close-with-context", Some("All done")).unwrap();
+
+        let path = svc.mount.root.join(TASKS_DIR).join("close-with-context.md");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.ends_with("---\n\nalpha\n\n**Closed**: All done\n"),
+            "closed task must keep its context and one blank line before the marker: {content:?}"
+        );
     }
 
     #[test]
