@@ -9,6 +9,31 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.8] - 2026-10-21
+
+### 新增
+
+- 可选择启用的统计服务通过 Bearer 凭据提供只读记录，支持按会话和工具筛选、分页及按需读取内容，供 AgentSight 等集成使用。远程监听需使用私有网络或 TLS 代理（[#7303](https://github.com/agentic-os-org/ANOLISA/pull/7303)）。
+- 原生 `find` 路径列表现在可在可逆视图中共享重复目录前缀，同时保留每条路径及换行细节；有歧义或无收益的输出保持原样（[#7953](https://github.com/agentic-os-org/ANOLISA/pull/7953)）。
+- macOS 插件在新对话中加载后，QwenWorkCN 1.3.2 的 workspace Shell 调用可使用 Tokenless；原生 Bash 继续受支持，Linux VM 执行仍不支持（[#8725](https://github.com/agentic-os-org/ANOLISA/pull/8725)）。
+
+### 变更
+
+- CSV 和 TSV 压缩现在保留全部行与单元格，不再抽样，也不再为表格写入 Stash。部分输出的 Token 节省会减少；此前存储的缩减视图仍可恢复（[#8584](https://github.com/agentic-os-org/ANOLISA/pull/8584)）。
+
+### 修复
+
+- CLI 在 stdout 或 stderr 不可写时不再 panic。已完成的操作遇到关闭的输出管道会正常退出，其他输出失败会报告错误；统计清空提示未送达时也不会确认删除（[#7777](https://github.com/agentic-os-org/ANOLISA/pull/7777)、[#7773](https://github.com/agentic-os-org/ANOLISA/pull/7773)）。
+- Qoder、Claude Code 和 QwenWork 的安装与卸载脚本在 `ANOLISA_DRY_RUN=1` 下只预览操作，不修改注册或文件；OpenCode 预览也会列出有条件创建的插件目录（[#7715](https://github.com/agentic-os-org/ANOLISA/pull/7715)、[#7731](https://github.com/agentic-os-org/ANOLISA/pull/7731)、[#7747](https://github.com/agentic-os-org/ANOLISA/pull/7747)、[#7750](https://github.com/agentic-os-org/ANOLISA/pull/7750)）。
+- Qoder 现在会更早展开较短的 Shell 结果再压缩。QwenPaw 在任一 PostTool 内容块失败时保留完整原始响应，并遵守绝对路径的 `TOKENLESS_DATA_DIR`（[#8290](https://github.com/agentic-os-org/ANOLISA/pull/8290)）。
+- QwenPaw 会在插件执行工具调用前拒绝缺少必需 SDK 构造参数的 Runtime Wheel（[#7744](https://github.com/agentic-os-org/ANOLISA/pull/7744)）。
+- 直接替换工具响应的宿主现在会把完整原始响应字段交给 Core，不再在 Cosh 包装提取时丢失字段（[#7633](https://github.com/agentic-os-org/ANOLISA/pull/7633)）。
+- Codex 适配器现在能识别正确的限定插件标识；解码后的 `tool_input` 不是对象时，PreToolUse 事件会原样通过（[#7565](https://github.com/agentic-os-org/ANOLISA/pull/7565)、[#6984](https://github.com/agentic-os-org/ANOLISA/pull/6984)）。
+- Pipeline Worker 遇到无效请求类型时会返回错误，并继续处理后续请求（[#7569](https://github.com/agentic-os-org/ANOLISA/pull/7569)）。
+- Git Diff 和 HTML 压缩在 Stash 写入失败时会保留原始工具结果并一致地报告 Stash 错误，不再将整次 PostTool 调用判为 Pipeline 错误（[#6619](https://github.com/agentic-os-org/ANOLISA/pull/6619)）。
+- `stats show` 现在能区分压缩后内容为空、未存储压缩后内容，以及未发生压缩（[#7809](https://github.com/agentic-os-org/ANOLISA/pull/7809)）。
+- QwenPaw 预发布 Wheel URL 现在使用符合 PEP 440、可被 pip 安装的文件名，同时保留 Release Tag 的原始拼写（[#7662](https://github.com/agentic-os-org/ANOLISA/pull/7662)）。
+
 ## [0.8.7] - 2026-10-15
 
 ### 修复

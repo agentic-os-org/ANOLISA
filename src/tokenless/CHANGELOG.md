@@ -9,6 +9,31 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-10-21
+
+### Added
+
+- An opt-in, Bearer-authenticated statistics service now exposes read-only records with session and tool filters, pagination, and optional content for integrations such as AgentSight. Remote listeners need a private network or TLS proxy ([#7303](https://github.com/agentic-os-org/ANOLISA/pull/7303)).
+- Native `find` path lists can share repeated directory prefixes in a reversible view while preserving every path and line ending. Ambiguous or unprofitable output passes through unchanged ([#7953](https://github.com/agentic-os-org/ANOLISA/pull/7953)).
+- QwenWorkCN 1.3.2 workspace Shell calls can use Tokenless after the macOS plugin is loaded in a new conversation. Native Bash remains supported; Linux VM execution is unsupported ([#8725](https://github.com/agentic-os-org/ANOLISA/pull/8725)).
+
+### Changed
+
+- CSV and TSV compression now preserves every row and cell instead of sampling rows, and no longer writes Stash entries for tables. Some outputs save fewer tokens; previously stored reduced views remain retrievable ([#8584](https://github.com/agentic-os-org/ANOLISA/pull/8584)).
+
+### Fixed
+
+- CLI commands no longer panic when stdout or stderr cannot be written. A closed output pipe exits successfully after completed work, other output failures report failure, and an undelivered statistics-clear prompt cannot confirm deletion ([#7777](https://github.com/agentic-os-org/ANOLISA/pull/7777), [#7773](https://github.com/agentic-os-org/ANOLISA/pull/7773)).
+- Qoder, Claude Code, and QwenWork installers and uninstallers now preview their actions under `ANOLISA_DRY_RUN=1` without changing registrations or files. OpenCode's preview also names conditional plugin-directory creation ([#7715](https://github.com/agentic-os-org/ANOLISA/pull/7715), [#7731](https://github.com/agentic-os-org/ANOLISA/pull/7731), [#7747](https://github.com/agentic-os-org/ANOLISA/pull/7747), [#7750](https://github.com/agentic-os-org/ANOLISA/pull/7750)).
+- Qoder unwraps shorter shell results before compression. QwenPaw preserves the entire response if any PostTool block fails and honors an absolute `TOKENLESS_DATA_DIR` ([#8290](https://github.com/agentic-os-org/ANOLISA/pull/8290)).
+- QwenPaw rejects a runtime wheel whose SDK constructors lack required keyword arguments before the plugin reaches a tool call ([#7744](https://github.com/agentic-os-org/ANOLISA/pull/7744)).
+- Hosts that replace tool responses directly now pass all raw response fields to Core instead of losing fields during Cosh wrapper extraction ([#7633](https://github.com/agentic-os-org/ANOLISA/pull/7633)).
+- The Codex adapter now recognizes its qualified plugin identity and passes through PreToolUse events whose decoded `tool_input` is not an object ([#7565](https://github.com/agentic-os-org/ANOLISA/pull/7565), [#6984](https://github.com/agentic-os-org/ANOLISA/pull/6984)).
+- Pipeline workers now return an error for invalid request variants and continue serving later requests ([#7569](https://github.com/agentic-os-org/ANOLISA/pull/7569)).
+- Git diff and HTML compression retain the original tool result and report Stash write failures consistently instead of failing the whole PostTool call as a pipeline error ([#6619](https://github.com/agentic-os-org/ANOLISA/pull/6619)).
+- `stats show` distinguishes empty or unstored after-content from a result that was not compressed ([#7809](https://github.com/agentic-os-org/ANOLISA/pull/7809)).
+- QwenPaw prerelease wheel URLs now use installable PEP 440 filenames while keeping the release tag's original spelling ([#7662](https://github.com/agentic-os-org/ANOLISA/pull/7662)).
+
 ## [0.8.7] - 2026-10-15
 
 ### Fixed

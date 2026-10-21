@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "csv",
  "html5ever",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "regex",
  "serde_json",
