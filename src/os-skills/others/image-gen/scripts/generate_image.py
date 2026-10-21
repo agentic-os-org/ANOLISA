@@ -12,11 +12,13 @@ def _key():
         try:
             with open(cfg) as f: c = json.loads(f.read())
             # 格式1: {"providers":{"dashscope":{"apiKey":"..."}}}
-            for p in (c.get("providers") or {}).values():
-                if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
-            # 格式2: {"models":{"providers":{"xxx":{"apiKey":"..."}}}}
-            for p in (c.get("models",{}).get("providers") or {}).values():
-                if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
+            # 只取 dashscope 这一项：遍历取首个命中会把其他 provider 的 key
+            # 发到 dashscope.aliyuncs.com，必然 401 且报错信息指向不了真因。
+            p = (c.get("providers") or {}).get("dashscope")
+            if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
+            # 格式2: {"models":{"providers":{"dashscope":{"apiKey":"..."}}}}
+            p = (c.get("models",{}).get("providers") or {}).get("dashscope")
+            if isinstance(p,dict) and p.get("apiKey"): return p["apiKey"]
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
     print("ERROR: No API key. Set DASHSCOPE_API_KEY or configure ~/.openclaw/openclaw.json",file=sys.stderr); sys.exit(1)
