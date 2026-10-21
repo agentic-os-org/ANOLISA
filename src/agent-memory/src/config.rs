@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::error::MemoryError;
+
 /// Top-level configuration.
 ///
 /// `deny_unknown_fields` on every struct turns config typos into hard
@@ -424,7 +426,39 @@ impl AppConfig {
         };
 
         config.apply_env_overrides();
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Reject values that parse fine but would silently corrupt behavior.
+    ///
+    /// `apply_env_overrides` range-checks the `MEMORY_INDEX_TIME_DECAY_*`
+    /// overrides and keeps the current value on a violation, but the config
+    /// file — the path operators are told to use — accepted anything TOML
+    /// can express, as does a config built in code. Both fields feed
+    /// `exp(-lambda * age_days)` straight into every search score, so a sign
+    /// typo makes the decay factor *grow* with age and stale memories
+    /// outrank fresh ones, while `nan` (TOML floats accept it) degenerates
+    /// the ordering entirely. Neither leaves a trace in the index or the
+    /// audit log, so both are load-time errors, matching the
+    /// `deny_unknown_fields` policy on the structs above.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        let lambda = self.memory.index.time_decay_lambda;
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.index].time_decay_lambda = {lambda} must be a finite number >= 0; \
+                 a negative lambda makes the recency factor grow with age, so stale memories \
+                 outrank fresh ones, and a non-finite one degenerates every search score"
+            )));
+        }
+        let alpha = self.memory.index.time_decay_alpha;
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.index].time_decay_alpha = {alpha} must be a finite number in 0.0..=1.0; \
+                 a larger weight lets the recency boost swamp BM25 relevance"
+            )));
+        }
+        Ok(())
     }
 
     fn default_config_path() -> PathBuf {
@@ -697,5 +731,97 @@ mod tests {
         let cfg: AppConfig = toml::from_str(toml_src).expect("shipped default.toml must parse");
         assert!(cfg.memory.consolidation.enabled);
         assert!(cfg.memory.consolidation.max_facts > 0);
+        cfg.validate()
+            .expect("shipped default.toml must stay inside the validated ranges");
+    }
+
+    /// Load `toml_src` through the real file path. `toml::from_str` alone
+    /// skips `validate`, which is exactly the hole these tests pin shut.
+    fn load_toml_file(toml_src: &str) -> anyhow::Result<AppConfig> {
+        let file = tempfile::NamedTempFile::new().expect("a temp dir must be writable");
+        std::fs::write(file.path(), toml_src).expect("the temp config must be writable");
+        AppConfig::load(Some(file.path()))
+    }
+
+    #[test]
+    fn load_rejects_negative_decay_lambda_from_file() {
+        // A sign typo in memory.toml used to load cleanly and then invert
+        // recency ranking for every query — see
+        // `negative_lambda_inverts_recency_ranking` in the BM25 store for
+        // the ranking damage this guard prevents.
+        let err = load_toml_file("[memory.index]\ntime_decay_lambda = -0.01\n")
+            .expect_err("a negative lambda must not load");
+        let msg = err.to_string();
+        assert!(msg.contains("[memory.index].time_decay_lambda"), "{msg}");
+        assert!(msg.contains("-0.01"), "{msg}");
+    }
+
+    #[test]
+    fn load_rejects_alpha_above_one_from_file() {
+        let err = load_toml_file("[memory.index]\ntime_decay_alpha = 5.0\n")
+            .expect_err("alpha above 1.0 must not load");
+        let msg = err.to_string();
+        assert!(msg.contains("[memory.index].time_decay_alpha"), "{msg}");
+        assert!(msg.contains('5'), "{msg}");
+        assert!(msg.contains("0.0..=1.0"), "{msg}");
+    }
+
+    #[test]
+    fn load_rejects_nan_lambda() {
+        // TOML floats accept `nan`, and NaN poisons every adjusted score,
+        // degenerating the `total_cmp` ordering the search paths rely on.
+        let err = load_toml_file("[memory.index]\ntime_decay_lambda = nan\n")
+            .expect_err("nan must not load");
+        let msg = err.to_string();
+        assert!(msg.contains("[memory.index].time_decay_lambda"), "{msg}");
+        assert!(msg.contains("NaN"), "{msg}");
+    }
+
+    #[test]
+    fn load_rejects_infinite_decay_values() {
+        // `inf` also parses as an f64 and reaches the scorer, where it turns
+        // the recency boost into inf-or-NaN.
+        for key in ["time_decay_lambda", "time_decay_alpha"] {
+            let err = load_toml_file(&format!("[memory.index]\n{key} = inf\n"))
+                .err()
+                .unwrap_or_else(|| panic!("{key} = inf must not load"));
+            assert!(err.to_string().contains(key), "{err}");
+        }
+    }
+
+    #[test]
+    fn load_accepts_documented_ranges() {
+        // 0.0 disables decay and 1.0 is the documented ceiling for alpha;
+        // both are legitimate operator settings and must keep loading.
+        let cfg =
+            load_toml_file("[memory.index]\ntime_decay_lambda = 0.0\ntime_decay_alpha = 1.0\n")
+                .expect("the documented extremes must load");
+        assert_eq!(cfg.memory.index.time_decay_lambda, 0.0);
+        assert_eq!(cfg.memory.index.time_decay_alpha, 1.0);
+
+        AppConfig::default()
+            .validate()
+            .expect("the built-in defaults must validate");
+    }
+
+    #[test]
+    fn validate_rejects_programmatic_config() {
+        // `MemoryService::new` is reachable without `AppConfig::load`
+        // (embedders, tests), so the guard has to sit on the config itself
+        // rather than in the loader.
+        let mut cfg = AppConfig::default();
+        cfg.memory.index.time_decay_alpha = 1.5;
+        let err = cfg
+            .validate()
+            .expect_err("alpha above 1.0 must be rejected");
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(_)),
+            "expected InvalidArgument, got {err:?}"
+        );
+        assert!(err.to_string().contains("1.5"), "{err}");
+
+        cfg = AppConfig::default();
+        cfg.memory.index.time_decay_lambda = f64::NAN;
+        assert!(cfg.validate().is_err(), "NaN lambda must be rejected");
     }
 }

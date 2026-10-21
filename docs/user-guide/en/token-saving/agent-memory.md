@@ -391,7 +391,12 @@ Every successful tool call appends a JSONL line to `<mount>/.anolisa/audit.log`;
 
 Default location: `~/.anolisa/memory.toml`. The file is optional; Agent Memory
 uses built-in defaults when it is absent. All structs enable
-`serde(deny_unknown_fields)` — typos hard-fail at load. Minimal config:
+`serde(deny_unknown_fields)` — typos hard-fail at load, and so do
+out-of-range ranking parameters: `[memory.index].time_decay_lambda` must be
+a finite number ≥ 0 and `[memory.index].time_decay_alpha` a finite number
+within 0.0–1.0, the same ranges the `MEMORY_INDEX_TIME_DECAY_*` environment
+overrides enforce. Startup reports the offending key and value instead of
+silently inverting search ranking. Minimal config:
 
 ```toml
 [global]
@@ -415,8 +420,8 @@ strategy = "auto"              # auto | userland | userns
 
 [memory.index]
 enabled = true
-time_decay_lambda = 0.01
-time_decay_alpha = 0.3
+time_decay_lambda = 0.01       # finite, ≥ 0 (0 disables recency decay)
+time_decay_alpha = 0.3         # finite, 0.0–1.0
 cold_after_days = 30
 exclude_cold_on_search = true
 

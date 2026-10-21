@@ -379,7 +379,10 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 
 默认位置：`~/.anolisa/memory.toml`。该文件可选；文件不存在时，Agent Memory
 使用内置默认值。所有 struct 启用 `serde(deny_unknown_fields)`，配置项拼写错误
-会直接导致加载失败。最小配置：
+会直接导致加载失败；排序参数越界同样加载失败：`[memory.index].time_decay_lambda`
+必须是有限且 ≥ 0 的数值，`[memory.index].time_decay_alpha` 必须是 0.0–1.0 之间的
+有限数值，与 `MEMORY_INDEX_TIME_DECAY_*` 环境变量的校验范围一致。启动时会直接报出
+出错的配置项与取值，而不是静默地反转搜索排序。最小配置：
 
 ```toml
 [global]
@@ -403,8 +406,8 @@ strategy = "auto"              # auto | userland | userns
 
 [memory.index]
 enabled = true
-time_decay_lambda = 0.01
-time_decay_alpha = 0.3
+time_decay_lambda = 0.01       # 有限数值，≥ 0（0 表示关闭时间衰减）
+time_decay_alpha = 0.3         # 有限数值，0.0–1.0
 cold_after_days = 30
 exclude_cold_on_search = true
 

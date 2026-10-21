@@ -51,6 +51,12 @@ impl MemoryService {
     /// directory is writable. Failure to start the session is logged and
     /// degrades gracefully (mem_promote / mem_session_log will return errors).
     pub fn new(config: AppConfig) -> Result<Self> {
+        // Configs built in code skip `AppConfig::load`, and `IndexHandle::open`
+        // below hands the raw decay values to the BM25 scorer, so re-check the
+        // ranges here: a negative lambda would otherwise invert recency
+        // ranking for every query without a single log line.
+        config.validate()?;
+
         // `pick_strategy` below may unshare into a user namespace, after
         // which `geteuid()` reports the mapped uid (0 for the default
         // `0 <host uid> 1` mapping) instead of the one we were launched
