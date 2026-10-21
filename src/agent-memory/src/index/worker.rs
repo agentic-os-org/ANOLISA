@@ -305,14 +305,69 @@ fn flush(
             }
         };
         if !meta.is_file() {
+            // A directory event (mkdir / chmod / touch on the dir itself)
+            // is not a stale row: pushing it would cascade-remove the
+            // entire subtree, vectors included, and force a full re-read
+            // + re-embed. A same-name directory replacing a file cannot
+            // arrive without the file's own Remove event (rename(2)
+            // refuses dir-over-file), so there is no real gap to close
+            // here — skip directories, only drop genuinely non-file,
+            // non-directory occupants.
+            if meta.is_dir() {
+                continue;
+            }
+            tracing::debug!("index dropping non-file non-directory path {rel}");
+            to_remove.push(rel);
             continue;
         }
         if !is_indexable(rel_path, meta.len()) {
+            // The file still exists but is no longer indexable — it either
+            // grew past MAX_INDEXABLE_BYTES or carries an extension the
+            // index refuses. full_scan prunes such rows via its seen-set;
+            // the incremental path must agree, or the store keeps serving
+            // the pre-change body as a stale search hit until the next
+            // overflow/restart rescan.
+            tracing::debug!(
+                "index dropping unindexable file {rel} ({} bytes)",
+                meta.len()
+            );
+            to_remove.push(rel);
             continue;
         }
-        let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
-            Some(b) => b,
-            None => continue,
+        let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), rel_path) {
+            Ok(b) => b,
+            // Permanently unindexable: not UTF-8 (binary overwrite,
+            // mojibake), or the path stopped being a file we may read
+            // (deleted between stat and read, or swapped for a symlink —
+            // the no-follow resolution reports that as an error). Drop the
+            // row, mirroring full_scan's seen-set pruning of extract
+            // failures — the two paths must not diverge.
+            Err(crate::MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                tracing::debug!("index dropping non-UTF-8 file {rel}: {e}");
+                to_remove.push(rel);
+                continue;
+            }
+            Err(crate::MemoryError::NotFound(_)) | Err(crate::MemoryError::PathOutsideMount(_)) => {
+                tracing::debug!("index dropping vanished file {rel}");
+                to_remove.push(rel);
+                continue;
+            }
+            // Anything we do not recognise as a permanent failure. Two
+            // families reach this arm: Other, where translate_open_error
+            // maps only ENOENT/EEXIST/ELOOP/EXDEV to typed variants and
+            // everything else (EACCES, ESTALE, EMFILE, ENFILE, …) lands
+            // here; and Io with a kind other than InvalidData, produced
+            // by the read stage after the open succeeded (e.g. EIO on a
+            // failing disk — std maps it to Uncategorized, not
+            // InvalidData, so it skips the arm above). Treat both as
+            // transient: keep the row — removing it would make an intact
+            // file silently unsearchable until the next full rescan, the
+            // very loss this path exists to prevent. The next modify
+            // event retries.
+            Err(e) => {
+                tracing::warn!("index read failed for {rel}, keeping existing row: {e}");
+                continue;
+            }
         };
         let mtime = super::store::mtime_ms_of(&meta);
         to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
@@ -389,9 +444,26 @@ fn full_scan(
             if !is_indexable(rel_path, meta.len()) {
                 continue;
             }
-            let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
-                Some(b) => b,
-                None => continue,
+            // The same error taxonomy the incremental flush uses: a
+            // permanently unindexable body (non-UTF-8, vanished, swapped
+            // for a symlink) leaves the path out of `seen` so its stale
+            // row is pruned below, while a transient I/O error marks the
+            // path as seen so its row survives — the next full scan
+            // retries it.
+            let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), rel_path) {
+                Ok(b) => b,
+                Err(crate::MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    continue;
+                }
+                Err(crate::MemoryError::NotFound(_))
+                | Err(crate::MemoryError::PathOutsideMount(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("full-scan read failed for {rel}, keeping existing row: {e}");
+                    seen.insert(rel.clone());
+                    continue;
+                }
             };
             let mtime = super::store::mtime_ms_of(&meta);
             // Skip if already indexed with same mtime
@@ -450,7 +522,11 @@ fn backfill_vectors(
     }
 
     // Phase 2 (lock-free): read body + embed. Holding the mutex across an
-    // embedding HTTP call would block every concurrent search.
+    // embedding HTTP call would block every concurrent search. The
+    // `.ok()` here deliberately swallows every error — backfill must
+    // never drop a BM25 row (the row stays in paths_without_vec and the
+    // next full scan retries it); do not "unify" this with the flush's
+    // drop-on-permanent-failure semantics.
     let mut to_upsert: Vec<(String, Vec<f32>)> = Vec::new();
     for rel in missing {
         let rel_path = Path::new(&rel);
