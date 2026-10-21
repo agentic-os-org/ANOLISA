@@ -34,6 +34,7 @@
 import { execSync } from 'node:child_process';
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
@@ -197,7 +198,7 @@ function packagePlatform(target, binaryPath) {
 
   // Copy binary
   copyFileSync(binaryPath, join(pkgDir, 'bin', 'anolisa'));
-  execSync(`chmod 755 "${join(pkgDir, 'bin', 'anolisa')}"`, { stdio: 'pipe' });
+  chmodSync(join(pkgDir, 'bin', 'anolisa'), 0o755);
 
   const template = platformPackageTemplate(
     join(npmDir, 'platforms', target.pkg_suffix, 'package.json'),
@@ -232,7 +233,7 @@ console.error('@anolisa/cli: postinstall has not run yet. Run "npm rebuild @anol
 process.exit(1);
 `;
   writeFileSync(join(rootPkgDir, 'bin', 'anolisa'), stubScript);
-  execSync(`chmod 755 "${join(rootPkgDir, 'bin', 'anolisa')}"`, { stdio: 'pipe' });
+  chmodSync(join(rootPkgDir, 'bin', 'anolisa'), 0o755);
 
   for (const script of ['platforms.js', 'postinstall.js']) {
     copyFileSync(
