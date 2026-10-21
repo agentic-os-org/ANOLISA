@@ -1,0 +1,159 @@
+{
+  "synthetic": true,
+  "cases": [
+    {
+      "case_id": "preservation-allow",
+      "request": "preservation-allow.json",
+      "expected": {
+        "candidate_control": "allow",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": ["rebuild-1"]}
+        ]
+      },
+      "rationale": "Synthetic local byte comparison proves reproducibility for an explicitly allowed replacement."
+    },
+    {
+      "case_id": "task-scope-allow",
+      "request": "task-scope-allow.json",
+      "expected": {
+        "candidate_control": "allow",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic authoritative structured task explicitly permits deletion; task scope alone needs no rebuild evidence."
+    },
+    {
+      "case_id": "preserve",
+      "request": "preserve.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "preserve", "confidence_ppm": 1000000, "reason": "preserved", "evidence_refs": []},
+          {"unit": "task_scope", "value": "preserve", "confidence_ppm": 1000000, "reason": "preserved", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic explicit preservation overrides allowance and prevents deletion in both scenarios."
+    },
+    {
+      "case_id": "snapshot",
+      "request": "snapshot.json",
+      "expected": {
+        "candidate_control": "allow",
+        "obligation_kinds": ["snapshot", "audit"],
+        "answers": [
+          {"unit": "preservation", "value": "needs_snapshot", "confidence_ppm": 1000000, "reason": "needs_snapshot", "evidence_refs": ["rebuild-1"]},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic unique edits require a protection snapshot recommendation; allow does not claim the snapshot was executed."
+    },
+    {
+      "case_id": "missing-task",
+      "request": "missing-task.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "missing_task", "evidence_refs": []},
+          {"unit": "task_scope", "value": "unknown", "confidence_ppm": 0, "reason": "missing_task", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic null authoritative task is a valid blocked judgment, not inferred authorization."
+    },
+    {
+      "case_id": "missing-evidence",
+      "request": "missing-evidence.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "missing_evidence", "evidence_refs": []},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic task scope passes, but absent reconstruction evidence keeps the aggregate candidate blocked."
+    },
+    {
+      "case_id": "unknown",
+      "request": "unknown.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "undetermined", "evidence_refs": ["rebuild-1"]},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic inconclusive local verification stays unknown even when explicit task scope allows the resource."
+    },
+    {
+      "case_id": "outside-scope",
+      "request": "outside-scope.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "outside_scope", "confidence_ppm": 1000000, "reason": "outside_scope", "evidence_refs": []},
+          {"unit": "task_scope", "value": "outside_scope", "confidence_ppm": 1000000, "reason": "outside_scope", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic free-text mention of a resource cannot extend the structured allowed resource set."
+    },
+    {
+      "case_id": "timeout",
+      "request": "timeout.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "budget_exceeded", "evidence_refs": []},
+          {"unit": "task_scope", "value": "unknown", "confidence_ppm": 0, "reason": "budget_exceeded", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic check exactly at the exclusive original deadline exhausts the budget without renewing it."
+    },
+    {
+      "case_id": "source-reported",
+      "request": "source-reported.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "untrusted_evidence", "evidence_refs": []},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic external source claims remain reports and cannot prove local byte equality."
+    },
+    {
+      "case_id": "model-echo",
+      "request": "model-echo.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "unknown", "confidence_ppm": 0, "reason": "untrusted_evidence", "evidence_refs": []},
+          {"unit": "task_scope", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic model repetition never becomes authoritative reconstruction evidence."
+    },
+    {
+      "case_id": "coverage-gap",
+      "request": "coverage-gap.json",
+      "expected": {
+        "candidate_control": "block",
+        "obligation_kinds": ["audit"],
+        "answers": [
+          {"unit": "preservation", "value": "allow", "confidence_ppm": 1000000, "reason": "allowed", "evidence_refs": ["rebuild-1"]},
+          {"unit": "task_scope", "value": "unknown", "confidence_ppm": 0, "reason": "evidence_gap", "evidence_refs": []}
+        ]
+      },
+      "rationale": "Synthetic successful reconstruction cannot conceal a separately declared scope coverage gap."
+    }
+  ]
+}

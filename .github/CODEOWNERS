@@ -52,6 +52,7 @@
 # src/skillfs request the default SkillFS reviewers.
 /src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs
 /src/aw/                                @kongche-jbw                # auto-label: component:aw
+/src/semantic-arbiter/                  @yummypeng                  # auto-label: component:semantic-arbiter
 
 # Shared Provider collaboration is separate from component source roots.
 /providers/                             @kongche-jbw

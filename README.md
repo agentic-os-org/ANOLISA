@@ -78,6 +78,9 @@ capability can be enabled independently.
       <td></td>
       <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>Unified Agent policy configuration</sub></td>
     </tr>
+    <tr>
+      <td colspan="3"><strong><a href="src/semantic-arbiter/">semantic-arbiter</a> (incubating)</strong><br><sub>Independent semantic judgments with deterministic checks and configurable Bailian/TypeSafe models. No installer, live execution or production AW integration.</sub></td>
+    </tr>
   </tbody>
 </table>
 

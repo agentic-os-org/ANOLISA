@@ -43,6 +43,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | 集成 Agent runtime 的 AI 原生 Linux 终端 |
 | [ktuner](user-entrypoint/ktuner.md) | ktuner | 确定性内核调优引擎，提供 JSON 建议与安全回滚 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
+| [semantic-arbiter](user-entrypoint/semantic-arbiter.md) | semantic-arbiter | 孵化中的语义判断组件，支持成果保护与任务范围的确定性检查和模型求值，不执行真实动作 |
 
 ### 可观测性 `agent-observability/`
 

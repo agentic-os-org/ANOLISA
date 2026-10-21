@@ -256,6 +256,22 @@
       "status": "incubating"
     },
     {
+      "id": "semantic-arbiter",
+      "display_name": "Semantic Arbiter",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/semantic-arbiter/"
+      ],
+      "label": "component:semantic-arbiter",
+      "commit_scope": "semantic-arbiter",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": "semantic_arbiter",
+      "issue_triagers": [],
+      "status": "incubating"
+    },
+    {
       "id": "osbase",
       "display_name": "OS Base",
       "aliases": [],

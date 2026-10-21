@@ -75,6 +75,9 @@ Agent 框架和沙箱。ANOLISA CLI 提供统一的安装入口，各项能力�
       <td></td>
       <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>统一的 Agent 策略配置</sub></td>
     </tr>
+    <tr>
+      <td colspan="3"><strong><a href="src/semantic-arbiter/">semantic-arbiter</a>（孵化中）</strong><br><sub>独立语义判断组件，支持确定性检查与可配置百炼/TypeSafe 模型。无安装器、不执行真实动作、未接入生产 AW。</sub></td>
+    </tr>
   </tbody>
 </table>
 
