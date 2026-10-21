@@ -234,12 +234,13 @@ fn mount_inner(
     // Start from an empty pipeline and enable stages from configuration below.
     // This keeps `EnvironmentProfile::detect()` gated on the directive stage
     // actually being enabled, unlike the public `SkillFs::new` default.
-    let mut fs = SkillFs::new_with_pipeline(
+    let mut fs = SkillFs::new_with_pipeline_and_staging(
         mountpoint.to_path_buf(),
         source.to_path_buf(),
         store,
         in_place,
         TransformPipeline::empty(),
+        staging_matcher.clone(),
     );
     if let Some(root) = skill_discover_root {
         fs = fs.with_skill_discover_root(root);
@@ -282,9 +283,6 @@ fn mount_inner(
                 );
             }
         }
-    }
-    if let Some(m) = staging_matcher {
-        fs = fs.with_staging_matcher(m);
     }
     if let Some(c) = staging_controller {
         fs = fs.with_staging_controller(c);
