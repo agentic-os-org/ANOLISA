@@ -59,6 +59,10 @@ aw inspect --config "$AW_HOME/tokenless.yaml" --json
 新生成的 Tokenless 配置已包含查询设置，旧配置的补充方法见
 [查询接口参考](../../../../developer-guide/zh/aw/tokenless.md#panel-只读查询)。
 
+Tokenless 统计使用 AW 配置中的 Agent 名称标记来源，也就是 `aw run --agent` 后指定的名称。
+例如，`qoder-work` 和 `qoder-test` 即使都使用 Qoder，也会分别标记来源。
+不同配置使用相同名称时，统计仍可能汇总到一起。
+
 统计反映最近记录中的候选压缩收益，可能包含其他接入产生的数据。
 它不等于当前会话的计费节省；是否进入模型上下文，还需结合 Agent 的实际结果确认。
 
@@ -67,6 +71,9 @@ aw inspect --config "$AW_HOME/tokenless.yaml" --json
 AW 审计只保存元数据，Tokenless 使用独立的数据目录。
 Tokenless 默认统计可能保存完整的压缩前后工具文本；本地 SLS 日志保存指标与归属信息。
 已有遥测采集器可能继续收集这些日志。
+
+Agent 名称可能出现在统计记录和日志中。命名时避免包含敏感信息，
+分享统计或日志前请检查其中的名称和内容。
 
 不需要录制时，在启动 AW 之前设置以下变量。若服务已经运行，先退出 Agent 并停止旧服务。
 

@@ -89,6 +89,38 @@ impl SkillFs {
         }
     }
 
+    /// The in-place mount's `/proc/self/fd/{n}` spelling of the source
+    /// root, when the pre-opened dirfd exists.
+    pub(super) fn source_alias_root(&self) -> Option<PathBuf> {
+        self.source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        })
+    }
+
+    /// Rewrite a physical path's in-place fd alias back to the canonical
+    /// source-root spelling.
+    ///
+    /// Write-path I/O addresses the source through [`Self::source_base`]
+    /// (the pre-opened `/proc/self/fd/{n}` dirfd) so it bypasses the FUSE
+    /// over-mount, but the store keys and compares entries by
+    /// `source_path`, and the initial scan records the real source-root
+    /// spelling. Inserting the fd spelling would make one manifest look
+    /// like two different sources: the duplicate-name rule would compare
+    /// `/home/.../SKILL.md` against `/proc/self/fd/N/SKILL.md` and drop
+    /// or steal the post-write refresh by alias ordering, so the live
+    /// store would diverge from a fresh discovery scan. Store identity
+    /// and ordering always use the canonical spelling; only the I/O keeps
+    /// the fd alias.
+    pub(super) fn canonical_source_spelling(&self, physical: &Path) -> PathBuf {
+        if let Some(alias) = self.source_alias_root() {
+            if let Ok(rest) = physical.strip_prefix(&alias) {
+                return self.source.join(rest);
+            }
+        }
+        physical.to_path_buf()
+    }
+
     /// Resolve the live directory used by flat installer-authorized I/O.
     pub(super) fn flat_live_dir(&self, skill_name: &str, kind: FlatLiveDirKind) -> PathBuf {
         match kind {
@@ -329,6 +361,47 @@ impl SkillFs {
                 return skill_name.split('/').any(|c| m.is_staging_root(c));
             }
             false
+        })
+    }
+
+    /// I2: whether a store entry is installer-private staging content.
+    ///
+    /// The loader enforces no staging rule of its own — it skips only
+    /// dot-prefixed top-level directories, while the staging validator
+    /// accepts non-dot patterns — so a staging root pre-seeded on disk
+    /// (an installer that stages before the mount, or the residue of a
+    /// crashed install) is scanned in as a category and its nested
+    /// skills enter the store under their bare leaf names. Matching the
+    /// pattern against the leaf alone then lets the staged half-install
+    /// surface in the ordinary views; the entry is staging-private when
+    /// either the adopted name or the category it was scanned under
+    /// names a staging root. Write-path mutations inside a staging root
+    /// never reach the store: the observe dispatcher drops them first
+    /// (H3), so the category record of a scan-loaded entry is the
+    /// authoritative staging signal for the listing surfaces.
+    ///
+    /// The caller supplies the borrowed store — this predicate must
+    /// never acquire the store lock itself. Discover rendering holds
+    /// one read guard across the whole listing, and parking_lot's
+    /// RwLock is fair: a second acquisition from inside that guard
+    /// blocks behind any queued writer (the background sync worker's
+    /// reparse refresh queues exactly such a write) while the writer
+    /// waits for the outer guard to drop, so reading or statting the
+    /// discover manifest would stall FUSE request processing for good.
+    /// Callers that do not already hold a guard take one before
+    /// filtering the names.
+    pub(super) fn store_entry_is_staging_private(
+        &self,
+        store: &skillfs_core::store::SkillStore,
+        name: &str,
+    ) -> bool {
+        self.staging_matcher.as_ref().is_some_and(|m| {
+            if m.is_staging_root(name) {
+                return true;
+            }
+            store
+                .category_of(name)
+                .is_some_and(|category| m.is_staging_root(category))
         })
     }
 

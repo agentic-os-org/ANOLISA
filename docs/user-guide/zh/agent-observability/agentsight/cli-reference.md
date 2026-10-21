@@ -453,6 +453,26 @@ llm_error            high            1
 两个 flag 都不给时 `stats` 保持原有口径，统计整个窗口（含已解决与未解决）；两个 flag 互斥。
 `count` 不变，仍只统计未解决事件。不带 `--agent` 时两者都覆盖主机上的所有 Agent。
 
+`count` 同样接受 `list` 的 `--type`，把按严重级别的合计收窄到某一种中断类型，取值集合与 `list`
+一致，于是「还有多少 `token_limit` 没解决」一次调用就能问出来，不必先拉 `list --type` 的数组再自己
+累加：
+
+```
+$ sudo agentsight interruption count --last 24 --type token_limit --json
+{
+  "total": 2,
+  "by_severity": {
+    "critical": 0,
+    "high": 0,
+    "medium": 2,
+    "low": 0
+  }
+}
+```
+
+不带 `--type` 时合计仍覆盖所有类型，人类可读形式的排版也不变；某个类型一条都没命中时返回全零，
+而不是退回未过滤的合计。
+
 ```bash
 $ sudo agentsight interruption list --last 24
 INTERRUPTION_ID                    TYPE          SEVERITY  OCCURRED_AT              RESOLVED  AGENT    SESSION_ID

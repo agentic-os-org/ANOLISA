@@ -28,7 +28,7 @@ use crate::security::{
     SkillMetaProtectionPolicy, StagingMatcher, TrustedWriterConfig, default_identity_resolver,
     lifecycle::is_reserved_lifecycle_name,
 };
-use crate::sync::{SyncEvent, spawn_sync_worker};
+use crate::sync::{SourceAlias, SyncEvent, spawn_sync_worker};
 
 mod callbacks;
 mod discover;
@@ -182,6 +182,28 @@ impl SkillFs {
         in_place: bool,
         transform_pipeline: TransformPipeline,
     ) -> Self {
+        Self::new_with_pipeline_and_staging(
+            mountpoint,
+            source,
+            store,
+            in_place,
+            transform_pipeline,
+            None,
+        )
+    }
+
+    /// [`Self::new_with_pipeline`] with the staging matcher wired in at
+    /// construction, so the background sync worker (spawned here, before
+    /// the builder-style setters run) can apply the staging carve-out of
+    /// `upsert_checked_replacing_staging` on its re-parse refreshes.
+    pub(crate) fn new_with_pipeline_and_staging(
+        mountpoint: PathBuf,
+        source: PathBuf,
+        store: SharedSkillStore,
+        in_place: bool,
+        transform_pipeline: TransformPipeline,
+        staging_matcher: Option<Arc<StagingMatcher>>,
+    ) -> Self {
         // Load views config from the source directory if present.
         let views_config = ViewsConfig::load(&source);
         if views_config.is_some() {
@@ -208,10 +230,20 @@ impl SkillFs {
             None
         };
 
-        // Spawn the background sync worker.
+        // Spawn the background sync worker. In in-place mode the
+        // worker's re-parse I/O keeps addressing the source through the
+        // fd alias, while the entries it inserts carry the canonical
+        // source-root spelling (see `SourceAlias`).
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
         let sync_store = store.clone();
-        spawn_sync_worker(sync_rx, sync_store);
+        let sync_alias = source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            SourceAlias::new(
+                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())),
+                source.clone(),
+            )
+        });
+        spawn_sync_worker(sync_rx, sync_store, sync_alias, staging_matcher.clone());
 
         let fs = Self {
             mountpoint,
@@ -235,7 +267,7 @@ impl SkillFs {
             notify_controller: None,
             trusted_writer: TrustedWriterConfig::disabled(),
             trusted_writer_identity: default_identity_resolver(),
-            staging_matcher: None,
+            staging_matcher,
             staging_controller: None,
             quiet_timeout_controller: None,
             pending_install_controller: None,

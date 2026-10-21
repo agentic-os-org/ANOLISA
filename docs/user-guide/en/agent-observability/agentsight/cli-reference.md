@@ -471,6 +471,26 @@ Without either flag `stats` keeps its previous scope and reports the whole windo
 unresolved); the two flags are mutually exclusive. `count` is unchanged and still reports
 unresolved events only. Without `--agent` both cover every agent on the host.
 
+`count` also takes `list`'s `--type`, narrowing the per-severity totals to one interruption type
+with the same closed value set, so "how many `token_limit` hits are still open" is one call instead
+of a `list --type` array summed by hand:
+
+```
+$ sudo agentsight interruption count --last 24 --type token_limit --json
+{
+  "total": 2,
+  "by_severity": {
+    "critical": 0,
+    "high": 0,
+    "medium": 2,
+    "low": 0
+  }
+}
+```
+
+Without `--type` the totals cover every type, as before, and the human-readable form keeps its
+layout. A type that matched nothing reports zeros, not the unfiltered totals.
+
 ```bash
 $ sudo agentsight interruption list --last 24
 INTERRUPTION_ID                    TYPE          SEVERITY  OCCURRED_AT              RESOLVED  AGENT    SESSION_ID

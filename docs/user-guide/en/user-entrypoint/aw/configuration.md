@@ -51,6 +51,22 @@ AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
 [configuration tool reference](../../../../developer-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration).
 
+## Compare policy edits
+
+Prepare a separate candidate file and compare it with the existing configuration:
+
+```bash
+aw validate --config next.yaml --against current.yaml
+```
+
+Both files are validated. The comparison permits changes only to Providers,
+events and the default event budget. Agent entrypoints, native scheduling,
+service paths, audit, observation and metadata must remain identical.
+Success prints `policy update scope valid; runtime activation is not checked`.
+It does not run Providers, modify files, check native readiness or update a
+running Agent. Apply edits using the existing stop/edit/run workflow above.
+Plain `aw validate --config FILE` still prints `configuration valid`.
+
 ## Choose an Agent
 
 A configuration can contain multiple targets. `--agent` selects a name under `spec.agents`.

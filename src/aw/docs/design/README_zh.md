@@ -26,6 +26,7 @@ flowchart LR
 | 阅读顺序 | 负责的部分 |
 | --- | --- |
 | [配置](configuration_zh.md) | `aw-config` 在运行前校验期望配置 |
+| [策略更新边界](policy-reload_zh.md) | 离线比较；原生激活与旁路接入仍在规划中 |
 | [Adapter 分发](adapter-dispatch_zh.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
 | [本地服务](local-service_zh.md) | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
 | [Provider Host](provider-host_zh.md) | `aw-host` 准备 Provider，执行已准入的步骤 |

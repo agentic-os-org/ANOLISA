@@ -218,11 +218,37 @@ impl SkillFs {
                         parse_status: ParseStatus::Degraded(
                             "directory created, awaiting SKILL.md".to_string(),
                         ),
-                        source_path: physical.join("SKILL.md"),
+                        // Canonical source-root spelling: `physical`
+                        // addresses the source through the in-place fd
+                        // alias, and the store compares `source_path`
+                        // spellings against the initial scan's real-root
+                        // entries.
+                        source_path: self.canonical_source_spelling(&physical).join("SKILL.md"),
                         last_modified: std::time::SystemTime::now(),
                     };
-                    self.store.write().upsert(placeholder);
-                    debug!(name = %skill_name, "mkdir: inserted placeholder into store");
+                    let staging_matcher = self.staging_matcher.clone();
+                    let staging_root = |name: &str| {
+                        staging_matcher
+                            .as_ref()
+                            .is_some_and(|m| m.is_staging_root(name))
+                    };
+                    match self
+                        .store
+                        .write()
+                        .upsert_checked_replacing_staging(placeholder, &staging_root)
+                    {
+                        None => {
+                            debug!(name = %skill_name, "mkdir: inserted placeholder into store");
+                        }
+                        Some(error) => {
+                            warn!(
+                                name = %skill_name,
+                                dropped = %error.path.display(),
+                                "mkdir: duplicate skill name — kept the lexicographically \
+                                 smaller source path"
+                            );
+                        }
+                    }
                 }
 
                 // D1.3-demo: a fresh skill dir or a sub-dir under an
@@ -426,10 +452,25 @@ impl SkillFs {
                 if let Some(ino) = self.inodes.lookup_by_path(&path_str) {
                     self.inodes.remove(ino);
                 }
-                // Fast-path store sync: if deleting SKILL.md, remove from store.
+                // Fast-path store sync: if deleting SKILL.md, remove it
+                // from the store — but only when the deleted manifest
+                // actually backs the entry. The store keys skills by
+                // leaf name, so a losing same-leaf candidate (an inbox
+                // install, or a flat in-place slot shadowed by a
+                // categorized owner) must not drop the retained owner's
+                // entry: its manifest is untouched and a fresh scan
+                // re-discovers it.
                 if let PathType::SkillMd { skill_name } = &path_type {
-                    self.store.write().remove(skill_name);
-                    info!(name = %skill_name, "sync: removed skill (SKILL.md deleted)");
+                    if self.store_entry_backs_manifest(skill_name, &physical) {
+                        self.store.write().remove(skill_name);
+                        info!(name = %skill_name, "sync: removed skill (SKILL.md deleted)");
+                    } else {
+                        info!(
+                            name = %skill_name,
+                            "sync: deleted manifest does not back the store entry — \
+                             kept the retained owner"
+                        );
+                    }
                 }
                 // D1.3-demo: enqueue a refresh against the owning
                 // skill so the controller can either install a fresh
@@ -627,9 +668,26 @@ impl SkillFs {
                 // skill no longer exists.
                 let removed_skill = match &path_type {
                     PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
-                        self.store.write().remove(skill_name);
-                        info!(name = %skill_name, "sync: removed skill (directory deleted)");
-                        Some(skill_name.clone())
+                        // Ownership gate: the removed directory is only
+                        // one candidate for the leaf key. When the store
+                        // entry is backed by a different manifest (a
+                        // categorized same-leaf owner retained by the
+                        // duplicate-name rule), removing the losing
+                        // candidate must not drop the retained owner —
+                        // its manifest is untouched and a fresh scan
+                        // re-discovers it.
+                        if self.store_entry_backs_manifest(skill_name, &physical.join("SKILL.md")) {
+                            self.store.write().remove(skill_name);
+                            info!(name = %skill_name, "sync: removed skill (directory deleted)");
+                            Some(skill_name.clone())
+                        } else {
+                            info!(
+                                name = %skill_name,
+                                "sync: removed directory does not back the store entry — \
+                                 kept the retained owner"
+                            );
+                            None
+                        }
                     }
                     _ => None,
                 };
@@ -1372,7 +1430,15 @@ impl SkillFs {
                             });
                         }
                         if let PathType::SkillMd { skill_name } = &old_type {
-                            self.store.write().remove(skill_name);
+                            // Ownership gate (the removal-side twin of the
+                            // directory-rename identity gate above): the
+                            // renamed manifest only drops the key when it
+                            // backs the stored entry; a losing same-leaf
+                            // candidate's rename must leave the retained
+                            // owner in place.
+                            if self.store_entry_backs_manifest(skill_name, &old_physical) {
+                                self.store.write().remove(skill_name);
+                            }
                         }
                     }
                 }
@@ -1663,7 +1729,19 @@ impl SkillFs {
     /// skill to a non-conforming directory (e.g. `foo_bar`) degrades the
     /// entry exactly like the initial scan would, instead of inserting a
     /// cleanly parsed entry under an illegal name.
-    fn update_store_after_skill_rename(&self, old_name: &str, new_name: &str, new_physical: &Path) {
+    ///
+    /// The insert goes through `SkillStore::upsert_checked`: when the new
+    /// leaf name is already owned by a skill in a different directory, the
+    /// loaders' collision rule decides the winner — the store then matches
+    /// what a fresh discovery scan of the same tree would produce — and the
+    /// loser is reported (and logged) instead of being silently
+    /// overwritten. The collision report is returned to the caller.
+    fn update_store_after_skill_rename(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        new_physical: &Path,
+    ) -> Option<skillfs_core::store::LoadError> {
         self.store.write().remove(old_name);
         let md_path = new_physical.join("SKILL.md");
         // The mount's ceiling, not the default: reads, listings and the
@@ -1690,7 +1768,52 @@ impl SkillFs {
                 }
             };
         adopt_directory_name(&mut new_entry, new_name);
-        self.store.write().upsert(new_entry);
+        // Both branches above record the manifest under the write path's
+        // physical spelling, which addresses the source through the
+        // in-place fd alias. Store identity and ordering must use the
+        // canonical source-root spelling the initial scan recorded, or
+        // the duplicate-name rule would compare one manifest's alias and
+        // real spellings as two different sources.
+        new_entry.source_path = self.canonical_source_spelling(&new_entry.source_path);
+        let staging_matcher = self.staging_matcher.clone();
+        let staging_root = |name: &str| {
+            staging_matcher
+                .as_ref()
+                .is_some_and(|m| m.is_staging_root(name))
+        };
+        let collision = self
+            .store
+            .write()
+            .upsert_checked_replacing_staging(new_entry, &staging_root);
+        if let Some(error) = &collision {
+            warn!(
+                name = %new_name,
+                dropped = %error.path.display(),
+                "rename: duplicate skill name — kept the lexicographically smaller source path"
+            );
+        }
+        collision
+    }
+
+    /// Whether the store entry keyed by `skill_name` is backed by the
+    /// manifest at `manifest_physical` — the removal-side twin of
+    /// [`Self::rename_source_backs_store_entry`].
+    ///
+    /// The store keys skills by their directory leaf name, so a removal
+    /// through a slot the entry does not own (an inbox candidate, or a
+    /// flat in-place slot shadowed by a categorized same-leaf owner
+    /// retained by the duplicate-name rule) must not drop the entry: the
+    /// manifest backing the live entry is untouched, and a fresh scan
+    /// would re-discover it. Both spellings of the source root (the real
+    /// path and the in-place fd alias) are accepted, the same alias pair
+    /// `rename_source_backs_store_entry` reconciles.
+    fn store_entry_backs_manifest(&self, skill_name: &str, manifest_physical: &Path) -> bool {
+        let store = self.store.read();
+        let Some(entry) = store.get(skill_name) else {
+            return false;
+        };
+        self.canonical_source_spelling(&entry.source_path)
+            == self.canonical_source_spelling(manifest_physical)
     }
 
     /// Whether the store entry keyed by `skill_name` demonstrably
@@ -2037,6 +2160,169 @@ mod tests {
             "placeholder must merge the directory-name issue, got {:?}",
             entry.parse_status
         );
+    }
+
+    #[test]
+    fn rename_onto_another_directorys_leaf_keeps_the_discovery_winner() {
+        // ee514e2b4 ("surface cross-category name clashes") made same-leaf
+        // collisions loud at discovery: the lexicographically smaller source
+        // path keeps the key and the loser is reported as a LoadError. The
+        // rename store sync inserts with a blind upsert, so renaming a skill
+        // onto another directory's leaf name silently steals that key — the
+        // shadowed skill vanishes from /skills, sls list/validate, and
+        // skill-discover, and the live store diverges from what a remount
+        // would re-discover.
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("apple/notes"), "notes");
+        write_skill(&source.path().join("banana/alpha"), "alpha");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        assert_eq!(
+            store.get("notes").expect("discovered").source_path,
+            source.path().join("apple/notes/SKILL.md")
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        // The physical rename already happened: alpha's directory (its
+        // manifest not yet updated) now sits at banana/notes.
+        write_skill(&source.path().join("banana/notes"), "alpha");
+
+        fs.update_store_after_skill_rename("alpha", "notes", &source.path().join("banana/notes"));
+
+        let guard = shared.read();
+        assert!(guard.get("alpha").is_none(), "old store key removed");
+        assert_eq!(
+            guard.get("notes").expect("colliding key").source_path,
+            source.path().join("apple/notes/SKILL.md"),
+            "the discovery winner must keep the key: a rename onto another \
+             directory's leaf name must not silently steal it"
+        );
+    }
+
+    #[test]
+    fn rename_onto_another_directorys_leaf_reports_the_stolen_name() {
+        // The mirror direction of the collision rule: the renamed skill's
+        // source path is lexicographically smaller, so it takes the key —
+        // the same winner a remount would re-discover — but the collision
+        // must be reported, never silent.
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("zeta/notes"), "notes");
+        write_skill(&source.path().join("apple/alpha"), "alpha");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        write_skill(&source.path().join("apple/notes"), "alpha");
+
+        let report = fs.update_store_after_skill_rename(
+            "alpha",
+            "notes",
+            &source.path().join("apple/notes"),
+        );
+
+        let guard = shared.read();
+        assert_eq!(
+            guard.get("notes").expect("winner").source_path,
+            source.path().join("apple/notes/SKILL.md"),
+            "the lexicographically smaller renamed skill wins the key"
+        );
+        let report = report.expect("collision report");
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+    }
+
+    #[test]
+    fn canonical_source_spelling_rewrites_the_in_place_fd_alias() {
+        // Store identity and ordering run on `source_path` spellings, and
+        // the initial scan records the real source root. The write paths
+        // address the source through the in-place fd alias, so the alias
+        // must be rewritten back before any store comparison — otherwise
+        // one manifest's two spellings look like colliding sources.
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("notes"), "notes");
+        let shared = Arc::new(RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared,
+            true,
+        );
+
+        let alias_root = fs.source_alias_root().expect("in-place dirfd alias");
+        assert_eq!(
+            fs.canonical_source_spelling(&alias_root.join("notes/SKILL.md")),
+            source.path().join("notes/SKILL.md"),
+            "the fd alias must rewrite to the canonical source spelling"
+        );
+        // A path outside the alias passes through untouched.
+        let outside = source.path().join("elsewhere/SKILL.md");
+        assert_eq!(fs.canonical_source_spelling(&outside), outside);
+    }
+
+    #[test]
+    fn store_entry_backs_manifest_matches_only_the_owning_candidate() {
+        // Discovery keeps the lexicographically smaller source path for a
+        // same-leaf collision; the removal paths must therefore verify
+        // that the manifest they are removing backs the stored entry
+        // before dropping the key — in either spelling of the source
+        // root (real path for the initial scan, fd alias for write-path
+        // I/O in an in-place mount).
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("apple/notes"), "notes");
+        write_skill(&source.path().join("notes"), "notes");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        assert_eq!(
+            store.get("notes").expect("owner").source_path,
+            source.path().join("apple/notes/SKILL.md"),
+            "discovery keeps the lexicographically smaller source path"
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared,
+            true,
+        );
+        let alias_root = fs.source_alias_root().expect("in-place dirfd alias");
+
+        // The categorized owner's manifest backs the entry, in both
+        // spellings; the losing flat candidate — the one reachable at
+        // `/<leaf>` through an in-place mount — does not.
+        assert!(
+            fs.store_entry_backs_manifest("notes", &source.path().join("apple/notes/SKILL.md"))
+        );
+        assert!(
+            fs.store_entry_backs_manifest("notes", &alias_root.join("apple/notes/SKILL.md")),
+            "the fd alias spelling of the owner's manifest must also match"
+        );
+        assert!(!fs.store_entry_backs_manifest("notes", &source.path().join("notes/SKILL.md")));
+        assert!(
+            !fs.store_entry_backs_manifest("notes", &alias_root.join("notes/SKILL.md")),
+            "the losing candidate's fd-alias spelling must not match"
+        );
+        assert!(!fs.store_entry_backs_manifest("absent", &source.path().join("x/SKILL.md")));
     }
 
     #[test]

@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { register } from '../../aw-adapter/native/openclaw/hooks.mjs';
 
 const packageRoot = process.env.OPENCLAW_PACKAGE_DIR;
 assert.ok(packageRoot, 'Set OPENCLAW_PACKAGE_DIR to the installed OpenClaw 2026.9.6 package');
@@ -16,7 +15,6 @@ process.env.OPENCLAW_STATE_DIR = root;
 process.env.OPENCLAW_CONFIG_PATH = join(root, 'openclaw.json');
 const dist = join(packageRoot, 'dist');
 const { sanitizeToolResult } = await import(pathToFileURL(join(dist, 'plugin-sdk/agent-harness-runtime.js')));
-const plugin = { register: api => register(api, sanitizeToolResult) };
 const source = readdirSync(dist).filter(name => /^hooks-.*\.mjs$/.test(name))
   .map(name => [name, readFileSync(join(dist, name), 'utf8')])
   .find(([, text]) => text.includes('function createHookRunner('));
@@ -26,28 +24,38 @@ assert.ok(alias, 'Pinned native hook runner must expose its export');
 const createHookRunner = (await import(pathToFileURL(resolve(dist, source[0]))))[alias];
 test.after(() => rmSync(root, { recursive: true }));
 
-function fixture(t, before, after, existing = []) {
+async function fixture(t, before, after, existing = []) {
   const directory = mkdtempSync(join(root, 'case-'));
-  const typedHooks = existing.slice();
-  const middlewares = [];
-  plugin.register({
-    pluginConfig: {
-      binary: fileURLToPath(new URL('./fixtures/openclaw/client.mjs', import.meta.url)),
-      binding: directory, ready: { path: join(directory, 'ready.json'), token: 'test' },
-      hooks: {
-        before: before.map(step => ({ step, onError: 'block', budgetMs: 1000 })),
-        after: after.map(step => typeof step === 'string' ? ({ step, onError: 'report', budgetMs: 1000 }) : step),
+  const entry = join(directory, 'plugin');
+  mkdirSync(entry, { mode: 0o700 });
+  for (const name of ['index.mjs', 'hooks.mjs', 'package.json', 'openclaw.plugin.json']) {
+    copyFileSync(fileURLToPath(new URL(`../../aw-adapter/native/openclaw/${name}`, import.meta.url)), join(entry, name));
+    chmodSync(join(entry, name), 0o600);
+  }
+  const loader = readdirSync(dist).find(name => /^loader-runtime-load-.*\.mjs$/.test(name));
+  assert.ok(loader, 'Pinned official plugin loader must be present');
+  const { t: acquire } = await import(pathToFileURL(join(dist, loader)));
+  const inspection = await acquire({ onlyPluginIds: ['aw-native-hooks'], config: { plugins: {
+    enabled: true, allow: ['aw-native-hooks'], load: { paths: [entry] }, entries: { 'aw-native-hooks': {
+      enabled: true, config: {
+        binary: fileURLToPath(new URL('./fixtures/openclaw/client.mjs', import.meta.url)),
+        binding: directory, ready: { path: join(directory, 'ready.json'), token: 'test' },
+        hooks: {
+          before: before.map(step => ({ step, onError: 'block', budgetMs: 1000 })),
+          after: after.map(step => typeof step === 'string' ? ({ step, onError: 'report', budgetMs: 1000 }) : step),
+        },
       },
-    },
-    logger: { warn() {} },
-    registerAgentToolResultMiddleware: handler => middlewares.push(handler),
-    on: (hookName, handler, options) => typedHooks.push({
-      hookName, handler, pluginId: 'aw-native-hooks', ...options,
-    }),
-  });
+    } },
+  } } });
+  t.after(() => inspection.release());
+  const { registry } = inspection;
+  const record = registry.plugins.find(plugin => plugin.id === 'aw-native-hooks');
+  assert.equal(record?.status, 'loaded', JSON.stringify(registry.diagnostics));
+  assert.ok(!registry.diagnostics.some(row => row.pluginId === 'aw-native-hooks' && row.level === 'error'));
   return {
-    middlewares,
-    runner: createHookRunner({ typedHooks }, { catchErrors: false }),
+    registry,
+    middlewares: registry.agentToolResultMiddlewares.map(row => row.handler),
+    runner: createHookRunner({ typedHooks: [...existing, ...registry.typedHooks] }, { catchErrors: false }),
     records: () => readFileSync(join(directory, 'calls.jsonl'), 'utf8').trim()
       .split('\n').map(row => JSON.parse(row)),
   };
@@ -58,7 +66,7 @@ const context = { sessionId: 'session', runId: 'run', toolCallId: 'call' };
 
 test('official before runner keeps existing priority and immutable snapshots, then short-circuits block', { timeout: 10000 }, async t => {
   const existingCalls = [];
-  const f = fixture(t, ['first', 'block', 'skipped'], [], [{
+  const f = await fixture(t, ['first', 'block', 'skipped'], [], [{
     hookName: 'before_tool_call', pluginId: 'existing', priority: 200,
     handler: original => {
       existingCalls.push(original.params.command);
@@ -77,7 +85,7 @@ test('official before runner keeps existing priority and immutable snapshots, th
 
 test('official after runner starts independent handlers concurrently and ignores their return values', { timeout: 10000 }, async t => {
   const existingCalls = [];
-  const f = fixture(t, [], ['slow', 'first'], [{
+  const f = await fixture(t, [], ['slow', 'first'], [{
     hookName: 'after_tool_call', pluginId: 'existing', priority: 200,
     handler: () => { existingCalls.push('after'); return { result: 'ignored' }; },
   }]);
@@ -97,7 +105,7 @@ test('official model-bound middleware runner adopts replacement text', { timeout
   const alias = source[1].match(/createAgentToolResultMiddlewareRunner as (\w+)/)?.[1];
   assert.ok(alias);
   const createRunner = (await import(pathToFileURL(resolve(dist, source[0]))))[alias];
-  const f = fixture(t, [], ['slow', 'first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  const f = await fixture(t, [], ['slow', 'first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
   const runner = createRunner({ ...context, runtime: 'openclaw' }, f.middlewares);
   const result = await runner.applyToolResultMiddleware({ ...event, args: event.params,
     result: { content: [{ type: 'text', text: 'original' }] } });
@@ -111,12 +119,13 @@ test('official model-bound middleware runner adopts replacement text', { timeout
 });
 
 test('native completion keeps failures and redacts the original observation snapshot', { timeout: 10000 }, async t => {
-  const f = fixture(t, [], ['first', { step: 'empty', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  const f = await fixture(t, [], ['first', { step: 'empty', onError: 'report', budgetMs: 1000, replaceResult: true }]);
   const source = readdirSync(dist).filter(name => /^tool-result-middleware-.*\.mjs$/.test(name))[0];
   const { t: createRunner } = await import(pathToFileURL(join(dist, source)));
   const original = { content: [{ type: 'text', text: 'failure' }], details: { status: 'failed', authorization: 'Bearer private-review-secret' } };
   const result = await createRunner({ ...context, runtime: 'openclaw' }, f.middlewares)
     .applyToolResultMiddleware({ ...event, args: event.params, isError: true, result: original });
+  assert.deepEqual(result, original, 'Failed native results must remain unchanged');
   await f.runner.runAfterToolCall({ ...event, result: sanitizeToolResult(result), error: 'native failure', durationMs: 81 }, context);
   const observed = f.records().find(row => row.step === 'first').received.event;
   assert.equal(observed.error, 'native failure');
@@ -125,30 +134,60 @@ test('native completion keeps failures and redacts the original observation snap
   assert.equal(JSON.stringify(observed).includes('private-review-secret'), false);
 });
 
+test('official before runner allows the tool when policy does not block', { timeout: 10000 }, async t => {
+  const f = await fixture(t, ['first'], []);
+  const result = await f.runner.runBeforeToolCall(event, context);
+  assert.notEqual(result?.block, true);
+  assert.deepEqual(f.records().filter(row => row.phase === 'start').map(row => row.step), ['first']);
+});
+
 test('official plugin loader accepts the entrypoint, SDK import and middleware manifest contract', { timeout: 30000 }, async t => {
-  const directory = mkdtempSync(join(root, 'loader-'));
-  const entry = join(directory, 'plugin');
-  mkdirSync(entry, { mode: 0o700 });
-  for (const name of ['index.mjs', 'hooks.mjs', 'package.json', 'openclaw.plugin.json']) {
-    copyFileSync(fileURLToPath(new URL(`../../aw-adapter/native/openclaw/${name}`, import.meta.url)), join(entry, name));
-    chmodSync(join(entry, name), 0o600);
+  const f = await fixture(t, ['first'], ['first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  const registrations = f.registry.agentToolResultMiddlewares;
+  assert.equal(registrations.length, 1);
+  assert.deepEqual(registrations[0].runtimes, ['openclaw']);
+  for (const name of ['before_tool_call', 'after_tool_call', 'session_end']) {
+    assert.ok(f.registry.typedHooks.some(hook => hook.hookName === name), name);
   }
-  const loader = readdirSync(dist).find(name => /^loader-runtime-load-.*\.mjs$/.test(name));
-  const { t: acquire } = await import(pathToFileURL(join(dist, loader)));
-  const inspection = await acquire({ onlyPluginIds: ['aw-native-hooks'], config: { plugins: {
-    enabled: true, allow: ['aw-native-hooks'], load: { paths: [entry] }, entries: { 'aw-native-hooks': {
-      enabled: true, config: { binary: '/unused/aw', binding: '/unused/binding', ready: { path: join(directory, 'ready'), token: 'test' },
-        hooks: { before: [{ step: 'scan', onError: 'block', budgetMs: 1000 }],
-          after: [{ step: 'observe', onError: 'report', budgetMs: 1000 }, { step: 'compress', onError: 'report', budgetMs: 1000, replaceResult: true }] } },
-    } },
-  } } });
-  try {
-    const record = inspection.registry.plugins.find(plugin => plugin.id === 'aw-native-hooks');
-    assert.equal(record?.status, 'loaded', JSON.stringify(inspection.registry.diagnostics));
-    assert.equal(inspection.registry.agentToolResultMiddlewares.length, 1, JSON.stringify({ record, diagnostics: inspection.registry.diagnostics }));
-    assert.ok(inspection.registry.typedHooks.some(hook => hook.hookName === 'before_tool_call'));
-    assert.ok(inspection.registry.typedHooks.some(hook => hook.hookName === 'after_tool_call'));
-    assert.ok(inspection.registry.typedHooks.some(hook => hook.hookName === 'session_end'));
-    assert.ok(!inspection.registry.diagnostics.some(row => row.pluginId === 'aw-native-hooks' && row.level === 'error'));
-  } finally { await inspection.release(); }
+  const original = { content: [{ type: 'text', text: 'original' }] };
+  const input = { ...event, args: event.params, result: original };
+  assert.equal(await f.middlewares[0](input, { ...context, runtime: 'codex' }), undefined);
+  assert.equal((await f.middlewares[0](input, { ...context, runtime: 'openclaw' })).result.content[0].text, 'compact');
+  assert.deepEqual(f.records().filter(row => row.phase === 'start').map(row => row.step), ['replace']);
+});
+
+test('native policy aliases correlate replacement with the original completion snapshot', { timeout: 30000 }, async t => {
+  const policy = readdirSync(dist).find(name => /^tool-policy-[^.]+\.mjs$/.test(name)
+    && readFileSync(join(dist, name), 'utf8').includes('export {')
+    && readFileSync(join(dist, name), 'utf8').includes('normalizeToolPolicyName,'));
+  assert.ok(policy, 'Pinned native tool policy must expose normalization');
+  const { normalizeToolPolicyName } = await import(pathToFileURL(join(dist, policy)));
+  const middleware = readdirSync(dist).find(name => /^tool-result-middleware-.*\.mjs$/.test(name));
+  const { t: createRunner } = await import(pathToFileURL(join(dist, middleware)));
+  const f = await fixture(t, [], ['first', { step: 'replace', onError: 'report', budgetMs: 1000, replaceResult: true }]);
+  const runner = createRunner({ ...context, runtime: 'openclaw' }, f.middlewares);
+  for (const name of ['bash', 'exec', 'apply-patch', 'apply_patch', 'cron', 'automations', 'CuStOm/ToOl']) {
+    // Expected completion names come from OpenClaw, independently of AW's mapping.
+    const toolName = normalizeToolPolicyName(name);
+    const toolCallId = `alias-${name}`;
+    const original = { content: [{ type: 'text', text: `original-${name}` }] };
+    const result = await runner.applyToolResultMiddleware({ ...event, toolName: name, toolCallId, args: event.params, result: original });
+    assert.equal(result.content[0].text, 'compact', name);
+    await f.runner.runAfterToolCall({ ...event, toolName, toolCallId, result, durationMs: 37 }, context);
+    const observed = f.records().filter(row => row.step === 'first' && row.phase === 'start').at(-1);
+    assert.equal(observed.received.event.toolName, toolName);
+    assert.equal(observed.received.event.toolCallId, toolCallId);
+    assert.deepEqual(observed.received.event.result, original, name);
+    assert.equal(observed.received.event.durationMs, 37);
+    assert.equal(observed.completion.phase, 'observation');
+  }
+});
+
+test('native middleware distinguishes falsy replacement fields from absent output', { timeout: 30000 }, async t => {
+  for (const [step, replacement] of [['replace-empty', ''], ['replace-null', null], ['replace-false', false], ['replace-zero', 0], ['first', undefined], ['empty', undefined]]) {
+    const f = await fixture(t, [], [{ step, onError: 'report', budgetMs: 1000, replaceResult: true }]);
+    const result = await f.middlewares[0]({ ...event, args: event.params, result: { content: [{ type: 'text', text: 'original' }] } },
+      { ...context, runtime: 'openclaw' });
+    assert.deepEqual(result, replacement === undefined ? undefined : { result: replacement }, step);
+  }
 });

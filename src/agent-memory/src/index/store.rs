@@ -231,6 +231,14 @@ impl BM25Store {
 
         match existing_rowid {
             Some(rowid) => {
+                // A vector describes the extracted body, so metadata-only
+                // refreshes keep it while changed content needs backfilling.
+                tx.execute(
+                    "DELETE FROM files_vec WHERE path = ?1 AND EXISTS (
+                        SELECT 1 FROM files_fts WHERE rowid = ?2 AND body <> ?3
+                     )",
+                    params![rel_path, rowid, body],
+                )?;
                 tx.execute(
                     "UPDATE files SET mtime_ms=?1, size=?2, indexed_at=?3, agent_id=COALESCE(agent_id, ?4) WHERE rowid=?5",
                     params![mtime_ms, size as i64, now, agent_id, rowid],
@@ -258,6 +266,21 @@ impl BM25Store {
         Ok(())
     }
 
+    /// Remove one file's metadata, text, and vector without matching descendants.
+    /// Unlike `remove`, exact matching cannot evict wildcard- or case-alike
+    /// neighbors. Use for known regular files; returns whether any row existed.
+    pub(super) fn remove_file(&mut self, rel_path: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM files_fts WHERE rowid IN (SELECT rowid FROM files WHERE path = ?1)",
+            params![rel_path],
+        )?;
+        let files = tx.execute("DELETE FROM files WHERE path = ?1", params![rel_path])?;
+        let vectors = tx.execute("DELETE FROM files_vec WHERE path = ?1", params![rel_path])?;
+        tx.commit()?;
+        Ok(files > 0 || vectors > 0)
+    }
+
     /// Remove a file's index entry. Returns true if any row existed.
     ///
     /// Cascade semantics: if `rel_path` matches a stored row exactly, that
@@ -274,7 +297,7 @@ impl BM25Store {
         let prefix = format!("{rel_path}/");
         let rowids: Vec<i64> = {
             let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR instr(path, ?2) = 1")?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +308,7 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 OR instr(path, ?2) = 1",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
@@ -849,15 +872,34 @@ impl BM25Store {
 
     /// Vector-only search: returns `(path, cosine_similarity)` ordered
     /// by descending similarity with time decay boost.
+    ///
+    /// Superseded rows and, when `exclude_cold_on_search` is set, cold rows
+    /// are filtered before ranking so they never consume the `top_k` budget.
+    /// Vector rows without a matching `files` entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+    }
+
+    // Keep this override private: vector searches use the store default,
+    // while hybrid searches pass their per-call cold policy. Superseded and
+    // optionally cold rows are filtered before ranking; standalone vectors stay eligible.
+    fn search_vec_with_cold(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        exclude_cold: bool,
+    ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
         // JOIN with files to get mtime in a single query (avoids N+1).
+        // exclude_cold binds as 0/1; 0 disables the cold predicate, keeping SQL static.
         let mut stmt = self.conn.prepare(
             "SELECT v.path, v.embedding, f.mtime_ms \
-             FROM files_vec v LEFT JOIN files f ON f.path = v.path",
+             FROM files_vec v LEFT JOIN files f ON f.path = v.path \
+             WHERE COALESCE(f.is_superseded, 0) = 0 \
+               AND (?1 = 0 OR COALESCE(f.is_cold, 0) = 0)",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![exclude_cold], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -927,7 +969,7 @@ impl BM25Store {
     ) -> Result<Vec<SearchHit>> {
         // Run both search strategies.
         let bm25_hits = self.search(query, top_k * 2, exclude_cold);
-        let vec_hits = self.search_vec(query_vec, top_k * 2);
+        let vec_hits = self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold);
 
         let (bm25_hits, vec_hits): (Vec<SearchHit>, Vec<(String, f64)>) =
             match (bm25_hits, vec_hits) {
@@ -1313,6 +1355,21 @@ fn add_superseded_frontmatter(path: &std::path::Path, new_id: &str) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_file_reports_only_actual_evictions() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        assert!(!store.remove_file("missing.md").unwrap());
+        store.upsert("text.md", 0, 4, "text", None).unwrap();
+        assert!(store.remove_file("text.md").unwrap());
+        assert!(!store.remove_file("text.md").unwrap());
+
+        // Vector cleanup remains unconditional even without file metadata.
+        store.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+        assert!(store.remove_file("vector.md").unwrap());
+        assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        assert!(!store.remove_file("vector.md").unwrap());
+    }
 
     #[test]
     fn upsert_search_remove_roundtrip() {

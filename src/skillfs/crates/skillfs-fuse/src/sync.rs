@@ -3,10 +3,43 @@
 //! shared store.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use skillfs_core::{SharedSkillStore, parser, store::adopt_directory_name};
 use tracing::{info, warn};
+
+/// The in-place mount's source-address alias pair: re-parse I/O goes
+/// through the `/proc/self/fd/{n}` dirfd (bypassing the FUSE over-mount)
+/// while the store's `source_path` identity and ordering use the
+/// canonical source-root spelling the initial scan recorded.
+///
+/// Without the rewrite one manifest would look like two different
+/// sources — `insert_discovered` compares spellings — and the
+/// duplicate-name rule would drop or steal the post-write refresh by
+/// alias ordering, diverging the live store from a fresh scan.
+#[derive(Clone)]
+pub(crate) struct SourceAlias {
+    alias_root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+impl SourceAlias {
+    pub(crate) fn new(alias_root: PathBuf, canonical_root: PathBuf) -> Self {
+        Self {
+            alias_root,
+            canonical_root,
+        }
+    }
+
+    /// Canonical spelling of a physical path: the fd-alias prefix is
+    /// rewritten to the source root; every other spelling passes through.
+    fn canonicalize(&self, physical: &Path) -> PathBuf {
+        match physical.strip_prefix(&self.alias_root) {
+            Ok(rest) => self.canonical_root.join(rest),
+            Err(_) => physical.to_path_buf(),
+        }
+    }
+}
 
 /// Events sent from FUSE write callbacks to the background sync task.
 #[derive(Debug)]
@@ -29,8 +62,17 @@ pub(crate) enum SyncEvent {
 pub(crate) fn spawn_sync_worker(
     rx: std::sync::mpsc::Receiver<SyncEvent>,
     store: SharedSkillStore,
+    alias: Option<SourceAlias>,
+    staging_matcher: Option<std::sync::Arc<crate::security::StagingMatcher>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // I2: a staging-private incumbent never legitimately owns its
+        // leaf name — see `upsert_checked_replacing_staging`.
+        let is_staging_root = |name: &str| {
+            staging_matcher
+                .as_ref()
+                .is_some_and(|m| m.is_staging_root(name))
+        };
         while let Ok(first) = rx.recv() {
             // Collect more events within a 50 ms window (debounce).
             let mut pending: HashMap<String, SyncEvent> = HashMap::new();
@@ -67,11 +109,30 @@ pub(crate) fn spawn_sync_worker(
                                 // cannot overwrite the Degraded entry the
                                 // initial scan produced with a clean one.
                                 adopt_directory_name(&mut entry, skill_name);
+                                // The event's source_path addresses the
+                                // source through the in-place fd alias
+                                // (I/O must bypass the FUSE over-mount);
+                                // the store entry carries the canonical
+                                // source-root spelling so identity and
+                                // ordering match the initial scan.
+                                if let Some(alias) = &alias {
+                                    entry.source_path = alias.canonicalize(&entry.source_path);
+                                }
                                 info!(
                                     name = %skill_name,
                                     "sync: re-parsed SKILL.md"
                                 );
-                                store.write().upsert(entry);
+                                if let Some(error) = store
+                                    .write()
+                                    .upsert_checked_replacing_staging(entry, &is_staging_root)
+                                {
+                                    warn!(
+                                        name = %skill_name,
+                                        dropped = %error.path.display(),
+                                        "sync: duplicate skill name — kept the \
+                                         lexicographically smaller source path"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 warn!(
@@ -112,7 +173,7 @@ mod tests {
 
         let store = Arc::new(RwLock::new(SkillStore::new()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let worker = spawn_sync_worker(rx, store.clone());
+        let worker = spawn_sync_worker(rx, store.clone(), None, None);
         tx.send(SyncEvent::Reparse {
             skill_name: "demo".to_string(),
             source_path: md_path.clone(),
@@ -127,6 +188,110 @@ mod tests {
         assert_eq!(entry.metadata.name, "demo");
         assert_eq!(entry.source_path, md_path);
         assert!(entry.body.contains("updated body"));
+    }
+
+    #[test]
+    fn reparse_rewrites_the_fd_alias_to_the_canonical_root() {
+        // In an in-place mount the write paths enqueue the re-parse with
+        // the `/proc/self/fd/{n}` alias spelling, while the initial scan
+        // recorded the real source root. The worker must insert under the
+        // canonical spelling, or the store's duplicate-name rule would
+        // compare one manifest's two spellings as colliding sources and
+        // drop or steal the post-write refresh by alias ordering.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let md_path = source.path().join("notes/SKILL.md");
+        std::fs::create_dir_all(md_path.parent().expect("skill parent")).expect("skill dir");
+        std::fs::write(
+            &md_path,
+            "---\nname: notes\ndescription: demo\n---\nupdated body\n",
+        )
+        .expect("SKILL.md");
+
+        let mut initial = SkillStore::new();
+        initial.load_from_directory(source.path(), &skillfs_core::ParseConfig::default());
+        let store = Arc::new(RwLock::new(initial));
+
+        // A real fd alias over the source root, as the in-place mount
+        // pre-opens it. The dirfd must outlive the worker's parse.
+        let dirfd = std::fs::File::open(source.path()).expect("source dirfd");
+        use std::os::unix::io::AsRawFd;
+        let alias_root = PathBuf::from(format!("/proc/self/fd/{}", dirfd.as_raw_fd()));
+        let alias = SourceAlias::new(alias_root.clone(), source.path().to_path_buf());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = spawn_sync_worker(rx, store.clone(), Some(alias), None);
+        tx.send(SyncEvent::Reparse {
+            skill_name: "notes".to_string(),
+            source_path: alias_root.join("notes/SKILL.md"),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send reparse");
+        drop(tx);
+        worker.join().expect("sync worker");
+
+        let guard = store.read();
+        let entry = guard.get("notes").expect("reparsed store entry");
+        assert_eq!(
+            entry.source_path, md_path,
+            "the fd alias must not leak into the store's source identity"
+        );
+        assert!(entry.body.contains("updated body"));
+    }
+
+    #[test]
+    fn reparse_of_a_colliding_leaf_keeps_the_discovery_winner() {
+        // The sync worker re-parses SKILL.md on write events and inserts
+        // the entry under the event's bare leaf name. When a different
+        // directory shares that leaf, the blind upsert silently steals the
+        // discovered skill's store key — the same collision the loaders
+        // report (ee514e2b4), which must be decided by the same rule here.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let winner_md = source.path().join("apple/notes/SKILL.md");
+        std::fs::create_dir_all(winner_md.parent().expect("skill parent"))
+            .expect("category skill dir");
+        std::fs::write(
+            &winner_md,
+            "---\nname: notes\ndescription: from apple\n---\nbody\n",
+        )
+        .expect("discovered SKILL.md");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &skillfs_core::ParseConfig::default());
+        assert_eq!(
+            store.get("notes").expect("discovered").source_path,
+            winner_md
+        );
+
+        // A different directory with the same leaf appears later (a write
+        // through the mount lands here as a Reparse event).
+        let loser_md = source.path().join("banana/notes/SKILL.md");
+        std::fs::create_dir_all(loser_md.parent().expect("skill parent"))
+            .expect("colliding skill dir");
+        std::fs::write(
+            &loser_md,
+            "---\nname: notes\ndescription: from banana\n---\nbody\n",
+        )
+        .expect("colliding SKILL.md");
+
+        let shared = Arc::new(RwLock::new(store));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = spawn_sync_worker(rx, shared.clone(), None, None);
+        tx.send(SyncEvent::Reparse {
+            skill_name: "notes".to_string(),
+            source_path: loser_md,
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
+        })
+        .expect("send reparse");
+        drop(tx);
+        worker.join().expect("sync worker");
+
+        let guard = shared.read();
+        assert_eq!(
+            guard.get("notes").expect("key still held").source_path,
+            winner_md,
+            "a re-parse of a different directory with the same leaf must \
+             not silently steal the store key"
+        );
     }
 
     #[test]
@@ -154,7 +319,7 @@ mod tests {
 
         let shared = Arc::new(RwLock::new(SkillStore::new()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let worker = spawn_sync_worker(rx, shared.clone());
+        let worker = spawn_sync_worker(rx, shared.clone(), None, None);
         tx.send(SyncEvent::Reparse {
             skill_name: "foo_bar".to_string(),
             source_path: md_path,
@@ -205,7 +370,7 @@ mod tests {
         ] {
             let store = Arc::new(RwLock::new(SkillStore::new()));
             let (tx, rx) = std::sync::mpsc::channel();
-            let worker = spawn_sync_worker(rx, store.clone());
+            let worker = spawn_sync_worker(rx, store.clone(), None, None);
             tx.send(SyncEvent::Reparse {
                 skill_name: "big".to_string(),
                 source_path: md_path.clone(),

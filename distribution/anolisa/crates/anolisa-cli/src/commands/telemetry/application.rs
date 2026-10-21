@@ -1520,10 +1520,15 @@ mod tests {
             "disable",
             "enable-failure",
             "disable-failure",
+            "link",
+            "already-linked",
+            "unlink",
+            "upload",
+            "init",
             "preview-enable",
             "preview-disable",
         ] {
-            for mode in ["human", "json", "quiet"] {
+            for mode in ["human", "json", "quiet", "quiet-json"] {
                 // Keep stdout capture out of the process running parallel tests.
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
@@ -1553,7 +1558,7 @@ mod tests {
                         "would disable telemetry collection and stop the uploader"
                     };
                     match mode {
-                        "json" => {
+                        "json" | "quiet-json" => {
                             let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
                             assert_eq!(json["ok"], true);
                             assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
@@ -1576,16 +1581,51 @@ mod tests {
                     }
                     assert!(stderr.is_empty());
                 } else {
-                    // Apply historically emits the same text for all output flags.
-                    // This injection slice must not change that compatibility behavior.
-                    assert_eq!(
-                        rendered,
-                        if scenario.starts_with("enable") {
-                            "Telemetry collection enabled.\n"
-                        } else {
-                            "Telemetry collection disabled.\n  The uploader stops shortly; buffered logs are preserved.\n"
-                        }
-                    );
+                    if mode.ends_with("json") {
+                        let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                        let (command, data) = match scenario {
+                            "enable" | "enable-failure" => (
+                                "telemetry enable",
+                                serde_json::json!({"collection_enabled": true}),
+                            ),
+                            "disable" | "disable-failure" => (
+                                "telemetry disable",
+                                serde_json::json!({"collection_enabled": false}),
+                            ),
+                            "link" | "already-linked" => (
+                                "telemetry link",
+                                serde_json::json!({
+                                    "linked": true,
+                                    "link_id": if scenario == "link" { "generated-link" } else { "existing-link" },
+                                    "already_linked": scenario == "already-linked",
+                                }),
+                            ),
+                            "unlink" => ("telemetry unlink", serde_json::json!({"linked": false})),
+                            "upload" => {
+                                ("telemetry upload", serde_json::json!({"loop_flag": false}))
+                            }
+                            "init" => ("telemetry init", serde_json::json!({"initialized": true})),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(json["ok"], true);
+                        assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
+                        assert_eq!(json["command"], command);
+                        assert_eq!(json["data"], data);
+                    } else {
+                        assert_eq!(
+                            rendered,
+                            match scenario {
+                                "enable" | "enable-failure" => "Telemetry collection enabled.\n",
+                                "disable" | "disable-failure" =>
+                                    "Telemetry collection disabled.\n  The uploader stops shortly; buffered logs are preserved.\n",
+                                "link" => "Linked to named reporting.\n  link id: generated-link\n",
+                                "already-linked" => "Already linked (link id: existing-link).\n",
+                                "unlink" => "Unlinked from named reporting.\n",
+                                "upload" | "init" => "",
+                                _ => unreachable!(),
+                            }
+                        );
+                    }
                     assert_eq!(
                         stderr,
                         match scenario {
@@ -1658,8 +1698,8 @@ mod tests {
         let ctx = sandbox.context_with(
             InstallMode::System,
             TestContextOptions {
-                json: mode == "json",
-                quiet: mode == "quiet",
+                json: mode.ends_with("json"),
+                quiet: mode.starts_with("quiet"),
                 dry_run: preview,
                 ..Default::default()
             },
@@ -1673,19 +1713,32 @@ mod tests {
                 output(Some(0), "LoadState=loaded\n", ""),
             ],
             "preview-enable" | "preview-disable" => vec![],
+            "link" | "already-linked" | "unlink" | "upload" | "init" => vec![],
             _ => panic!("unknown service fixture"),
         };
         let (mut effects, calls) = service_effects(outputs);
+        if scenario == "already-linked" {
+            effects.link_id = Some("existing-link".to_string());
+        }
         effects.spawn_error = Some("spawn failed");
         let intent = if preview {
             ExecutionIntent::Plan
         } else {
             ExecutionIntent::Apply
         };
-        let request = if scenario.contains("enable") {
-            TelemetryRequest::Enable { intent }
-        } else {
-            TelemetryRequest::Disable { intent }
+        let request = match scenario.as_str() {
+            "enable" | "enable-failure" | "preview-enable" => TelemetryRequest::Enable { intent },
+            "disable" | "disable-failure" | "preview-disable" => {
+                TelemetryRequest::Disable { intent }
+            }
+            "link" | "already-linked" => TelemetryRequest::Link { intent },
+            "unlink" => TelemetryRequest::Unlink { intent },
+            "upload" => TelemetryRequest::Upload {
+                loop_flag: false,
+                intent,
+            },
+            "init" => TelemetryRequest::Init { intent },
+            _ => unreachable!(),
         };
         let result = run_with_effects(request, &ctx, &effects).unwrap();
         if preview {

@@ -14,9 +14,10 @@ single `audit.log` also lets multiple short-lived processes append and rotate by
 cannot represent complete Core and Shell lifecycles reliably and introduces cross-process rotation
 races.
 
-SLS already has a fixed production parsing contract: `/var/log/anolisa/sls/ops/cosh.jsonl`, 32
-fields, field types and calculations, turn-finalization write timing, `COSH_SLS_LOG_PATH`, and
-non-fatal write failures. Audit work must not change that contract.
+SLS already has a fixed production parsing contract: `/var/log/anolisa/sls/ops/cosh.jsonl`, 33
+fields (the original 32 plus `os.distro`, added 2026-10 as a separately reviewed schema change),
+field types and calculations, turn-finalization write timing, `COSH_SLS_LOG_PATH`, and non-fatal
+write failures. Audit work must not change that contract.
 
 ## Decision
 
@@ -61,7 +62,9 @@ non-fatal write failures. Audit work must not change that contract.
 ### Freeze SLS metrics completely
 
 - Keep `TurnMetrics` fields, increment points, and per-turn reset semantics unchanged.
-- Keep the exact 32 fields, names, types, calculations, and placeholders from `build_sls_record()`.
+- Keep the exact 33 fields, names, types, calculations, and placeholders from
+  `build_sls_record()` (the original 32 plus `os.distro`, added 2026-10 via the Follow-up
+  process: a separately reviewed work item that updated this ADR, the design doc, and the spec).
 - Keep the default path, environment override, open/append/close behavior, and non-fatal failure
   semantics of `append_sls_log()`.
 - Audit is an independent side path. It must not regenerate SLS from audit segments, add `trace_id`

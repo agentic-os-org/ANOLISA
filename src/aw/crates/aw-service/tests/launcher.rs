@@ -5,6 +5,8 @@
 mod command_policy;
 #[path = "launcher/hermes_trust.rs"]
 mod hermes_trust;
+#[path = "launcher/policy_update.rs"]
+mod policy_update;
 #[path = "launcher/qoder_version.rs"]
 mod qoder_version;
 #[path = "launcher/support.rs"]

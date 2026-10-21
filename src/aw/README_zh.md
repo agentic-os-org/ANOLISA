@@ -18,6 +18,10 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+用 `aw validate --config next.yaml --against current.yaml` 离线检查仅涉及策略的修改，
+详见[配置](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#比较策略修改)；
+此命令不更新运行中的实例。
+
 退出 Agent 后，本地服务仍可查询，使用结束后显式停止。
 
 ```bash
@@ -86,5 +90,9 @@ Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider�
 ```bash
 python3 src/aw/scripts/check.py
 ```
+
+Qoder CLI 和 QwenPaw App/API 各自通过临时容器中的真实 sec-core 验证正常放行、
+扫描拒绝、后端异常和超时阻断。Qoder 使用 nightly 账号 Secret，QwenPaw 使用
+本地确定性模型。完整验收边界见 [CI 看护](CONTRIBUTING_zh.md#日常-ci-与-nightly-集成)。
 
 - [开发环境和测试](CONTRIBUTING_zh.md)

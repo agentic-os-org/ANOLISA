@@ -68,6 +68,7 @@ from hook_utils import (
     is_skill_file,
     is_tokenless_retrieve_command,
     parse_version,
+    prepare_hook_input,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
@@ -256,6 +257,7 @@ def main() -> None:
         )
         skip()
 
+    input_data = prepare_hook_input(input_data, agent_id)
     session_id = input_data.get("session_id", "")
     tool_use_id = resolve_tool_call_id(agent_id, input_data)
     try:

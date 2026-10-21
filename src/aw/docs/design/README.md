@@ -27,6 +27,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Read in order | Owner and boundary |
 | --- | --- |
 | [Configuration](configuration.md) | `aw-config` validates desired input before runtime preparation |
+| [Policy update boundary](policy-reload.md) | Offline comparison; native activation and attachment remain planned |
 | [Adapter dispatch](adapter-dispatch.md) | The CLI registers native callbacks, normalizes events, and adopts effects |
 | [Local service](local-service.md) | `aw-service` manages bindings, events, and audit; dispatches steps to Host |
 | [Provider Host](provider-host.md) | `aw-host` prepares Providers and invokes admitted steps |

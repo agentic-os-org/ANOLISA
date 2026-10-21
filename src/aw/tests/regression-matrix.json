@@ -3,6 +3,7 @@
   "required_targets": [
     "aw-adapter/lib/aw_adapter",
     "aw-config/test/configuration",
+    "aw-config/test/policy_update",
     "aw-contracts/test/canonical",
     "aw-contracts/test/contracts",
     "aw-contracts/test/orchestration",
@@ -129,6 +130,14 @@
     "cancel-initialization": {
       "target": "aw-service/lib/aw_service",
       "test": "audit::tests::cancellation_fences_hook_opens_blocked_in_initial_audit_claim"
+    },
+    "policy_update_boundary": {
+      "target": "aw-config/test/policy_update",
+      "test": "launch_and_service_edits_are_rejected_without_values"
+    },
+    "policy_update_offline_cli": {
+      "target": "aw-service/test/launcher",
+      "test": "policy_update::policy_scope_validation_does_not_launch_agents_or_providers_or_modify_files"
     }
   },
   "agents": {

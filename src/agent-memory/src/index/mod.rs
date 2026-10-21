@@ -105,6 +105,10 @@ impl IndexHandle {
         store.search(query, top_k, false)
     }
 
+    /// Rank vector matches with the configured cold-file policy.
+    /// Superseded rows and cold rows excluded by `exclude_cold_on_search`
+    /// are filtered before ranking and never consume the `top_k` budget.
+    /// Vector rows without a matching file entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let raw = store.search_vec(query_vec, top_k)?;

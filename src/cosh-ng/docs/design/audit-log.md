@@ -20,8 +20,9 @@ results, terminal output, or environment variables. Audit events are retained fo
 100 MiB cap. Existing Shell evidence remains temporary and gains no new persistent directory.
 Exports apply a stricter redaction pass and include a verifiable manifest.
 
-Existing SLS metrics are a frozen compatibility contract. The path, 32 fields, field types and
-calculations, turn export timing, `COSH_SLS_LOG_PATH`, and non-fatal failure behavior must not change.
+Existing SLS metrics are a frozen compatibility contract. The path, 33 fields (the original 32
+plus `os.distro`), field types and calculations, turn export timing, `COSH_SLS_LOG_PATH`, and
+non-fatal failure behavior must not change.
 Audit events are written independently; they add no SLS trace ID and are never used to regenerate
 SLS records.
 
@@ -413,7 +414,7 @@ No phase may claim a complete production timeline before the corresponding produ
 - `required` blocks Provider/Agent governed execution on critical flush failure; `best_effort`
   persistently reports degradation and records recovery.
 - With audit enabled or disabled, identical fixed inputs produce identical SLS JSON; the SLS path,
-  32 fields, calculations, export timing, and non-fatal failure behavior remain unchanged.
+  33 fields, calculations, export timing, and non-fatal failure behavior remain unchanged.
 - Shell adds no internal-crate dependency or root implementation file and introduces no layout
   violation group.
 - Existing `cosh-shell diagnostics export` CLI, default output, and redaction regressions remain

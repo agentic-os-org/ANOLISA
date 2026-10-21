@@ -211,6 +211,11 @@ pub enum InterruptionAction {
         #[structopt(long)]
         agent: Option<String>,
 
+        /// Filter by interruption type.
+        /// Accepts every type the detector can produce; see the values listed below.
+        #[structopt(long = "type", possible_values = interruption_type_values())]
+        itype: Option<String>,
+
         /// Output as JSON
         #[structopt(long)]
         json: bool,
@@ -457,13 +462,19 @@ impl InterruptionCommand {
                 }
             }
 
-            InterruptionAction::Count { last, agent, json } => {
+            InterruptionAction::Count {
+                last,
+                agent,
+                itype,
+                json,
+            } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
                 let (critical, high, medium, low) = match interruption_severity_counts(
                     &store,
                     start_ns,
                     end_ns,
                     agent.as_deref(),
+                    itype.as_deref(),
                 ) {
                     Ok(counts) => counts,
                     Err(e) => {
@@ -656,17 +667,21 @@ fn interruption_stats(
     store.stats(start_ns, end_ns, resolved, agent)
 }
 
-/// Unresolved per-severity counts for a window, optionally scoped to one agent.
+/// Unresolved per-severity counts for a window, optionally scoped to one agent
+/// and one interruption type.
 ///
 /// `Some(false)` keeps the documented unresolved-only view; the agent filter
-/// is the one `list --agent` already applies.
+/// is the one `list --agent` already applies, and `itype` is the same column
+/// `list --type` sends to SQL — the count had no way to ask it, so every
+/// severity total covered all types no matter what the caller named.
 fn interruption_severity_counts(
     store: &InterruptionStore,
     start_ns: i64,
     end_ns: i64,
     agent: Option<&str>,
+    itype: Option<&str>,
 ) -> Result<(i64, i64, i64, i64), Box<dyn std::error::Error>> {
-    let rows = store.list(start_ns, end_ns, agent, None, None, Some(false), i64::MAX)?;
+    let rows = store.list(start_ns, end_ns, agent, itype, None, Some(false), i64::MAX)?;
     let mut critical = 0i64;
     let mut high = 0i64;
     let mut medium = 0i64;
@@ -983,6 +998,44 @@ mod tests {
         (read_only, path)
     }
 
+    /// One unresolved `token_limit` (medium) and one unresolved `agent_crash`
+    /// (critical), so a per-severity count can tell the two types apart.
+    fn mixed_type_store(name: &str) -> (InterruptionStore, std::path::PathBuf) {
+        use agentsight::interruption::{InterruptionEvent, InterruptionType, Severity};
+
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_interruption_mixed_{name}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = InterruptionStore::new_with_path(&path).expect("create store");
+        for (index, (itype, severity)) in [
+            (InterruptionType::TokenLimit, Severity::Medium),
+            (InterruptionType::AgentCrash, Severity::Critical),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut event = InterruptionEvent::new(
+                itype,
+                Some(format!("sess-mixed-{index}")),
+                None,
+                Some(format!("conv-mixed-{index}")),
+                None,
+                Some(4242),
+                Some("TestAgent".to_string()),
+                1_000_000_000,
+                None,
+            );
+            event.severity = severity;
+            event.interruption_id = format!("int-mixed-{index}");
+            store.insert(&event).expect("insert event");
+        }
+        let read_only =
+            InterruptionStore::open_read_only_existing(&path).expect("reopen read-only");
+        (read_only, path)
+    }
+
     /// `--unresolved` / `--resolved` on `stats` used to be unexpressible: the
     /// helper passed `None` for the resolution filter no matter what, so the
     /// per-type table always mixed solved and unsolved events. The store has
@@ -1224,6 +1277,87 @@ mod tests {
             ]);
             assert!(both.is_err(), "{command} must reject both flags together");
         }
+    }
+
+    /// `count` publishes per-severity totals, but its store call hardcoded the
+    /// type filter to `None`: every severity total covered all types, so a
+    /// caller asking "how many token_limit hits are open" had no way to ask it
+    /// and had to pull `list --type token_limit --json` and sum by hand.
+    #[test]
+    fn count_filters_by_type() {
+        use agentsight::interruption::{InterruptionType, Severity};
+
+        let (store, path) = mixed_type_store("count_type");
+
+        let all = interruption_severity_counts(&store, 0, i64::MAX, None, None)
+            .expect("count every type");
+        assert_eq!(all, (1, 0, 1, 0), "both types are counted without --type");
+
+        // Reverting the wiring (back to a hardcoded `None`) makes this the
+        // `all` tuple instead: (1, 0, 1, 0) rather than (0, 0, 1, 0).
+        let token_limit =
+            interruption_severity_counts(&store, 0, i64::MAX, None, Some("token_limit"))
+                .expect("count token_limit");
+        assert_eq!(
+            token_limit,
+            (0, 0, 1, 0),
+            "only the token_limit row survives the type filter"
+        );
+
+        let crash = interruption_severity_counts(&store, 0, i64::MAX, None, Some("agent_crash"))
+            .expect("count agent_crash");
+        assert_eq!(crash, (1, 0, 0, 0), "only the agent_crash row survives");
+
+        // A type nobody recorded is zero everywhere, not the unfiltered total.
+        let absent = interruption_severity_counts(&store, 0, i64::MAX, None, Some("dead_loop"))
+            .expect("count an absent type");
+        assert_eq!(absent, (0, 0, 0, 0), "an absent type counts zero, not all");
+
+        // The store spells the type the way `InterruptionType::as_str` does;
+        // keep the fixture honest about that so the values above are not
+        // passing by accident on a different spelling.
+        assert_eq!(InterruptionType::TokenLimit.as_str(), "token_limit");
+        assert_eq!(InterruptionType::AgentCrash.as_str(), "agent_crash");
+        assert_eq!(
+            store
+                .list(0, i64::MAX, None, Some("token_limit"), None, None, i64::MAX)
+                .expect("list the token_limit rows")
+                .len(),
+            1,
+            "the fixture holds one token_limit row"
+        );
+        let _ = Severity::Medium;
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `count --type` parses with the same closed value set `list --type` uses,
+    /// so a typo is a usage error rather than a filter that silently keeps
+    /// everything.
+    #[test]
+    fn count_parses_the_type_filter() {
+        let parsed =
+            InterruptionCommand::from_iter_safe(["interruption", "count", "--type", "token_limit"])
+                .expect("count --type must parse");
+        match parsed.action {
+            InterruptionAction::Count { itype, .. } => {
+                assert_eq!(itype.as_deref(), Some("token_limit"));
+            }
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        let bare = InterruptionCommand::from_iter_safe(["interruption", "count"])
+            .expect("bare count must parse");
+        match bare.action {
+            InterruptionAction::Count { itype, .. } => assert!(itype.is_none()),
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        assert!(
+            InterruptionCommand::from_iter_safe(["interruption", "count", "--type", "not_a_type"])
+                .is_err(),
+            "count --type must reject an unknown type, like list's"
+        );
     }
 
     /// The per-id views accept the `--type` / `--severity` pair `list` does,

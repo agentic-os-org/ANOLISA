@@ -30,9 +30,6 @@ def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) ->
             raise ValueError(f"duplicate or unknown native report: {agent}")
         reports[agent] = (report, path.parent)
     for agent, row in manifest["agents"].items():
-        if row["mode"] == "manual":
-            rows.append(f"| {agent} | MANUAL — not tested | {row['reason']} |")
-            continue
         report, evidence = reports.get(agent, ({}, directory))
         cases = report.get("cases", [])
         complete = (
@@ -59,8 +56,8 @@ def summarize(manifest: dict, directory: Path, expected: str, outcomes: dict) ->
             "",
             f"Job outcomes: `{json.dumps(outcomes, sort_keys=True)}`.",
             "",
-            "A green automated run does not sign off manual native boundaries. "
-            "Before release, rerun this workflow on the exact release SHA and complete those checks.",
+            "A green run covers only the declared native boundaries. "
+            "Before release, rerun this workflow on the exact release SHA.",
         ]
     )
     return "\n".join(rows) + "\n", passed

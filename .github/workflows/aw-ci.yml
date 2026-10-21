@@ -37,6 +37,8 @@ jobs:
     uses: ./.github/workflows/aw-preview.yml
     with:
       candidate_sha: ${{ github.sha }}
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
 
   required:
     name: AW / required

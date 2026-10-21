@@ -19,6 +19,10 @@ aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
+Use `aw validate --config next.yaml --against current.yaml` to check policy-only
+edits offline. See [configuration](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#compare-policy-edits);
+this does not update a running instance.
+
 The local service remains available after the Agent exits. Query it and stop it
 when finished.
 
@@ -94,5 +98,10 @@ Run the AW CI checks from the repository root.
 ```bash
 python3 src/aw/scripts/check.py
 ```
+
+Qoder CLI and QwenPaw App/API each exercise real sec-core allow, scan denial,
+backend failure and timeout blocking in disposable containers. Qoder uses the
+nightly account Secret; QwenPaw uses a local deterministic model. See
+[CI coverage](CONTRIBUTING.md#daily-ci-and-nightly-integration) for the full boundary.
 
 - [Development environment and tests](CONTRIBUTING.md)

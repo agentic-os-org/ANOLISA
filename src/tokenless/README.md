@@ -44,7 +44,7 @@ retrieval, and attribution.
 | Search path sharing | workload-dependent | Enabled by default: API search records share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
 | Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
 | HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
-| CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
+| CSV/TSV table compression | workload-dependent | Preserves every cell and row/column order while compacting quoting and record separators; returns the original when there is no benefit. No row sampling or Stash writes. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
@@ -691,11 +691,11 @@ compression so the recovered payload reaches the model unchanged.
 make qoder-install
 ```
 
-## QwenWork Plugin (macOS Local Mode)
+## QwenWork Plugin (macOS)
 
-The `qwenwork` adapter targets QwenWorkCN (千问办公) local sessions. PreToolUse
-rewrites **Bash input only**; PostToolUse observes **all tools** and compresses
-eligible full results through the shared policy. Metadata-only callbacks from
+The `qwenwork` adapter targets QwenWorkCN (千问办公) native Bash and macOS workspace
+Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
+**all tools** and compresses eligible full results through the shared policy. Metadata-only callbacks from
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
 output; full MCP responses remain compressible. File-content protection and RTK
 deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
@@ -709,13 +709,15 @@ anolisa adapter enable tokenless qwenwork
 anolisa adapter status tokenless
 ```
 
-Restart QwenWorkCN and open a new local session; check activation in the application.
+Restart QwenWorkCN and open a new session; check activation in the application.
 The CLI verifies managed files, while loading and activation remain `unknown`.
-It does not change settings or enable a disabled plugin. Security-workspace/VM
-sessions are unsupported. Uninstall previous script-managed installations with
-their original script before enabling through the CLI; CLI-managed copies use
-`anolisa adapter disable tokenless qwenwork`. Installation, removal, and the 1.2.5
-validation scope are covered in [QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos-local-mode).
+It does not change settings or enable a disabled plugin. Linux VM sessions remain
+unsupported. Workspace Shell state uses the conversation working directory, and
+its single MCP text block is handled as shell output. Uninstall previous
+script-managed installations with their original script before enabling through
+the CLI; CLI-managed copies use `anolisa adapter disable tokenless qwenwork`.
+Installation, removal, and compatibility baselines are covered in
+[QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos).
 
 ## Claude Code Plugin
 

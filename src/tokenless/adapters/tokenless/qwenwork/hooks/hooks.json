@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|mcp__workspace__bash|mcp__qw-builtin__mcp_workspace_bash",
         "hooks": [
           {
             "type": "command",

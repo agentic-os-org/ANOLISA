@@ -19,9 +19,10 @@ impl Fixture {
             &cli,
             format!(
                 r#"#!/usr/bin/python3
-import json, os, sys, time
+import json, os, pathlib, sys, time
 assert sys.argv[1:] == ['compress']
 request = json.load(sys.stdin)
+pathlib.Path(__file__).with_suffix('.request').write_text(json.dumps(request))
 assert request['protocol_version'] == 2 and request['operation'] == 'post_tool'
 assert request['input']['capabilities']['recovery'] == {{'kind':'none'}}
 assert request['input']['output_optimization'] == 'none'
@@ -36,6 +37,10 @@ if mode == 'empty': output = ''
 if mode == 'inflated': output = request['input']['content'] * 2
 if mode == 'same_size': output = 'x' * len(request['input']['content'])
 attribution = request['attribution'] if mode != 'wrong_identity' else {{'agent_id':'other'}}
+if mode == 'cross_binding': attribution['agent_id'] = 'target-b'
+if mode == 'framework_identity': attribution['agent_id'] = 'qoder'
+if mode == 'wrong_session': attribution['session_id'] = 'other-session'
+if mode == 'wrong_call': attribution['tool_use_id'] = 'other-call'
 print(json.dumps({{'protocol_version':2,'operation':'post_tool','attribution':attribution,
     'result':{{'disposition':disposition,'output':output}}}}))
 "#
@@ -97,6 +102,46 @@ fn applied_cli_result_is_a_bound_text_replacement() {
     };
     assert_eq!(outcome.as_value()["effects"][0]["text"], "compact");
     assert_eq!(outcome.as_value()["effects"][0]["type"], "replace_result");
+}
+
+#[test]
+fn cli_attribution_distinguishes_bindings_and_preserves_native_ids() {
+    for binding in ["target-a", "target-b"] {
+        let fixture = Fixture::new("applied");
+        let mut value = invoke(true);
+        value.as_object_mut().unwrap().remove("input_digest");
+        value["event"]["agent"]["binding_id"] = json!(binding);
+        let request = Protocol::new().unwrap().bind_invocation(value).unwrap();
+        let reply = fixture.run(request.as_value().clone(), Duration::from_secs(1));
+        assert_eq!(reply["effects"][0]["text"], "compact", "{reply}");
+        let wire: Value =
+            serde_json::from_slice(&fs::read(fixture.cli.with_extension("request")).unwrap())
+                .unwrap();
+        assert_eq!(
+            wire["attribution"],
+            json!({
+                "agent_id": binding, "session_id": "session", "tool_use_id": "tool-call"
+            })
+        );
+    }
+    for mode in [
+        "cross_binding",
+        "framework_identity",
+        "wrong_session",
+        "wrong_call",
+    ] {
+        let fixture = Fixture::new(mode);
+        let mut value = invoke(true);
+        value.as_object_mut().unwrap().remove("input_digest");
+        value["event"]["agent"]["binding_id"] = json!("target-a");
+        let request = Protocol::new().unwrap().bind_invocation(value).unwrap();
+        let reply = fixture.run(request.as_value().clone(), Duration::from_secs(1));
+        assert_eq!(
+            reply["error_code"], "invalid_compression_result",
+            "{mode}: {reply}"
+        );
+        assert!(reply.get("effects").is_none());
+    }
 }
 
 #[test]
