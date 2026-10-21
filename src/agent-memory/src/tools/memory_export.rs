@@ -82,48 +82,45 @@ impl Default for ExportFilter {
 /// Returns (frontmatter_map, body).
 fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut fm = HashMap::new();
-    let body;
 
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
-            let mut current_list_key: Option<String> = None;
-            let mut current_list_items: Vec<String> = Vec::new();
-            for line in fm_str.lines() {
-                if let Some(item) = line.strip_prefix("  - ") {
-                    // List item under the current list header
-                    if current_list_key.is_some() {
-                        current_list_items.push(item.trim().to_string());
-                    }
-                    continue;
-                }
-                // Flush any accumulated list items
-                if let Some(key) = current_list_key.take() {
-                    let json = serde_json::to_string(&current_list_items)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    fm.insert(key, json);
-                    current_list_items.clear();
-                }
-                if let Some((key, value)) = line.split_once(": ") {
-                    fm.insert(key.trim().to_string(), value.trim().to_string());
-                } else if let Some(key) = line.strip_suffix(':') {
-                    current_list_key = Some(key.trim().to_string());
-                }
+    // Shared fence rule: a closing fence that ends the file (no trailing
+    // newline) still closes the block, so such a file no longer exports with
+    // an empty frontmatter map (GH-3580).
+    let Some((fm_str, body)) = super::frontmatter::split(content) else {
+        // No frontmatter found
+        return (fm, content.to_string());
+    };
+
+    let mut current_list_key: Option<String> = None;
+    let mut current_list_items: Vec<String> = Vec::new();
+    for line in fm_str.lines() {
+        if let Some(item) = line.strip_prefix("  - ") {
+            // List item under the current list header
+            if current_list_key.is_some() {
+                current_list_items.push(item.trim().to_string());
             }
-            // Flush trailing list
-            if let Some(key) = current_list_key.take() {
-                let json =
-                    serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
-                fm.insert(key, json);
-            }
-            return (fm, body);
+            continue;
+        }
+        // Flush any accumulated list items
+        if let Some(key) = current_list_key.take() {
+            let json =
+                serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
+            fm.insert(key, json);
+            current_list_items.clear();
+        }
+        if let Some((key, value)) = line.split_once(": ") {
+            fm.insert(key.trim().to_string(), value.trim().to_string());
+        } else if let Some(key) = line.strip_suffix(':') {
+            current_list_key = Some(key.trim().to_string());
         }
     }
+    // Flush trailing list
+    if let Some(key) = current_list_key.take() {
+        let json = serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
+        fm.insert(key, json);
+    }
 
-    // No frontmatter found
-    body = content.to_string();
-    (fm, body)
+    (fm, body.to_string())
 }
 
 /// Export the memory store to AMA JSON format.
@@ -252,6 +249,72 @@ mod tests {
         let (fm, body) = parse_frontmatter(content);
         assert!(fm.is_empty());
         assert_eq!(body, content);
+    }
+
+    #[test]
+    fn parse_frontmatter_closing_fence_without_trailing_newline() {
+        // GH-3580: the fence closes the block even when it ends the file.
+        let content = "---\nid: abc123\ncategory: lesson\n---";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        assert_eq!(fm.get("category").unwrap(), "lesson");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn parse_frontmatter_crlf_closing_fence() {
+        let content = "---\nid: abc123\r\n---\r\nbody\r\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        assert_eq!(body, "body\r\n");
+    }
+
+    #[test]
+    fn export_keeps_frontmatter_of_a_file_ending_at_its_fence() {
+        // GH-3580: such a file used to export with an empty frontmatter map,
+        // so the AMA archive lost id/category/source and a category filter
+        // silently skipped the entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = tmp.path().to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.mount.strategy = crate::mount::MountStrategyKind::Userland;
+        config.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().to_string();
+        let svc = MemoryService::new(config).unwrap();
+        svc.write(
+            "notes/fenced.md",
+            "---\nid: abc123\ncategory: lesson\nsource: manual-observe\n---",
+            false,
+        )
+        .unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&memory_export(&svc, &ExportFilter::default()).unwrap()).unwrap();
+        let entry = value["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == "notes/fenced.md")
+            .expect("the fenced file must be exported");
+        assert_eq!(entry["frontmatter"]["id"], "abc123");
+        assert_eq!(entry["frontmatter"]["category"], "lesson");
+        assert_eq!(entry["frontmatter"]["source"], "manual-observe");
+        assert_eq!(entry["content"], "");
+
+        // The category filter reads that same map.
+        let filtered = memory_export(
+            &svc,
+            &ExportFilter {
+                category: Some("lesson".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            filtered.contains("notes/fenced.md"),
+            "a lesson file must survive --category lesson: {filtered}"
+        );
     }
 
     #[test]

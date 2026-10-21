@@ -201,12 +201,13 @@ fn parse_frontmatter_flat(content: &str) -> std::collections::HashMap<String, St
 }
 
 fn extract_body(content: &str) -> String {
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
-        }
+    // Same fence rule as the canonical key reader, so a file that ends at its
+    // closing fence yields an empty body instead of the raw fence block
+    // (GH-3580).
+    match super::frontmatter::split(content) {
+        Some((_, body)) => body.trim().to_string(),
+        None => content.trim().to_string(),
     }
-    content.trim().to_string()
 }
 
 fn parse_count_from_body(body: &str, keyword: &str) -> usize {
@@ -261,6 +262,19 @@ mod tests {
         let content = "---\nid: x\n---\n\nSession had 42 tool calls.";
         let body = extract_body(content);
         assert!(body.contains("42 tool calls"));
+    }
+
+    #[test]
+    fn extract_body_closing_fence_without_trailing_newline() {
+        // GH-3580: a summary that ends at its closing fence has no body, so
+        // the counts parsed out of it stay zero instead of reading frontmatter
+        // values as if they were body text.
+        let content = "---\nid: x\n---";
+        assert_eq!(extract_body(content), "");
+        assert_eq!(
+            extract_body("---\nid: x\n---\nSession had 42 tool calls."),
+            "Session had 42 tool calls."
+        );
     }
 
     #[test]
