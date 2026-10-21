@@ -3,7 +3,8 @@ use std::path::Path;
 
 use crate::safe_fs;
 
-const MAX_INDEXABLE_BYTES: u64 = 4 * 1024 * 1024;
+/// Maximum file size eligible for the search index.
+pub(super) const MAX_INDEXABLE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Decide whether `path` should be indexed by BM25, based on extension and
 /// size. We only index UTF-8 text-y formats; binaries are skipped silently.

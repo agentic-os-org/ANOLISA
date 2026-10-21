@@ -67,7 +67,7 @@ pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
             && words[1]
                 == format!(
                     "TOKENLESS_AGENT_ID={}",
-                    event["agent"]["adapter"].as_str().unwrap_or("")
+                    event["agent"]["binding_id"].as_str().unwrap_or("")
                 )
             && words[2]
                 == format!(
@@ -176,14 +176,14 @@ mod tests {
 
     #[test]
     fn optimization_uses_executed_attribution_without_granting_authority() {
-        let prefix = "env TOKENLESS_AGENT_ID=hermes TOKENLESS_SESSION_ID='session one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk git status";
-        let mut event = json!({"agent":{"adapter":"hermes"},"session_id":"session one","tool":{"name":"terminal","call_id":"new-call","input":{"command":prefix}}});
+        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk git status";
+        let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session one","tool":{"name":"terminal","call_id":"new-call","input":{"command":prefix}}});
         assert_eq!(optimization(&event, Path::new("/state space")), "rtk");
         for command in [
             "rtk git status".to_owned(),
             format!("echo {prefix}"),
             format!("{prefix} && echo other"),
-            prefix.replace("AGENT_ID=hermes", "AGENT_ID=qoder"),
+            prefix.replace("AGENT_ID=hermes-target", "AGENT_ID=other-target"),
             prefix.replace("'session one'", "other"),
             prefix.replace("'/state space'", "/other"),
             prefix.replace("/opt/rtk", "rtk"),
@@ -201,8 +201,8 @@ mod tests {
 
     #[test]
     fn quoted_shell_literals_preserve_ownership_but_shell_operations_do_not() {
-        let prefix = "env TOKENLESS_AGENT_ID=hermes TOKENLESS_SESSION_ID='session|one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk rg";
-        let mut event = json!({"agent":{"adapter":"hermes"},"session_id":"session|one","tool":{"name":"terminal","input":{"command":""}}});
+        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session|one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk rg";
+        let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session|one","tool":{"name":"terminal","input":{"command":""}}});
         for (argument, expected) in [
             ("'foo|bar' src", "rtk"),
             (r#""foo|bar" src"#, "rtk"),
@@ -245,7 +245,7 @@ mod tests {
         for suffix in ["", "not-created/nested"] {
             let data = link.join(suffix);
             let canonical = real.canonicalize().unwrap().join(suffix);
-            let mut event = json!({"agent":{"adapter":"hermes"},"session_id":"session","tool":{"name":"terminal","input":{"command":format!("env TOKENLESS_AGENT_ID=hermes TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR={} /opt/rtk git status", shlex::try_quote(canonical.to_str().unwrap()).unwrap())}}});
+            let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":format!("env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR={} /opt/rtk git status", shlex::try_quote(canonical.to_str().unwrap()).unwrap())}}});
             assert_eq!(optimization(&event, &data), "rtk");
             event["tool"]["input"]["command"] = json!(event["tool"]["input"]["command"]
                 .as_str()
@@ -258,8 +258,8 @@ mod tests {
 
     #[test]
     fn transparent_execution_prefixes_preserve_ownership() {
-        let wrapper = "env TOKENLESS_AGENT_ID=hermes TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR=/state /opt/rtk git status";
-        let mut event = json!({"agent":{"adapter":"hermes"},"session_id":"session","tool":{"name":"terminal","input":{"command":""}}});
+        let wrapper = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR=/state /opt/rtk git status";
+        let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":""}}});
         for (prefix, expected) in [
             ("sudo ", "rtk"),
             ("sudo noglob ", "rtk"),

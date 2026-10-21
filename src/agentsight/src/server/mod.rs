@@ -1116,10 +1116,13 @@ pub async fn run_server(
     };
     let optimize_state = optimize::OptimizeState::init(storage_base, optimization_store);
 
-    let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
-        config_path.clone(),
-        &storage_config,
-    ));
+    let storage_budget = Arc::new(
+        crate::storage_budget::StorageBudget::new(config_path.clone(), &storage_config)
+            // `--db` names the GenAI database; the config-derived path always
+            // carries the default name, so the override keeps the served file
+            // inside the combined cap.
+            .with_genai_path(&storage_path),
+    );
     let maintenance_jobs = server_maintenance_jobs(
         &database_manager,
         &storage_config,

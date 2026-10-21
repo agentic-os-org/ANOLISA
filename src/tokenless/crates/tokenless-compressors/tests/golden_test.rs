@@ -283,6 +283,10 @@ fn check(name: &str, input: &str, output: &str) {
         tokenless_protocol::estimate_tokens(output) < tokenless_protocol::estimate_tokens(input),
         "{name}: no estimated token savings"
     );
+    check_snapshot(name, input, output);
+}
+
+fn check_snapshot(name: &str, input: &str, output: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/content")
         .join(format!("{name}.expected.txt"));
@@ -401,63 +405,50 @@ fn html_goldens() {
 
 #[test]
 fn tabular_goldens() {
-    for name in [
-        "table_compaction.csv",
-        "table_compaction.tsv",
-        "table_reduction.csv",
-        "table_special.csv",
-        "table_special.tsv",
-        "table_reduction.tsv",
+    for (name, expect_compaction) in [
+        ("table_compaction.csv", true),
+        ("table_compaction.tsv", true),
+        ("table_complete_regression.csv", false),
+        ("table_special.csv", true),
+        ("table_special.tsv", true),
+        ("table_complete_regression.tsv", false),
     ] {
         let source = input(name);
         let run = || {
-            let store = InMemoryStore::new();
-            let result = TabularCompressor.compress_with_recovery(
-                &source,
-                Some(&store),
-                &RecoveryMethod::Shell,
-            );
-            let operation = if name.starts_with("table_reduction") {
+            let result = TabularCompressor.compress(&source);
+            if !expect_compaction {
                 assert!(result.output.contains("FAILED"));
-                TabularOperation::RowReduction
+                assert_eq!(result.output, source);
+                assert!(result.operations.is_empty());
             } else {
-                TabularOperation::Compaction
+                assert_eq!(result.operations, [TabularOperation::Compaction]);
+            }
+            let delimiter = if name.ends_with(".tsv") { b'\t' } else { b',' };
+            let cells = |text: &str| {
+                csv::ReaderBuilder::new()
+                    .delimiter(delimiter)
+                    .has_headers(false)
+                    .from_reader(text.as_bytes())
+                    .records()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
             };
-            assert!(result.operations.contains(&operation), "{name}");
-            if operation == TabularOperation::Compaction {
-                let delimiter = if name.ends_with(".tsv") { b'\t' } else { b',' };
-                let cells = |text: &str| {
-                    csv::ReaderBuilder::new()
-                        .delimiter(delimiter)
-                        .has_headers(false)
-                        .from_reader(text.as_bytes())
-                        .records()
-                        .collect::<Result<Vec<_>, _>>()
-                        .unwrap()
-                };
-                assert_eq!(cells(&source), cells(&result.output));
-            }
+            assert_eq!(cells(&source), cells(&result.output));
+            assert!(result.stash_writes.is_empty());
+            assert_eq!(result.metrics.original_rows, result.metrics.retained_rows);
             assert_eq!(
-                result.stash_writes.len(),
-                usize::from(operation == TabularOperation::RowReduction),
-                "{name}: unexpected stash writes"
+                result.recoverability,
+                tokenless_compressors::Recoverability::Lossless
             );
-            for write in &result.stash_writes {
-                assert!(is_valid_hash(&write.key), "{name}: invalid stash key");
-                assert!(
-                    result
-                        .output
-                        .contains(&recovery_instruction(&write.key, &RecoveryMethod::Shell)),
-                    "{name}: missing recovery instruction for {}",
-                    write.key
-                );
-                assert_eq!(store.retrieve(&write.key).unwrap().unwrap(), source);
-            }
             result.output
         };
         let output = run();
         assert_eq!(output, run(), "{name}: non-deterministic output");
-        check(name, &source, &output);
+        if !expect_compaction {
+            check_snapshot(name, &source, &output);
+        } else {
+            check(name, &source, &output);
+        }
     }
 }
 

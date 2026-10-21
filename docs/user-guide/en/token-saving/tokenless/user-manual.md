@@ -49,7 +49,7 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, omitted Build Log progress intervals, and complete original tables behind row reduction | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, omitted Build Log progress intervals | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 
@@ -108,7 +108,7 @@ Adapters do not compress every tool result. For response compression, compressed
 2. File-content tools such as Read/Glob/LSP/NotebookRead and their aliases retain their content. Native Claude Code `Grep` results in no-context content mode can use lossless search path sharing. Non-file command and API results can also share pure path lists by content; this does not expand file-read eligibility (see [Controlling search path sharing](#controlling-search-path-sharing)).
 3. The response reaches the minimum length. Core skips responses shorter than 200 characters on the shared response hook, OpenClaw, and Hermes paths. Length is counted in characters, not bytes.
 4. The content matches a supported domain. Threshold-based response compression works on JSON objects and arrays; plain text is compressed only by a matching text compressor, and which compressors can fire depends on the path:
-   - **4a. Shared response hook path:** output that arrives as plain text (not JSON) is routed to the content-aware text compressors (build/test log terminal cleanup and progress reduction, CSV/TSV table compaction, search path sharing for API records and non-file command/API path lists, HTML page rendering, and opt-in Git diff context cropping) described in [Adapter processing rules](framework-integration.md#adapter-processing-rules); the table rules are detailed in [CSV/TSV views can be incomplete](#csvtsv-views-can-be-incomplete) and the search rules in [Controlling search path sharing](#controlling-search-path-sharing). For shell tools, the hook first unwraps the envelope's dominant text field (`stdout` or `stderr`, at least 2,000 characters; a Bash `stdout` that starts with `diff --git` is unwrapped even below that minimum) into the text slot and later re-injects the compressed text into a same-shaped envelope.
+   - **4a. Shared response hook path:** output that arrives as plain text (not JSON) is routed to the content-aware text compressors (build/test log terminal cleanup and progress reduction, CSV/TSV table compaction, search path sharing for API records and non-file command/API path lists, HTML page rendering, and opt-in Git diff context cropping) described in [Adapter processing rules](framework-integration.md#adapter-processing-rules); the table rules are detailed in [CSV/TSV compaction preserves complete tables](#csvtsv-compaction-preserves-complete-tables) and the search rules in [Controlling search path sharing](#controlling-search-path-sharing). For shell tools, the hook first unwraps the envelope's dominant text field (`stdout` or `stderr`, at least 2,000 characters; a Bash `stdout` that starts with `diff --git` is unwrapped even below that minimum) into the text slot and later re-injects the compressed text into a same-shaped envelope.
    - **4b. OpenClaw:** a plain string, or a `toolResult` message whose content is exactly one valid text block, takes the replaceable text path. Any other `toolResult` — multiple text blocks, image blocks, or empty/invalid content — is skipped as-is: the plugin returns before calling Core, so such results are neither compressed nor recorded in statistics. Non-`toolResult` objects and arrays, including a shell envelope such as `{"stdout": ...}`, are passed to Core whole as structured JSON with text replacement disabled, so the envelope keeps its top-level shape and only JSON-domain compression applies.
    - **4c. Hermes:** for shell tools, Hermes unwraps the envelope's `output` field, sends that text to Core with replacement allowed, and restores the compressed text into the same envelope; other tools' results go through directly.
 
@@ -167,37 +167,30 @@ and may still allow wrapped `find` to be rewritten. Disabling path sharing retai
 available for subsequent reads. Mixed or unprofitable native output may therefore remain uncompressed.
 Whole-task savings depend on the workload; smaller search results do not guarantee lower total token use.
 
-### CSV/TSV views can be incomplete
+### CSV/TSV compaction preserves complete tables
 
-Successful CSV/TSV tool results can be compressed when the host can replace output with text.
+Successful CSV/TSV tool results can be compacted when the host can replace output with text.
 File-origin results, failed tools, RTK-optimized output and Retrieve output pass through.
-A supported table has a header and at least two data rows of equal width, with an unambiguous
+A supported table has a header and at least two equal-width data rows with an unambiguous
 comma or tab delimiter. Malformed quoting, ambiguous delimiters, single-column text, Markdown
 and fixed-width tables are not compressed by this compressor.
 
-Full compaction preserves all cell strings, including empty cells, duplicate headers, leading
-zeros and large numeric strings. It removes unnecessary quoting and normalizes record separators;
-embedded cell line endings remain unchanged. This preserves cells, not the original bytes.
-A full view saving at least 15% of estimated tokens takes priority.
+Compaction preserves every cell string and row/column order, including duplicate rows,
+empty cells, duplicate headers, leading zeros and large numeric strings. It removes
+unnecessary quoting and normalizes record separators to LF without changing line endings
+inside cells. No final record separator is appended, so an existing trailing separator may
+be removed even when that is the only formatting change. This preserves cells, not the
+original bytes, and does not guarantee unchanged model reading accuracy.
 
-Row reduction requires column labels: each nonempty header starts with a Unicode letter or `_`,
-then contains only letters, numbers, `_`, `-` or `.`; at least one label must be nonempty.
-Duplicate and empty labels are allowed. Headers containing spaces, expressions or sentence
-punctuation keep all rows, preventing the reported source/prose patterns from being sampled.
-This conservative heuristic also skips reduction for some genuine tables.
+The complete candidate is applied only when both character count and estimated token count
+decrease; otherwise the original is returned unchanged. There is no percentage savings
+threshold. The estimate does not guarantee savings with every model tokenizer.
 
-Otherwise, tables with more than 32 data rows may retain the first and last four rows,
-rows containing diagnostic keywords, and evenly spaced ordinary rows up to a base budget of 32.
-Protected rows may exceed that budget. The notice outside the table states the retained and total
-row counts, original one-based data row ranges excluding the header, and how to recover the source.
-The complete original CSV/TSV is stored in Stash; retrieval returns its original bytes.
-Retrieve before complete enumeration or calculations: selected rows are an incomplete view.
-Missing recovery or a failed Stash write permits only full compaction or the original input.
-The same applies if the exact source-range list exceeds 1 KiB; diagnostic rows and their
-provenance are never partially reported.
-
-A reduced candidate must use fewer characters and estimated tokens than both the original and
-full view, including the notice. These checks do not guarantee savings with every model tokenizer.
+Tables are never sampled or reduced, regardless of size or recovery availability. Table
+compaction does not write Stash, emit an incomplete-table notice, or require Retrieve before
+enumeration or calculations. Applied compaction reports `lossless` and `tabular_compaction`.
+Historical table originals already in Stash remain retrievable under the existing
+expiry and authorization rules; new table compactions do not store original formatting.
 
 ### Native Grep keeps every received match
 

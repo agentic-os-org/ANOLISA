@@ -44,6 +44,15 @@ in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 
+QwenWork's hook adapter normalizes its two workspace Shell MCP names to `Bash`
+before either lifecycle request. It unwraps only an exact single plain text block;
+unknown block arrays pass through without compression. The workspace event's
+absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.
+Native Bash keeps the existing state location and structured response handling.
+Plugin-private binaries are resolved by the adapter. Neither that private PATH
+nor workspace state implies model-visible recovery access, so these paths declare
+`recovery.kind = none`.
+
 Invalid inputs, missing packaged RTK, lifecycle operation failures, attachment failures, and
 tool-name collisions fail fast. Normal Core dispositions such as passthrough, no savings, and
 recoverability unavailable return typed results. A candidate is applied only when it is strictly

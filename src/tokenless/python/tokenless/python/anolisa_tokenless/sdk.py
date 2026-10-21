@@ -128,6 +128,7 @@ class AppliedOperation(StrEnum):
     TERMINAL_CLEANUP = "terminal_cleanup"
     BUILD_LOG_REDUCTION = "build_log_reduction"
     TABULAR_COMPACTION = "tabular_compaction"
+    # Historical wire value; current table compression never emits it.
     TABULAR_ROW_REDUCTION = "tabular_row_reduction"
     SEARCH_PATH_SHARING = "search_path_sharing"
     DIFF_REDUCTION = "diff_reduction"

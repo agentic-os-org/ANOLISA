@@ -16,8 +16,9 @@ impl Fixture {
         let root = tempfile::tempdir_in(fs::canonicalize(build).unwrap()).unwrap();
         let cli = root.path().join("tokenless");
         fs::write(&cli, format!(r#"#!/usr/bin/python3
-import json, os, sys, time
+import json, os, pathlib, sys, time
 r = json.load(sys.stdin)
+pathlib.Path(__file__).with_suffix('.request').write_text(json.dumps(r))
 assert sys.argv[1:] == ['compress']
 mode = {mode:?}
 if mode == 'failed': sys.exit(1)
@@ -37,7 +38,7 @@ if r['operation'] == 'pre_tool':
     if mode == 'mutated_passthrough': action, optimization = 'passthrough', 'none'
     result = {{'arguments': args, 'action': action, 'output_optimization': optimization}}
 else:
-    assert r['input']['output_optimization'] == 'rtk', r
+    assert r['input']['output_optimization'] == ('none' if mode == 'unowned' else 'rtk'), r
     assert r['input']['capabilities']['recovery'] == {{'kind':'none'}}
     result = {{'disposition':'passthrough','output':r['input']['content']}}
 if mode == 'wrong_identity': r['attribution']['agent_id'] = 'other'
@@ -74,9 +75,13 @@ print(json.dumps({{'protocol_version':2,'operation':r['operation'], 'attribution
 
 #[test]
 fn adapters_block_original_and_carry_retry_ownership_into_after() {
-    for adapter in ["qoder", "openclaw", "qwenpaw", "hermes", "pi", "agentscope"] {
+    for (adapter, binding) in ["qoder", "openclaw", "qwenpaw", "hermes", "pi", "agentscope"]
+        .into_iter()
+        .flat_map(|adapter| ["target-a", "target-b"].map(|binding| (adapter, binding)))
+    {
         let f = Fixture::new("suggest");
-        let before = f.request(adapter);
+        let mut before = f.request(adapter);
+        before["event"]["agent"]["binding_id"] = json!(binding);
         let reply = f.run(before.clone());
         let effect = &reply["effects"][0];
         assert_eq!(effect["type"], "block");
@@ -88,6 +93,19 @@ fn adapters_block_original_and_carry_retry_ownership_into_after() {
         )
         .unwrap();
         assert_eq!(retry["cwd"], "/original");
+        assert!(retry["command"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("TOKENLESS_AGENT_ID={binding} ")));
+        let wire: Value =
+            serde_json::from_slice(&fs::read(f.root.path().join("tokenless.request")).unwrap())
+                .unwrap();
+        assert_eq!(
+            wire["attribution"],
+            json!({
+                "agent_id": binding, "session_id": "session", "tool_use_id": "blocked-call"
+            })
+        );
         assert!(!f.root.path().join("rtk").exists());
         let mut next = before;
         next["event"]["tool"]["call_id"] = json!("retry-call");
@@ -139,7 +157,49 @@ print(json.dumps({'ok':True,'verdict':'deny'}))
         next["event"]["tool"]["result_projection"] =
             json!({"text":"rtk output","status":"success","content_origin":"command_output"});
         assert_eq!(f.run(next)["effects"], json!([]));
+        let wire: Value =
+            serde_json::from_slice(&fs::read(f.root.path().join("tokenless.request")).unwrap())
+                .unwrap();
+        assert_eq!(
+            wire["attribution"],
+            json!({
+                "agent_id": binding, "session_id": "session", "tool_use_id": "retry-call"
+            })
+        );
     }
+}
+
+#[test]
+fn executed_wrapper_cannot_borrow_another_binding_identity() {
+    let f = Fixture::new("unowned");
+    let mut before = f.request("qoder");
+    before["event"]["agent"]["binding_id"] = json!("target-a");
+    let reply = f.run(before.clone());
+    let retry: Value = serde_json::from_str(
+        reply["effects"][0]["text"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("[tokenless:rewrite] Retry this tool with arguments: ")
+            .unwrap(),
+    )
+    .unwrap();
+    before["event"]["agent"]["binding_id"] = json!("target-b");
+    before["event"]["tool"]["call_id"] = json!("retry-call");
+    before["event"]["tool"]["input"] = retry;
+    assert_eq!(f.run(before.clone())["effects"][0]["type"], "block");
+    before["operation"] = json!("post_tool");
+    before["allowed_effects"] = json!(["replace_result"]);
+    before["event"]["name"] = json!("tool.after");
+    before["event"]["tool"]["result"] = json!("rtk output");
+    before["event"]["tool"]["result_projection"] =
+        json!({"text":"rtk output","status":"success","content_origin":"command_output"});
+    let reply = f.run(before);
+    assert_eq!(reply["status"], "ok", "{reply}");
+    let wire: Value =
+        serde_json::from_slice(&fs::read(f.root.path().join("tokenless.request")).unwrap())
+            .unwrap();
+    assert_eq!(wire["input"]["output_optimization"], "none");
+    assert_eq!(wire["attribution"]["agent_id"], "target-b");
 }
 
 #[test]

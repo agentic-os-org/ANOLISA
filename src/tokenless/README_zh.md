@@ -22,7 +22,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
-| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
+| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -352,9 +352,10 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
-### 千问办公插件（macOS 本地模式）
+### 千问办公插件（macOS）
 
-`qwenwork` Adapter 面向千问办公 QwenWorkCN 的本地会话。PreToolUse **只改写 Bash 输入**；
+`qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
+PreToolUse 匹配两种 Shell 的工具名；
 PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
 保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
@@ -368,11 +369,12 @@ anolisa adapter enable tokenless qwenwork
 anolisa adapter status tokenless
 ```
 
-完成后重启千问办公并开启新的本地会话，在应用内检查激活状态。CLI 验证受管理文件，
+完成后重启千问办公并开启新会话，在应用内检查激活状态。CLI 验证受管理文件，
 加载和激活状态保持 `unknown`。旁加载不修改 settings，也不自动启用已禁用的插件。
-当前不支持安全工作区／VM 会话。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
+Linux VM 会话仍不受支持。工作区 Shell 的状态保存在对话工作目录中，
+其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
-安装、卸载及 1.2.5 验证范围参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos-本地模式)。
+安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos)。
 
 ### QwenPaw 安装
 

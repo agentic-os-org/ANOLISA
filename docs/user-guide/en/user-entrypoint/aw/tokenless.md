@@ -61,6 +61,11 @@ Check the Tokenless card and recent step records. `no_data` means no statistics 
 and data directory first. Newly generated Tokenless configuration includes query settings;
 for older files, see the [query reference](../../../../developer-guide/en/aw/tokenless.md#read-only-panel-queries).
 
+Tokenless statistics identify their source using the Agent name configured in AW,
+the name selected by `aw run --agent`. For example, `qoder-work` and `qoder-test`
+are identified separately even if both use Qoder. Reusing the same name across
+configurations can still aggregate their records.
+
 Statistics estimate candidate compression savings over recent records and may include other
 integrations. They are not the current session's billing savings. Check the Agent's actual results
 to confirm adoption into model context.
@@ -70,6 +75,9 @@ to confirm adoption into model context.
 AW audit stores metadata only; Tokenless uses a separate data directory. Its default statistics
 may retain complete before/after tool text. Local SLS logs contain metrics and attribution;
 an existing telemetry collector may collect those logs separately.
+
+Agent names may appear in statistics and logs. Avoid sensitive information in these names,
+and check the names and content before sharing statistics or logs.
 
 If recording is unnecessary, set these variables before launching AW. If a service is already
 running, exit its Agents and stop it first.

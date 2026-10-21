@@ -218,6 +218,89 @@ fn scan_loaded_staging_content_stays_out_of_skill_discover() {
     );
 }
 
+/// kongche-jbw follow-up on #7742 (interaction with the merged #8037):
+/// the reparse refresh of a pre-seeded staging category's manifest goes
+/// through `upsert_checked`, which used to insert with an empty category
+/// and so wiped the scanned category record — the staging-private view
+/// filters match that record, so after an exact flat-path edit of
+/// `/skills/web/SKILL.md` (a path the observe dispatcher does not drop:
+/// its staging check sees the bare leaf `web`, not the staging root) the
+/// refresh re-parsed the manifest and the staged skill became listable
+/// and discoverable again until the next remount. The refresh must keep
+/// the category provenance.
+#[test]
+fn flat_manifest_edit_refresh_keeps_the_staging_category_hidden() {
+    skip_if_no_fuse!();
+
+    let m = StagingScanMount::new(seed_workspace);
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(m.mount_path("skills/zeta/SKILL.md")).is_ok()
+        }),
+        "flat mount never served skills/zeta/SKILL.md"
+    );
+
+    // Precondition (#8037): the staged half-install is out of both views.
+    let entries_before = list_dir_names(&m.mount_path("skills"));
+    assert!(
+        !entries_before.iter().any(|n| n == "web"),
+        "precondition: the staged skill must start hidden from /skills, got: {entries_before:?}"
+    );
+    let discover_before = std::fs::read_to_string(m.mount_path("skills/skill-discover/SKILL.md"))
+        .expect("discover before the edit");
+    assert!(
+        !discover_before.contains("| web |"),
+        "precondition: the staged skill must start hidden from skill-discover, got:\n{discover_before}"
+    );
+
+    // Exact flat-path edit: the flat /skills/web slot resolves to the
+    // stored entry's manifest (pip-staging/web/SKILL.md), and the
+    // observe dispatcher's staging check matches the bare leaf only, so
+    // the edit reaches the reparse worker.
+    let web_md = m.mount_path("skills/web/SKILL.md");
+    let mut md = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&web_md)
+        .expect("open the staged manifest through the flat mount");
+    use std::io::Write as _;
+    md.write_all(b"refreshed through the flat mount\n")
+        .expect("append the staged manifest through the flat mount");
+    drop(md);
+
+    // The refresh ran once the store entry carries the appended body.
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            m.shared
+                .read()
+                .get("web")
+                .is_some_and(|e| e.body.contains("refreshed through the flat mount"))
+        }),
+        "the flat-path manifest edit must reach the reparse worker, body is {:?}",
+        m.shared.read().get("web").map(|e| e.body.clone())
+    );
+
+    // Both views must keep hiding the staged skill after the refresh.
+    let entries = list_dir_names(&m.mount_path("skills"));
+    assert!(
+        !entries.iter().any(|n| n == "web"),
+        "a refreshed staging entry must stay out of /skills, got: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|n| n == "zeta"),
+        "an ordinary flat skill must stay listed, got: {entries:?}"
+    );
+    let discover = std::fs::read_to_string(m.mount_path("skills/skill-discover/SKILL.md"))
+        .expect("discover after the edit");
+    assert!(
+        !discover.contains("| web |"),
+        "a refreshed staging entry must stay out of skill-discover, got:\n{discover}"
+    );
+    assert!(
+        discover.contains("| zeta |"),
+        "an ordinary flat skill must stay discoverable, got:\n{discover}"
+    );
+}
+
 /// The same scan-loaded leak through a non-dot `PrefixStar` staging
 /// pattern: the pattern names the top-level staging root, the store key
 /// is the nested skill's bare leaf, so the name-level filters miss it.

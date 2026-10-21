@@ -364,6 +364,8 @@ With git on, `mem_log` exposes change history and `mem_revert` gives the agent a
 
 SQLite FTS5 BM25 index, sub-millisecond queries. A background tokio task watches the mount via `inotify`; events are debounced 200 ms and applied in a single transaction. Tokenizer is `trigram` (substring matching for ≥3-char terms). The trigram tokenizer emits one token per 3-character window, so a query term shorter than 3 characters (common for CJK words like "花名" / "小云") produces no tokens and would silently match nothing; `memory_search` detects this case and falls back to a `body LIKE '%term%'` substring scan so short CJK queries still recall. `IN_Q_OVERFLOW` triggers a full rescan — events are never silently dropped.
 
+Only supported UTF-8 text files up to 4 MiB are indexed. When an indexed file grows beyond this limit or becomes non-UTF-8, its old text and vector entries are removed and the eviction is logged; the file itself is unchanged. The default 16 MiB write limit and the per-call append limit do not guarantee search eligibility: repeated appends can grow a file past 4 MiB. Split large memories into smaller files to keep them searchable.
+
 ### Hybrid vector search
 
 BM25 + dense vector hybrid retrieval, fused via RRF (Reciprocal Rank Fusion, k=60). Vectors come from a pluggable Embedding Provider:

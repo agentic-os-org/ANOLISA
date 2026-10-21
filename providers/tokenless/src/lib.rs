@@ -138,7 +138,7 @@ fn dispatch(
     if !before && projection["status"] != "success" {
         return Ok(neutral);
     }
-    let attribution = json!({"agent_id":event["agent"]["adapter"], "session_id":event["session_id"], "tool_use_id":event["tool"]["call_id"]});
+    let attribution = json!({"agent_id":event["agent"]["binding_id"], "session_id":event["session_id"], "tool_use_id":event["tool"]["call_id"]});
     // Tokenless rejects null optional IDs; absence is distinct from a native ID.
     let mut attribution = attribution;
     attribution

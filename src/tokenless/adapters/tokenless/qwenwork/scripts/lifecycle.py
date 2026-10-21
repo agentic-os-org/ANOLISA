@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sideload the macOS local-mode plugin without changing desktop settings."""
+"""Sideload the macOS plugin without changing desktop settings."""
 
 from __future__ import annotations
 
@@ -320,20 +320,20 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(target)
                 print(
                     f"Removed sideloaded plugin: {target}. "
-                    "Restart QwenWorkCN and open a new local session."
+                    "Restart QwenWorkCN and open a new session."
                 )
             return 0
         if platform.system() != "Darwin":
-            raise LifecycleError("QwenWorkCN sideloading supports macOS (Darwin) local mode only")
+            raise LifecycleError("QwenWorkCN sideloading supports macOS (Darwin) only")
         app, version = _application(home)
         print(f"QwenWorkCN: {app} (version {version})")
         print(
-            "Validated target: QwenWorkCN 1.2.5 only (macOS local mode); "
+            "Compatibility baselines: QwenWorkCN 1.2.5 native Bash and 1.3.2 workspace Shell; "
             "check plugin activation in the UI."
         )
-        if version != "1.2.5":
+        if version not in {"1.2.5", "1.3.2"}:
             print(
-                f"WARNING: version {version} is outside the validated 1.2.5 scope; "
+                f"WARNING: version {version} is outside the 1.2.5 / 1.3.2 baselines; "
                 "compatibility is unverified.",
                 file=sys.stderr,
             )
@@ -352,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _install(data, target, previous)
             print(
-                f"Sideloaded: {target}. Restart QwenWorkCN, open a new local session, "
+                f"Sideloaded: {target}. Restart QwenWorkCN, open a new session, "
                 "and enable the plugin in the UI if needed. Enablement is not checked."
             )
         return 0

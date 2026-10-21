@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import tempfile
@@ -472,7 +474,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(stats, sdk.stats)
         self.assertEqual(stats.status.data_dir, sdk.runtime.data_dir)
 
-    async def test_tabular_pipeline_preserves_raw_recovery_and_bypasses_retrieved_output(self) -> None:
+    async def test_tabular_pipeline_preserves_all_cells_without_recovery(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
         for delimiter in (",", "\t"):
             with self.subTest(delimiter=delimiter):
@@ -497,14 +499,15 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                         attribution=Attribution("sdk-agent", "table-session", "table-call"),
                     )
                 )
-                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_ROW_REDUCTION,))
+                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_COMPACTION,))
                 self.assertEqual(result.content_type.value, "tabular")
-                self.assertEqual(result.recoverability.value, "retrievable")
-                self.assertIn("Incomplete table", result.output)
-                restored = await sdk.retrieve(
-                    RetrieveRequest(result.stash_keys[0], frozenset(result.stash_keys), self.attribution)
+                self.assertEqual(result.recoverability.value, "lossless")
+                self.assertEqual(result.stash_keys, ())
+                self.assertNotIn("Incomplete table", result.output)
+                self.assertEqual(
+                    list(csv.reader(io.StringIO(result.output), delimiter=delimiter)),
+                    list(csv.reader(io.StringIO(original), delimiter=delimiter)),
                 )
-                self.assertEqual(restored.payload.encode(), original.encode())
                 for kind, optimization in (
                     (ResultKind.RETRIEVE, OutputOptimization.NONE),
                     (ResultKind.TOOL, OutputOptimization.RTK),
@@ -513,7 +516,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                         PostToolRequest(
                             result_kind=kind,
                             tool_name="tokenless_retrieve",
-                            content=restored.payload,
+                            content=original,
                             status=ToolResultStatus.SUCCESS,
                             content_origin=ContentOrigin.API_RESPONSE,
                             output_optimization=optimization,

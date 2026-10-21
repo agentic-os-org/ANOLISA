@@ -539,7 +539,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Oct 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Oct 21 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Add authenticated read-only stats, reversible path lists and QwenWork workspace Shell support
+- Keep all CSV and TSV rows at the cost of lower savings for some outputs
+- Improve adapter dry runs and keep CLI, Hook and worker failures from losing results
+- Guard QwenPaw wheel compatibility and normalize prerelease wheel URLs
+
+* Thu Oct 15 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.7-1
 - Preserve exact JSON values and OpenCode parameter validators
 - Honor Qwen Code and OpenCode uninstall dry runs
 - Warn on stats initialization failures without blocking results

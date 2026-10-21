@@ -82,14 +82,25 @@ def capture_runtime_log(
                 if complete and isinstance(start, LogPosition):
                     handle.seek(start.size - len(start.tail))
                     complete = handle.read(len(start.tail)) == start.tail
-                try:
-                    current = source.stat()
-                    complete = complete and (current.st_dev, current.st_ino) == (
-                        stat.st_dev,
-                        stat.st_ino,
-                    )
-                except OSError:
+                if not complete:
+                    # Copytruncate can leave new diagnostics before the old offset.
+                    try:
+                        handle.seek(0)
+                        payload += b"\n" + handle.read()
+                    except OSError:
+                        pass
+            try:
+                current = source.stat()
+            except OSError:
+                complete = False
+            else:
+                if (current.st_dev, current.st_ino) != (stat.st_dev, stat.st_ino):
                     complete = False
+                    # Preserve one replacement without chasing ongoing rotation.
+                    try:
+                        payload += b"\n" + source.read_bytes()
+                    except OSError:
+                        pass
     except OSError:
         return None, []
     destination.parent.mkdir(parents=True, exist_ok=True)
