@@ -19,6 +19,11 @@ Baseline on unchanged main:
 - ``test_cli_attributes_prefixed_skills_end_to_end`` fails on any host whose
   readdir lists the shorter name first (the common case) and pins the fixed
   attribution everywhere.
+- ``test_shell_operator_boundaries_still_count`` and
+  ``test_cli_counts_subshell_and_redirection_references`` pass on unchanged
+  main (the substring match counted these forms); they pin that the boundary
+  check keeps counting references that sit directly against a grouping or
+  redirection operator.
 """
 
 import json
@@ -288,6 +293,46 @@ class TestPrefixedSkillAttribution(SessionLogsTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
         self.assertIn("web-search: 1", proc.stdout)
         self.assertNotIn("web: 1", proc.stdout)
+
+    def test_shell_operator_boundaries_still_count(self):
+        skill_usage = self.import_script()
+        try:
+            paths = {"web": "/ws/skills/web", "web-search": "/ws/skills/web-search"}
+            # Grouping and redirection operators are shell syntax, not name
+            # content: unchanged main counted these references, so the
+            # boundary check must keep counting them.
+            for command in (
+                "(cd /ws/skills/web)",            # subshell, no trailing slash
+                "ls /ws/skills/web>listing.txt",  # redirection, no space
+                "run</ws/skills/web/input.txt",   # input redirect, no space
+                "(/ws/skills/web/run.py)",        # path right after the paren
+            ):
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        skill_usage.find_skill_in_command(command, paths),
+                        "web",
+                    )
+        finally:
+            self.release_script()
+
+    def test_cli_counts_subshell_and_redirection_references(self):
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        (workspace / "skills" / "web-search").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"(cd {workspace}/skills/web)"),
+                tool_call(f"ls {workspace}/skills/web>listing.txt"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("web: 2", proc.stdout)
+        self.assertIn("Total skill calls: 2", proc.stdout)
+        # Operator-adjacent references belong to the skill actually named,
+        # never to its longer neighbour.
+        self.assertNotIn("web-search:", proc.stdout)
 
 
 if __name__ == "__main__":

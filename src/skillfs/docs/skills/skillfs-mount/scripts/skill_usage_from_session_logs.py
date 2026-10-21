@@ -79,8 +79,12 @@ def get_skill_paths(workspace: str) -> dict:
 #: The set mirrors the name class of the ``skills/([^/\s&|;]+)/`` fallback
 #: below (a skill directory name may contain anything except ``/`` and
 #: these) plus the quoting characters a shell wraps a path in, which are
-#: syntax, never part of a directory name here.
-_SHELL_WORD_DELIMITERS = " \t\n\r&|;'\""
+#: syntax, never part of a directory name here. The grouping and
+#: redirection operators ``( ) < >`` and the backquote are syntax as well:
+#: a path can sit directly against them (``(cd /ws/skills/web)``,
+#: ``ls /ws/skills/web>listing.txt``), so they are word boundaries on
+#: either side exactly like whitespace.
+_SHELL_WORD_DELIMITERS = " \t\n\r&|;()<>'\"`"
 
 
 def _references_path(command: str, skill_path: str) -> bool:
@@ -92,7 +96,10 @@ def _references_path(command: str, skill_path: str) -> bool:
     reference must start and end at a shell-word boundary: ``web`` no
     longer matches ``web-search/...``, while ``ls /ws/skills/web`` (the
     command ends right after the directory) and
-    ``python /ws/skills/web/run.py`` still count.
+    ``python /ws/skills/web/run.py`` still count. A reference also counts
+    when it sits directly against a grouping or redirection operator —
+    ``(cd /ws/skills/web)`` or ``ls /ws/skills/web>listing.txt`` — since
+    those characters are shell syntax, never name content.
     """
     start = 0
     while True:
