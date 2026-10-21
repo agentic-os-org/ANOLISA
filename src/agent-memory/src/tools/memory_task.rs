@@ -144,6 +144,8 @@ impl Task {
         }
         out.push_str(&format!("created_at: {}\n", self.created_at));
         out.push_str(&format!("updated_at: {}\n", self.updated_at));
+        // The blank line after the closing fence is part of the delimiter;
+        // `split_task_frontmatter` consumes it so the context never grows.
         out.push_str("---\n\n");
         out.push_str(&self.context);
         if !self.context.ends_with('\n') && !self.context.is_empty() {
@@ -201,16 +203,29 @@ fn validate_task_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Split a task file into its frontmatter block and its body.
+///
+/// `to_markdown` terminates the frontmatter with `---\n\n`: the blank line
+/// after the closing fence is the delimiter's own separator, not context.
+/// Returning it as body made every load→save round trip prepend one more
+/// newline to the stored context, so exactly one leading newline is consumed
+/// here. A hand-written file whose body starts right after the closing fence
+/// keeps its first byte, and a context that genuinely begins with a blank line
+/// survives — `to_markdown` re-adds the separator, so the round trip is
+/// byte-stable either way.
+fn split_task_frontmatter(content: &str) -> Result<(&str, &str)> {
+    let (rest, pos) = content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n").map(|pos| (rest, pos)))
+        .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
+    let body = &rest[pos + 5..];
+    Ok((&rest[..pos], body.strip_prefix('\n').unwrap_or(body)))
+}
+
 /// Parse a task from markdown content with YAML frontmatter.
 fn parse_task(content: &str) -> Result<Task> {
     // Split frontmatter and body.
-    let (frontmatter, body) = content
-        .strip_prefix("---\n")
-        .and_then(|rest| {
-            rest.find("\n---\n")
-                .map(|pos| (&rest[..pos], &rest[pos + 5..]))
-        })
-        .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
+    let (frontmatter, body) = split_task_frontmatter(content)?;
 
     // Parse frontmatter as YAML (using serde_yaml via serde_json roundtrip).
     // We use a simple line-by-line parser for the known fields since we
@@ -764,6 +779,195 @@ mod tests {
         assert_eq!(parsed.progress, 75);
         assert_eq!(parsed.next_steps.len(), 2);
         assert_eq!(parsed.files_modified.len(), 1);
+    }
+
+    /// A task with every field empty except the ones under test.
+    fn task_with_context(context: &str) -> Task {
+        Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: context.to_string(),
+        }
+    }
+
+    fn task_path(svc: &MemoryService, id: &str) -> std::path::PathBuf {
+        svc.mount.root.join(TASKS_DIR).join(format!("{id}.md"))
+    }
+
+    /// The stored body: everything after the frontmatter fence and its
+    /// separator blank line.
+    fn task_body(svc: &MemoryService, id: &str) -> String {
+        let content = std::fs::read_to_string(task_path(svc, id)).unwrap();
+        content
+            .split_once("---\n\n")
+            .expect("frontmatter fence")
+            .1
+            .to_string()
+    }
+
+    /// Pull the task id out of a `task saved: <id> (status=...)` reply.
+    fn saved_id(result: &str) -> &str {
+        result
+            .split(": ")
+            .nth(1)
+            .expect("task saved reply")
+            .split_whitespace()
+            .next()
+            .expect("task id")
+    }
+
+    #[test]
+    fn parse_task_does_not_leak_frontmatter_separator_into_context() {
+        let md = task_with_context("Some context here.").to_markdown();
+        let first = parse_task(&md).unwrap();
+        assert!(
+            !first.context.starts_with('\n'),
+            "parsed context must not include the blank separator line after \
+             the frontmatter fence: {:?}",
+            first.context
+        );
+
+        // Re-serialising the parsed task and parsing again must be a fixed
+        // point: the context stops growing after the first hop.
+        let mut current = first;
+        for _ in 0..3 {
+            let next = parse_task(&current.to_markdown()).unwrap();
+            assert_eq!(next.context, current.context);
+            assert_eq!(next.to_markdown(), current.to_markdown());
+            current = next;
+        }
+    }
+
+    #[test]
+    fn parse_task_empty_context_stays_empty() {
+        let parsed = parse_task(&task_with_context("").to_markdown()).unwrap();
+        assert_eq!(parsed.context, "");
+    }
+
+    #[test]
+    fn parse_task_keeps_multi_paragraph_context() {
+        let context = "First paragraph.\n\nSecond paragraph.\n";
+        let parsed = parse_task(&task_with_context(context).to_markdown()).unwrap();
+        assert_eq!(parsed.context, context);
+    }
+
+    #[test]
+    fn parse_task_keeps_context_that_starts_with_a_blank_line() {
+        // The delimiter's own separator is stripped, but an authored blank
+        // line beyond it is context and must survive the round trip.
+        let context = "\nDeliberately indented by a blank line.\n";
+        let parsed = parse_task(&task_with_context(context).to_markdown()).unwrap();
+        assert_eq!(parsed.context, context);
+    }
+
+    #[test]
+    fn parse_task_reads_hand_written_file_without_separator() {
+        // A task file whose body starts immediately after the closing fence
+        // keeps its first byte instead of losing it.
+        let content = "---\nid: hand-written\ntitle: \"Hand written\"\n---\nBody text.";
+        let parsed = parse_task(content).unwrap();
+        assert_eq!(parsed.id, "hand-written");
+        assert_eq!(parsed.context, "Body text.");
+    }
+
+    #[test]
+    fn repeated_saves_do_not_grow_task_context() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Growing task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alpha"),
+            Some("grow-1"),
+        )
+        .unwrap();
+        let id = saved_id(&result);
+        assert_eq!(id, "grow-1");
+
+        let mut previous = task_body(&svc, id);
+        assert_eq!(previous, "alpha\n");
+        for round in 0..3 {
+            // A load→save hop that passes no new context must rewrite the
+            // stored body byte for byte.
+            memory_task_save(&svc, "", None, None, None, None, None, None, None, Some(id)).unwrap();
+            let current = task_body(&svc, id);
+            assert_eq!(
+                current, previous,
+                "round {round}: task body grew on a load→save hop"
+            );
+            previous = current;
+        }
+
+        let content = std::fs::read_to_string(task_path(&svc, id)).unwrap();
+        assert_eq!(parse_task(&content).unwrap().context, "alpha\n");
+    }
+
+    #[test]
+    fn close_task_without_context_does_not_add_blank_lines() {
+        // The leaked separator newline made an empty context look non-empty,
+        // so memory_task_close stacked a blank line before the Closed marker.
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Context-free task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("close-1"),
+        )
+        .unwrap();
+        let id = saved_id(&result);
+
+        memory_task_close(&svc, id, Some("All done")).unwrap();
+
+        assert_eq!(task_body(&svc, id), "**Closed**: All done\n");
+    }
+
+    #[test]
+    fn close_task_with_context_keeps_a_single_separator() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Task with context",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alpha"),
+            Some("close-2"),
+        )
+        .unwrap();
+        let id = saved_id(&result);
+
+        memory_task_close(&svc, id, Some("All done")).unwrap();
+        assert_eq!(task_body(&svc, id), "alpha\n\n**Closed**: All done\n");
+
+        // Closing again must not stack another blank line either.
+        memory_task_close(&svc, id, Some("Really done")).unwrap();
+        assert_eq!(
+            task_body(&svc, id),
+            "alpha\n\n**Closed**: All done\n\n**Closed**: Really done\n"
+        );
     }
 
     #[test]
