@@ -77,6 +77,9 @@ libsystemd = "0.7"
 tempfile = "3"
 tokio-test = "0.4"
 toml = "0.8"
+# Integration tests assert `mem_diff` output round-trips through the same
+# unified-diff parser a consumer would use.
+diffy = "0.4"
 
 [[bin]]
 name = "agent-memory"

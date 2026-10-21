@@ -296,6 +296,87 @@ fn diff_shows_changes() {
 }
 
 #[test]
+fn diff_output_round_trips_as_a_unified_patch() {
+    let (_t, svc) = setup();
+    let original = "first\noriginal\nlast\n";
+    let modified = "first\nmodified\nlast\n";
+    svc.write("notes/original.md", original, false).unwrap();
+    svc.write("notes/modified.md", modified, false).unwrap();
+
+    let output = svc.diff("notes/original.md", "notes/modified.md").unwrap();
+
+    // Exactly one header pair, carrying the real mount-relative paths.
+    let headers: Vec<&str> = output
+        .lines()
+        .filter(|l| l.starts_with("--- ") || l.starts_with("+++ "))
+        .collect();
+    assert_eq!(headers, ["--- notes/original.md", "+++ notes/modified.md"]);
+
+    let patch = diffy::Patch::from_str(&output)
+        .unwrap_or_else(|e| panic!("mem_diff must return a valid unified patch: {e}"));
+    assert_eq!(patch.original(), Some("notes/original.md"));
+    assert_eq!(patch.modified(), Some("notes/modified.md"));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_of_identical_files_is_an_empty_patch() {
+    let (_t, svc) = setup();
+    let same = "alpha\nbeta\n";
+    svc.write("notes/a.md", same, false).unwrap();
+    svc.write("notes/b.md", same, false).unwrap();
+
+    let output = svc.diff("notes/a.md", "notes/b.md").unwrap();
+
+    let patch = diffy::Patch::from_str(&output)
+        .unwrap_or_else(|e| panic!("header-only patch must parse: {e}"));
+    assert!(
+        patch.hunks().is_empty(),
+        "identical files must produce no hunks: {output}"
+    );
+    assert_eq!(diffy::apply(same, &patch).unwrap(), same);
+}
+
+#[test]
+fn diff_round_trips_without_trailing_newline() {
+    let (_t, svc) = setup();
+    let original = "one\ntwo\n";
+    let modified = "one\ntwo changed";
+    svc.write("notes/a.md", original, false).unwrap();
+    svc.write("notes/b.md", modified, false).unwrap();
+
+    let output = svc.diff("notes/a.md", "notes/b.md").unwrap();
+
+    let patch = diffy::Patch::from_str(&output)
+        .unwrap_or_else(|e| panic!("patch must parse without a trailing newline: {e}"));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
+fn diff_headers_keep_paths_needing_escaping() {
+    let (_t, svc) = setup();
+    let original = "keep me\n";
+    let modified = "keep me changed\n";
+    svc.write("notes/my note.md", original, false).unwrap();
+    svc.write("notes/my other note.md", modified, false)
+        .unwrap();
+
+    let output = svc
+        .diff("notes/my note.md", "notes/my other note.md")
+        .unwrap();
+
+    assert!(
+        output.starts_with("--- notes/my note.md\n+++ notes/my other note.md\n"),
+        "unexpected header: {output}"
+    );
+    let patch = diffy::Patch::from_str(&output)
+        .unwrap_or_else(|e| panic!("patch with spaced paths must parse: {e}"));
+    assert_eq!(patch.original(), Some("notes/my note.md"));
+    assert_eq!(patch.modified(), Some("notes/my other note.md"));
+    assert_eq!(diffy::apply(original, &patch).unwrap(), modified);
+}
+
+#[test]
 fn diff_missing_file_errors() {
     let (_t, svc) = setup();
     svc.write("a.md", "x", false).unwrap();

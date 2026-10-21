@@ -52,12 +52,19 @@ pub fn diff(svc: &MemoryService, path1: &str, path2: &str) -> Result<String> {
             return Err(e);
         }
     };
-    let patch = diffy::create_patch(&body1, &body2);
-    let formatted = format!("--- {rel1}\n+++ {rel2}\n{patch}");
+    // Let diffy own the filename headers: it already emits `--- <original>` /
+    // `+++ <modified>`, so prepending our own pair produced a patch with two
+    // header blocks that no unified-diff parser accepts (GH-3564).
+    let audit_path = format!("{rel1} <-> {rel2}");
+    let mut options = diffy::DiffOptions::new();
+    options
+        .set_original_filename(rel1)
+        .set_modified_filename(rel2);
+    let formatted = options.create_patch(&body1, &body2).to_string();
 
     svc.audit_log(
         AuditEntry::new(TOOL)
-            .path(format!("{rel1} <-> {rel2}"))
+            .path(audit_path)
             .bytes(formatted.len() as u64),
     );
 
