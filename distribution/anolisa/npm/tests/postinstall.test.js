@@ -142,6 +142,14 @@ check('missing native binary preserves the previous launcher', (fixture) => {
   assert.equal(readlinkSync(fixture.launcher), fixture.oldTarget);
 });
 
+check('directory at native binary path is rejected', (fixture) => {
+  mkdirSync(fixture.native);
+  const result = install(fixture);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Binary not found/);
+  assert.equal(lstatSync(fixture.native).isDirectory(), true);
+});
+
 check('launcher survives moving the installation tree', (fixture) => {
   writeFileSync(fixture.native, nativeContent);
   assertInstalled(fixture, install(fixture));

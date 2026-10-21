@@ -22,6 +22,7 @@
 import {
   existsSync,
   mkdirSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   chmodSync,
@@ -66,7 +67,13 @@ function resolvePackageBinary() {
   }
 
   const nativeBinary = join(pkgDir, 'bin', 'anolisa');
-  if (!existsSync(nativeBinary)) {
+  let nativeBinaryIsFile = false;
+  try {
+    nativeBinaryIsFile = statSync(nativeBinary).isFile();
+  } catch {
+    // Keep the installation error stable for a missing or unreadable payload.
+  }
+  if (!nativeBinaryIsFile) {
     throw new Error(`Binary not found in ${pkgName} at ${nativeBinary}`);
   }
 
