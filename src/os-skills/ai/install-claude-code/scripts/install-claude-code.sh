@@ -104,6 +104,15 @@ check_alinux() {
 }
 
 install_sys_deps() {
+  # Non-RPM hosts (macOS, Debian family, slim containers) have neither dnf nor
+  # rpm. The install methods below do not need distribution packages, so skip
+  # this step instead of dying with "dnf: command not found" (exit 127) before
+  # any of them is attempted.
+  if ! command_exists dnf && ! command_exists rpm; then
+    warn "Neither dnf nor rpm found — skipping distribution packages."
+    return 0
+  fi
+
   info "Installing system prerequisites via dnf..."
 
   local pkgs_to_install=()
@@ -113,12 +122,20 @@ install_sys_deps() {
   command_exists tar   || pkgs_to_install+=(tar)
   command_exists gzip  || pkgs_to_install+=(gzip)
 
-  # glibc and libstdc++ should already be present on Alinux 4, but ensure
-  rpm -q glibc        &>/dev/null || pkgs_to_install+=(glibc)
-  rpm -q libstdc++    &>/dev/null || pkgs_to_install+=(libstdc++)
+  # glibc and libstdc++ should already be present on Alinux 4, but ensure.
+  # Without rpm the probes always fail and would fabricate a package list.
+  if command_exists rpm; then
+    rpm -q glibc        &>/dev/null || pkgs_to_install+=(glibc)
+    rpm -q libstdc++    &>/dev/null || pkgs_to_install+=(libstdc++)
+  fi
 
   if [[ ${#pkgs_to_install[@]} -eq 0 ]]; then
     ok "All system prerequisites already installed."
+    return 0
+  fi
+
+  if ! command_exists dnf; then
+    warn "dnf not found — skipping distribution packages: ${pkgs_to_install[*]}"
     return 0
   fi
 
