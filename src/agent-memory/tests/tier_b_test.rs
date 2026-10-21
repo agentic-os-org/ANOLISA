@@ -107,6 +107,90 @@ fn inotify_unindex_on_delete() {
     );
 }
 
+fn wait_until_absent(svc: &MemoryService, query: &str) -> Vec<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        let paths: Vec<String> = svc
+            .memory_search(query, 5, None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        if paths.is_empty() || std::time::Instant::now() >= deadline {
+            return paths;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn snapshot_restore_unindexes_files_the_snapshot_lacks() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/a.md", "alpha keyword", false).unwrap();
+    assert!(wait_for_index(&svc, 2));
+    let snapshot = agent_memory::tools::mem_snapshot::snapshot(&svc, Some("before-b")).unwrap();
+    svc.write("notes/b.md", "bravo unicorn", false).unwrap();
+    assert!(wait_for_index(&svc, 3));
+
+    agent_memory::tools::mem_snapshot_restore::snapshot_restore(&svc, &snapshot.id).unwrap();
+
+    assert!(!svc.mount.root.join("notes/b.md").exists());
+    let stale = wait_until_absent(&svc, "unicorn");
+    assert!(
+        stale.is_empty(),
+        "restored-away file still indexed: {stale:?}"
+    );
+    let kept = svc.memory_search("alpha", 5, None, None, None).unwrap();
+    assert_eq!(kept.len(), 1, "restored file must stay indexed");
+    assert_eq!(kept[0].path, "notes/a.md");
+}
+
+#[test]
+fn directory_replaced_in_one_window_drops_old_children() {
+    let (tmp, svc) = setup();
+    svc.write("notes/old.md", "obsolete griffin", false)
+        .unwrap();
+    svc.write("notes_x/keep.md", "sibling griffin", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 3));
+
+    // Replace notes/ by another directory faster than the debounce window.
+    let root = svc.mount.root.clone();
+    let aside = tmp.path().join("aside");
+    std::fs::rename(root.join("notes"), &aside).unwrap();
+    let staged = tmp.path().join("staged");
+    std::fs::create_dir(&staged).unwrap();
+    std::fs::write(staged.join("new.md"), "fresh pegasus").unwrap();
+    std::fs::rename(&staged, root.join("notes")).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while svc
+        .memory_search("pegasus", 5, None, None, None)
+        .unwrap()
+        .is_empty()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let griffin: Vec<String> = wait_until_absent(&svc, "obsolete")
+        .into_iter()
+        .chain(
+            svc.memory_search("griffin", 5, None, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path),
+        )
+        .collect();
+    assert_eq!(
+        griffin,
+        vec!["notes_x/keep.md".to_string()],
+        "only the replaced directory's old child may go"
+    );
+    let fresh = svc.memory_search("pegasus", 5, None, None, None).unwrap();
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].path, "notes/new.md");
+}
+
 #[test]
 fn ignores_meta_dir() {
     let (_tmp, svc) = setup();
