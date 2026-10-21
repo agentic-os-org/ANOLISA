@@ -2,6 +2,7 @@
 
 import ast
 import copy
+from contextlib import chdir
 import hashlib
 import json
 import os
@@ -10,18 +11,80 @@ import sys
 import textwrap
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from test_ci_checks import AW, GateFixture
 from check_native import load
 from native_acceptance import Commands, verify_bundle, verify_case
 from native_reports import validate_case
 from native_summary import summarize
+import native_acceptance
 
 
 class NativeTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
         self.manifest = load(AW)
+
+    def test_setup_reports_survive_relative_and_absolute_output_paths(self) -> None:
+        run = Commands.run
+        row = self.manifest["agents"]["qoder"]
+
+        def command(commands, argv, cwd, timeout=600, **kwargs):
+            if len(argv) > 1 and argv[1] == str(AW / "scripts/native_qoder.py"):
+                # Replace the download with a real child writing the same report
+                # from setup's working directory, without credentials or network.
+                report = argv[argv.index("--report") + 1]
+                return run(
+                    commands,
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; import sys; "
+                        "Path(sys.argv[1]).write_text('{}')",
+                        report,
+                    ],
+                    cwd,
+                    5,
+                )
+            return "{}"
+
+        for mode in ("relative", "absolute"):
+            output = self.root / mode / "evidence with spaces"
+            argument = str(output.relative_to(self.root) if mode == "relative" else output)
+            argv = [
+                "native_acceptance.py",
+                "--agent",
+                "qoder",
+                "--candidate-sha",
+                "a" * 40,
+                "--bin",
+                "candidate-binaries",
+                "--output",
+                argument,
+            ]
+            with self.subTest(mode=mode), chdir(self.root), patch.object(
+                sys, "argv", argv
+            ), patch.dict(
+                os.environ, {"QODER_PERSONAL_ACCESS_TOKEN": "test-private-token"}
+            ), patch.object(
+                native_acceptance, "plan"
+            ), patch.object(
+                native_acceptance, "load", return_value=self.manifest
+            ), patch.object(
+                native_acceptance, "verify_bundle"
+            ), patch.object(
+                native_acceptance.platform, "python_version", return_value=row["python"]
+            ), patch.object(
+                Commands, "run", autospec=True, side_effect=command
+            ), patch.object(
+                native_acceptance, "verify_case"
+            ):
+                native_acceptance.main()
+                self.assertEqual(json.loads((output / "qoder-version.json").read_text()), {})
+                self.assertEqual(
+                    json.loads((output / "result.json").read_text())["status"], "passed"
+                )
 
     def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
         workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()

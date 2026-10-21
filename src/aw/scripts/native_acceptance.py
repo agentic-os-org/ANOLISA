@@ -290,6 +290,7 @@ def main() -> None:
     plan(AW, args.candidate_sha)
     row = load(AW)["agents"][args.agent]
     args.bin = args.bin.resolve()
+    args.output = args.output.resolve()
     verify_bundle(args.bin, args.candidate_sha)
     args.output.mkdir(parents=True, exist_ok=False)
     result = {
