@@ -413,6 +413,53 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+#[test]
+fn search_category_filter_applies_before_limit() {
+    let (_tmp, svc) = setup();
+
+    // Regression for the client-side filter that ran *after* the SQL LIMIT:
+    // six lesson facts repeat the query terms and dominate the bm25 top-k,
+    // so filtering the returned window for "interest" used to yield zero
+    // hits even though interest facts match. The filter now rides inside
+    // the SQL WHERE, before LIMIT.
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/lesson/01JLESSON{i:02}.md"),
+            "---\ncategory: lesson\n---\n\nquantum lattice dynamics quantum lattice dynamics \
+             quantum lattice dynamics quantum lattice dynamics",
+            false,
+        )
+        .unwrap();
+        svc.write(
+            &format!("facts/interest/01JINTEREST{i:02}.md"),
+            "---\ncategory: interest\n---\n\nuser asked about quantum lattice dynamics once",
+            false,
+        )
+        .unwrap();
+    }
+    // 12 fact files + the scaffold file the setup indexes.
+    assert!(wait_for_index(&svc, 13));
+
+    // Premise: the unfiltered top-5 window is entirely lesson facts.
+    let hits = svc
+        .memory_search("quantum lattice dynamics", 5, None, None, None)
+        .unwrap();
+    assert_eq!(hits.len(), 5);
+    assert!(
+        hits.iter().all(|h| h.path.contains("facts/lesson/")),
+        "premise broken, unfiltered window: {hits:?}"
+    );
+
+    // category=interest must still return a full window of interest hits.
+    let hits = svc
+        .memory_search("quantum lattice dynamics", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(hits.iter().all(|h| h.path.contains("facts/interest/")));
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic
