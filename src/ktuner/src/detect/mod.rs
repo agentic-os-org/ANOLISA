@@ -2081,6 +2081,14 @@ const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "clickhouse-keeper",
     "oracle-cloud-agent",
     "oracle-cloud-agent-updater",
+    // The Kubernetes control planes for three comm-named services: each one
+    // provisions its service as separate pods and never runs it, but its name
+    // still carries the service's first run (`grafana`, `clickhouse`,
+    // `postgres`) with a `-` boundary. A node whose only process from that
+    // family is the operator reported the service and ran its rules.
+    "grafana-operator",
+    "clickhouse-operator",
+    "postgres-operator",
 ];
 
 /// Whether the program `program` is a *tool* of a service rather than the
@@ -4852,7 +4860,23 @@ mod tests {
             // platform's default agents reported an Oracle database.
             ("oracle-cloud-agent", "oracle", "Oracle"),
             ("oracle-cloud-agent-updater", "oracle", "Oracle"),
+            // The Kubernetes control planes: each provisions its service as
+            // separate pods and never runs it, but keeps the service's first
+            // name run (`grafana`, `clickhouse`, `postgres`).
+            ("grafana-operator", "grafana", "Grafana"),
+            ("clickhouse-operator", "clickhouse", "ClickHouse"),
+            ("postgres-operator", "postgres", "PostgreSQL"),
         ] {
+            // `has_process` is host-wide, so a machine that already runs the
+            // service cannot tell whether this case was filtered. Say so and
+            // move on instead of failing on the host's own state.
+            if gather_system_info()
+                .expect("gather system info")
+                .has_process(service)
+            {
+                eprintln!("skip {name}: the host already runs {service}");
+                continue;
+            }
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
             let mut command = std::process::Command::new(&path);
@@ -4990,6 +5014,11 @@ mod tests {
             "spark-submit",
             "hadoop-daemon.sh",
             "elasticsearch-keystore",
+            // Kubernetes operators: control planes of a service that runs in
+            // separate pods, never the service itself.
+            "grafana-operator",
+            "clickhouse-operator",
+            "postgres-operator",
         ] {
             assert!(
                 program_names_service_tool(tool),
