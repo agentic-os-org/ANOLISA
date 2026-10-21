@@ -41,7 +41,7 @@ for name, values in {
     "agentscope": {},
     "agentscope.message": {"TextBlock": Block, "ToolResultState": SimpleNamespace(DENIED="denied")},
     "agentscope.middleware": {"MiddlewareBase": object},
-    "agentscope.tool": {"ToolResponse": Response},
+    "agentscope.tool": {"ToolResponse": Response, "ToolChunk": type("ToolChunk", (), {})},
 }.items():
     module = ModuleType(name)
     module.__dict__.update(values)

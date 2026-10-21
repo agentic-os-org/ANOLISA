@@ -2,7 +2,7 @@
 
 mod cli;
 
-use aw_service::{Client, Operation, Server};
+use aw_service::{Operation, Server};
 use std::{
     io::Read,
     path::PathBuf,
@@ -32,8 +32,9 @@ fn run() -> cli::Result<cli::Exit> {
         .ok_or("expected run, install, validate, inspect, policy, serve, status, request, stop")?;
     if command == "--help" {
         println!(
-            "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
+            "aw run --config FILE --agent TARGET [--reloadable] [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
 aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
+aw update (--config CURRENT_FILE | --socket ABSOLUTE_PATH) (--agent TARGET | --instance ID) --policy NEXT_FILE [--expected-revision SHA256]\n\
 aw validate --config FILE [--against BASELINE_FILE]\n\
 aw inspect --config ABS_FILE --json\n\
 aw policy < provider-request.json\n\
@@ -76,7 +77,10 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         println!("{}", serde_json::to_string(&snapshot)?);
         return Ok(cli::Exit::Code(0));
     }
-    if matches!(command.as_str(), "run" | "hook" | "install" | "policy") {
+    if matches!(
+        command.as_str(),
+        "run" | "hook" | "install" | "policy" | "update" | "bridge"
+    ) {
         return cli::dispatch(&command, &args);
     }
     let flags = &args.flags;
@@ -142,30 +146,7 @@ install dispatches native Hook installation; it does not install AW or an Agent.
                 }
             };
             let expires = Instant::now() + Duration::from_millis(budget);
-            let paths = if let Some(config) = flags.get("--config") {
-                if flags.contains_key("--socket") {
-                    return Err("choose --config or --socket".into());
-                }
-                let bytes = cli::read_file(config, 4 * 1024 * 1024)?;
-                let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty());
-                Some(aw_service::launch_service::resolve(
-                    &bytes,
-                    runtime.as_deref().map(std::path::Path::new),
-                )?)
-            } else {
-                None
-            };
-            let socket = match &paths {
-                Some(paths) => paths.socket.clone(),
-                None => PathBuf::from(required("--socket")?),
-            };
-            let client = Client::connect(socket, expires)?;
-            if paths
-                .as_ref()
-                .is_some_and(|paths| paths.config_revision != client.identity().config_revision)
-            {
-                return Err("service configuration does not match the supplied file".into());
-            }
+            let client = cli::connect_service(&args, expires)?;
             let result = client.call(operation, expires)?;
             println!(
                 "{}",

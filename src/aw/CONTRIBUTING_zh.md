@@ -91,6 +91,11 @@ sec-core 用例：`allow`、`scan-deny`、`backend-error` 和 `timeout-block`。
 固定镜像。容器禁用网络，宿主仅挂载一个可写的 socket 目录，并记录实际平台镜像 ID。定时任务只选择一次 `github.sha`；
 容器不会另行拉取不断变化的分支或独立构建的 nightly 镜像。
 
+另一个必需的 Qoder 1.1.73 TUI 用例验证原生 SessionStart 就绪，以及请求派发前的
+空策略 → 增加 Hook → 移除 Hook 更新，保留相同 PID/启动 ticks。它下载独立校验和固定
+的版本，并保留 1.1.64 print 用例。原生清单要求其具名元数据报告及清理结果。
+该用例不证明托管 TUI 工具轮次或结果替换已经通过。
+
 正常用例必须写出标记文件；风险用例必须命中内置 `shell-recursive-delete` 规则
 （`warn` 转为阻断），保留待删除的临时夹具，且不生成标记。停止真实容器模拟后端
 不可用，暂停容器验证 Provider 的 2 秒截止时间和 `on_error: block`。二者均须
@@ -170,7 +175,7 @@ cargo build --locked -p aw-provider --example policy
 
 [使用指南](../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)提供前台
 服务与独立客户端的完整演示，以及状态目录和审计历史的清理说明。服务使用
-`aw-service/v1alpha3` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
+`aw-service/v1alpha4` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
 分别版本化。
 
 ## 运行时验收

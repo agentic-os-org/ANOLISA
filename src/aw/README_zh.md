@@ -22,6 +22,11 @@ aw run --config "$HOME/aw/aw.yaml" --agent qoder
 详见[配置](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#比较策略修改)；
 此命令不更新运行中的实例。
 
+通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
+AgentScope 2.0.9 App 预装实验性空闲更新桥接。
+`aw update --config current.yaml --agent TARGET --policy next.yaml` 选择目标的唯一实例，
+保留宿主进程，忙碌实例返回 busy；见[预热实例更新](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#更新预热实例)。
+
 退出 Agent 后，本地服务仍可查询，使用结束后显式停止。
 
 ```bash

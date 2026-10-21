@@ -10,6 +10,7 @@ pub mod callback;
 pub mod completion;
 pub mod projection;
 mod qoder;
+pub mod reload;
 
 pub use adapter::{
     block_reason, select, Adapter, HookEvent, HookOutput, InstallOptions, LaunchContext,

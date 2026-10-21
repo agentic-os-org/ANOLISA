@@ -386,7 +386,7 @@ The native Hook output dialect and event coverage remain framework-specific.
 
 ## Upgrade the service
 
-This build uses local protocol `aw-service/v1alpha3`. A daemon from an older
+This build uses local protocol `aw-service/v1alpha4`. A daemon from an older
 build is rejected with `protocol_version` before Agent binding or callbacks.
 Before replacing the executable, exit its Agent sessions and use the **old**
 `aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.
@@ -683,8 +683,9 @@ reused only when its protocol and exact configuration revision match. With
 directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
 unset. Explicit paths must be absolute and agree on the `aw.sock` location.
 
-The service retains a fixed configuration snapshot. Editing `aw.yaml` does not
-reload it. Stop a service using its original file or socket before retiring that
+The service retains its bootstrap configuration snapshot. Editing `aw.yaml` does not
+reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/user-entrypoint/aw/configuration.md#update-a-prewarmed-instance);
+these change the instance Host without changing service identity. Stop a service using its original file or socket before retiring that
 configuration; auto paths for changed configuration may select a different
 service. Exiting an Agent does not stop other sessions or the shared daemon.
 The local endpoint is a same-user boundary, not a sandbox.
@@ -694,6 +695,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
 | `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
+| `aw update --config CURRENT --agent TARGET --policy NEXT` | Update an opted-in idle instance; busy rejects without queuing |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |

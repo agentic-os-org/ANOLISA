@@ -9,6 +9,9 @@ mod native;
 #[path = "service/cancellation.rs"]
 mod cancellation;
 
+#[path = "service/policy.rs"]
+mod policy;
+
 use aw_service::{Client, Operation, Request, Server, VERSION};
 use common::{
     audit, close, event, invoke, open, second_step, Fixture, Running, PRIVATE_MARKER, TIMEOUT,

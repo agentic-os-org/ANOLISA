@@ -54,7 +54,6 @@ impl Settings {
 use aw_adapter::association::source_matches_adapter;
 
 pub(super) struct Contexts {
-    document: Value,
     sources: BTreeMap<String, Settings>,
     registry: Registry,
     // Claims live until the owning instance has drained all its observation work.
@@ -147,7 +146,6 @@ impl Contexts {
             }
         }
         Ok(Self {
-            document,
             sources,
             registry: Registry::new().map_err(contract)?,
             sessions: Mutex::new(SessionClaims::default()),
@@ -169,13 +167,14 @@ impl Contexts {
         event: &Value,
         association: Value,
         deadline: Instant,
+        document: &Value,
     ) -> Result<Seed> {
         let target = subject["binding_id"]
             .as_str()
             .ok_or_else(|| rejected("context_subject"))?;
         let constraints = projection::content(&json!({
-            "execution": self.document["spec"]["execution"],
-            "events": self.document["spec"]["events"],
+            "execution": document["spec"]["execution"],
+            "events": document["spec"]["events"],
             "config_revision": subject["config_revision"],
         }))?;
         Ok(Seed {

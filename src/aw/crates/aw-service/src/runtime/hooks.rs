@@ -110,7 +110,7 @@ impl Runtime {
     }
 
     pub(super) fn release_instance(&self, instance_id: &str, deadline: Instant) -> Result<Value> {
-        {
+        let update = {
             let mut instances = self
                 .instances
                 .lock()
@@ -120,7 +120,15 @@ impl Runtime {
                 .and_then(Option::as_mut)
                 .ok_or_else(|| rejected("unknown_instance"))?;
             instance.closing = true;
-        }
+            if let Some(cancelled) = instance
+                .reload
+                .as_ref()
+                .and_then(|reload| reload.preparation_cancelled.as_ref())
+            {
+                cancelled.store(true, Ordering::Release);
+            }
+            Arc::clone(&instance.policy_update)
+        };
         loop {
             let active = {
                 let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
@@ -134,7 +142,12 @@ impl Runtime {
                 }
                 active
             };
-            if !active && self.finish_observation(instance_id)? {
+            let preparing = match update.try_lock() {
+                Ok(_) => false,
+                Err(TryLockError::WouldBlock) => true,
+                Err(TryLockError::Poisoned(_)) => return Err(rejected("state_poisoned")),
+            };
+            if !active && !preparing && self.finish_observation(instance_id)? {
                 self.release_source_sessions(instance_id)?;
                 let observation = self.observation_metadata(instance_id)?;
                 self.instances
@@ -364,6 +377,14 @@ mod tests {
         runtime.instances.lock().unwrap().insert(
             "fixture".into(),
             Some(Instance {
+                bytes: bytes.to_vec(),
+                context: ProcessContext {
+                    cwd: directory.clone(),
+                    environment: BTreeMap::new(),
+                    stderr_bytes: 1024,
+                },
+                reload: None,
+                policy_update: Arc::new(Mutex::new(())),
                 host: Arc::new(host),
                 closing: false,
                 observation: None,

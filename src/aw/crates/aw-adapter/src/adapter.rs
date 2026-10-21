@@ -44,6 +44,8 @@ pub struct HookEvent {
 /// Native overrides parsed by the CLI, independent of its option syntax.
 #[derive(Default)]
 pub struct NativeOptions {
+    /// Preinstall a stable bridge for explicit idle-only policy updates.
+    pub reloadable: bool,
     /// Existing native settings file.
     pub settings: Option<String>,
     /// Existing native profile directory.

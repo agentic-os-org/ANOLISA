@@ -31,7 +31,7 @@ service.
 ## Local protocol
 
 [wire.rs](../../crates/aw-service/src/wire.rs) defines the experimental
-`aw-service/v1alpha3` protocol. It is separate from the Provider stdio protocol
+`aw-service/v1alpha4` protocol. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
 and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
@@ -323,3 +323,16 @@ Instance observation starts only through `start_observation` (automatically call
 failure without raw diagnostics. Status returns bounded observation metadata.
 Release drains observation workers and returns their final metadata; the durable
 run chain has its own audit key. See [evidence lifecycle](evidence-context.md#automatic-run-observation).
+
+## Explicit instance policy updates
+
+Reloadable `aw run` instances use `EnableReload`, `AssociateProcess`,
+`BridgeLifecycle`, `HookPlan` and `UpdatePolicy`. Service identity remains the
+bootstrap digest; `expected_revision` addresses the instance Host's current
+revision. Native request entry and the final update check share the instance
+registry gate. Candidate Host preparation runs outside it. Busy updates never
+queue, drain tools or activate after the response. Completed event leases remain
+claimed across updates; evidence is built from the owning Host snapshot.
+
+The [policy reload design](policy-reload.md) defines the lifecycle, process
+association, pinned entrypoints, manual acceptance and later attach/steer scope.

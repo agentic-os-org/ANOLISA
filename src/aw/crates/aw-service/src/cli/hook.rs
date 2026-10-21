@@ -47,6 +47,13 @@ pub(super) fn callback(args: &Arguments) -> Exit {
 }
 
 fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
+    if args
+        .flags
+        .get("--step")
+        .is_some_and(|step| step == aw_adapter::reload::DISPATCH)
+    {
+        return emit(super::dispatch::invoke(args, adapter)?);
+    }
     args.check(
         &[
             "--adapter",
@@ -203,7 +210,7 @@ fn emit(output: HookOutput) -> Result<Exit> {
     Ok(output.exit)
 }
 
-fn read_input(deadline: Instant) -> Result<Vec<u8>> {
+pub(super) fn read_input(deadline: Instant) -> Result<Vec<u8>> {
     let mut input = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {

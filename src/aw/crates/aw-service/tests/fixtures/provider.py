@@ -26,6 +26,14 @@ temporary = directory / f"{request['request_id']}.tmp"
 temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 temporary.replace(directory / f"{request['request_id']}.call.json")
 reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
+if (method == "describe" and (directory / "describe-gate").exists()) or (
+    method == "validate_config" and request["config"].get("prepare_gate")
+):
+    deadline = time.monotonic() + 4
+    while not (directory / "prepare-release").exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    if not (directory / "prepare-release").exists():
+        sys.exit(91)
 if method == "describe":
     reply["operations"] = [
         {"name": operation, "events": ["tool.before", "tool.after"], "effects": ["observe", "block"]}

@@ -26,7 +26,8 @@ aw-package configure --prefix "$AW_PREFIX" \
 
 ## 修改已有配置
 
-退出使用这份配置的 Agent，用原配置停止服务后再编辑。配置不会自动重载。
+退出使用这份配置的 Agent，用原配置停止服务后再编辑。配置文件不会被监听；
+已显式启用稳定桥接的实例可使用下述空闲更新流程。
 
 ```bash
 aw stop --config "$AW_HOME/aw.yaml"
@@ -59,8 +60,68 @@ aw validate --config next.yaml --against current.yaml
 Agent 入口、原生调度、服务路径、审计、观测和元数据必须相同。
 成功打印 `policy update scope valid; runtime activation is not checked`。
 比较不运行 Provider、不修改文件、不检查原生就绪，也不更新运行中的 Agent。
-应用修改仍使用前述停止、编辑、启动流程。
+启用稳定桥接的实例可使用下述显式空闲更新；其他实例使用前述停止、编辑、启动流程。
 原有 `aw validate --config FILE` 继续打印 `configuration valid`。
+
+## 更新预热实例
+
+需要保留预热宿主并更新 AW Hook 时，在原启动入口显式启用稳定桥接：
+
+```bash
+aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
+```
+
+运行时路径固定 Qoder 1.1.73 TUI，或 QwenPaw 2.2.2b4 / AgentScope 2.0.9 App。
+QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
+普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级，外部 attach 后续提供。
+
+独立准备 `next.yaml`，在另一个终端通过原启动配置定位现有服务并更新目标：
+
+```bash
+aw update --config "$AW_HOME/aw.yaml" --agent qoder --policy next.yaml
+```
+
+命令选择该目标唯一的存活实例，并读取当前策略版本。这个版本仍用于乐观并发校验：
+若另一个更新先完成，本次返回冲突，不会自动重试。没有匹配实例时报错；多个匹配实例时
+要求补充 `--instance ID`。通过 `aw status --config "$AW_HOME/aw.yaml"` 查询实例 ID 和版本。
+选择范围包括未就绪和未启用热更新的实例，不会在忙碌实例旁边默默选择一个空闲实例。
+
+需要显式选择实例或接入外部管控时：
+
+```bash
+aw update --socket "$AW_SOCKET" --instance "$AW_INSTANCE" \
+  --policy next.yaml --expected-revision "$AW_POLICY_REVISION"
+```
+
+`--socket` 替代 `--config`；`--instance` 也可用于消除 `--agent` 的多实例歧义。
+`--expected-revision` 可选，在调用方需要指定前置版本时覆盖查询到的版本。冲突不自动重试。
+
+成功返回实际激活的 `policy_revision`、前版本、审计 key、`preparation_ms` 和 `activation_ms`。
+命令不修改两份文件、不重启原生宿主，也不会启动服务。原启动文件保持不变，用于
+`aw update`、`aw status` 和 `aw stop`：自动服务路径由启动摘要决定，不使用候选策略摘要。
+新 binding 仍使用服务最初的默认策略；原地修改启动文件不能重新定位运行中的实例。
+
+热更新模式下，生命周期确认缺失或无法取得激活计划时，`tool.before` 会阻断。
+成功取得计划后，每个步骤仍使用配置的 report/block 错误策略。
+
+活跃 Agent 请求（含没有工具执行的模型等待）返回 `busy`，旧策略保持生效，更新不排队，
+之后也不会自动应用。准备失败、版本冲突和不支持的原生策略同样保留旧策略。
+超时无法确定是否已经生效时，先查询实际版本再派发工作。管控侧必须独占分配实例，并将
+更新与 Session 派发串行化；成功确认不等于预留下一条请求。同一 App 的多个 Session 共用
+实例策略，任一活跃请求都会阻止切换。
+
+在创建或派发首个用户 Session 前完成策略更新。模型账号、原生 Agent 定义由框架自己的
+Session 配置处理；通过 AW 修改这些字段仍需另起实例。Qoder 原生工具 Hook 使用顺序执行时，AW 目标也须设置 `qoder.sequential: true`，以保留相同调度。
+Qoder 的 `Stop` 不等于空闲，须等
+原生 idle_prompt 通知。QwenPaw 在正常耗尽流后释放请求/工具占用；确认完成前提前关闭流、取消或异常退出
+无法确认原生清理完成，因此保留 busy。AW 在原生清理完成后交付最终响应及终结错误/中断片段，
+因此正常返回的结构化工具错误不会阻止后续更新；无法确定结束时
+使用新实例。
+
+本 Preview 已有 CLI 接入回归和固定版本 AgentScope middleware 回归。原生清单还要求
+独立校验和固定的 Qoder 1.1.73 TUI 启动及派发前空闲切换用例。必需的 QwenPaw App HTTP 测试
+使用确定性本地模型和真实 shell/read_file 工具，验证同一进程在成功及结构化错误结果后的多次策略切换。完整的托管 Qoder TUI
+工具轮次采纳仍需独立验收。
 
 ## 选择 Agent
 

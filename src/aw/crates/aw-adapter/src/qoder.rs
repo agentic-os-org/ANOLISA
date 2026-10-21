@@ -17,6 +17,7 @@ use std::{
 };
 
 pub(super) struct Qoder;
+mod reload;
 
 struct Prepared {
     input: LaunchInput,
@@ -47,6 +48,13 @@ impl Adapter for Qoder {
         check_args(&native)?;
         let settings = settings(input.options.settings.as_ref())?;
         check_sources(&input.command.cwd, &settings)?;
+        if input.options.reloadable {
+            reload::check_sources(
+                &input.command.cwd,
+                &settings,
+                input.document["spec"]["agents"][&input.target]["qoder"]["sequential"] == true,
+            )?;
+        }
         let version =
             adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
         if version.is_empty() || version.len() > 128 {
@@ -92,6 +100,13 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if self.input.options.reloadable {
+            crate::reload::validate(
+                &self.input.document,
+                &self.input.target,
+                &self.capabilities(),
+            )?;
+        }
         generate(
             self.settings.clone(),
             &self.input.document,
@@ -104,14 +119,25 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (settings, events) = generate(
-            self.settings.clone(),
-            &self.input.document,
-            &self.input.target,
-            context.steps,
-            context.executable,
-            context.binding_path,
-        )?;
+        let (settings, events) = if self.input.options.reloadable {
+            reload::generate(
+                self.settings.clone(),
+                context.executable,
+                context.binding_path,
+                self.input.document["spec"]["agents"][&self.input.target]["qoder"]
+                    .get("sequential")
+                    .and_then(Value::as_bool),
+            )?
+        } else {
+            generate(
+                self.settings.clone(),
+                &self.input.document,
+                &self.input.target,
+                context.steps,
+                context.executable,
+                context.binding_path,
+            )?
+        };
         let path = context
             .files
             .write("settings.json", &serde_json::to_vec(&settings)?)?;

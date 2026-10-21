@@ -138,6 +138,26 @@
     "policy_update_offline_cli": {
       "target": "aw-service/test/launcher",
       "test": "policy_update::policy_scope_validation_does_not_launch_agents_or_providers_or_modify_files"
+    },
+    "runtime-reload": {
+      "target": "aw-service/test/launcher",
+      "test": "runtime_policy::prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting"
+    },
+    "reload-busy": {
+      "target": "aw-service/test/service",
+      "test": "policy::whole_request_and_unfinished_tools_return_busy_without_deferred_activation"
+    },
+    "reload-race": {
+      "target": "aw-service/test/service",
+      "test": "policy::request_arriving_during_preparation_wins_and_parallel_update_is_busy"
+    },
+    "reload-rollback": {
+      "target": "aw-service/test/service",
+      "test": "policy::failed_preparation_conflict_and_frozen_edits_preserve_policy_and_context"
+    },
+    "reload-cancel": {
+      "target": "aw-service/test/service",
+      "test": "policy::disconnected_update_cancels_preparation_without_later_activation"
     }
   },
   "agents": {
@@ -312,7 +332,12 @@
       },
       "lifecycle": [
         "qoder-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "runtime-reload",
+        "reload-busy",
+        "reload-race",
+        "reload-rollback",
+        "reload-cancel"
       ],
       "security": [
         "security-retry"
@@ -342,7 +367,12 @@
       },
       "lifecycle": [
         "qwenpaw-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "runtime-reload",
+        "reload-busy",
+        "reload-race",
+        "reload-rollback",
+        "reload-cancel"
       ],
       "security": [
         "security-retry"

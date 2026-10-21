@@ -182,6 +182,44 @@ class NativeTests(GateFixture):
                 with self.assertRaises(ValueError):
                     load(AW)
 
+    def test_qoder_reload_pin_entrypoint_and_cases_are_required(self) -> None:
+        original = Path.read_text
+        for mode in ("pin", "version", "suite", "entrypoint", "case"):
+            manifest = copy.deepcopy(self.manifest)
+            row = manifest["agents"]["qoder"]
+            case = next(item for item in row["cases"] if item["name"] == "runtime-reload")
+            if mode == "pin":
+                del row["qoder_reload_cli"]
+            elif mode == "version":
+                row["qoder_reload_cli"] = copy.deepcopy(row["qoder_cli"])
+            elif mode == "suite":
+                row["cases"].remove(case)
+            elif mode == "entrypoint":
+                case["argv"][1] = "tests/test_claude_sdk_native.py"
+            else:
+                case["results"][0]["cases"]["names"].remove("add-hook")
+
+            def read(path, *args, **kwargs):
+                if path == AW / "tests/native-matrix.json":
+                    return json.dumps(manifest)
+                return original(path, *args, **kwargs)
+
+            with self.subTest(mode=mode), patch.object(Path, "read_text", read):
+                with self.assertRaises(ValueError):
+                    load(AW)
+
+    def test_qoder_reload_rejects_missing_credential_before_launch(self) -> None:
+        import importlib.util
+
+        source = AW / "crates/aw-service/tests/fixtures/qoder/reload.py"
+        spec = importlib.util.spec_from_file_location("aw_qoder_reload", source)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        with patch.dict(os.environ, {}, clear=True), patch.object(fixture, "install") as install:
+            with self.assertRaisesRegex(RuntimeError, "QODER_PERSONAL_ACCESS_TOKEN"):
+                fixture.exercise(self.root, self.root)
+            install.assert_not_called()
+
     def reports(self) -> None:
         for agent, row in self.manifest["agents"].items():
             directory = self.root / agent

@@ -56,6 +56,14 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+### 显式策略更新
+
+`aw run --reloadable` 显式预装稳定 Adapter 入口，`aw update` 定位现有实例，
+由 `aw-service` 在请求准入门外准备新的不可变 Host，再在同一门内最终复查空闲和版本后发布。
+服务保留启动身份，每个实例持有自己的激活策略。原生 Adapter 报告请求/工具生命周期，
+保留调度与效果采纳；Provider 协议和 Core 计划执行不变。
+固定版本、busy 拒绝、进程关联及验收范围见[策略热更新](../../../../src/aw/docs/design/policy-reload_zh.md)。
+
 ### `aw-core` 在哪里
 
 当前 Hook 路径是 `aw-service → aw-host → aw-exec`。服务复用

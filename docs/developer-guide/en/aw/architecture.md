@@ -67,6 +67,17 @@ Native Hook scripts also run through `aw-exec`, preserving raw output and exit
 status without a Provider handshake. AgentSight is a separate optional observation
 source; read-only `aw inspect` views do not participate in Hook admission.
 
+### Explicit policy updates
+
+Opt-in `aw run --reloadable` installs stable Adapter entrypoints. `aw update`
+addresses an existing instance and asks `aw-service` to prepare a new immutable
+Host outside the request gate, then publish it only after a final idle/revision
+check under that gate. The service retains the bootstrap identity while each
+instance owns its active policy. Native Adapters report request/tool lifetimes
+and preserve scheduling and adoption; Provider protocols and Core plan execution
+are unchanged. See [policy reload](../../../../src/aw/docs/design/policy-reload.md)
+for version pins, busy rejection, process association and acceptance boundaries.
+
 ### Where `aw-core` fits
 
 The current Hook path is `aw-service → aw-host → aw-exec`. The service reuses

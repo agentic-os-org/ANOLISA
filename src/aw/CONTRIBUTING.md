@@ -111,6 +111,12 @@ host. The resolved platform image ID is also recorded. The scheduled run selects
 `github.sha` once; containers never fetch a moving branch or a separately built
 nightly image.
 
+A separate required Qoder 1.1.73 TUI case verifies native SessionStart readiness
+and empty → added-hook → removed-hook policy activation before dispatch, retaining
+the same PID/start ticks. It downloads a separately checksummed release and keeps
+the 1.1.64 print lane. Its named metadata report and cleanup are required by the
+native inventory. It does not certify hosted TUI tool turns or result replacement.
+
 The normal case must write its marker. The risk case must match the builtin
 `shell-recursive-delete` rule (`warn`, mapped to block), preserve its disposable
 deletion fixture and omit the marker. Stopping the actual container tests backend
@@ -207,7 +213,7 @@ cargo build --locked -p aw-provider --example policy
 
 The [user guide](../../docs/developer-guide/en/aw/native-agents.md#run-the-local-service-demo)
 walks through a foreground service and separate client, including state-directory
-and audit-history cleanup. The service uses the local `aw-service/v1alpha3`
+and audit-history cleanup. The service uses the local `aw-service/v1alpha4`
 protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately.
 
 ## Runtime validation

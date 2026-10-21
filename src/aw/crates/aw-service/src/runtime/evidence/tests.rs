@@ -31,6 +31,13 @@ fn delayed_query_cannot_reclaim_a_released_instance_session() {
             &json!({"name":"tool.before","tool":{}}),
             json!({"status":"verified","session_id":"resumed"}),
             deadline,
+            aw_config::Validator::new()
+                .unwrap()
+                .parse(include_bytes!(
+                    "../../../../aw-config/examples/aw.minimal.yaml"
+                ))
+                .unwrap()
+                .as_value(),
         )
         .unwrap();
     contexts.sessions.lock().unwrap().active.remove("first");

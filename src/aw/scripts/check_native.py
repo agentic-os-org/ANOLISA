@@ -36,6 +36,26 @@ def load(root: Path) -> dict:
             raise ValueError(f"{agent}: pin the native runtime")
         if "qoder_cli" in row:
             validate_pin(row["qoder_cli"])
+        if agent == "qoder":
+            validate_pin(row.get("qoder_reload_cli", {}))
+            reload = [case for case in row.get("cases", []) if case["name"] == "runtime-reload"]
+            expected = [
+                "{python}", "crates/aw-service/tests/fixtures/qoder/reload.py",
+                "--bin", "{bin}", "--output", "{output}/runtime-reload",
+            ]
+            if (
+                row["qoder_reload_cli"]["version"] != "1.1.73"
+                or len(reload) != 1
+                or reload[0]["argv"] != expected
+            ):
+                raise ValueError("qoder: require pinned 1.1.73 TUI idle reload acceptance")
+            validate_case(reload[0])
+            if (
+                reload[0]["report"] != "json"
+                or set(reload[0]["results"][0].get("cases", {}).get("names", []))
+                != {"prewarm", "add-hook", "remove-hook"}
+            ):
+                raise ValueError("qoder: require prewarm/add/remove native reload reports")
         if agent in {"qoder", "qwenpaw"}:
             security = [case for case in row.get("cases", []) if case["name"] == "sec-core"]
             expected = {"allow", "scan-deny", "backend-error", "timeout-block"}

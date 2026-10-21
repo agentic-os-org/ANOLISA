@@ -440,7 +440,7 @@
         "qwenpaw==2.2.2b4",
         "agentscope==2.0.9"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes.",
       "cases": [
         {
           "name": "middleware",
@@ -450,7 +450,33 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 12
+          "tests": 20
+        },
+        {
+          "name": "runtime-reload",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/qwenpaw/native_reload.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 7
+        },
+        {
+          "name": "app-reload",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/qwenpaw/native_app_reload.py",
+            "--bin",
+            "{bin}",
+            "--qwenpaw",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 1
         },
         {
           "name": "sec-core",
@@ -543,6 +569,43 @@
               }
             }
           ]
+        },
+        {
+          "name": "runtime-reload",
+          "argv": [
+            "{python}",
+            "crates/aw-service/tests/fixtures/qoder/reload.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/runtime-reload"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/runtime-reload/results.json",
+              "values": {
+                "passed": true,
+                "native_version": "1.1.73",
+                "same_process": true,
+                "instance_released": true,
+                "runtime_removed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "prewarm",
+                  "add-hook",
+                  "remove-hook"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ],
       "qoder_cli": {
@@ -558,8 +621,21 @@
           }
         }
       },
-      "boundary": "Pinned real Qoder CLI with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN; native Bash allow, scan denial, backend error and timeout blocking through the candidate sec-core daemon container.",
-      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
+      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary.",
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "qoder_reload_cli": {
+        "version": "1.1.73",
+        "downloads": {
+          "x86_64": {
+            "url": "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/1.1.73/qodercli-linux-x64.tar.gz",
+            "sha256": "b7379fd20904dc7cc01568b93c06dec235b5d67d2b2096f69931c2026cfa1312"
+          },
+          "aarch64": {
+            "url": "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/1.1.73/qodercli-linux-arm64.tar.gz",
+            "sha256": "aed01a40653c116bfd9a0bbf10e1c015e7fd7d2697512afe69d501e235aa6402"
+          }
+        }
+      }
     }
   }
 }

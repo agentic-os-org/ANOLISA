@@ -21,7 +21,7 @@ use std::{
 
 const MAX_CONNECTIONS: usize = 64;
 
-/// One fixed configuration served through a private same-user Unix socket.
+/// A bootstrap configuration and per-instance policies on a private same-user socket.
 /// Binding preparation executes trusted local commands with an explicit context.
 /// This service does not install native Hooks or implement a sandbox boundary.
 pub struct Server {
@@ -102,15 +102,17 @@ impl Server {
                 }
                 match self.endpoint.listener().accept() {
                     Ok((stream, _)) => {
-                        if workers.len() >= MAX_CONNECTIONS || endpoint::same_user(&stream).is_err()
-                        {
+                        if workers.len() >= MAX_CONNECTIONS {
                             continue;
                         }
+                        let Ok(peer) = endpoint::peer_credentials(&stream) else {
+                            continue;
+                        };
                         let runtime = Arc::clone(&self.runtime);
                         workers.push(
                             thread::Builder::new()
                                 .name("aw-rpc".into())
-                                .spawn(move || connection(stream, runtime))?,
+                                .spawn(move || connection(stream, runtime, peer))?,
                         );
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -143,7 +145,7 @@ impl Server {
     }
 }
 
-fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
+fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) {
     // A legal request may fill the whole eight MiB frame; every received byte
     // resets the initial stall budget so only idle connections are shed,
     // while the total window still matches the protocol's call deadline cap.
@@ -159,18 +161,12 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
         .unwrap_or_else(|_| Instant::now() + stall);
     let binding = matches!(&request.operation, Operation::Bind { .. });
     let result = (|| {
-        if request.api_version != VERSION {
-            return Err(rejected("protocol_version"));
+        if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
+            return prepare_connected(&stream, &runtime, request, expires, peer);
         }
-        if request.identity.as_ref() != Some(&runtime.identity)
-            && !(request.identity.is_none()
-                && matches!(request.operation, crate::Operation::Status))
-        {
-            return Err(rejected("stale_service"));
-        }
-        let deadline = deadline?;
+        let deadline = request.admit(&runtime.identity)?;
         if binding {
-            prepare_connected(&stream, &runtime, request.operation, deadline)
+            prepare_connected(&stream, &runtime, request, deadline, peer)
         } else {
             runtime.handle(request.operation, deadline, &runtime.stopped)
         }
@@ -208,14 +204,21 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
 fn prepare_connected(
     stream: &UnixStream,
     runtime: &Arc<Runtime>,
-    operation: Operation,
+    request: Request,
     deadline: Instant,
+    peer: libc::ucred,
 ) -> Result<serde_json::Value> {
-    let cancelled = AtomicBool::new(false);
+    let cancelled = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
         let worker = thread::Builder::new()
             .name("aw-prepare".into())
-            .spawn_scoped(scope, || runtime.handle(operation, deadline, &cancelled))?;
+            .spawn_scoped(scope, || {
+                if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
+                    runtime.update_policy(&request, (peer.uid, peer.pid), &cancelled)
+                } else {
+                    runtime.handle(request.operation, deadline, &cancelled)
+                }
+            })?;
         while !worker.is_finished() {
             let mut peer = libc::pollfd {
                 fd: stream.as_raw_fd(),

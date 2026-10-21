@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from agentscope.agent import Agent
 from agentscope.message import TextBlock, ToolCallBlock, ToolResultState
@@ -253,6 +253,226 @@ class MiddlewareTests(unittest.IsolatedAsyncioTestCase):
         middleware._invoke = cancelled
         with self.assertRaises(asyncio.CancelledError):
             await middleware._run({})
+
+
+class ReloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_reply_model_wait_retains_request_until_generator_finishes(self):
+        phases = []
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Probe(MODULE.AwReloadMiddleware):
+            async def lifecycle(self, phase, key):
+                phases.append(phase)
+
+        async def reply(**kwargs):
+            entered.set()
+            await release.wait()
+            yield TextBlock(text="complete")
+
+        middleware = Probe({})
+        agent = SimpleNamespace(_reply_middlewares=[middleware], _reply_impl=reply)
+        async def consume():
+            return [item async for item in Agent._reply(agent)]
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(phases, ["request_start"])
+            release.set()
+            self.assertEqual((await task)[0].text, "complete")
+            self.assertEqual(phases, ["request_start", "request_end"])
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_reply_failure_and_cancellation_keep_unconfirmed_request_busy(self):
+        for failure in (False, True):
+            phases = []
+            entered = asyncio.Event()
+
+            class Probe(MODULE.AwReloadMiddleware):
+                async def lifecycle(self, phase, key):
+                    phases.append(phase)
+
+            async def reply(**kwargs):
+                entered.set()
+                if failure:
+                    raise RuntimeError("native failure")
+                await asyncio.Event().wait()
+                yield
+
+            agent = SimpleNamespace(_reply_middlewares=[Probe({})], _reply_impl=reply)
+            async def consume():
+                return [item async for item in Agent._reply(agent)]
+            task = asyncio.create_task(consume())
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                if not failure:
+                    task.cancel()
+                with self.assertRaises(RuntimeError if failure else asyncio.CancelledError):
+                    await task
+                self.assertEqual(phases, ["request_start"])
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_failed_reply_cleanup_does_not_report_request_end(self):
+        phases = []
+
+        class Probe(MODULE.AwReloadMiddleware):
+            async def lifecycle(self, phase, key):
+                phases.append(phase)
+
+        async def reply(**kwargs):
+            try:
+                yield TextBlock(text="partial")
+            finally:
+                raise RuntimeError("reply cleanup failed")
+
+        generator = Probe({}).on_reply(None, {}, reply)
+        await anext(generator)
+        with self.assertRaisesRegex(RuntimeError, "reply cleanup failed"):
+            await generator.aclose()
+        self.assertEqual(phases, ["request_start"])
+
+    async def test_terminal_tool_errors_keep_unconfirmed_tool_busy(self):
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                phases = []
+
+                class Probe(MODULE.AwReloadMiddleware):
+                    async def lifecycle(self, phase, key):
+                        phases.append(phase)
+
+                async def tool(tool_call):
+                    try:
+                        if streaming:
+                            yield ToolChunk(content=[TextBlock(text="partial")], is_last=False)
+                        raise RuntimeError("terminal native failure")
+                    finally:
+                        await asyncio.sleep(0)
+                        phases.append("generator_closed")
+
+                agent = SimpleNamespace(_acting_middlewares=[Probe({})], _acting_impl=tool,
+                                        state=SimpleNamespace(session_id="session"))
+                with patch.object(MODULE.AwToolMiddleware, "_run", new=AsyncMock(return_value=None)):
+                    with self.assertRaisesRegex(RuntimeError, "terminal native failure"):
+                        [item async for item in Agent._acting(agent, ToolCallBlock(id="failed", name="tool", input="{}"))]
+                self.assertEqual(phases, ["tool_start", "generator_closed"])
+
+    async def test_failed_generator_cleanup_does_not_report_tool_end(self):
+        phases = []
+
+        class Probe(MODULE.AwReloadMiddleware):
+            async def lifecycle(self, phase, key):
+                phases.append(phase)
+
+        async def tool(tool_call):
+            try:
+                yield ToolResponse(content=[TextBlock(text="result")])
+            finally:
+                phases.append("generator_closing")
+                raise RuntimeError("native cleanup failed")
+
+        agent = SimpleNamespace(_acting_middlewares=[Probe({})], _acting_impl=tool,
+                                state=SimpleNamespace(session_id="session"))
+        with patch.object(MODULE.AwToolMiddleware, "_run", new=AsyncMock(side_effect=[None, RuntimeError("after failed")])):
+            with self.assertRaisesRegex(RuntimeError, "native cleanup failed"):
+                [item async for item in Probe({}).on_acting(agent, {"tool_call": ToolCallBlock(id="failed", name="tool", input="{}")}, tool)]
+        self.assertEqual(phases, ["tool_start", "generator_closing"])
+
+    async def test_final_tool_response_is_held_until_native_exhaustion(self):
+        for invalid_tail in (False, True):
+            with self.subTest(invalid_tail=invalid_tail):
+                phases = []
+
+                class Probe(MODULE.AwReloadMiddleware):
+                    async def lifecycle(self, phase, key):
+                        phases.append(phase)
+
+                async def tool(tool_call):
+                    try:
+                        yield ToolResponse(content=[TextBlock(text="complete")])
+                        if invalid_tail:
+                            yield ToolChunk(content=[TextBlock(text="invalid")], is_last=False)
+                    finally:
+                        phases.append("generator_closed")
+
+                agent = SimpleNamespace(_acting_middlewares=[Probe({})], _acting_impl=tool,
+                                        state=SimpleNamespace(session_id="session"))
+                call = ToolCallBlock(id="complete", name="tool", input="{}")
+                generator = Agent._acting(agent, call)
+                with patch.object(MODULE.AwToolMiddleware, "_run", new=AsyncMock(return_value=None)):
+                    try:
+                        if invalid_tail:
+                            with self.assertRaisesRegex(MODULE.CallbackFailure, "native_output_after_final_response"):
+                                await anext(generator)
+                        else:
+                            self.assertIsInstance(await anext(generator), ToolResponse)
+                            self.assertEqual(phases, ["tool_start", "generator_closed", "tool_end"])
+                    finally:
+                        await generator.aclose()
+                        await asyncio.wait_for(asyncio.get_running_loop().shutdown_asyncgens(), 3)
+                if invalid_tail:
+                    self.assertNotIn("tool_end", phases)
+
+    async def test_terminal_chunk_cleanup_failure_retains_claim(self):
+        for state in (ToolResultState.ERROR, ToolResultState.INTERRUPTED):
+            with self.subTest(state=state):
+                phases = []
+
+                class Probe(MODULE.AwReloadMiddleware):
+                    async def lifecycle(self, phase, key):
+                        phases.append(phase)
+
+                async def tool(tool_call):
+                    yield ToolChunk(content=[TextBlock(text="failed")], state=state, is_last=True)
+                    yield ToolResponse(content=[TextBlock(text="failed")], state=state)
+                    raise RuntimeError("native cleanup failed")
+
+                agent = SimpleNamespace(_acting_middlewares=[Probe({})], _acting_impl=tool,
+                                        state=SimpleNamespace(session_id="session"))
+                stream = Agent._acting(agent, ToolCallBlock(id="error", name="tool", input="{}"))
+                with patch.object(MODULE.AwToolMiddleware, "_run", new=AsyncMock(return_value=None)):
+                    try:
+                        with self.assertRaisesRegex(RuntimeError, "native cleanup failed"):
+                            await anext(stream)
+                    finally:
+                        await stream.aclose()
+                self.assertEqual(phases, ["tool_start"])
+        await asyncio.wait_for(asyncio.get_running_loop().shutdown_asyncgens(), 3)
+
+    async def test_unconfirmed_cancelled_tool_keeps_its_claim_busy(self):
+        phases = []
+        entered = asyncio.Event()
+
+        class Probe(MODULE.AwReloadMiddleware):
+            async def lifecycle(self, phase, key):
+                phases.append(phase)
+
+        async def tool(tool_call):
+            entered.set()
+            await asyncio.Event().wait()
+            yield ToolResponse(content=[TextBlock(text="never completed")])
+
+        agent = SimpleNamespace(_acting_middlewares=[Probe({})], _acting_impl=tool,
+                                state=SimpleNamespace(session_id="session"))
+        async def consume():
+            return [item async for item in Agent._acting(agent, ToolCallBlock(id="call", name="tool", input="{}"))]
+        with patch.object(MODULE.AwToolMiddleware, "_run", new=AsyncMock(return_value=None)):
+            task = asyncio.create_task(consume())
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(phases, ["tool_start"])
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
 
 class RegistrationTests(unittest.TestCase):

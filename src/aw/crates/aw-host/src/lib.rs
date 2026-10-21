@@ -43,6 +43,7 @@ pub const MAX_NATIVE_ENVIRONMENT_BYTES: usize = MAX_MESSAGE_BYTES;
 /// This is supplied by the embedding application, not Provider output. The Host
 /// does not inherit its own environment or provide a sandbox. Executables and
 /// their dependencies must remain trusted and stable for the Host's lifetime.
+#[derive(Clone)]
 pub struct ProcessContext {
     /// Absolute Agent-side working directory for all configured Provider commands.
     pub cwd: PathBuf,
@@ -216,6 +217,11 @@ impl Host {
         )?;
         check(deadline, cancelled)?;
         Ok(())
+    }
+
+    /// Validated immutable configuration retained by this Host snapshot.
+    pub fn configuration(&self) -> &Configuration {
+        &self.configuration
     }
 
     /// Exact-document revision retained for every exchange and invocation binding.

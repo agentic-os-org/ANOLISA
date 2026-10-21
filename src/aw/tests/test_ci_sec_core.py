@@ -312,16 +312,18 @@ class SecurityInventoryTests(GateFixture):
                         load(AW)
 
     def test_qoder_download_requires_reviewed_version_and_checksum(self):
-        pin = load(AW)["agents"]["qoder"]["qoder_cli"]
-        validate_pin(pin)
-        for mutation in ("checksum", "version", "url"):
-            edited = copy.deepcopy(pin)
-            if mutation == "version":
-                edited["version"] = "latest"
-            else:
-                edited["downloads"]["x86_64"]["sha256" if mutation == "checksum" else "url"] = ""
-            with self.assertRaises(ValueError):
-                validate_pin(edited)
+        pins = load(AW)["agents"]["qoder"]
+        for key in ("qoder_cli", "qoder_reload_cli"):
+            pin = pins[key]
+            validate_pin(pin)
+            for mutation in ("checksum", "version", "url"):
+                edited = copy.deepcopy(pin)
+                if mutation == "version":
+                    edited["version"] = "latest"
+                else:
+                    edited["downloads"]["x86_64"]["sha256" if mutation == "checksum" else "url"] = ""
+                with self.assertRaises(ValueError):
+                    validate_pin(edited)
 
     def test_missing_qoder_credential_writes_failed_evidence(self):
         output = self.root / "missing-credential"

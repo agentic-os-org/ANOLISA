@@ -10,6 +10,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(deny_unknown_fields)]
 pub(super) struct HookBinding {
     pub adapter: String,
+    #[serde(default)]
+    pub reloadable: bool,
     pub binding: Binding,
     pub socket: PathBuf,
     pub cwd: PathBuf,

@@ -32,8 +32,13 @@ def model_server(case):
                     + "\n"
                 )
             if not seen:
-                if "execute_shell_command" not in tools:
-                    self.send_error(400, "native shell absent")
+                request_path = case / "tool-call.json"
+                tool = json.loads(request_path.read_text()) if request_path.exists() else {
+                    "name": "execute_shell_command",
+                    "arguments": {"command": (case / "tool-command.txt").read_text(), "timeout": 5},
+                }
+                if tool["name"] not in tools:
+                    self.send_error(400, "requested native tool absent")
                     return
                 delta = {
                     "role": "assistant",
@@ -43,13 +48,8 @@ def model_server(case):
                             "id": "call_aw_acceptance",
                             "type": "function",
                             "function": {
-                                "name": "execute_shell_command",
-                                "arguments": json.dumps(
-                                    {
-                                        "command": (case / "tool-command.txt").read_text(),
-                                        "timeout": 5,
-                                    }
-                                ),
+                                "name": tool["name"],
+                                "arguments": json.dumps(tool["arguments"]),
                             },
                         }
                     ],

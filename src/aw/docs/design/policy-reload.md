@@ -2,10 +2,11 @@
 
 [中文版](policy-reload_zh.md)
 
-This design tracks [issue #8459](https://github.com/agentic-os-org/ANOLISA/issues/8459).
-The implemented slice is offline policy-scope comparison through
-`aw validate --config CANDIDATE --against BASELINE`. Runtime activation and
-external attachment remain planned; existing launch and service behavior applies.
+AW can explicitly update the policy of an idle instance launched with a stable
+bridge. The native host process stays alive; busy instances reject the update.
+The runtime path is opt-in through `aw run --reloadable`, initially pinned to
+Qoder 1.1.73 TUI and QwenPaw 2.2.2b4 / AgentScope 2.0.9 App. External attachment
+and steer remain planned. Ordinary `aw run` keeps its existing registration path.
 
 ## Separate lifecycles
 
@@ -57,56 +58,65 @@ Plain `aw validate --config FILE` retains its existing output and semantics.
 The comparison applies to any configured Adapter and is not proof that any
 framework supports runtime reload.
 
-## Planned: prewarming and activation
+## Implemented: prewarming and idle-only activation
 
-Prewarming installs stable before/after bridge entrypoints even if the default
-policy has no steps. Concrete step lists must no longer be fixed exclusively in
-launch-time native configuration. Adapter-owned dispatch must preserve native
-sequential/concurrent scheduling and existing user Hooks.
+Prewarm the container, AW, the stable before/after bridge and the reusable native
+host. A concrete Agent or Session can still be created by the framework when the
+user request arrives. Apply the requested AW policy before creating/dispatching
+that request. Native model, credential and Session configuration stays with the
+framework; this operation changes only the AW policy fields listed above.
 
-Separate the service generation, native instance identity, attachment ownership
-and immutable policy revision. Current service resolution hashes the full input
-document; locating an existing instance for an update must not accidentally
-select a new daemon from the candidate's digest. Each instance has its own active
-policy; updating one instance must not change another.
+`aw run --config current.yaml --agent TARGET --reloadable` preinstalls stable
+callbacks even when the default policy has no user hooks. `aw status` reports
+instance IDs, active policy revisions, readiness, request/tool counts and process
+metadata. Use `aw update --config current.yaml --agent TARGET --policy next.yaml`
+to resolve the original service, select the unique target instance and read its
+revision. Multiple matches require `--instance`; `--socket` and
+`--expected-revision` allow explicit selection and concurrency preconditions.
+The observed revision still guards activation; conflicts never retry silently.
+No internal callback assembly is required. Editing a file alone never activates it.
 
-The first runtime release targets infrequent explicit control-plane updates,
-primarily prewarmed containers: **explicit update, idle-only activation, busy
-rejection**. Start the container, AW and native Agent under the default policy;
-confirm the stable bridge and native readiness. Before dispatching a request
-that needs a new policy, submit the update and wait for the activated revision.
-The native entrypoint must support reuse across requests; process liveness alone
-is not request readiness.
+The service generation and bootstrap configuration digest remain fixed. Updates
+address an existing instance without resolving a service from the candidate's
+digest. Each instance retains its bytes, Host and immutable process context;
+updating one instance does not update another or change future bindings' default.
 
-1. Compare policy scope and the expected active revision.
-2. Prepare a candidate through existing capability admission and Host preparation.
-3. Under the admission gate shared with incoming requests, recheck the revision
-   and obtain Adapter-supported whole-request idle confirmation, with no active
-   tool invocations.
-4. If busy, return `busy` without waiting, queuing or scheduling later activation.
-   Release candidate resources and keep the old revision. If the Adapter cannot
-   establish idle, return `unsupported`.
-5. Otherwise reserve that idle boundary, atomically publish and audit the
-   revision, then reopen admission and return the revision actually activated.
+1. Reject unsupported/unready instances, active requests/tools/events and stale
+   revisions before preparation. A concurrent update returns `busy`.
+2. Validate policy scope and native scheduling/budget limits, then prepare a new
+   Host through existing Provider discovery and private configuration admission.
+   Preparation runs outside the request-admission gate.
+3. Under the same gate as native request entry, recheck revision, process identity,
+   readiness and all request/tool/event lifetimes. A newly admitted request wins;
+   the update returns `busy` and discards the prepared Host.
+4. If idle, durably record and atomically publish the revision. Return instance,
+   previous/active revision, audit key, preparation time and activation time.
 
-An early busy check may avoid preparation, but cannot replace the final gated
-check. Preparation failure, revision conflict or cancellation keeps the previous
-revision active and releases owned resources. Preparation and gate ownership
-remain bounded; this release has no tool-drain wait. A caller requiring a new
-revision must not submit its request under the old revision.
+Busy, failed preparation, conflicts and cancellation do not queue or schedule a
+later activation. Retain the old policy and release the candidate. Preparation
+and gate ownership are bounded; there is no tool-drain wait or in-flight tool/
+middleware replacement. Every native tool keeps one revision through before/after.
+An RPC timeout can be indeterminate; inspect the active revision before deciding
+what to do next, and never dispatch a request requiring an unconfirmed revision.
 
-Whole-request idle is stricter than zero service events or zero tool calls.
-An active Agent request, including a remote model wait, is busy in this release.
-A tool may still execute after its before callback returns. Native request
-lifecycle evidence must establish that success, failure, denial or cancellation
-has left no tool invocations active before declaring idle. A tool invocation
-retains one revision through before/after; in-flight tool or middleware
-replacement is outside this release.
+The control plane owns exclusive instance assignment and serializes its policy
+selection with Session dispatch. Activation acknowledgement is not a reservation
+for a future request. Policies are per instance, not per Session; an App serving
+several Sessions has one policy and any active request makes updates busy.
+Per-Session policies are outside this release.
 
-Service protocol changes need an explicit version and stale-binding rejection.
-Keep original event inputs, once-only step claims and budgets; a policy update
-must not renew an existing call or replace its pinned evidence context. Optional
-observation must not become a dependency of process association or enforcement.
+Zero AW events or tools is not whole-request idle. Model waits remain busy.
+Native terminal evidence retains unfinished tools after a request returns,
+including background work. Unknown completion remains busy; it never enables a
+switch. Original callback correlations remain claimed across revisions, so old
+callbacks cannot acquire a fresh execution budget. Event evidence uses the
+owning Host's revision and policy constraints, not the bootstrap configuration.
+
+The wire protocol is `aw-service/v1alpha4`. Old daemons and bindings fail explicit
+version/generation checks. Process association is independent of optional
+observation; it records root PID, start ticks, UID and PID namespace, corroborates
+bridge ancestry and rechecks lifetime before activation. Audit stores association
+and transitions without Provider configuration values.
 
 ### Update authority and audit
 
@@ -141,11 +151,15 @@ activation only after the switch.
 No steer queue, automatic deferred activation, idle polling heuristic or new
 generic Hook event is required by the first runtime release.
 
-## Planned: Qoder
+## Qoder stable bridge and future attachment
 
-AW-launched instances can retain temporary `--settings` for stable bridge
-registration. Policy changes then occur in AW without relying on that file's
-native watcher behavior.
+Reloadable launches retain temporary `--settings` for stable bridge registration;
+policy changes happen in AW and do not rely on native settings-file watching.
+The pinned TUI entrypoint reports SessionStart, UserPromptSubmit and idle-prompt
+Notification boundaries. Stop is not idle: a native Stop hook can continue the
+Agent. Tool failures and permission denial close tool lifetimes without adding
+new Provider events. Missing idle notifications conservatively retain busy.
+Ordinary print/TUI launches remain unchanged; print is not a reusable reload host.
 
 External attachment instead needs a native settings source that reloads Hooks.
 Require a verified version/entrypoint and an exclusive configuration scope:
@@ -155,16 +169,26 @@ Preserve unrelated Hooks and concurrent edits; detach removes only AW-owned
 entries rather than restoring an entire old settings file.
 
 Writing settings is not readiness. Require a correlated handshake with the
-target process and separate native adoption evidence. Complete terminal-path
-tracking: the current Adapter maps successful `PostToolUse`, while failure,
-denial and cancellation need completion evidence. Lifecycle-only notifications
+target process and separate native adoption evidence. Successful `PostToolUse` retains the existing policy path. Lifecycle-only notifications
 do not expand the structured Provider event catalog automatically.
 Print and TUI need separate pinned native acceptance.
 
-## Planned: QwenPaw
+## QwenPaw stable bridge and future attachment
 
-Preinstall a stable middleware bridge and select the policy at an admitted
-request boundary. For external instances, use the target App's plugin-management
+Preinstall one stable middleware bridge. `on_reply` tracks the complete native
+request, including model waits; `on_acting` tracks the actual tool generator.
+Callbacks obtain the active plan from AW, preserving native scheduling, denial
+and final replacement. Only normal generator exhaustion releases request/tool
+claims; a policy denial before native tool entry also releases that tool claim.
+AgentScope 2.0.9 does not propagate wrapper closure through every child generator.
+A final response or successful wrapper `aclose()` therefore cannot prove native
+cleanup. Hold the final tool response and ERROR/INTERRUPTED chunks until normal
+exhaustion and the end notification: QwenPaw's ToolCoordinator stops pulling at
+any of these. A terminal chunk may be followed by Toolkit's accumulated response;
+other output after a terminal chunk or final response is rejected. Nonterminal
+chunks remain streaming. Normal structured errors release occupancy after cleanup.
+Early closure, cancellation and exceptions before confirmed completion retain busy; use a fresh
+instance when completion cannot be established. For external instances, use the target App's plugin-management
 interface and correlate its endpoint, working directory and executing process.
 
 Use plugin configuration or a protected local descriptor for bridge discovery.
@@ -195,8 +219,12 @@ owned resources without touching user configuration or other instances.
 ## Delivery and regression acceptance
 
 1. Offline comparison: implemented in this slice.
-2. Stable bridges, instance snapshots, readiness and explicit idle-only activation
-   for prewarmed Qoder/QwenPaw, with busy rejection and process association.
+2. Stable bridges, instance snapshots, readiness, explicit idle-only activation,
+   busy rejection and process association: implemented for the pinned entrypoints.
+   CLI seam regressions and AgentScope middleware tests cover the contracts;
+   the native inventory requires a separate Qoder 1.1.73 TUI startup/idle-switch
+   case before dispatch. Full hosted TUI tool-turn adoption and QwenPaw App
+   reload acceptance remain separate checks. The 1.1.64 print lane is retained.
 3. Native attach/detach for those frameworks after scoped registration acceptance.
 4. Incremental Adapter support for other frameworks. OpenClaw/Hermes and then
    Pi/Claude SDK/AgentScope are candidates; reload and attachment are independent

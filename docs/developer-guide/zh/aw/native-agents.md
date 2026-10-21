@@ -336,7 +336,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 
 ## 升级服务
 
-本版本使用本地协议 `aw-service/v1alpha3`。旧版 daemon 会在 Agent 绑定和回调前
+本版本使用本地协议 `aw-service/v1alpha4`。旧版 daemon 会在 Agent 绑定和回调前
 被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
 **旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。
@@ -580,7 +580,8 @@ AW 保留该文件的其他字段和 Hook 条目，加入自己的回调，再�
 私有目录；该变量未设置时使用 `/tmp/aw-UID` 下的目录。显式路径必须是绝对路径，
 并且指向同一个 `aw.sock` 位置。
 
-服务持有固定配置快照，编辑 `aw.yaml` 不会热更新它。停用某份配置前，用原文件或
+服务保留启动配置快照，编辑 `aw.yaml` 不会热更新它。显式启用稳定桥接的实例可使用
+[空闲策略更新](../../../user-guide/zh/user-entrypoint/aw/configuration.md#更新预热实例)，更换实例 Host，服务身份不变。停用某份配置前，用原文件或
 socket 停止相应服务；修改配置后的 auto 路径可能指向另一个服务。退出 Agent 不会
 停止其他会话或共享 daemon。本地端点是同用户访问边界，不提供 sandbox。
 
@@ -589,6 +590,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
 | `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
+| `aw update --config CURRENT --agent TARGET --policy NEXT` | 更新已启用稳定桥接的空闲实例；busy 拒绝且不排队 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |

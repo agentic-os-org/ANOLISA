@@ -28,7 +28,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha3`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha4`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -248,3 +248,14 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 `started` 携带 `pid`，`exited` 的 `code` 与 `signal` 恰有一个非空，`failed` 表示
 启动/原生就绪失败，不携带原始诊断正文。status 返回有界观测元数据。释放时等待
 观测 worker 并返回最终元数据，持久运行链使用独立审计 key，参见[证据生命周期](evidence-context_zh.md#自动运行观测)。
+
+## 显式实例策略更新
+
+启用稳定桥接的 `aw run` 实例使用 `EnableReload`、`AssociateProcess`、
+`BridgeLifecycle`、`HookPlan` 和 `UpdatePolicy`。服务身份保持启动摘要，
+`expected_revision` 指定实例 Host 的当前版本。原生请求入口与最终更新检查共用实例注册
+准入门，候选 Host 准备不持有该门。busy 更新不排队、不等工具排空，也不在返回后激活。
+已完成事件的关联声明跨版本保留，证据来自所属 Host 快照。
+
+[策略热更新设计](policy-reload_zh.md) 说明生命周期、进程关联、固定入口、人工验收及
+后续 attach/steer 范围。

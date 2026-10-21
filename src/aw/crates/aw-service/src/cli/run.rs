@@ -58,6 +58,7 @@ impl Drop for Artifacts {
 pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     args.check(
         &[
+            "--reloadable",
             "--config",
             "--agent",
             "--native-settings",
@@ -103,6 +104,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             document: config.as_value().clone(),
             target: target.into(),
             options: aw_adapter::NativeOptions {
+                reloadable: args.flags.contains_key("--reloadable"),
                 settings: args.flags.get("--native-settings").cloned(),
                 profile: args.flags.get("--native-profile").cloned(),
                 state_dir: args.flags.get("--native-state-dir").cloned(),
@@ -121,6 +123,9 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let capabilities: aw_service::Capabilities = prepared.capabilities().into();
     if capabilities.adapter != name {
         return Err("prepared Adapter does not match configured target".into());
+    }
+    if args.flags.contains_key("--reloadable") {
+        aw_adapter::reload::supported(&prepared.capabilities())?;
     }
     let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
@@ -160,6 +165,15 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             Err(error) => return interrupted().map(Ok).unwrap_or_else(|| Err(error.into())),
         };
         instance = Some(binding.instance_id.clone());
+        let reloadable = args.flags.contains_key("--reloadable");
+        if reloadable {
+            service.client.call(
+                Operation::EnableReload {
+                    instance_id: binding.instance_id.clone(),
+                },
+                Instant::now() + Duration::from_secs(2),
+            )?;
+        }
         if agent.get("evidence").is_some() {
             let observation = match service.client.call_cancellable(
                 Operation::StartObservation {
@@ -179,6 +193,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         }
         let hook_binding = HookBinding {
             adapter: name.into(),
+            reloadable,
             binding,
             socket: service.paths.socket.clone(),
             cwd,
@@ -196,7 +211,28 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         );
         let mut reported: Result<()> = Ok(());
         let status = readiness::run(&plan.command, &SIGNAL, plan.readiness, |pid| {
-            if observing {
+            if reloadable {
+                reported = service
+                    .client
+                    .call(
+                        Operation::AssociateProcess {
+                            instance_id: hook_binding.binding.instance_id.clone(),
+                            pid,
+                        },
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .map(|_| ())
+                    .map_err(Into::into);
+                if reported.is_err() {
+                    let _ = SIGNAL.compare_exchange(
+                        0,
+                        libc::SIGTERM,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    );
+                }
+            }
+            if observing && reported.is_ok() {
                 reported = service
                     .client
                     .call(
