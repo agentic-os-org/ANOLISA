@@ -103,6 +103,8 @@ pub struct MountPointLite {
     pub meta_dir_name: String,
     /// Arc-wrapped root fd so MountPointLite is Clone without OwnedFd
     /// (OwnedFd is not Clone; Arc makes the fd shareable across threads).
+    /// `clone_lite` shares the mount's existing Arc rather than `dup`ing
+    /// the fd, so the worker holds no descriptor of its own.
     pub root_fd: Arc<OwnedFd>,
 }
 
@@ -123,7 +125,12 @@ impl MountPoint {
             root,
             meta_dir,
             meta_dir_name: self.meta_dir_name().to_string(),
-            root_fd: Arc::new(self.root_fd.try_clone().expect("root_fd dup")),
+            // Share the mount's Arc instead of dup(2)-ing a second fd:
+            // every consumer only borrows `root_fd.as_fd()` for one openat2
+            // call, so the extra descriptor bought nothing — and the dup
+            // made clone_lite panic (EMFILE) at service startup under fd
+            // pressure instead of staying descriptor-neutral.
+            root_fd: Arc::clone(&self.root_fd),
         }
     }
 }
@@ -535,5 +542,35 @@ fn is_overflow(e: &notify::Error) -> bool {
         }
         notify::ErrorKind::MaxFilesWatch => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+
+    use super::*;
+    use crate::ns::Namespace;
+
+    /// The worker must borrow the mount's own root fd, not a `dup` of it.
+    /// Duping burned one descriptor per `clone_lite()` call and turned
+    /// service startup into a panic the moment `dup(2)` hit `EMFILE`.
+    #[test]
+    fn clone_lite_shares_root_fd_instead_of_duping() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mount = MountPoint::ensure(Namespace::user("alice").expect("namespace"), tmp.path())
+            .expect("mount");
+
+        let lite = mount.clone_lite();
+
+        assert!(
+            Arc::ptr_eq(&mount.root_fd, &lite.root_fd),
+            "clone_lite must share the mount's Arc<OwnedFd>"
+        );
+        assert_eq!(
+            mount.root_fd.as_raw_fd(),
+            lite.root_fd.as_raw_fd(),
+            "clone_lite must not dup a second descriptor"
+        );
     }
 }
