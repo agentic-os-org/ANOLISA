@@ -223,6 +223,8 @@ layer's role.
 | [Agent Security Core](https://agentic-os.sh/docs/user-guide/agent-sec-core/) | OS-level security kernel for AI Agents. |
 | [AgentSight](https://agentic-os.sh/docs/user-guide/agentsight/) | Observe Agent execution through trajectories, LLM calls, and Token usage. |
 
+[semantic-arbiter](src/semantic-arbiter/) is an incubating independent semantic judgment component with deterministic checks and configurable Bailian/TypeSafe models. It has no installer, live execution or production AW integration.
+
 [ANOLISA CLI](distribution/anolisa/README.md) manages component installation and
 lifecycle. [ktuner](https://agentic-os.sh/docs/user-guide/ktuner/) inspects Linux
 kernel parameters, provides tuning recommendations, and can apply or roll back
