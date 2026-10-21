@@ -56,6 +56,8 @@ pub enum FuseError {
     InvalidMountPoint(String),
     #[error("invalid skill-discover root: {0}")]
     InvalidSkillDiscoverRoot(String),
+    #[error("invalid views config: {0}")]
+    InvalidViewsConfig(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
     #[error("io error: {0}")]
