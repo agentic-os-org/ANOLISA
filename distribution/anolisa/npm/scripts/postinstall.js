@@ -22,6 +22,7 @@
 import {
   existsSync,
   mkdirSync,
+  renameSync,
   symlinkSync,
   unlinkSync,
   chmodSync,
@@ -82,19 +83,32 @@ function main() {
   }
 
   const linkPath = join(binDir, 'anolisa');
+  const temporaryLinkPath = `${linkPath}.tmp-${process.pid}`;
 
-  // Do not follow the launcher symlink: its previous target may be absent.
+  // Build the replacement before touching the installed launcher. This keeps
+  // a working installation usable when symlink creation fails.
   try {
-    unlinkSync(linkPath);
+    unlinkSync(temporaryLinkPath);
   } catch (error) {
     if (error.code !== 'ENOENT') {
       throw error;
     }
   }
 
-  // Keep the launcher valid when the complete installation tree is relocated.
-  symlinkSync(relative(binDir, nativeBinary), linkPath);
-  chmodSync(linkPath, 0o755);
+  try {
+    // Keep the launcher valid when the complete installation tree is
+    // relocated. POSIX rename atomically replaces the previous symlink/file.
+    symlinkSync(relative(binDir, nativeBinary), temporaryLinkPath);
+    renameSync(temporaryLinkPath, linkPath);
+    chmodSync(linkPath, 0o755);
+  } catch (error) {
+    try {
+      unlinkSync(temporaryLinkPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') throw cleanupError;
+    }
+    throw error;
+  }
 
   console.log(`@anolisa/cli: Linked native binary for ${platform()}-${arch()}`);
 }
