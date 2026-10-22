@@ -54,6 +54,7 @@ from anolisa_tokenless.stats import (
     StatsStashMetrics,
     StatsStatus,
     StatsSummary,
+    StatsSummaryScope,
     TokenlessStats,
 )
 
@@ -101,6 +102,7 @@ __all__ = [
     "StatsStashMetrics",
     "StatsStatus",
     "StatsSummary",
+    "StatsSummaryScope",
     "TokenlessConfig",
     "TokenlessError",
     "TokenlessRuntime",
