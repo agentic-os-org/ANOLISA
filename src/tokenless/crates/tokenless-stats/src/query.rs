@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::record::{CompressionMode, StatsRecord};
-use crate::recorder::{RetrieveTotals, StatsSummary};
+use crate::recorder::{RetrieveTotals, StatsSummary, SummaryWindow};
 
 /// Partition a record slice into the active view summaries report over and
 /// the count of dry-run rows they exclude (roadmap §4.6: predicted savings
@@ -52,8 +52,8 @@ fn format_num(n: usize) -> String {
 /// When `session_total_tokens` is provided, adds an "Actual Savings Rate"
 /// section showing the percentage of the entire session's token consumption
 /// that tokenless saved — not just the tool-response portion. `retrieve`
-/// carries whole-table retrieve aggregates (the `records` slice may be
-/// limited) for the attribution block; `None` omits the retrieve lines.
+/// must cover the same full history as `records`; pass `None` for a partial
+/// window. Prefer [`format_summary_window`] for recorder-backed reports.
 pub fn format_summary(
     records: &[StatsRecord],
     title: Option<&str>,
@@ -212,12 +212,22 @@ pub fn format_summary(
 /// Totals cover active rows only; the excluded dry-run count and the §4.6
 /// attribution report land as top-level keys (never inside `total`, whose
 /// key set intentionally matches every `by_operation` entry). Retrieve
-/// aggregates are whole-table and appear only when `retrieve` is `Some`.
+/// aggregates must cover the same history as `records`. Prefer
+/// [`format_summary_window_json`] for recorder-backed reports.
 pub fn format_summary_json(
     records: &[StatsRecord],
     session_total_tokens: Option<usize>,
     retrieve: Option<&RetrieveTotals>,
 ) -> String {
+    serde_json::to_string_pretty(&summary_json_value(records, session_total_tokens, retrieve))
+        .unwrap_or_default()
+}
+
+fn summary_json_value(
+    records: &[StatsRecord],
+    session_total_tokens: Option<usize>,
+    retrieve: Option<&RetrieveTotals>,
+) -> serde_json::Value {
     let (active, excluded) = active_records(records);
     let total = StatsSummary::from_record_refs(active.iter().copied());
 
@@ -317,14 +327,51 @@ pub fn format_summary_json(
         );
     }
 
-    let output = serde_json::json!({
+    serde_json::json!({
         "schema_version": "1.1",
         "dry_run_records_excluded": excluded,
         "attribution": attribution,
         "total": total_json,
         "by_operation": by_op_json,
-    });
+    })
+}
 
+/// Format a snapshot summary, disclosing rows omitted from its reporting window.
+/// Retrieval query errors omit optional cost fields; strict callers must check
+/// `window.retrieve_totals` before formatting.
+pub fn format_summary_window(window: &SummaryWindow, title: Option<&str>) -> String {
+    let retrieve = window
+        .retrieve_totals
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref);
+    let mut output = format_summary(&window.records, title, None, retrieve);
+    if !window.is_complete() {
+        output.push_str(&format!(
+            "\nSummary window: {} of {} stored records (before dry-run exclusion).\n\
+             Retrieval and net savings omitted: this window does not cover the full history.\n",
+            window.records.len(),
+            window.total_records,
+        ));
+    }
+    output
+}
+
+/// Format a snapshot summary with an additive `summary_scope` object.
+/// Retrieval query errors omit optional cost fields; strict callers must check
+/// `window.retrieve_totals` before formatting.
+pub fn format_summary_window_json(window: &SummaryWindow) -> String {
+    let retrieve = window
+        .retrieve_totals
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref);
+    let mut output = summary_json_value(&window.records, None, retrieve);
+    output["summary_scope"] = serde_json::json!({
+        "records_selected": window.records.len(),
+        "records_total": window.total_records,
+        "complete": window.is_complete(),
+    });
     serde_json::to_string_pretty(&output).unwrap_or_default()
 }
 
