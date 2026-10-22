@@ -83,7 +83,7 @@ Host outside the request gate, then publish it only after a final idle/revision
 check under that gate. The service retains the bootstrap identity while each
 instance owns its active policy. Native Adapters report request/tool lifetimes
 and preserve scheduling and adoption; Provider protocols and Core plan execution
-are unchanged. See [policy reload](../../../../src/aw/docs/design/policy-reload.md)
+are unchanged. See [policy reload](../../../../src/aw/docs/design/en/runtime/policy-reload.md)
 for version pins, busy rejection, process association and acceptance boundaries.
 
 ### Where `aw-core` fits
@@ -122,8 +122,8 @@ and packaging scope.
 | `scripts/`, `tests/` | Workspace checks, cross-language vectors, and native acceptance |
 | `docs/design/` | Protocol contracts, boundaries, and design rationale |
 
-Follow the [design index](../../../../src/aw/docs/design/README.md) in call order
-for details. [Architecture boundaries](../../../../src/aw/docs/design/architecture-boundaries.md)
+Follow the [design index](../../../../src/aw/docs/design/en/README.md) in call order
+for details. [Architecture boundaries](../../../../src/aw/docs/design/en/architecture-boundaries.md)
 explains Adapter interfaces and the deferred release changes. See [Contributing](../../../../src/aw/CONTRIBUTING.md) for the
 development environment and checks.
 

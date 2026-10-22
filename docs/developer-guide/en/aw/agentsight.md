@@ -89,7 +89,7 @@ Each instance has one worker, two queued candidates and one retained bounded
 projection. At most 256 callbacks are observed per instance; overflow is visible
 in `gaps` and existing actions continue. Queries also retain the original callback
 cutoff. Duplicate callbacks do not schedule additional reads. History is matched
-by exact native session and the [explicit framework-name contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/evidence-context.md#identity-association), without inferring process identity.
+by exact native session and the [explicit framework-name contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/runtime/evidence-context.md#identity-association), without inferring process identity.
 A concurrent conflicting instance gets `source_session_conflict`; after the first
 instance drains, a resumed run may associate that session as historical evidence.
 

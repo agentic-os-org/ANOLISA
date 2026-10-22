@@ -207,7 +207,7 @@ Framework crates live in `src/aw/crates/<name>/`, concrete Providers in
 the repository-root `providers/<provider>/` with independent workspaces; the root manifest only organizes the workspace. See
 [Provider collaboration](../../providers/README.md) for contribution and distribution,
 [Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
-dependencies, and the [design index](docs/design/README.md) for protocol reading order.
+dependencies, and the [design index](docs/design/en/README.md) for protocol reading order.
 
 Keep native dialects and bridge assets in `aw-adapter`; `aw-cli` owns argument
 parsing, RPCs, signals and resources. The service owns state, budgets and audit.
@@ -244,7 +244,7 @@ temporary state directories. They need no model, Agent installation or cloud key
 They check shared event budgets, binding and once-only invocation, cancellation
 and shutdown, durable audit, stale handles and endpoint ownership. Fixtures wait
 for owned processes and remove temporary directories; build artifacts stay in
-`target/`. See the [local service contract](docs/design/local-service.md) for the
+`target/`. See the [local service contract](docs/design/en/runtime/local-service.md) for the
 validation boundary.
 
 For focused Provider Host checks, run from `src/aw` on Linux:
@@ -256,7 +256,7 @@ cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 
 These tests use local fixture processes to check preparation, request binding,
 failure reporting, shared deadlines, cancellation and once-only event steps.
-The [local example](docs/design/provider-host.md#local-example) exercises the
+The [local example](docs/design/en/runtime/provider-host.md#local-example) exercises the
 sample Provider using synthetic Adapter evidence and tool events. It is not
 native Agent acceptance or proof of effect adoption.
 

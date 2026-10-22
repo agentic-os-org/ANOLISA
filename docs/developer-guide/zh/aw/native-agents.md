@@ -257,7 +257,7 @@ false（没有 block 命中），after 返回 true（observe）。把 before 命
 已有应用在**每个**公共工厂中使用 `AwBridge().create_agent(...)`，原样传入已有
 middleware 列表。可信参数注入应先于追加的 AW middleware。readiness 回执只
 覆盖所构造的 Agent，不覆盖其他工厂或直接 dispatch 路由。
-[工厂合同](../../../../src/aw/docs/design/agentscope-adapter_zh.md)说明顺序、预算、
+[工厂合同](../../../../src/aw/docs/design/zh/adapters/agentscope-adapter.md)说明顺序、预算、
 调用身份与覆盖边界。
 
 before 等待并可在工具副作用前阻断；after 等待一次 final `ToolResponse`，保留
@@ -716,7 +716,7 @@ rm -r -- "$AW_DEMO_ROOT"
 或重放旧事件。
 
 [配置参考](configuration.md)列出完整字段和事件名。
-[本地服务合同](../../../../src/aw/docs/design/local-service_zh.md)面向 Adapter 开发者，
+[本地服务合同](../../../../src/aw/docs/design/zh/runtime/local-service.md)面向 Adapter 开发者，
 说明操作 JSON、截止时间和生命周期。
 
 sec-core 扫描通过独立的 `aw-provider-sec-core` 接入，见[配置与使用](../../../user-guide/zh/user-entrypoint/aw/security.md)。
@@ -771,7 +771,7 @@ Tokenless 使用[共享优化示例](https://github.com/agentic-os-org/ANOLISA/b
 文本块并保留 SDK metadata；report 故障保留原结果。原生 Hook 不能提供替换。
 AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提前拒绝时关闭事件。
 精确 callback、身份、取消、容量与可
-复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/pi-adapter_zh.md)。
+复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/pi-adapter.md)。
 修改策略前退出 Agent 并停止原服务；审计状态按同样的本地服务清理流程保留或删除。
 
 ## 启动 Claude SDK worker
@@ -829,7 +829,7 @@ launcher binding 中运行多个 SDK clients/任务；Gunicorn 和业务部署�
 CLI 2.1.161 对 SDK MCP `isError: true` 响应仍发 `PostToolUse`，callback 数据不含
 该 flag，因此 after 观察不能分类所有业务失败。原生 Bash 执行失败使用
 `PostToolUseFailure`。身份、取消与验证限制见
-[Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/claude-sdk-adapter_zh.md)。
+[Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-sdk-adapter.md)。
 
 无模型的原生采纳验证使用真实 SDK/bundled CLI，连接本地确定 HTTP fixture。
 先构建 AW，再运行测试；测试创建独立 profile，私有 UDS 目录也位于 output 下，

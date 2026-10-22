@@ -289,7 +289,7 @@ For an existing application, use `AwBridge().create_agent(...)` in **every** pub
 factory, passing the existing middleware list unchanged. Existing trusted
 argument injection must precede the appended AW middleware. A readiness receipt
 covers the constructed Agent, not other factories or direct dispatch routes.
-The [factory contract](../../../../src/aw/docs/design/agentscope-adapter.md) details
+The [factory contract](../../../../src/aw/docs/design/en/adapters/agentscope-adapter.md) details
 ordering, budgets, invocation identity and coverage.
 
 Before waits and can block before a tool side effect. After awaits one final
@@ -842,7 +842,7 @@ creates a new service identity; historical records remain queryable without
 resuming or replaying old events.
 
 The [configuration reference](configuration.md)
-covers every field and event name. The [local service contract](../../../../src/aw/docs/design/local-service.md)
+covers every field and event name. The [local service contract](../../../../src/aw/docs/design/en/runtime/local-service.md)
 describes operation JSON, deadlines and lifecycle for Adapter developers.
 
 Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](../../../user-guide/en/user-entrypoint/aw/security.md).
@@ -903,7 +903,7 @@ preserving SDK metadata; report failures retain the original result. Raw native
 Hooks cannot supply replacements. AW uses a fresh invocation UUID for pairing,
 retains the original tool ID in `native`, and closes events on early denial.
 
-See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/pi-adapter.md)
+See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/pi-adapter.md)
 for exact callback semantics, identity, cancellation, capacity and reproducible
 SDK acceptance. Exit Agents and stop the original service before changing policy;
 retain/remove the audit state using the same local-service cleanup procedure.
@@ -968,7 +968,7 @@ need their own task lifecycle integration.
 CLI 2.1.161 emits `PostToolUse` for SDK MCP `isError: true` responses and omits that
 flag from callback data. After observation therefore does not classify every
 business failure. Native Bash execution failure does use `PostToolUseFailure`.
-See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/claude-sdk-adapter.md)
+See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-sdk-adapter.md)
 for identity, cancellation and validation limits.
 
 For model-free native adoption checks, build AW and use the real SDK/bundled CLI

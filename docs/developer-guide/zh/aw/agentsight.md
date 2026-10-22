@@ -74,7 +74,7 @@ session 在可信回调到达后关联，没有回调的运行可以成功退出
 
 每个实例只有一个 worker、两个排队候选和一个有界投影。每个实例最多观测 256 个
 回调，超额进入 `gaps`，已有动作继续执行。查询还受原始回调截止时间限制。重复
-回调不增加读取。历史按精确原生 session 和[明确的框架名称合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/evidence-context_zh.md#身份关联)关联，不推断进程身份。
+回调不增加读取。历史按精确原生 session 和[明确的框架名称合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/runtime/evidence-context.md#身份关联)关联，不推断进程身份。
 并发冲突实例得到 `source_session_conflict`；首个实例完成收尾后，恢复运行可以将
 同一 session 关联为历史证据。
 

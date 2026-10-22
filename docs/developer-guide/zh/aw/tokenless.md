@@ -215,7 +215,7 @@ view 失败只影响对应卡片。每 Provider 最多两秒，完整快照最�
 [Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/schemas/view-v1alpha1.schema.json)
 的 `$defs/panel` 定义快照；[fixture](https://github.com/agentic-os-org/ANOLISA/tree/main/src/aw/crates/aw-provider/examples/views)
 覆盖正常、离线、缺组件、无数据、部分失败和陈旧状态。
-[开发合同](../../../../src/aw/docs/design/provider-views_zh.md)定义登记、错误和关联规则。
+[开发合同](../../../../src/aw/docs/design/zh/providers/provider-views.md)定义登记、错误和关联规则。
 
 ## 从源码构建
 

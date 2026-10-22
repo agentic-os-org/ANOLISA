@@ -140,7 +140,7 @@ timeout 15s "$AW_HOST" "$AW_CONFIG" tool.after demo_shell '{"command":"printf AW
 
 完整 Provider 可参考第 1 步已构建的
 [Rust 示例](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs)和
-[协议参考](../../../../src/aw/docs/design/provider-protocol_zh.md)。以下两次调用验证它的
+[协议参考](../../../../src/aw/docs/design/zh/providers/provider-protocol.md)。以下两次调用验证它的
 发现与私有配置合同：
 
 ```bash

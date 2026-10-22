@@ -29,12 +29,12 @@ ANOLISA/
 自身后端依赖由 owner 管理。第三方可直接实现公开进程协议，通过 YAML 接入，
 无需链接 Rust 库或检出 ANOLISA。分发层消费各组件产物，负责随包依赖的组合验证。
 
-完整职责和迁移范围见[架构边界](../../../../src/aw/docs/design/architecture-boundaries_zh.md)。
+完整职责和迁移范围见[架构边界](../../../../src/aw/docs/design/zh/architecture-boundaries.md)。
 
 ## 独立接入
 
 1. 实现 `describe`、`validate_config` 和 `invoke`，通过 stdin/stdout 交换 JSON。
-   协议字段、错误和能力声明见 [Provider 协议](../../../../src/aw/docs/design/provider-protocol_zh.md)。
+   协议字段、错误和能力声明见 [Provider 协议](../../../../src/aw/docs/design/zh/providers/provider-protocol.md)。
 2. 用自己的发布方式交付可执行程序及依赖，配置 `transport.argv` 指向安装后的绝对路径。
    后端所需凭据、socket 和数据目录由 Provider 的安装说明约定。
 3. 在配置中声明 Provider 和 Hook 步骤，验证允许、阻断、超时、错误与清理行为。

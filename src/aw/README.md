@@ -137,7 +137,7 @@ flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
 for installation and configuration and `aw-service` for runtime operations.
 
 The [architecture overview](../../docs/developer-guide/en/aw/architecture.md)
-explains crate ownership and runtime flow. The [design index](docs/design/README.md)
+explains crate ownership and runtime flow. The [design index](docs/design/en/README.md)
 organizes protocol details in call order.
 
 ## Development and validation

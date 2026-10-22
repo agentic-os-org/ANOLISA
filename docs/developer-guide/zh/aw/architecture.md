@@ -69,7 +69,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 由 `aw-service` 在请求准入门外准备新的不可变 Host，再在同一门内最终复查空闲和版本后发布。
 服务保留启动身份，每个实例持有自己的激活策略。原生 Adapter 报告请求/工具生命周期，
 保留调度与效果采纳；Provider 协议和 Core 计划执行不变。
-固定版本、busy 拒绝、进程关联及验收范围见[策略热更新](../../../../src/aw/docs/design/policy-reload_zh.md)。
+固定版本、busy 拒绝、进程关联及验收范围见[策略热更新](../../../../src/aw/docs/design/zh/runtime/policy-reload.md)。
 
 ### `aw-core` 在哪里
 
@@ -103,8 +103,8 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | `scripts/`、`tests/` | workspace 检查、跨语言向量检查和原生验收 |
 | `docs/design/` | 协议约定、边界与设计理由 |
 
-详细设计从[设计索引](../../../../src/aw/docs/design/README_zh.md)按调用顺序阅读。
-[架构边界](../../../../src/aw/docs/design/architecture-boundaries_zh.md)说明 Adapter 接口和后续发布工作。
+详细设计从[设计索引](../../../../src/aw/docs/design/zh/README.md)按调用顺序阅读。
+[架构边界](../../../../src/aw/docs/design/zh/architecture-boundaries.md)说明 Adapter 接口和后续发布工作。
 开发环境和检查命令见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。
 
 ## Schema 归属

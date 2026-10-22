@@ -268,7 +268,7 @@ To roll back to older AW binaries, remove optional `view` fields offline first.
 The [schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-provider/schemas/view-v1alpha1.schema.json)
 uses `$defs/panel` for snapshots. [Fixtures](https://github.com/agentic-os-org/ANOLISA/tree/main/src/aw/crates/aw-provider/examples/views)
 cover normal, offline, missing component, no data, partial failure and stale states.
-The [developer contract](../../../../src/aw/docs/design/provider-views.md) defines
+The [developer contract](../../../../src/aw/docs/design/en/providers/provider-views.md) defines
 registration, errors and correlation.
 
 ## Build from source

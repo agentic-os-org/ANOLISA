@@ -162,7 +162,7 @@ by substituting false.
 
 For a full Provider, start with the existing
 [Rust example](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs), built in
-step 1, and the [protocol reference](../../../../src/aw/docs/design/provider-protocol.md).
+step 1, and the [protocol reference](../../../../src/aw/docs/design/en/providers/provider-protocol.md).
 These two calls exercise its discovery and private configuration contract:
 
 ```bash

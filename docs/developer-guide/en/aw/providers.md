@@ -35,13 +35,13 @@ Third parties can implement the public process protocol and connect through YAML
 without linking Rust libraries or checking out ANOLISA. The distribution layer
 consumes component artifacts and validates bundled dependencies together.
 
-See [architecture boundaries](../../../../src/aw/docs/design/architecture-boundaries.md)
+See [architecture boundaries](../../../../src/aw/docs/design/en/architecture-boundaries.md)
 for ownership and migration scope.
 
 ## Integrate independently
 
 1. Implement `describe`, `validate_config`, and `invoke` using JSON over stdin/stdout.
-   See the [Provider protocol](../../../../src/aw/docs/design/provider-protocol.md)
+   See the [Provider protocol](../../../../src/aw/docs/design/en/providers/provider-protocol.md)
    for fields, errors, and capability declarations.
 2. Distribute the executable and dependencies through your own release process.
    Set `transport.argv` to its installed absolute path. Document backend credentials,

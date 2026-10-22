@@ -170,7 +170,7 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 通用框架位于 `crates/<name>/`，具体 Provider 位于仓库根 `providers/<provider>/`，各自构建；
 根清单只组织 workspace。[Provider 协作约定](../../providers/README_zh.md)说明如何收录和分发。
 包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
-协议阅读顺序见[设计索引](docs/design/README_zh.md)。
+协议阅读顺序见[设计索引](docs/design/zh/README.md)。
 
 原生方言和桥接资产归 `aw-adapter`；`aw-cli` 负责参数、RPC、信号和资源，服务负责
 状态、预算和审计。两者共用 Adapter，不向它传递服务内部类型。
@@ -203,7 +203,7 @@ cargo test --locked -p aw-service -p aw-cli
 服务单元测试和 CLI 集成测试使用真实 Unix socket、样例 Provider 子进程和私有临时状态目录，不需要
 模型、Agent 安装或云端密钥。检查共享事件预算、调用关联与单次执行、取消和关闭、
 持久审计、陈旧句柄及端点所有权。fixture 负责等待所属进程并删除临时目录；构建
-产物保留在 `target/`。验收边界见[本地服务合同](docs/design/local-service_zh.md)。
+产物保留在 `target/`。验收边界见[本地服务合同](docs/design/zh/runtime/local-service.md)。
 
 在 Linux 的 `src/aw` 目录中运行 Provider Host 定向检查：
 
@@ -213,7 +213,7 @@ cargo test --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 ```
 
 这些测试使用本地 fixture 进程检查准备、请求绑定、失败报告、共享截止时间、取消和
-事件步骤的单次调用。[本地示例](docs/design/provider-host_zh.md#本地示例)使用合成
+事件步骤的单次调用。[本地示例](docs/design/zh/runtime/provider-host.md#本地示例)使用合成
 Adapter 证据和工具事件运行样例 Provider，不代表原生 Agent 验收或效果已被采用。
 
 协议与 Core 测试使用合成输入和 Host。原生接入需要单独取证，确认回调已安装、

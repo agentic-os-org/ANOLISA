@@ -121,7 +121,7 @@ Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider�
 `aw-service` 完成运行时操作。
 
 [架构总览](../../docs/developer-guide/zh/aw/architecture.md)说明各包职责与运行顺序，
-[设计索引](docs/design/README_zh.md)按调用流程组织详细协议。
+[设计索引](docs/design/zh/README.md)按调用流程组织详细协议。
 
 ## 开发与验证
 
