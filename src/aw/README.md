@@ -49,6 +49,12 @@ The same operations are available as `aw service status` and `aw service stop`.
 `aw service serve` runs a foreground service; it does not install a system unit.
 Use `aw service --help` for options and `aw --version` for the CLI crate version.
 
+Use `aw --help`, `aw config --help`, and `aw config validate --help` to
+discover the implemented command tree. Public commands also accept `-h`;
+`aw -V` reports the CLI version. Help must be the final option, and unknown
+or repeated options fail before work starts. Options such as `--json` remain
+command-local. See [command help](../../docs/user-guide/en/user-entrypoint/aw/operations.md#command-help-and-arguments).
+
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.

@@ -34,6 +34,11 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
 `aw-contracts`。底层库不依赖 `aw-cli`；两个命令入口在进程内调用相同的安装 API。
 
+公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
+调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
+和失败回复；`aw-package` 保留兼容解析器。两条路径都不改变服务消息、
+Provider 效果或安装所有权。
+
 ### 独立 Provider
 
 | Cargo 包与二进制 | 目录 | 职责 | 依赖的框架 crate |
@@ -87,6 +92,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | 路径，相对于 `src/aw/` | 内容 |
 | --- | --- |
 | `crates/aw-cli/src/bin/`、`crates/aw-cli/src/lib.rs`、`crates/aw-cli/src/cli/` | CLI 入口、通用启动与 RPC 协调 |
+| `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
 | `crates/aw-core/src/journal.rs` | 持久审计实现 |

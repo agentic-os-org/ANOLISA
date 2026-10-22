@@ -17,6 +17,7 @@ path = "src/bin/aw-package.rs"
 doc = false
 
 [dependencies]
+clap = { workspace = true }
 aw-adapter = { workspace = true }
 aw-config = { workspace = true }
 aw-exec = { workspace = true }

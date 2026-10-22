@@ -20,7 +20,7 @@ pub(crate) struct Arguments {
 }
 
 impl Arguments {
-    pub fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
+    pub fn parse_protocol(args: impl Iterator<Item = String>) -> Result<Self> {
         let mut args = args.peekable();
         let mut parsed = Self::default();
         while let Some(flag) = args.next() {

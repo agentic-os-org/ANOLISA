@@ -3,7 +3,7 @@
 use aw_package::{Error, Result};
 use std::ffi::OsString;
 
-pub(super) fn decode_all(arguments: impl Iterator<Item = OsString>) -> Result<Vec<String>> {
+pub(crate) fn decode_all(arguments: impl Iterator<Item = OsString>) -> Result<Vec<String>> {
     arguments
         .map(|argument| {
             argument

@@ -5,6 +5,39 @@
 Use the configuration path from installation. Exit all Agents sharing that configuration before
 stopping its AW service.
 
+## Command help and arguments
+
+Start with `aw --help` (or just `aw`), then request help for a group or action.
+Help does not load configuration, contact services or modify files.
+
+```bash
+aw --help
+aw agent connect --help
+aw config validate --help
+aw service status --help
+aw -V
+```
+
+Public commands accept `-h` as well as `--help`. Put help last; trailing
+arguments or repeated help flags are errors. Version queries are root-only:
+`aw --version` or `aw -V`. Unknown options, duplicates, missing values and
+conflicting selections fail before the operation starts. Ordinary argument
+errors retain exit code 1; successful help and version queries return 0.
+
+Options belong to the command that lists them. There is no global `--json`:
+`inspect` requires it, while `service status`, `service stop`, `request`,
+`config show` and the runtime-policy `update` already return JSON without it.
+The `update` command changes an idle instance's policy, not installed software.
+`config show` includes private Provider values; review its output before sharing.
+
+Both `--option value` and `--option=value` are accepted. Use the latter when
+a value begins with `--`. Arguments after `--` in `run` and command-template
+`config init` are forwarded literally, including `--help`, empty strings and
+spaces. The native Agent retains its output, exit code and signal handling.
+Internal Hook and lifecycle callbacks retain their protocol-specific replies
+and error codes. The compatibility `aw-package` executable keeps its original
+parser, including optional adjacent-bundle discovery for installation.
+
 ## Check status and stop
 
 ```bash

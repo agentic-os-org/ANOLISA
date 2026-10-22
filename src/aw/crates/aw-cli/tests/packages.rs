@@ -184,7 +184,8 @@ fn only_legacy_package_entrypoint_infers_an_adjacent_bundle() {
             .output()
             .unwrap(),
     );
-    assert!(diagnostic.contains("missing --bundle"));
+    assert!(diagnostic.contains("--bundle"));
+    assert!(diagnostic.contains("required"));
     assert!(!f.prefix.exists());
     success(
         Command::new(&legacy)
@@ -293,6 +294,13 @@ fn package_and_native_install_options_cannot_mix_or_write_on_invalid_arguments()
             .unwrap(),
     );
     assert!(!f.config.exists());
+    let legacy = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+        .args(["install", "--prefix"])
+        .output()
+        .unwrap();
+    assert_eq!(legacy.status.code(), Some(1));
+    assert!(legacy.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&legacy.stderr).starts_with("aw-package:"));
 }
 
 #[test]
@@ -317,16 +325,24 @@ fn unified_config_validate_keeps_relative_paths_and_policy_update_validation() {
 
 #[test]
 fn package_help_uses_the_selected_frontend_name() {
-    for args in [vec!["install", "--help"], vec!["config", "init", "--help"]] {
+    for (args, usage) in [
+        (vec!["install", "--help"], "Usage: aw install"),
+        (vec!["config", "init", "--help"], "Usage: aw config init"),
+    ] {
         let output = success(
             Command::new(env!("CARGO_BIN_EXE_aw"))
-                .args(args)
+                .args(&args)
                 .output()
                 .unwrap(),
         );
-        assert!(output.contains("aw install --prefix ABS_DIR --bundle ABS_DIR"));
-        assert!(!output.contains("[--bundle"));
-        assert!(output.contains("aw config init --prefix"));
+        assert!(output.contains(usage));
+        assert!(output.contains("--prefix <ABS_DIR>"));
+        if args[0] == "install" {
+            assert!(output.contains("--bundle <ABS_DIR>"));
+            assert!(output.contains("no URL or RPM/DEB backend"));
+        } else {
+            assert!(output.contains("--state-dir <ABS_DIR>"));
+        }
         assert!(!output.contains("aw-package"));
     }
     let output = success(
@@ -345,15 +361,24 @@ fn package_help_uses_the_selected_frontend_name() {
             .output()
             .unwrap(),
     );
-    assert!(output.contains("aw config init --prefix"));
-    assert!(output.contains("aw config validate --config FILE [--against BASELINE_FILE]"));
+    assert!(output.contains("Usage: aw config <COMMAND>"));
+    assert!(output.contains("init"));
+    assert!(output.contains("validate"));
     assert!(!output.contains("aw-package"));
+    let output = success(
+        Command::new(env!("CARGO_BIN_EXE_aw"))
+            .args(["config", "validate", "--help"])
+            .output()
+            .unwrap(),
+    );
+    assert!(output.contains("--config <FILE>"));
+    assert!(output.contains("--against <BASELINE_FILE>"));
     let output = success(
         Command::new(env!("CARGO_BIN_EXE_aw"))
             .arg("--help")
             .output()
             .unwrap(),
     );
-    assert!(output.contains("aw install --prefix ABSOLUTE_DIR --bundle ABSOLUTE_DIR"));
-    assert!(!output.contains("[--bundle"));
+    assert!(output.contains("Install a local Preview bundle"));
+    assert!(output.contains("local unpacked Preview bundles only"));
 }

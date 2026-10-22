@@ -243,7 +243,7 @@ class GateTests(GateFixture):
             (
                 "aw-cli", self.root / "crates/aw-cli",
                 ["aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
-                 "aw-provider", "aw-service", "libc", "serde", "serde_json",
+                 "aw-provider", "aw-service", "clap", "libc", "serde", "serde_json",
                  "serde_yaml_ng", "sha2", "tempfile"],
             ),
         ):

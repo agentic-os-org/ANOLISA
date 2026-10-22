@@ -3,8 +3,8 @@
 use aw_package::{Error, Policy, Result, Settings};
 use std::{collections::BTreeMap, path::Path};
 
-mod arguments;
-mod config;
+pub(crate) mod arguments;
+pub(crate) mod config;
 mod signals;
 
 pub(crate) fn compatibility_main() {
@@ -14,24 +14,6 @@ pub(crate) fn compatibility_main() {
         eprintln!("aw-package: {error}");
         std::process::exit(1);
     }
-}
-
-pub(crate) fn dispatch(command: &str, arguments: &[String]) -> crate::cli::Result<()> {
-    let (command, arguments) =
-        if command == "config" && arguments.first().is_some_and(|action| action == "init") {
-            ("configure", &arguments[1..])
-        } else {
-            (command, arguments)
-        };
-    if arguments == ["--help"] && command != "config" {
-        print_help("aw");
-        return Ok(());
-    }
-    run(
-        std::iter::once(command.to_owned()).chain(arguments.iter().cloned()),
-        "aw",
-    )?;
-    Ok(())
 }
 
 fn configuration_usage(program: &str) -> String {
@@ -96,6 +78,15 @@ fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()>
             .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
         flags.insert(flag, value);
     }
+    execute(&command, &flags, check_args, program)
+}
+
+pub(crate) fn execute(
+    command: &str,
+    flags: &BTreeMap<String, String>,
+    check_args: Vec<String>,
+    program: &str,
+) -> Result<()> {
     let required = |name: &str| -> Result<&Path> {
         flags
             .get(name)
@@ -107,7 +98,7 @@ fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()>
         // The installed unified CLI is not colocated with an unpacked bundle.
         required("--bundle")?;
     }
-    match command.as_str() {
+    match command {
         "install" => {
             let executable = std::env::current_exe()?;
             let bundle = flags

@@ -39,6 +39,12 @@ The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
 on `aw-service`; CLI integration tests also use `aw-contracts`. Libraries do not
 depend on `aw-cli`. Both command frontends call the same package APIs in-process.
 
+The public `aw` tree uses one typed Clap declaration for parsing and help.
+Admitted options call existing handlers without reparsing argv. Internal Hook
+and lifecycle callbacks retain their protocol parser and failure replies;
+`aw-package` retains its compatibility parser. Neither path changes service
+messages, Provider effects or package ownership.
+
 ### Independent Providers
 
 | Cargo package and binary | Directory | Responsibility | Framework dependencies |
@@ -105,6 +111,7 @@ and packaging scope.
 | Path, relative to `src/aw/` | Content |
 | --- | --- |
 | `crates/aw-cli/src/bin/`, `crates/aw-cli/src/lib.rs`, `crates/aw-cli/src/cli/` | CLI entrypoints, launcher and RPC coordination |
+| `crates/aw-cli/src/command.rs`, `crates/aw-cli/src/command/` | Typed public command declaration, generated help and handler dispatch |
 | `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
 | `crates/aw-core/src/journal.rs` | Durable audit storage |

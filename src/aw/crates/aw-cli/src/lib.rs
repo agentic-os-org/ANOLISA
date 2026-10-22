@@ -1,8 +1,8 @@
 //! Unified AW command presentation and orchestration over reusable framework libraries.
 
 mod cli;
+mod command;
 mod package;
-mod routing;
 
 use aw_service::{Operation, Server};
 use std::{
@@ -34,66 +34,11 @@ pub fn package_main() {
 }
 
 fn run() -> cli::Result<cli::Exit> {
-    let arguments = routing::decode(std::env::args_os().skip(1))?;
-    match routing::select(&arguments)? {
-        routing::Route::Help => {
-            help();
-            Ok(cli::Exit::Code(0))
-        }
-        routing::Route::Version => {
-            println!("aw {}", env!("CARGO_PKG_VERSION"));
-            Ok(cli::Exit::Code(0))
-        }
-        routing::Route::ServiceHelp => {
-            println!(
-                "aw service serve --config FILE --state-dir ABSOLUTE_DIR\n\
-aw service status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\n\
-serve runs in the foreground. No system service is installed.\n\
-Compatibility: aw serve, aw status and aw stop remain available."
-            );
-            Ok(cli::Exit::Code(0))
-        }
-        routing::Route::Runtime { command, arguments } => runtime(command, arguments),
-        routing::Route::Package { command, arguments } => {
-            package::dispatch(command, arguments)?;
-            Ok(cli::Exit::Code(0))
-        }
-    }
+    let arguments = package::arguments::decode_all(std::env::args_os().skip(1))?;
+    command::run(arguments)
 }
 
-fn help() {
-    println!(
-            "aw run --config FILE --agent TARGET [--reloadable] [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
-aw install --prefix ABSOLUTE_DIR --bundle ABSOLUTE_DIR\n\
-aw uninstall --prefix ABSOLUTE_DIR\n\
-aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]\n\
-aw config init --prefix ABSOLUTE_DIR --config ABSOLUTE_FILE --state-dir ABSOLUTE_DIR [OPTIONS]\n\
-aw config show|add-provider|remove-provider|add-event|add-hook|remove-hook --config ABSOLUTE_FILE [OPTIONS]\n\
-aw config validate --config FILE [--against BASELINE_FILE]\n\
-aw update (--config CURRENT_FILE | --socket ABSOLUTE_PATH) (--agent TARGET | --instance ID) --policy NEXT_FILE [--expected-revision SHA256]\n\
-aw inspect --config ABS_FILE --json\n\
-aw policy < provider-request.json\n\
-aw service serve --config FILE --state-dir ABSOLUTE_DIR\n\
-aw service status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
-aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
-aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
-aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
-aw --version\n\n\
-Pi Coding Agent/Core 0.84.2: run requires a Node SDK application module.\n\
-Qoder CLI >=1.1.64: run accepts optional --native-settings; records the detected version.\n\
-OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\
-AgentScope 2.0.6: run requires Python script/-m entrypoint and explicit AwBridge.create_agent.\n\
-QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
-Hermes 952c941e: run and agent connect require --native-profile; run requires the installed AW plugin.\n\
-Claude SDK 0.2.88: run requires a foreground Python worker using aw_claude.create_client; bundled CLI 2.1.161.\n\
-Package installation currently accepts local unpacked Preview bundles only.\n\
-Compatibility: aw install --config FILE --agent TARGET retains native Hook installation;\n\
-aw validate retains the config validate behavior. Agent connect does not install an Agent."
-        );
-}
-
-fn runtime(command: &str, arguments: &[String]) -> cli::Result<cli::Exit> {
-    let args = cli::Arguments::parse(arguments.iter().cloned())?;
+fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     if command == "policy" || command == "inspect" {
         install_stop_signals()?;
     }
@@ -122,7 +67,7 @@ fn runtime(command: &str, arguments: &[String]) -> cli::Result<cli::Exit> {
         command,
         "run" | "hook" | "install" | "policy" | "update" | "bridge"
     ) {
-        return cli::dispatch(command, &args);
+        return cli::dispatch(command, args);
     }
     let flags = &args.flags;
     let allowed: &[&str] = match command {
@@ -187,7 +132,7 @@ fn runtime(command: &str, arguments: &[String]) -> cli::Result<cli::Exit> {
                 }
             };
             let expires = Instant::now() + Duration::from_millis(budget);
-            let client = cli::connect_service(&args, expires)?;
+            let client = cli::connect_service(args, expires)?;
             let result = client.call(operation, expires)?;
             println!(
                 "{}",

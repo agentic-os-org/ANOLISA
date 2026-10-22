@@ -59,6 +59,10 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
             .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
         flags.insert(flag, value);
     }
+    execute(&action, &flags)
+}
+
+pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<()> {
     let required = |name: &str| -> Result<&str> {
         flags
             .get(name)
@@ -67,7 +71,7 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
     };
     let path = Path::new(required("--config")?);
     // Validate every action's options before opening any user files.
-    match action.as_str() {
+    match action {
         "show" => {
             if (flags.contains_key("--provider") && flags.contains_key("--event"))
                 || (flags.contains_key("--id") && !flags.contains_key("--event"))
@@ -92,7 +96,7 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
         required("--id")?;
     }
     let mut editor = ConfigurationEditor::open(path)?;
-    match action.as_str() {
+    match action {
         "show" => {
             let value = if let Some(name) = flags.get("--provider") {
                 editor.provider(name)

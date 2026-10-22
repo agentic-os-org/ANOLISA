@@ -4,6 +4,35 @@
 
 以下命令使用安装时的配置路径。所有共享同一份配置的 Agent 退出后，再停止对应 AW 服务。
 
+## 命令帮助与参数
+
+先运行 `aw --help`（或直接运行 `aw`），再逐级查看分组或操作的帮助。
+帮助不会加载配置、访问服务或修改文件。
+
+```bash
+aw --help
+aw agent connect --help
+aw config validate --help
+aw service status --help
+aw -V
+```
+
+公开命令同时支持 `-h` 和 `--help`。帮助须放在最后；后面追加参数或重复帮助
+选项都会报错。版本查询仅用于根入口：`aw --version` 或 `aw -V`。
+未知参数、重复参数、缺少值及选择冲突会在操作开始前失败。
+普通参数错误保留退出码 1；帮助和版本查询成功返回 0。
+
+参数只属于列出它的命令。没有全局 `--json`：`inspect` 必须携带它，
+而 `service status`、`service stop`、`request`、`config show` 和运行时策略
+`update` 本来就返回 JSON，不接受该选项。`update` 修改空闲实例的策略，
+不是更新已安装的软件。`config show` 包含 Provider 私有值，分享前请检查。
+
+支持 `--option value` 和 `--option=value`；值以 `--` 开头时使用后一种写法。
+`run` 和 command 模板的 `config init` 中，`--` 后的参数按原样传递，
+包括 `--help`、空字符串和空格。原生 Agent 保留原有输出、退出码和信号处理。
+内部 Hook 与生命周期回调保留协议特定的回复和错误码。兼容入口 `aw-package`
+保留原解析器，包括安装时可自动查找二进制旁的 bundle。
+
 ## 查看状态与停止
 
 ```bash
