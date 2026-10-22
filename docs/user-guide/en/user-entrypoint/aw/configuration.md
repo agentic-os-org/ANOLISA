@@ -24,6 +24,22 @@ aw config init --prefix "$AW_PREFIX" \
 
 Install the selected Providers first; the generator supplies executable paths and integrity metadata.
 
+For a QwenPaw HTTP App, select its executable instead. The generated target is
+named `qwenpaw` and uses `qwenpaw app`; no graphical interface is required.
+Initialization verifies the entrypoint but does not start the App or change its
+model accounts. Native version admission is unchanged.
+
+```bash
+export AW_QWENPAW=/absolute/path/to/qwenpaw
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/qwenpaw.yaml" --state-dir "$AW_HOME/qwenpaw-state" \
+  --qwenpaw "$AW_QWENPAW"
+```
+
+The existing `--qoder` and paired `--node`/`--openclaw` selections remain available
+and may be combined with `--qwenpaw`. All targets in one configuration share its
+event steps; initialization does not create per-Agent or per-Session policies.
+
 ## Edit existing configuration
 
 Exit Agents using the file and stop the service with the original configuration before editing.
@@ -51,6 +67,61 @@ program availability is checked at launch. Write actual absolute paths in YAML;
 AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
 [configuration tool reference](../../../../developer-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration).
+
+## Append a boolean script Hook
+
+A boolean script reads the normalized event from stdin and emits JSON `true` or
+`false`. True requests the configured effect; exit status zero alone is not a
+boolean result. Prepare executable scripts at the absolute paths below.
+
+```bash
+aw config add-hook --config "$AW_HOME/aw.yaml" \
+  --event tool.before --id tenant-check --check /opt/hooks/check \
+  --effect block --on-error block --reason-code tenant_policy \
+  -- arg1 "arg with spaces"
+aw config add-hook --config "$AW_HOME/aw.yaml" \
+  --event tool.after --id completion-log --check /opt/hooks/record \
+  --effect observe --on-error report
+aw config validate --config "$AW_HOME/aw.yaml"
+```
+
+The shortcut creates its Provider and step in one validated, atomic file edit.
+An absent event is created enabled. An existing event retains its options,
+budget, filters and step order; the new step is appended. A disabled event is
+rejected so an edit cannot silently enable it. Existing security steps remain.
+`--id`, `--check`, `--effect` and `--on-error` are required. `--reason-code` is
+optional. Effect choices are `block` and `observe`; post-tool steps accept only
+`observe`. Failure actions follow the existing event rules: for example,
+`block` is valid before execution, while `report` preserves continuation.
+The generated Provider keeps the command-template limits: 1000 ms and 32 stdout
+bytes. Larger or specialized limits use a complete definition.
+
+The Provider name defaults to the Hook ID. Use `--provider NAME` to choose another
+name. Names are shared across the configuration, while Hook IDs are scoped to
+each event. Identical definitions are no-ops; conflicting Provider names or Hook
+IDs fail without changing the file. Script arguments after `--` are literal,
+including spaces, shell characters and option-looking strings. The editor never
+executes the script, checks native readiness or contacts a running service.
+
+Remove a step with the existing command; its Provider is retained until explicitly
+removed and cannot be removed while another step references it:
+
+```bash
+aw config remove-hook --config "$AW_HOME/aw.yaml" --event tool.before --id tenant-check
+aw config remove-provider --config "$AW_HOME/aw.yaml" --name tenant-check
+```
+
+`add-hook --definition FILE` retains the original complete-step behavior and
+requires an existing event. It cannot be mixed with shortcut options. Native
+scripts and structured Providers continue to use complete definitions and their
+own protocols; the boolean shortcut does not convert their outputs.
+
+These commands edit desired configuration offline. For an ordinary instance,
+use the stop/edit/run workflow above. For a running reloadable instance, edit a
+separate candidate and explicitly activate it using the idle-update workflow
+below. A busy update leaves the candidate file intact and the active policy
+unchanged; it does not queue activation. Configuration editing does not reserve
+or select a live Agent.
 
 ## Compare policy edits
 

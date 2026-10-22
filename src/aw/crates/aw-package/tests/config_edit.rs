@@ -1,5 +1,8 @@
 //! Offline editing, idempotency and failure-preserving publication contracts.
 
+#[path = "config_edit/command.rs"]
+mod command;
+
 use aw_package::config_edit::ConfigurationEditor;
 use serde_json::{json, Value};
 use std::{

@@ -115,8 +115,8 @@ enum Config {
     RemoveProvider(package::RemoveProvider),
     /// Add a complete event definition
     AddEvent(package::Event),
-    /// Append a complete Hook step to an existing event
-    AddHook(package::Event),
+    /// Append a definition or generate a boolean command Hook offline
+    AddHook(package::AddHook),
     /// Remove a Hook step; retain the event even when empty
     RemoveHook(package::RemoveHook),
 }

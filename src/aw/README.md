@@ -54,6 +54,11 @@ The same operations are available as `aw service status` and `aw service stop`.
 `aw service serve` runs a foreground service; it does not install a system unit.
 Use `aw service --help` for options and `aw --version` for the CLI crate version.
 
+`aw config init --qwenpaw /absolute/path/to/qwenpaw` generates a headless HTTP App
+target. `aw config add-hook` can append a boolean script using `--id`, `--check`,
+`--effect` and `--on-error`, while retaining definition-file editing and existing
+steps. Edits remain offline; see the [configuration guide](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#append-a-boolean-script-hook).
+
 Use `aw --help`, `aw config --help`, and `aw config validate --help` to
 discover the implemented command tree. Public commands also accept `-h`;
 `aw -V` reports the CLI version. Help must be the final option, and unknown

@@ -115,6 +115,7 @@ fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services
             state: &state,
             policy,
             qoder: Some(Path::new("/bin/true")),
+            qwenpaw: None,
             node: None,
             openclaw: None,
         })
@@ -183,6 +184,7 @@ fn installed_binaries_scan_and_recover_audit() {
         state: &state,
         policy: aw_package::Policy::SecCore { socket: &socket },
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: Some(Path::new("/bin/true")),
         openclaw: Some(Path::new("/bin/true")),
     })

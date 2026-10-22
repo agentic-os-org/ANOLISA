@@ -27,6 +27,7 @@ impl Fixture {
             state: &directory.path().join("state"),
             policy: Policy::None,
             qoder: Some(Path::new("/unexecuted/qoder")),
+            qwenpaw: None,
             node: None,
             openclaw: None,
         })

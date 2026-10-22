@@ -21,6 +21,7 @@ fn configuration_holds_a_read_lock_through_publication() {
             socket: Path::new("/run/aw-test/sec.sock"),
         },
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: Some(Path::new("/bin/true")),
         openclaw: Some(Path::new("/bin/true")),
     };
@@ -82,6 +83,7 @@ fn configuration_rejects_state_file_collisions_before_publication() {
                 socket: Path::new("/run/aw-test/sec.sock"),
             },
             qoder: Some(Path::new("/bin/true")),
+            qwenpaw: None,
             node: Some(Path::new("/bin/true")),
             openclaw: Some(Path::new("/bin/true")),
         };
@@ -113,6 +115,7 @@ fn configuration_requires_an_existing_private_state_directory() {
             socket: Path::new("/run/aw-test/sec.sock"),
         },
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: Some(Path::new("/bin/true")),
         openclaw: Some(Path::new("/bin/true")),
     };
@@ -157,6 +160,7 @@ fn configuration_checks_launcher_access_and_accepts_readable_scripts() {
             socket: Path::new("/run/aw-test/sec.sock"),
         },
         qoder: Some(&qoder),
+        qwenpaw: None,
         node: Some(&node),
         openclaw: Some(&openclaw),
     };
@@ -198,6 +202,7 @@ fn one_configuration_maps_both_agents_and_rejects_long_socket() {
         state: &state,
         policy: crate::Policy::SecCore { socket: &socket },
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: Some(Path::new("/bin/true")),
         openclaw: Some(Path::new("/bin/true")),
     };
@@ -275,6 +280,7 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
                         socket: Path::new("/run/aw-test/sec.sock"),
                     },
                     qoder: Some(Path::new("/bin/true")),
+                    qwenpaw: None,
                     node: Some(Path::new("/bin/true")),
                     openclaw: Some(Path::new("/bin/true")),
                 };
@@ -304,6 +310,7 @@ fn tokenless_templates_require_its_package_and_keep_security_before_compression(
         state,
         policy: crate::Policy::Tokenless,
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: None,
         openclaw: None,
     };
@@ -409,6 +416,7 @@ fn desired_tokenless_document_does_not_require_installed_payloads() {
         state: &state,
         policy: crate::Policy::Tokenless,
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: None,
         openclaw: None,
     })
@@ -440,6 +448,7 @@ fn managed_tokenless_configuration_rejects_path_delimiters_before_publication() 
         state: &state,
         policy: crate::Policy::Tokenless,
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: None,
         openclaw: None,
     };

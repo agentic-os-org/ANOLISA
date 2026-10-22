@@ -2,6 +2,8 @@
 
 #[path = "packages/confirmation.rs"]
 mod confirmation;
+#[path = "packages/hooks.rs"]
+mod hooks;
 #[path = "packages/output.rs"]
 mod output;
 #[path = "packages/support.rs"]

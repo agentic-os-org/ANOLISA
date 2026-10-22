@@ -1,7 +1,10 @@
 //! Offline edits reuse the same parser and publication boundary as the library.
 
 use crate::output::Outcome;
-use aw_package::{config_edit::ConfigurationEditor, Error, Result};
+use aw_package::{
+    config_edit::{CommandHook, ConfigurationEditor},
+    Error, Result,
+};
 use std::{collections::BTreeMap, fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
 /// Command reference also printed by the packaging CLI's top-level help.
@@ -12,6 +15,7 @@ aw-package config add-provider --config ABS_FILE --name NAME --definition FILE
 aw-package config remove-provider --config ABS_FILE --name NAME
 aw-package config add-event --config ABS_FILE --event EVENT --definition FILE
 aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE
+aw-package config add-hook --config ABS_FILE --event EVENT --id ID --check ABS_PROGRAM --effect block|observe --on-error ACTION [--provider NAME] [--reason-code CODE] -- [CHECK_ARGS]
 aw-package config remove-hook --config ABS_FILE --event EVENT --id ID
 Definitions are complete YAML/JSON objects. Show includes private Provider values.
 Edits are offline; changed files are rewritten as YAML. No service reload.";
@@ -46,12 +50,28 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
         "validate" => &["--config"],
         "add-provider" => &["--config", "--name", "--definition"],
         "remove-provider" => &["--config", "--name"],
-        "add-event" | "add-hook" => &["--config", "--event", "--definition"],
+        "add-event" => &["--config", "--event", "--definition"],
+        "add-hook" => &[
+            "--config",
+            "--event",
+            "--definition",
+            "--id",
+            "--check",
+            "--provider",
+            "--effect",
+            "--on-error",
+            "--reason-code",
+        ],
         "remove-hook" => &["--config", "--event", "--id"],
         _ => return Err(Error::Invalid(format!("unknown config action: {action}"))),
     };
     let mut flags = BTreeMap::new();
+    let mut check_args = Vec::new();
     while let Some(flag) = arguments.next() {
+        if flag == "--" && action == "add-hook" {
+            check_args.extend(arguments);
+            break;
+        }
         if !allowed.contains(&flag.as_str()) || flags.contains_key(&flag) {
             return Err(Error::Invalid(format!("unknown or duplicate flag: {flag}")));
         }
@@ -60,13 +80,17 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
             .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
         flags.insert(flag, value);
     }
-    if let Some(outcome) = execute(&action, &flags)? {
+    if let Some(outcome) = execute(&action, &flags, &check_args)? {
         crate::output::human(&outcome)?;
     }
     Ok(())
 }
 
-pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<Option<Outcome>> {
+pub(crate) fn execute(
+    action: &str,
+    flags: &BTreeMap<String, String>,
+    arguments: &[String],
+) -> Result<Option<Outcome>> {
     let required = |name: &str| -> Result<&str> {
         flags
             .get(name)
@@ -93,7 +117,30 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
         }
         _ => {}
     }
-    if action.starts_with("add-") {
+    let command_hook = action == "add-hook" && !flags.contains_key("--definition");
+    if action == "add-hook" {
+        if command_hook {
+            for name in ["--id", "--check", "--effect", "--on-error"] {
+                required(name)?;
+            }
+        } else if [
+            "--id",
+            "--check",
+            "--provider",
+            "--effect",
+            "--on-error",
+            "--reason-code",
+        ]
+        .iter()
+        .any(|key| flags.contains_key(*key))
+            || !arguments.is_empty()
+        {
+            return Err(Error::Invalid(
+                "--definition conflicts with command Hook options".into(),
+            ));
+        }
+    }
+    if action.starts_with("add-") && !command_hook {
         required("--definition")?;
     }
     if action == "remove-hook" {
@@ -129,6 +176,23 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
         }
         "add-event" => {
             editor.add_event(required("--event")?, definition(required("--definition")?)?)?;
+        }
+        "add-hook" if command_hook => {
+            let id = required("--id")?;
+            let argv: Vec<_> = std::iter::once(required("--check")?.to_owned())
+                .chain(arguments.iter().cloned())
+                .collect();
+            editor.add_command_hook(
+                required("--event")?,
+                CommandHook {
+                    id,
+                    provider: flags.get("--provider").map(String::as_str).unwrap_or(id),
+                    argv: &argv,
+                    effect: required("--effect")?,
+                    on_error: required("--on-error")?,
+                    reason_code: flags.get("--reason-code").map(String::as_str),
+                },
+            )?;
         }
         "add-hook" => {
             editor.add_hook(required("--event")?, definition(required("--definition")?)?)?;

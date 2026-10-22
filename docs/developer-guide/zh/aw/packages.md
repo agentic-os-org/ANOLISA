@@ -114,8 +114,10 @@ Provider 私有 `config` 中的键保持不透明。
 添加已有的相同定义时保留文件；同名对象或同一事件下同 ID 步骤已有不同定义时报告
 冲突。删除不存在的对象或步骤也保留文件。成功的修改操作打印 `Updated configuration`
 或 `Configuration unchanged`。删除 Provider 前须先删除所有引用步骤，包括禁用的
-步骤。删除事件最后一个步骤后仍保留事件选项及空 `steps` 数组。`add-hook` 要求事件
+步骤。删除事件最后一个步骤后仍保留事件选项及空 `steps` 数组。`add-hook --definition` 形式要求事件
 已存在；`add-event` 显式指定是否启用事件，不覆盖已有事件的选项。
+
+布尔脚本简写支持 `--id`、`--check`、`--effect`、`--on-error`、可选的 `--provider`/`--reason-code` 和 `--` 后的字面参数。它创建缺失事件，原子新增 Provider 与步骤，拒绝禁用事件，保留已有选项及顺序。示例和兼容规则见[用户指南](../../../user-guide/zh/user-entrypoint/aw/configuration.md#追加布尔脚本-hook)。`configure --qwenpaw ABS_FILE` 与 `aw config init --qwenpaw ABS_FILE` 生成相同的 HTTP App 目标。
 
 每条修改命令原子发布一个操作。多条命令分别发布，后续命令失败时，先前已成功的
 命令仍然生效。

@@ -7,7 +7,7 @@ use std::path::Path;
 
 pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
     require(
-        settings.qoder.is_some() || settings.openclaw.is_some(),
+        settings.qoder.is_some() || settings.qwenpaw.is_some() || settings.openclaw.is_some(),
         "select at least one Agent entrypoint",
     )?;
     require(
@@ -23,6 +23,9 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
     if let Some(qoder) = settings.qoder {
         value["spec"]["agents"]["qoder"] = json!({"adapter":"qoder","argv":[qoder]});
     }
+    if let Some(qwenpaw) = settings.qwenpaw {
+        value["spec"]["agents"]["qwenpaw"] = json!({"adapter":"qwenpaw","argv":[qwenpaw,"app"]});
+    }
     if let (Some(node), Some(openclaw)) = (settings.node, settings.openclaw) {
         value["spec"]["agents"]["openclaw"] =
             json!({"adapter":"openclaw","argv":[node,openclaw,"gateway","run"]});
@@ -35,6 +38,10 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
             let mut tools = json!({});
             if settings.qoder.is_some() {
                 tools["Bash"] = json!({"language":"bash","input_pointer":"/command"});
+            }
+            if settings.qwenpaw.is_some() {
+                tools["execute_shell_command"] =
+                    json!({"language":"bash","input_pointer":"/command"});
             }
             if settings.openclaw.is_some() {
                 tools["exec"] = json!({"language":"bash","input_pointer":"/command"});

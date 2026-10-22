@@ -25,6 +25,8 @@ pub struct Settings<'a> {
     pub policy: Policy<'a>,
     /// Qoder CLI >=1.1.64 executable with compatible native command Hooks.
     pub qoder: Option<&'a Path>,
+    /// QwenPaw executable; the generated target uses its headless HTTP App.
+    pub qwenpaw: Option<&'a Path>,
     /// Node executable used by the pinned OpenClaw installation.
     pub node: Option<&'a Path>,
     /// OpenClaw 2026.9.6 openclaw.mjs entrypoint.
@@ -76,6 +78,7 @@ pub(crate) fn configure_using(
         state,
         policy,
         qoder,
+        qwenpaw,
         node,
         openclaw,
     } = settings;
@@ -141,7 +144,7 @@ pub(crate) fn configure_using(
         socket_length("sec-core", socket)?;
     }
     require(
-        qoder.is_some() || openclaw.is_some(),
+        qoder.is_some() || qwenpaw.is_some() || openclaw.is_some(),
         "select at least one Agent entrypoint",
     )?;
     require(
@@ -150,6 +153,7 @@ pub(crate) fn configure_using(
     )?;
     for (path, access, permission) in [
         (*qoder, libc::X_OK, "executable"),
+        (*qwenpaw, libc::X_OK, "executable"),
         (*node, libc::X_OK, "executable"),
         (*openclaw, libc::R_OK, "readable"),
     ] {

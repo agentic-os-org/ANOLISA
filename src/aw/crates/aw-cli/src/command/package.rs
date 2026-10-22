@@ -52,9 +52,12 @@ pub(super) struct Configure {
     /// Absolute private state directory outside the prefix
     #[arg(long, value_name = "ABS_DIR")]
     pub state_dir: String,
-    /// Absolute Qoder executable; choose Qoder and/or OpenClaw
-    #[arg(long, value_name = "ABS_FILE", required_unless_present = "openclaw")]
+    /// Absolute Qoder executable
+    #[arg(long, value_name = "ABS_FILE", required_unless_present_any = ["openclaw", "qwenpaw"])]
     pub qoder: Option<String>,
+    /// Absolute QwenPaw executable; generates the headless HTTP App target
+    #[arg(long, value_name = "ABS_FILE", required_unless_present_any = ["qoder", "openclaw"])]
+    pub qwenpaw: Option<String>,
     /// Absolute Node executable, paired with --openclaw
     #[arg(long, value_name = "ABS_FILE", requires = "openclaw")]
     pub node: Option<String>,
@@ -63,7 +66,7 @@ pub(super) struct Configure {
         long,
         value_name = "ABS_FILE",
         requires = "node",
-        required_unless_present = "qoder"
+        required_unless_present_any = ["qoder", "qwenpaw"]
     )]
     pub openclaw: Option<String>,
     /// Provider template; none is the default
@@ -159,6 +162,50 @@ pub(super) struct RemoveHook {
     pub event: String,
     #[arg(long, value_name = "ID", allow_hyphen_values = true)]
     pub id: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+/// The definition form retains its existing event/step semantics.
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct AddHook {
+    #[command(flatten)]
+    pub configuration: Configuration,
+    #[arg(long, value_name = "EVENT")]
+    pub event: String,
+    /// Complete step object; conflicts with command-generation options
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["id", "check", "provider", "effect", "on_error", "reason_code", "arguments"])]
+    pub definition: Option<String>,
+    /// Event-scoped Hook ID
+    #[arg(
+        long,
+        value_name = "ID",
+        required_unless_present = "definition",
+        allow_hyphen_values = true
+    )]
+    pub id: Option<String>,
+    /// Absolute script emitting a JSON boolean; never executed by the editor
+    #[arg(
+        long,
+        value_name = "ABS_PROGRAM",
+        required_unless_present = "definition"
+    )]
+    pub check: Option<String>,
+    /// Provider name; defaults to the Hook ID, shared across events
+    #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
+    pub provider: Option<String>,
+    /// Effect requested on true; post-tool Hooks accept observe only
+    #[arg(long, value_parser = ["block", "observe"], required_unless_present = "definition")]
+    pub effect: Option<String>,
+    /// Failure action, constrained by the event; never implicit
+    #[arg(long, value_parser = ["block", "report", "withhold_result"], required_unless_present = "definition")]
+    pub on_error: Option<String>,
+    /// Optional machine-readable match reason
+    #[arg(long, value_name = "CODE", allow_hyphen_values = true)]
+    pub reason_code: Option<String>,
+    /// Literal script arguments following --
+    #[arg(last = true, value_name = "CHECK_ARGS")]
+    pub arguments: Vec<String>,
     #[command(flatten)]
     pub output: crate::output::Options,
 }
