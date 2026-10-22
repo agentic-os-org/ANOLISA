@@ -60,14 +60,16 @@ for versioned command metadata. `aw completion bash` prints a completion script;
 Zsh, Fish, PowerShell and Elvish are also supported. Scripts are not installed
 automatically. See [command discovery](../../docs/user-guide/en/user-entrypoint/aw/operations.md#command-discovery-and-completion).
 
-Local package install/uninstall, `config init`, and offline configuration edits
+Local package install/uninstall, `config init`, `config validate`, and offline configuration edits
 accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See
 [management reports](../../docs/user-guide/en/user-entrypoint/aw/operations.md#management-reports) for supported commands and failure semantics.
 
 The same management writes accept local `--quiet`, `--verbose` and
 `--color auto|always|never` for human output. They cannot accompany `--json`;
-native output and protocol streams remain unchanged. See
+native output and protocol streams remain unchanged. Package reports distinguish
+commit, cancellation, incomplete recovery and cleanup warnings without inferring
+rollback from an exit code. See
 [terminal output](../../docs/user-guide/en/user-entrypoint/aw/operations.md#terminal-output).
 
 Core works independently. The Tokenless package includes RTK and TOON encoding;

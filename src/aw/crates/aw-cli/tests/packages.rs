@@ -6,6 +6,8 @@ mod output;
 mod support;
 #[path = "packages/terminal.rs"]
 mod terminal;
+#[path = "packages/validation.rs"]
+mod validation;
 
 use serde_json::{json, Value};
 use std::{

@@ -43,7 +43,7 @@ fn configuration_validation_keeps_legacy_scope_comparison() {
     else {
         panic!("expected config validation")
     };
-    assert_eq!(old, new);
+    assert_eq!(old, new.validation);
 }
 
 #[test]

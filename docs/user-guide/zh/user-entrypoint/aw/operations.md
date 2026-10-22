@@ -59,18 +59,21 @@ aw completion elvish
 
 ## 管理结果
 
-本地 bundle 的 `install`、`uninstall`、`config init`，以及
-`config add-provider/remove-provider/add-event/add-hook/remove-hook` 支持局部
-`--json`。旧原生连接 `install --config`、`agent connect`、`config validate`
-和兼容入口 `aw-package` 不支持这个管理输出选项。
+本地 bundle 的 `aw install`、`aw uninstall`、`aw config init`、`aw config validate`、
+`aw config add-provider`、`aw config remove-provider`、`aw config add-event`、
+`aw config add-hook` 和 `aw config remove-hook` 支持局部 `--json`。
+旧原生连接、`aw agent connect`、旧 `aw validate` 和兼容入口 `aw-package`
+不支持这个管理输出选项。
 
 ```bash
 aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --json
 aw config remove-hook --config "$HOME/aw/aw.yaml" --event tool.before --id check --json
+aw config validate --config "$HOME/aw/aw.yaml" --json
 ```
 
 报告在 stdout 输出一个 JSON 对象。`format: 1` 标识格式版本，`command` 标识
-操作，`status` 为 `succeeded` 或 `failed`。成功返回有类型的 `result`，例如：
+操作，`status` 为 `succeeded`、`failed`、`cancelled` 或 `partial`。
+成功返回有类型的 `result`，例如：
 
 ```json
 {"format":1,"command":"config remove-hook","status":"succeeded","result":{"kind":"configuration_edited","changed":true}}
@@ -82,9 +85,22 @@ aw config remove-hook --config "$HOME/aw/aw.yaml" --event tool.before --id check
 Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 
 操作失败返回退出码 1 和 `failed` 对象，其中 `error` 包含 `code` 与固定摘要
-`message`。错误码为 `io`、`invalid_json`、`invalid_yaml`、`package_contract`，
-不会把底层原始错误复制进这份报告。成功返回 0。失败不声称全部变更已经回滚。
-安装器已有的清理警告仍可能写入 stderr；这份报告不将这些警告替换为事务清单。
+`message`。错误码为 `io`、`invalid_json`、`invalid_yaml`、`package_contract`、
+`invalid_configuration` 和 `cancelled`，不复制底层原始错误。
+验证仅在离线执行；`policy_update_scope: true` 表示 `--against` 仅检查允许的编辑
+范围，不代表运行时生效。原 `aw validate` 输出保持不变。
+
+本地安装与卸载另提供 `mutation.committed`、`mutation.recovery` 和必要的
+`warnings`。`committed` 表示越过既有 payload／receipt 提交点，不是崩溃持久性保证。
+恢复状态为 `not_attempted`、`complete` 或 `incomplete`，仅覆盖本次操作跟踪的资源。
+`not_attempted` 不表示没有写入；`complete` 不证明整机状态。
+警告包含固定 `code`、资源 `path` 与可选的粗粒度 `io_kind`，不复制 I/O 错误字符串。
+
+成功返回 0，已提交卸载但备份清理留下警告时仍然如此；警告在 JSON 和人类 quiet
+模式均可见。失败且恢复不完整时使用 `partial`，退出 1，并保留主因 `error.code`，
+包括取消。其他已观察到的包协作取消使用 `cancelled`，保持既有包退出惯例返回 1；
+其余失败使用 `failed` 并返回 1。失败不表示全部变更已回滚。
+包报告将通知放入 JSON，不额外输出 stderr 警告；兼容 `aw-package` 保留旧诊断通道。
 
 语法错误仍在 stderr 输出文本，退出码为 1，stdout 为空，即使被拒绝的参数中
 包含 `--json`。默认人类诊断与显式 `config show` 保留原有契约；这不是全局
@@ -110,7 +126,7 @@ aw uninstall --prefix "$AW_PREFIX" --color never
 
 `--quiet` 与 `--verbose` 互斥。`--json` 与这三种选项都冲突，不会被静默隐藏。
 它们不是全局参数，不用于原生连接、服务或协议命令、`config show`、
-`config validate` 或 `aw-package`。转发分隔符 `--` 后的参数仍按原样传递。
+旧 `aw validate` 或 `aw-package`。转发分隔符 `--` 后的参数仍按原样传递。
 
 非空 `NO_COLOR` 或 `TERM=dumb` 会禁用自动着色；显式 `always` 覆盖这些设置。
 成功摘要使用 stdout，操作错误使用 stderr，分别检查各自是否连接终端。
@@ -118,7 +134,8 @@ aw uninstall --prefix "$AW_PREFIX" --color never
 
 CLI 自己生成的管理摘要和操作错误，会转义元数据中的控制字符与双向文本控制符，
 避免路径注入终端指令或额外行。`aw-package` 共用的成功摘要也转义这些元数据，
-但不着色。已有库清理警告与其他命令诊断不在此格式化范围内，这不是全局私有数据脱敏。
+但不着色。新入口的安装／卸载通知同样转义；兼容入口的清理警告与其他命令诊断
+不在此格式化范围内。这不是全局私有数据脱敏。
 JSON 值和原生输出、协议流保留原格式。
 
 输出流失败时，文件可能已经发布，命令仍返回非零；这不代表操作已回滚。

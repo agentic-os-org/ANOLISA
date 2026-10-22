@@ -687,6 +687,7 @@ fn already_cancelled_install_does_not_create_prefix() {
 }
 
 mod configuration;
+mod reported;
 mod standalone;
 
 #[path = "tests/tokenless.rs"]

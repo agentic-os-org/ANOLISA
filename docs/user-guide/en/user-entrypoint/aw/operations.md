@@ -70,18 +70,22 @@ Success returns 0; invalid syntax or an output-stream failure returns 1.
 
 ## Management reports
 
-Use command-local `--json` with local-bundle `install`, `uninstall`, `config init`,
-or `config add-provider/remove-provider/add-event/add-hook/remove-hook`. It does
-not apply to legacy native `install --config`, `agent connect`, `config validate`
-or the compatibility `aw-package` executable.
+Use command-local `--json` with local-bundle `aw install`, `aw uninstall`,
+`aw config init`, `aw config validate`, `aw config add-provider`,
+`aw config remove-provider`, `aw config add-event`, `aw config add-hook` or
+`aw config remove-hook`. It does not apply to legacy native installation,
+`aw agent connect`, legacy `aw validate` or the compatibility `aw-package`
+executable.
 
 ```bash
 aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --json
 aw config remove-hook --config "$HOME/aw/aw.yaml" --event tool.before --id check --json
+aw config validate --config "$HOME/aw/aw.yaml" --json
 ```
 
 The report is one JSON object on stdout. `format: 1` identifies its schema;
-`command` identifies the operation and `status` is `succeeded` or `failed`.
+`command` identifies the operation and `status` is `succeeded`, `failed`,
+`cancelled` or `partial`.
 Success returns a typed `result`, for example:
 
 ```json
@@ -97,10 +101,28 @@ Preview package check, not publisher trust or native Agent acceptance.
 
 An operation failure returns exit code 1 and a `failed` object with an `error`
 containing `code` and a fixed summary `message`. Codes are `io`, `invalid_json`,
-`invalid_yaml` and `package_contract`; raw library errors are not copied into
-this report. Success returns 0. A failed command makes no claim that all changes
-were rolled back. Existing installer cleanup warnings can still appear on
-stderr; the report does not replace those warnings with a transaction inventory.
+`invalid_yaml`, `package_contract`, `invalid_configuration` and `cancelled`;
+raw library errors are not copied into this report. Validation is offline;
+`policy_update_scope: true` means `--against` checked only the permitted edit
+scope, not runtime activation. The original `aw validate` output remains unchanged.
+
+Local installation and removal also report `mutation.committed`,
+`mutation.recovery` and any `warnings`. `committed` identifies the existing
+payload/receipt commit point, not crash durability. Recovery values are
+`not_attempted`, `complete` and `incomplete`, covering only this invocation's
+tracked resources. `not_attempted` does not mean zero writes; `complete` does
+not certify machine-wide state. Warning entries have a stable `code`, resource
+`path`, and an optional coarse `io_kind`, not a copied I/O error string.
+
+Successful operations return 0, including a committed uninstall whose backup
+cleanup left warnings. Those warnings remain visible in JSON and human quiet
+mode. A failure with incomplete recovery uses `partial` and exit 1; its original
+`error.code` is retained, including cancellation. Otherwise an observed
+cooperative package cancellation uses `cancelled` and exit 1, preserving the
+existing package exit convention; other failures use `failed` and exit 1.
+A failed command never implies that all changes were rolled back. Reported
+package operations place notices inside JSON without separate stderr warnings;
+the compatibility `aw-package` executable keeps its legacy diagnostic channel.
 
 Syntax errors remain text on stderr with exit code 1 and empty stdout, even
 when `--json` was among the rejected arguments. Default human diagnostics and
@@ -128,7 +150,7 @@ aw uninstall --prefix "$AW_PREFIX" --color never
 
 `--quiet` and `--verbose` conflict. `--json` conflicts with all three options;
 it is never silently suppressed. They are not global options and do not apply
-to native connection, service/protocol commands, `config show`, `config validate`
+to native connection, service/protocol commands, `config show`, legacy `aw validate`
 or `aw-package`. Arguments after the forwarding `--` remain literal.
 
 Auto color is disabled by nonempty `NO_COLOR` or `TERM=dumb`; explicit `always`
@@ -139,8 +161,9 @@ or permission grant is added, including in a pipe or with `--quiet`.
 CLI-owned management summaries and operation errors escape control and bidi
 characters in metadata so paths cannot inject terminal instructions or lines.
 The shared `aw-package` success formatter also escapes such metadata but stays
-uncolored. Existing library cleanup warnings and other command diagnostics are
-outside this formatting boundary; it is not global private-data redaction.
+uncolored. Canonical install/removal notices use the same escaping; legacy
+cleanup warnings and other command diagnostics remain outside this formatting
+boundary. It is not global private-data redaction.
 JSON values and native/protocol streams retain their existing formats.
 
 An output-stream failure can return nonzero after files were already published.

@@ -9,12 +9,19 @@ mod manifest;
 pub mod package;
 
 pub use configuration::{configure, document, Policy, Settings};
-pub use install::{install, install_cancellable, uninstall, uninstall_cancellable};
+pub use install::{
+    install, install_cancellable, install_reported, uninstall, uninstall_cancellable,
+    uninstall_reported, MutationFailure, MutationNotice, MutationReport, MutationResult,
+    NoticeCode, RecoveryState,
+};
 pub use manifest::{digest, inspect, Component, Manifest, Payload};
 
 /// Packaging failure; cleanup diagnostics never replace the original error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The caller's cancellation was observed before the operation committed.
+    #[error("package operation interrupted")]
+    Cancelled,
     /// Filesystem or process operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

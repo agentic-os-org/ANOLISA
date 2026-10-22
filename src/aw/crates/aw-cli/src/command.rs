@@ -5,6 +5,7 @@ mod dispatch;
 mod package;
 #[cfg(test)]
 mod tests;
+mod validation;
 
 use clap::{Args, Parser, Subcommand};
 use package::{Configure, Edit, Install, Prefix, Show};
@@ -106,7 +107,7 @@ enum Config {
     /// Print configuration JSON, including private Provider values
     Show(Show),
     /// Check configuration; optionally compare a policy update's scope
-    Validate(Validate),
+    Validate(ManagedValidate),
     /// Add a complete Provider definition without starting a service
     AddProvider(Edit),
     /// Remove an unreferenced Provider definition
@@ -179,6 +180,14 @@ struct Validate {
     /// Baseline for policy-only scope comparison; does not activate changes
     #[arg(long, value_name = "BASELINE_FILE")]
     against: Option<String>,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct ManagedValidate {
+    #[command(flatten)]
+    validation: Validate,
+    #[command(flatten)]
+    output: crate::output::Options,
 }
 
 #[derive(Args, Debug, PartialEq)]

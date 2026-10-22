@@ -147,20 +147,22 @@ pub(super) fn run(command: Command) -> Result<Exit> {
 }
 
 fn package(action: &'static str, args: Arguments, output: crate::output::Options) -> Result<Exit> {
-    crate::output::complete(
+    crate::package::managed(
         if action == "configure" {
             "config init"
         } else {
             action
         },
+        action,
+        &args.flags,
+        args.native,
         output,
-        crate::package::execute(action, &args.flags, args.native, "aw"),
     )
 }
 
 fn config(command: Config) -> Result<Exit> {
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
-        Config::Validate(value) => return validate(value),
+        Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
             let mut args = options([
                 ("prefix", Some(value.prefix.prefix)),

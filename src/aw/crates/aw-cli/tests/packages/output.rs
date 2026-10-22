@@ -194,7 +194,7 @@ fn json_remains_local_and_syntax_errors_do_not_emit_result_objects() {
             "--json",
         ],
         vec!["config", "show", "--config", "/missing", "--json"],
-        vec!["config", "validate", "--config", "/missing", "--json"],
+        vec!["validate", "--config", "/missing", "--json"],
         vec!["policy", "--json"],
     ] {
         let output = invoke(f.command().args(args));

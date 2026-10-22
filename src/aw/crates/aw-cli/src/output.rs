@@ -46,6 +46,9 @@ pub(crate) enum Outcome {
         changed: bool,
     },
     ConfigurationValidated,
+    ConfigurationChecked {
+        policy_update_scope: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -55,6 +58,8 @@ enum ErrorCode {
     InvalidJson,
     InvalidYaml,
     PackageContract,
+    InvalidConfiguration,
+    Cancelled,
 }
 
 #[derive(Serialize)]
@@ -79,6 +84,7 @@ impl From<&aw_package::Error> for Diagnostic {
                 ErrorCode::PackageContract,
                 "The operation violates the package or configuration contract",
             ),
+            Error::Cancelled => (ErrorCode::Cancelled, "The package operation was cancelled"),
         };
         Self { code, message }
     }
@@ -90,6 +96,10 @@ struct Report<'a> {
     command: &'static str,
     #[serde(flatten)]
     result: ResultView<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutation: Option<mutation::Summary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<mutation::Warning>,
 }
 
 #[derive(Serialize)]
@@ -97,6 +107,20 @@ struct Report<'a> {
 enum ResultView<'a> {
     Succeeded { result: &'a Outcome },
     Failed { error: Diagnostic },
+    Cancelled { error: Diagnostic },
+    Partial { error: Diagnostic },
+}
+
+mod mutation;
+
+pub(crate) enum ValidationError {
+    Io(std::io::Error),
+    Configuration(aw_config::Error),
+}
+
+struct Failure {
+    human: String,
+    diagnostic: Diagnostic,
 }
 
 pub(crate) fn human(outcome: &Outcome) -> std::io::Result<()> {
@@ -133,6 +157,12 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
         Outcome::ConfigurationEdited { changed: true } => "Updated configuration".into(),
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
         Outcome::ConfigurationValidated => "Valid configuration".into(),
+        Outcome::ConfigurationChecked {
+            policy_update_scope: false,
+        } => "configuration valid".into(),
+        Outcome::ConfigurationChecked {
+            policy_update_scope: true,
+        } => "policy update scope valid; runtime activation is not checked".into(),
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
@@ -154,13 +184,20 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
                 "Configuration bytes and inode were retained; no runtime reload was requested."
             }
             Outcome::ConfigurationValidated => "Configuration validation completed offline.",
+            Outcome::ConfigurationChecked { .. } => {
+                "Configuration validation completed offline; no runtime activation was checked."
+            }
         };
         writeln!(std::io::stderr().lock(), "{detail}")?;
     }
     Ok(())
 }
 
-fn json(command: &'static str, result: ResultView<'_>) -> crate::cli::Result<()> {
+fn json(
+    command: &'static str,
+    result: ResultView<'_>,
+    mutation: Option<&aw_package::MutationReport>,
+) -> crate::cli::Result<()> {
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(
         &mut stdout,
@@ -168,6 +205,8 @@ fn json(command: &'static str, result: ResultView<'_>) -> crate::cli::Result<()>
             format: 1,
             command,
             result,
+            mutation: mutation.map(mutation::Summary::from),
+            warnings: mutation.map(mutation::warnings).unwrap_or_default(),
         },
     )?;
     writeln!(stdout)?;
@@ -179,32 +218,112 @@ pub(crate) fn complete(
     options: Options,
     result: aw_package::Result<Outcome>,
 ) -> crate::cli::Result<crate::cli::Exit> {
+    complete_result(
+        command,
+        options,
+        result.map_err(|error| Failure {
+            diagnostic: Diagnostic::from(&error),
+            human: error.to_string(),
+        }),
+        None,
+    )
+}
+
+pub(crate) fn complete_validation(
+    options: Options,
+    result: Result<Outcome, ValidationError>,
+) -> crate::cli::Result<crate::cli::Exit> {
+    let result = result.map_err(|error| {
+        let (code, message, human) = match error {
+            ValidationError::Io(error) => (
+                ErrorCode::Io,
+                "A configuration file could not be read",
+                error.to_string(),
+            ),
+            ValidationError::Configuration(error) => (
+                ErrorCode::InvalidConfiguration,
+                "Configuration validation failed",
+                error.to_string(),
+            ),
+        };
+        Failure {
+            human,
+            diagnostic: Diagnostic { code, message },
+        }
+    });
+    complete_result("config validate", options, result, None)
+}
+
+pub(crate) fn complete_mutation(
+    command: &'static str,
+    options: Options,
+    outcome: Outcome,
+    result: aw_package::MutationResult,
+) -> crate::cli::Result<crate::cli::Exit> {
+    match result {
+        Ok(report) => complete_result(command, options, Ok(outcome), Some(&report)),
+        Err(failure) => complete_result(
+            command,
+            options,
+            Err(Failure {
+                diagnostic: Diagnostic::from(&failure.error),
+                human: failure.error.to_string(),
+            }),
+            Some(&failure.report),
+        ),
+    }
+}
+
+fn complete_result(
+    command: &'static str,
+    options: Options,
+    result: Result<Outcome, Failure>,
+    mutation: Option<&aw_package::MutationReport>,
+) -> crate::cli::Result<crate::cli::Exit> {
+    if !options.json {
+        if let Some(report) = mutation {
+            mutation::human(report)?;
+        }
+    }
     match result {
         Ok(outcome) => {
             if options.json {
-                json(command, ResultView::Succeeded { result: &outcome })?;
+                json(
+                    command,
+                    ResultView::Succeeded { result: &outcome },
+                    mutation,
+                )?;
             } else {
                 human_with(&outcome, &options)?;
             }
             Ok(crate::cli::Exit::Code(0))
         }
-        Err(error) if options.json => {
+        Err(failure) if options.json => {
             // Failure describes the command, not rollback or runtime health.
-            json(
-                command,
-                ResultView::Failed {
-                    error: Diagnostic::from(&error),
-                },
-            )?;
+            let result = failure_view(failure.diagnostic, mutation);
+            json(command, result, mutation)?;
             Ok(crate::cli::Exit::Code(1))
         }
-        Err(error) => {
+        Err(failure) => {
             let mut stderr = std::io::stderr().lock();
-            let message = format!("aw: {}", terminal::escape(&error.to_string()));
+            let message = format!("aw: {}", terminal::escape(&failure.human));
             let colored = terminal::use_color(options.color, stderr.is_terminal());
             writeln!(stderr, "{}", terminal::styled(&message, colored, true))?;
             Ok(crate::cli::Exit::Code(1))
         }
+    }
+}
+
+fn failure_view(
+    diagnostic: Diagnostic,
+    mutation: Option<&aw_package::MutationReport>,
+) -> ResultView<'static> {
+    if mutation.is_some_and(|report| report.recovery == aw_package::RecoveryState::Incomplete) {
+        ResultView::Partial { error: diagnostic }
+    } else if matches!(diagnostic.code, ErrorCode::Cancelled) {
+        ResultView::Cancelled { error: diagnostic }
+    } else {
+        ResultView::Failed { error: diagnostic }
     }
 }
 
@@ -226,6 +345,8 @@ mod tests {
                 result: ResultView::Failed {
                     error: Diagnostic::from(&error),
                 },
+                mutation: None,
+                warnings: Vec::new(),
             })
             .unwrap();
             assert_eq!(value["format"], 1);
@@ -235,5 +356,68 @@ mod tests {
                 assert!(!value.to_string().contains(absent));
             }
         }
+    }
+
+    #[test]
+    fn cancellation_and_incomplete_recovery_keep_the_primary_cause() {
+        for (recovery, status) in [
+            (aw_package::RecoveryState::NotAttempted, "cancelled"),
+            (aw_package::RecoveryState::Complete, "cancelled"),
+            (aw_package::RecoveryState::Incomplete, "partial"),
+        ] {
+            let report = aw_package::MutationReport {
+                committed: false,
+                recovery,
+                notices: vec![aw_package::MutationNotice {
+                    code: aw_package::NoticeCode::BackupRetained,
+                    path: "/owned/backup\n\u{1b}[2J".into(),
+                    io_kind: None,
+                }],
+            };
+            let value = serde_json::to_value(Report {
+                format: 1,
+                command: "uninstall",
+                result: failure_view(
+                    Diagnostic::from(&aw_package::Error::Cancelled),
+                    Some(&report),
+                ),
+                mutation: Some(mutation::Summary::from(&report)),
+                warnings: mutation::warnings(&report),
+            })
+            .unwrap();
+            assert_eq!(value["status"], status);
+            assert_eq!(value["error"]["code"], "cancelled");
+            assert_eq!(value["mutation"]["committed"], false);
+            assert_eq!(value["warnings"][0]["code"], "backup_retained");
+            assert!(value.get("result").is_none());
+        }
+    }
+
+    #[test]
+    fn committed_cleanup_warning_does_not_claim_operation_failure() {
+        let report = aw_package::MutationReport {
+            committed: true,
+            recovery: aw_package::RecoveryState::NotAttempted,
+            notices: vec![aw_package::MutationNotice {
+                code: aw_package::NoticeCode::BackupCleanupFailed,
+                path: "/owned/backup".into(),
+                io_kind: Some(std::io::ErrorKind::PermissionDenied),
+            }],
+        };
+        let value = serde_json::to_value(Report {
+            format: 1,
+            command: "uninstall",
+            result: ResultView::Succeeded {
+                result: &Outcome::Uninstalled,
+            },
+            mutation: Some(mutation::Summary::from(&report)),
+            warnings: mutation::warnings(&report),
+        })
+        .unwrap();
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(value["mutation"]["committed"], true);
+        assert_eq!(value["mutation"]["recovery"], "not_attempted");
+        assert_eq!(value["warnings"][0]["io_kind"], "permission_denied");
+        assert!(value.get("error").is_none());
     }
 }
