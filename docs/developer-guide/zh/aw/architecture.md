@@ -150,3 +150,8 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 有效及无效样例。受支持的版本可以并存；新增版本使用独立的名称和 `$id`，保留旧版
 合同及其测试，直到明确结束兼容。迁移现有 Schema 时保持字节、`$id`、Registry 名称
 与跨语言摘要向量不变。
+
+Qoder SDK 接入通过每个 Query 的 `options.hooks` 注册回调。前台 Worker 选择
+Adapter 的 daemon 和 Query 工厂；daemon 工厂先校验启动参数并登记对象身份，
+Query 才能使用该 daemon。工具分发复用现有 CLI callback → service → Host → Provider 路径。
+应用保留 daemon 和 Query 的管理责任，不新增 SDK 专用服务操作或 Provider。

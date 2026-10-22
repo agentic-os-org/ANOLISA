@@ -210,6 +210,29 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
             {"id":"compress","provider":"tokenless","operation":"record","effects":["replace_result"],"on_error":"report"}]}});
         let service = Service::start(&fixture, &document);
         let deadline = || Instant::now() + support::TIMEOUT;
+        // An observation-only adapter must reject compression during admission.
+        if adapter == "qoder-sdk" {
+            let rejected = service.client.call(
+                Operation::Bind {
+                    target: "agent".into(),
+                    capabilities: Capabilities {
+                        adapter: adapter.into(),
+                        version: "1.0.54".into(),
+                        entrypoint: "sdk-worker".into(),
+                        events: BTreeMap::from([("tool.after".into(), vec!["observe".into()])]),
+                    },
+                    cwd: fixture.root.to_str().unwrap().into(),
+                    environment: BTreeMap::new(),
+                },
+                deadline(),
+            );
+            assert!(
+                rejected.is_err(),
+                "unsupported replacement must fail admission"
+            );
+            service.released(&fixture);
+            continue;
+        }
         let binding: Binding = serde_json::from_value(
             service
                 .client

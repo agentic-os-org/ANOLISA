@@ -43,7 +43,8 @@
     "aw-package/lib/aw_package",
     "aw-package/test/management",
     "aw-exec/test/packages",
-    "aw-cli/test/legacy_migration"
+    "aw-cli/test/legacy_migration",
+    "aw-cli/test/qoder_sdk"
   ],
   "cases": {
     "package-unified-bootstrap": {
@@ -401,6 +402,10 @@
     "package-plan-removal-byte-reserve": {
       "target": "aw-package/lib/aw_package",
       "test": "plan::capacity::tests::installation_admission_reserves_the_future_whole_removal_encoded_budget"
+    },
+    "qoder-sdk-lifecycle": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "query_hooks_preserve_first_call_identity_and_cleanup"
     }
   },
   "agents": {
@@ -621,6 +626,34 @@
         "security-retry"
       ],
       "tokenless": [
+        "final-replacement"
+      ]
+    },
+    "qoder-sdk": {
+      "events": {
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "qoder-sdk-lifecycle"
+          ]
+        }
+      },
+      "lifecycle": [
+        "qoder-sdk-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "security-retry",
         "final-replacement"
       ]
     }

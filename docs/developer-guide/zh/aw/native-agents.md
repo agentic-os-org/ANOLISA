@@ -872,3 +872,62 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless ../tokenless/target/debug/tokenless \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
+
+## 启动 Qoder SDK Worker
+
+使用 `adapter: qoder-sdk`、`@qoder-ai/qoder-agent-sdk@1.0.54`、随包提供的
+Worker 1.1.74（国际版）和 Node.js 22 或更新版本。将 SDK 安装到 Worker 的应用目录，
+在现有 AW 配置中设置目标：
+
+```yaml
+agents:
+  sdk:
+    adapter: qoder-sdk
+    argv: [node, /absolute/application/worker.mjs]
+```
+
+Worker 显式选择 AW 的 daemon 和 Query 工厂；同一个 Worker 也可以通过 Node 和原生 SDK 工厂独立启动：
+
+```javascript
+import { startDaemon, query, accessTokenFromEnv } from "@qoder-ai/qoder-agent-sdk";
+import { pathToFileURL } from "node:url";
+
+const prompt = process.argv[2];
+if (!prompt) throw new Error("A prompt is required");
+const bridge = process.env.AW_QODER_SDK_BRIDGE
+  ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
+const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
+const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
+const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+let current;
+try {
+  current = await makeQuery({ prompt, options: {
+    daemon, cwd: process.cwd(), settingSources: [],
+  } });
+  for await (const message of current) console.log(JSON.stringify(message));
+} finally {
+  await current?.return();
+  await daemon.stop();
+}
+```
+
+执行 `aw run --config aw.yaml --agent sdk -- "你的请求"`，或执行
+`node /absolute/application/worker.mjs "你的请求"` 走不启用 AW 的原生启动方式。
+沿用 SDK 认证方式，不把凭据写入配置文件。调用方启动和停止 daemon，并关闭每个 Query。
+通过 AW 启动时，使用 Bridge 的两个工厂：`startDaemon()` 在启动固定版本 daemon 前
+校验运行时选择和禁用 Hook 的环境变量；`createQuery()` 拒绝原生 SDK 直接创建的
+daemon，因为无法核验它的启动配置。仅启动 daemon 不会报告 Query 就绪。
+AW 沿用前台 Worker 生命周期，在 Worker 退出时释放自己的绑定。
+
+AW 在 Query 初始化前注册回调，SDK 握手成功后报告就绪。
+`tool.before` 支持观察和拒绝；`tool.after` 观察原生工具成功和失败的结果。
+原生权限拒绝保留优先级，结果替换在准入时拒绝。现有 SDK Hook 保留；参数改写和权限
+Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
+
+使用 `settingSources: []`，不要传入 `settings`、插件、额外 CLI 参数或运行时 transport
+覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
+语义解析并拒绝。所有接入 AW 的 Query 使用绑定的工作目录。回调按 Query 注册；同一 daemon 上
+直接使用原生 SDK 创建的 Query 不受修改，**也不受 AW 保护**。同一 AW 实例内接入的
+Query 共用配置的策略，不支持分别选择 session 策略。注册后不要通过 `applyFlagSettings`
+修改 Hook 路由。此适配器不支持 `--reloadable`、策略更新或外部 PID attach/detach，
+这些能力需要后续单独接入请求生命周期。

@@ -170,7 +170,7 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
     }
     match adapter {
         "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
-        "claude-sdk" => reply.stdout = serde_json::to_vec(text)?,
+        "claude-sdk" | "qoder-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;
             value[if adapter == "openclaw" {

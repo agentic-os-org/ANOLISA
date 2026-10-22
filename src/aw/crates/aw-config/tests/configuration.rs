@@ -40,6 +40,7 @@ fn one_configuration_covers_declared_adapters_and_sixteen_event_names() {
     for adapter in [
         "qwenpaw",
         "qoder",
+        "qoder-sdk",
         "openclaw",
         "hermes",
         "pi",

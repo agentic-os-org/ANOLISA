@@ -117,8 +117,15 @@ core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | — |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Qoder SDK 1.0.54 / Worker 1.1.74 使用 Bridge 的 daemon 和 Query 工厂校验
+原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
+参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
+首版支持调用前观察/拒绝、调用后观察，不包含策略热更新、外部 attach 或结果替换。
+
 
 Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经过安全和原生权限检查。
 结果替换仅适用于受支持的文本位置；AW 不提供 OS 沙箱或跨 Agent 审批。

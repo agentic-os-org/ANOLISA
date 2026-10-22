@@ -26,7 +26,7 @@ CLI 版本，要求 >=1.1.64 而不固定一个版本；OpenClaw、QwenPaw、Her
 | `execution.guarantee` | 仅 `native_hook`，不提供 OS、final 或 protected 保证 |
 | `execution.default_event_budget_ms` | 必填正整数共享事件预算，各步骤不会获得重新开始的预算 |
 | `audit.enabled`、`audit.payload` | 本版本固定为 `true`、`metadata_only`；服务持久保存执行元数据 |
-| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope`；识别名称不等于运行效果已认证 |
+| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope`；识别名称不等于运行效果已认证 |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
 | `agents.<id>.qoder.sequential` | `adapter: qoder` 专属的可选布尔值；将生成的原生组标为顺序执行，false 不覆盖其他匹配组 |
 | `providers.<id>.protocol` | 缺省为仅执行 invoke 的 `aw-hook/v1alpha1`；显式 `aw-provider/v1alpha1` 保留结构化消息，`native-hook/v1alpha1` 保留原生回调字节 |

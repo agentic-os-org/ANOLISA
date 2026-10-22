@@ -101,7 +101,7 @@ migration. Native jobs reuse checksummed binaries from that exact build.
 
 [tests/native-matrix.json](tests/native-matrix.json) records fixed runtime versions,
 owners, bounded commands and the precise acceptance boundary for every registered
-Agent. The nightly job matrix is generated from this inventory. All seven Agents
+Agent. The nightly job matrix is generated from this inventory. All eight Agents
 have automated suites. OpenClaw covers official Hook runners; full OpenClaw
 Gateway model flows still require explicit acceptance.
 
@@ -135,7 +135,8 @@ adopted descendants across sessions and removes containers carrying that command
 unique ownership label. It retains a cleanup report and fails the interrupted run.
 
 QwenPaw drives its stock App/API with a deterministic loopback OpenAI-compatible
-model, requiring no cloud key. Qoder uses its real hosted Performance model and
+model, requiring no cloud key. Qoder CLI uses its real hosted Performance model; Qoder SDK 1.0.54 uses its
+bundled Worker 1.1.74 and hosted `auto` model. Both require
 the repository `QODER_PERSONAL_ACCESS_TOKEN` Secret, as documented in
 [Qoder authentication](https://docs.qoder.com/cli/authentication). Dependency
 installation does not receive the Secret. The Qoder launcher and its native

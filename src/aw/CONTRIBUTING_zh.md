@@ -85,7 +85,7 @@ Preview 包，验证真实 sec-core health、Tokenless/RTK 契约、安装、服
 原生任务复用该次构建的二进制，并校验提交 SHA 和文件摘要。
 
 [tests/native-matrix.json](tests/native-matrix.json) 为每个已注册 Agent 记录固定
-版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。七种 Agent
+版本、责任人、有界命令和明确的验收边界，并生成 nightly 任务矩阵。八种 Agent
 均有自动验收。OpenClaw 覆盖官方 Hook runner，完整 Gateway 模型流程仍需单独验收。
 
 Qoder CLI 1.1.64 和 QwenPaw 2.2.2b4 / AgentScope 2.0.9 各自必须完成四项真实
@@ -238,3 +238,7 @@ Adapter 证据和工具事件运行样例 Provider，不代表原生 Agent 验�
 协议与 Core 测试使用合成输入和 Host。原生接入需要单独取证，确认回调已安装、
 工具按预期执行或被阻断，以及返回效果已被 Agent 采用。验证命令和结果写入 PR，
 实验日志不放入 README。
+
+Qoder SDK 1.0.54 原生验收使用随包的 Worker 1.1.74 和托管 `auto` 模型，
+复用 `QODER_PERSONAL_ACCESS_TOKEN` Secret。依赖安装不接收凭据，SDK 运行阶段
+验证首请求拒绝、session Hook 隔离、成功/失败观察、原生权限拒绝和 daemon 不重启。

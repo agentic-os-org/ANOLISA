@@ -1023,3 +1023,70 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py \
   --tokenless ../tokenless/target/debug/tokenless \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless
 ```
+
+## Start a Qoder SDK worker
+
+Use `adapter: qoder-sdk` with `@qoder-ai/qoder-agent-sdk@1.0.54`, its bundled
+Worker 1.1.74 (global), and Node.js 22 or newer. Install the SDK in the worker's
+application directory. Configure the target in your existing AW configuration:
+
+```yaml
+agents:
+  sdk:
+    adapter: qoder-sdk
+    argv: [node, /absolute/application/worker.mjs]
+```
+
+The worker selects AW's daemon and Query factories when launched through AW. The same
+worker can run directly with Node and the native SDK factory:
+
+```javascript
+import { startDaemon, query, accessTokenFromEnv } from "@qoder-ai/qoder-agent-sdk";
+import { pathToFileURL } from "node:url";
+
+const prompt = process.argv[2];
+if (!prompt) throw new Error("A prompt is required");
+const bridge = process.env.AW_QODER_SDK_BRIDGE
+  ? await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE)) : undefined;
+const makeQuery = bridge ? bridge.createQuery : async (request) => query(request);
+const makeDaemon = bridge ? bridge.startDaemon : startDaemon;
+const daemon = await makeDaemon({ auth: accessTokenFromEnv() });
+let current;
+try {
+  current = await makeQuery({ prompt, options: {
+    daemon, cwd: process.cwd(), settingSources: [],
+  } });
+  for await (const message of current) console.log(JSON.stringify(message));
+} finally {
+  await current?.return();
+  await daemon.stop();
+}
+```
+
+Run `aw run --config aw.yaml --agent sdk -- "your prompt"`, or run
+`node /absolute/application/worker.mjs "your prompt"` for native startup without AW.
+Use your normal SDK authentication; keep credentials out of configuration files.
+The caller starts and stops the daemon and closes each Query. Under AW, use
+both bridge factories: `startDaemon()` validates runtime selectors and the
+Hook-disable environment before starting the pinned daemon; `createQuery()`
+rejects daemons created directly through the SDK because their launch context
+cannot be verified. Daemon startup alone does not publish Query readiness.
+AW keeps the foreground-worker lifecycle and releases its binding on worker exit.
+
+AW registers per-Query callbacks before initialization, then reports readiness
+after the SDK handshake. `tool.before` supports observation and denial;
+`tool.after` observes successful and failed native tool calls. Native permission
+denials retain precedence. Result replacement is rejected during admission.
+Existing SDK hooks are retained; argument rewrites and permission-hook overrides
+are rejected so a tool cannot execute different arguments from those checked.
+
+Use `settingSources: []` and no `settings`, plugins, extra CLI flags or runtime
+transport overrides. Hook-disable flags are parsed with the bundled Worker's
+whitespace normalization and rejected in both process and launch environments.
+All managed Queries must use the bound working directory.
+Each Query gets its own callbacks; an ordinary SDK Query on the same daemon is
+unmodified and is **not protected by AW**. Managed Queries within one AW instance
+share its configured policy, not independently selectable per-session policies.
+Do not change Hook routing through `applyFlagSettings` after registration.
+This adapter does not support `--reloadable`, policy update or external PID
+attach/detach; those require a separate request-lifecycle integration.

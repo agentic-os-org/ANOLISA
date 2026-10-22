@@ -136,8 +136,16 @@ for supported versions, tool types, and text replacement boundaries.
 | `openclaw` | ✓ | ✓ | ✓ | ✓ |
 | `pi` | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | — |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Qoder SDK 1.0.54 / Worker 1.1.74 requires the bridge daemon and Query factories
+to admit the native runtime and register per-Query callbacks through
+`aw run`; see the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
+Its first release supports before observation/denial and after observation,
+without policy reload, external attach or result replacement.
+
 
 A Tokenless retry suggestion blocks the original call. The Agent must make a new
 call through security and native permission checks. Replacement applies only to

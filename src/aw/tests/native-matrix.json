@@ -636,6 +636,50 @@
           }
         }
       }
+    },
+    "qoder-sdk": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "@qoder-ai/qoder-agent-sdk@1.0.54"
+      ],
+      "boundary": "Real SDK 1.0.54 / bundled Worker 1.1.74 startDaemon and query, hosted Bash allow/deny, first request, per-Query hook isolation and daemon cleanup. No runtime policy update, external PID attach, per-session AW policy or result replacement.",
+      "cases": [
+        {
+          "name": "daemon-hooks",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "first-request-denied",
+                  "session-isolation",
+                  "allow-before-after",
+                  "tool-failure-observed",
+                  "native-permission-veto",
+                  "daemon-not-restarted"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

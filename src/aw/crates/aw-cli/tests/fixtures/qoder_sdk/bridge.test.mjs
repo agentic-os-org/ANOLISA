@@ -1,0 +1,226 @@
+/** Contract tests for SDK option composition, vetoes and bounded callback cleanup. */
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
+const { createQuery } = bridge;
+
+function fixture(t, mode = "allow") {
+  const root = fs.mkdtempSync(path.join(process.cwd(), "sdk-bridge-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sdk = path.join(root, "sdk.mjs");
+  fs.writeFileSync(sdk, `import fs from 'node:fs';
+  export async function startDaemon(options) {
+    fs.writeFileSync(${JSON.stringify(path.join(root, "started"))}, JSON.stringify(options));
+    if(options.failStart) throw new Error('daemon startup failed');
+    return { options, async stop(){fs.writeFileSync(${JSON.stringify(path.join(root, "stopped"))},'stopped');} };
+  }
+  export function query({options}) {
+    fs.writeFileSync(${JSON.stringify(path.join(root, "queried"))},'queried'); return {
+    options, async initializationResult(){if(options.failInit) throw new Error('init failed');},
+    async return(){fs.writeFileSync(${JSON.stringify(path.join(root, "closed"))},'closed');}
+  };}`);
+  const executable = path.join(root, "callback");
+  fs.writeFileSync(executable, `#!${process.execPath}
+import fs from 'node:fs';
+let input='';for await(const chunk of process.stdin)input+=chunk;
+fs.writeFileSync(${JSON.stringify(path.join(root, "input"))},input);
+fs.writeFileSync(${JSON.stringify(path.join(root, "pid"))},String(process.pid));
+const mode=${JSON.stringify(mode)};
+if(mode==='wait')await new Promise(r=>setTimeout(r,30000));
+if(mode==='deny'){process.stdout.write(JSON.stringify('policy denied'));process.exitCode=2;}
+else if(mode==='invalid')process.stdout.write('{"approval":true}');
+else process.stdout.write('{}');
+`, { mode: 0o700 });
+  fs.writeFileSync(path.join(root, "package.json"), '{"type":"module"}');
+  const config = { sdk, executable, binding: path.join(root, "binding"), cwd: process.cwd(),
+    ready_path: path.join(root, "ready"), ready_token: "fixture", hooks: [
+      { event: "tool.before", step: "before", on_error: "block", budget_ms: 500, replace_result: false },
+      { event: "tool.after", step: "after", on_error: "report", budget_ms: 500, replace_result: false },
+    ] };
+  const file = path.join(root, "config.json");
+  fs.writeFileSync(file, JSON.stringify(config));
+  process.env.AW_QODER_SDK_CONFIG = file;
+  return { root, config, file, options: { settingSources: [], cwd: process.cwd() } };
+}
+const payload = (event = "PreToolUse") => ({ hook_event_name: event, session_id: "session",
+  tool_use_id: "call", tool_name: "Bash", tool_input: { command: "original" }, cwd: process.cwd() });
+const invoke = (query, event = "PreToolUse", signal = new AbortController().signal) =>
+  query.options.hooks[event].at(-1).hooks[0](payload(event), "call", { signal });
+
+test("registers before initialization and preserves the caller options", async (t) => {
+  const f = fixture(t);
+  const q = await createQuery({ prompt: "first", options: f.options });
+  assert.equal(fs.existsSync(path.join(f.root, "ready")), true);
+  assert.equal(f.options.hooks, undefined);
+  for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+    assert.deepEqual(await invoke(q, event), {});
+  await q.return();
+  assert(fs.existsSync(path.join(f.root, "closed")));
+});
+test("denial and invalid callbacks fail closed without approval", async (t) => {
+  for (const mode of ["deny", "invalid"]) {
+    const f = fixture(t, mode);
+    const q = await createQuery({ prompt: "first", options: f.options });
+    assert.equal((await invoke(q)).hookSpecificOutput.permissionDecision, "deny");
+    assert.deepEqual(await invoke(q, "PostToolUse"), {});
+  }
+});
+test("query routes remain private after another query is configured", async (t) => {
+  const a = fixture(t, "deny");
+  const qa = await createQuery({ prompt: "a", options: a.options });
+  const b = fixture(t);
+  const qb = await createQuery({ prompt: "b", options: b.options });
+  assert.equal((await invoke(qa)).hookSpecificOutput.permissionDecision, "deny");
+  assert.deepEqual(await invoke(qb), {});
+  assert(fs.existsSync(path.join(a.root, "input")));
+  assert(fs.existsSync(path.join(b.root, "input")));
+});
+test("native callbacks keep vetoes and cannot mutate checked arguments", async (t) => {
+  const f = fixture(t);
+  const options = { ...f.options, hooks: { PreToolUse: [{ hooks: [async (input) => {
+    input.tool_input.command = "changed";
+    return { hookSpecificOutput: { updatedInput: { command: "changed" } } };
+  }] }] }, canUseTool: async () => ({ behavior: "allow", updatedInput: { command: "changed" } }) };
+  const q = await createQuery({ prompt: "first", options });
+  const original = payload();
+  const result = await q.options.hooks.PreToolUse[0].hooks[0](original, "call", {});
+  assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(original.tool_input.command, "original");
+  assert.equal((await q.options.canUseTool("Bash", original.tool_input, {})).behavior, "deny");
+  const denied = await createQuery({ prompt: "first", options: { ...f.options,
+    canUseTool: async () => ({ behavior: "deny", message: "native veto" }) } });
+  assert.equal((await denied.options.canUseTool("Bash", {}, {})).message, "native veto");
+});
+test("unsupported routing and cwd overrides fail before readiness", async (t) => {
+  const f = fixture(t);
+  for (const extra of [{ settingSources: undefined }, { settings: {} }, { transport: {} },
+    { pathToQoderCLIExecutable: "/other" }, { cwd: "/other" }, { plugins: [{}] },
+    { hooks: { PermissionRequest: [{}] } }, { extraArgs: { settings: "{}" } },
+    { env: { QODER_HEADLESS_FAST_HOOKS: "1" } }]) {
+    await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, ...extra } }));
+    assert(!fs.existsSync(path.join(f.root, "ready")));
+  }
+});
+test("failed initialization closes the Query without reporting ready", async (t) => {
+  const f = fixture(t);
+  await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, failInit: true } }));
+  assert(!fs.existsSync(path.join(f.root, "ready")));
+  assert(fs.existsSync(path.join(f.root, "closed")));
+});
+test("process runtime selectors fail before SDK query creation", async (t) => {
+  const f = fixture(t);
+  const inherited = process.env.QODERCLI_PATH;
+  const restore = () => {
+    if (inherited === undefined) delete process.env.QODERCLI_PATH;
+    else process.env.QODERCLI_PATH = inherited;
+  };
+  t.after(restore);
+  delete process.env.QODERCLI_PATH;
+  for (const extra of [{ executable: "node" }, { executable: "" }, { executable: null },
+    { executableArgs: ["--inspect"] }, { executableArgs: [] }, { executableArgs: null },
+    { spawnQoderCLIProcess: () => { throw new Error("must not spawn"); } },
+    { spawnQoderCLIProcess: null }]) {
+    await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, ...extra } }),
+      /runtime.*overrides/);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(path.join(f.root, "ready")));
+  }
+  process.env.QODERCLI_PATH = "/unverified/qodercli";
+  // Query-local env does not mask the inherited selector used by SDK 1.0.54.
+  for (const env of [undefined, {}, { QODERCLI_PATH: "" }]) {
+    await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, env } }),
+      /QODERCLI_PATH/);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(path.join(f.root, "ready")));
+  }
+  delete process.env.QODERCLI_PATH;
+  const q = await createQuery({ prompt: "first", options: { ...f.options,
+    executable: undefined, executableArgs: undefined, spawnQoderCLIProcess: undefined } });
+  assert(fs.existsSync(path.join(f.root, "queried")));
+  assert(fs.existsSync(path.join(f.root, "ready")));
+  await q.return();
+});
+test("cancellation waits for owned callback process exit", async (t) => {
+  const f = fixture(t, "wait");
+  const q = await createQuery({ prompt: "first", options: f.options });
+  const controller = new AbortController();
+  const pending = invoke(q, "PreToolUse", controller.signal);
+  const deadline = Date.now() + 3000;
+  while (!fs.existsSync(path.join(f.root, "pid")) && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert(fs.existsSync(path.join(f.root, "pid")));
+  controller.abort();
+  assert.equal((await pending).hookSpecificOutput.permissionDecision, "deny");
+  const pid = fs.readFileSync(path.join(f.root, "pid"), "utf8");
+  assert(!fs.existsSync(`/proc/${pid}`));
+});
+test("identity mismatches block before invoking policy", async (t) => {
+  const f = fixture(t);
+  const q = await createQuery({ prompt: "first", options: f.options });
+  const result = await q.options.hooks.PreToolUse[0].hooks[0](payload(), "other", {});
+  assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+  assert(!fs.existsSync(path.join(f.root, "input")));
+});
+
+test("daemon launch admission rejects overrides and unregistered daemons", async (t) => {
+  const f = fixture(t);
+  // A daemon created directly by the SDK has no AW-validated launch context.
+  await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, daemon: {} } }),
+    /startDaemon/);
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  assert(!fs.existsSync(f.config.ready_path));
+  for (const extra of [{ pathToQoderCLIExecutable: "/other" },
+    { executable: "node" }, { executableArgs: [] }, { spawnQoderCLIProcess: null },
+    { env: { QODER_HEADLESS_FAST_HOOKS: "1" } },
+    { env: { QODER_HEADLESS_FAST_HOOKS: " true " } }]) {
+    await assert.rejects(bridge.startDaemon(extra), /runtime.*overrides|disables native hooks/);
+    assert(!fs.existsSync(path.join(f.root, "started")));
+  }
+  const selector = process.env.QODERCLI_PATH;
+  t.after(() => {
+    if (selector === undefined) delete process.env.QODERCLI_PATH;
+    else process.env.QODERCLI_PATH = selector;
+  });
+  process.env.QODERCLI_PATH = "/unverified/qodercli";
+  await assert.rejects(bridge.startDaemon({}), /QODERCLI_PATH/);
+  assert(!fs.existsSync(path.join(f.root, "started")));
+  delete process.env.QODERCLI_PATH;
+  const launch = { auth: { type: "fixture" }, workerIdleTimeoutMs: 42,
+    env: { QODER_HEADLESS_FAST_HOOKS: "false", APPLICATION_SETTING: "kept" } };
+  const daemon = await bridge.startDaemon(launch);
+  assert.deepEqual(daemon.options, launch);
+  assert(!fs.existsSync(f.config.ready_path), "daemon startup alone is not Query readiness");
+  const q = await createQuery({ prompt: "first", options: { ...f.options, daemon } });
+  assert.equal(q.options.daemon, daemon);
+  assert(fs.existsSync(f.config.ready_path));
+  await q.return();
+  assert(!fs.existsSync(path.join(f.root, "stopped")), "Query closure must not stop the shared daemon");
+  await daemon.stop();
+  assert(fs.existsSync(path.join(f.root, "stopped")));
+  await assert.rejects(bridge.startDaemon({ failStart: true }), /daemon startup failed/);
+});
+
+test("Hook-disable flags use the pinned Worker's whitespace normalization", async (t) => {
+  const f = fixture(t);
+  const inherited = process.env.QODER_HEADLESS_FAST_HOOKS;
+  t.after(() => {
+    if (inherited === undefined) delete process.env.QODER_HEADLESS_FAST_HOOKS;
+    else process.env.QODER_HEADLESS_FAST_HOOKS = inherited;
+  });
+  for (const value of ["1", " true ", "\tYES\n", " On "]) {
+    delete process.env.QODER_HEADLESS_FAST_HOOKS;
+    await assert.rejects(createQuery({ prompt: "first", options: { ...f.options,
+      env: { QODER_HEADLESS_FAST_HOOKS: value } } }), /disables native hooks/);
+    process.env.QODER_HEADLESS_FAST_HOOKS = value;
+    await assert.rejects(createQuery({ prompt: "first", options: f.options }), /disables native hooks/);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(f.config.ready_path));
+  }
+  process.env.QODER_HEADLESS_FAST_HOOKS = " false ";
+  const q = await createQuery({ prompt: "first", options: f.options });
+  assert(fs.existsSync(f.config.ready_path));
+  await q.return();
+});

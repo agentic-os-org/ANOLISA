@@ -181,3 +181,10 @@ valid and invalid examples together. Supported versions can coexist: give new
 versions distinct names and `$id` values, retaining the old contracts and tests
 until compatibility is explicitly retired. Relocating existing schemas must
 preserve their bytes, `$id`, registry names and canonical digest vectors.
+
+Qoder SDK integration uses `options.hooks` on each Query. The foreground worker
+selects the Adapter's daemon and Query factories. The daemon factory admits
+runtime launch options and registers its identity before a Query can use it.
+Tool dispatch reuses the existing CLI callback →
+service → Host → Provider path. The application retains daemon and Query
+ownership; no SDK-specific service operation or Provider is introduced.

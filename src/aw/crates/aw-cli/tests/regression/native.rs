@@ -17,7 +17,7 @@ pub fn agents() -> Vec<String> {
 pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path) -> Value {
     let before = event == "tool.before";
     let mut native = match adapter {
-        "qoder" | "claude-sdk" => {
+        "qoder" | "qoder-sdk" | "claude-sdk" => {
             let response = if adapter == "claude-sdk" {
                 json!({"stdout":"original", "stderr":"", "interrupted":false, "isImage":false})
             } else {

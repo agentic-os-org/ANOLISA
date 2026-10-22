@@ -291,7 +291,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.plan.outputs.sha }}
           NATIVE_AGENT: ${{ matrix.agent }}
           # Only the Qoder matrix entry uses a cloud account. Missing credentials fail it.
-          QODER_PERSONAL_ACCESS_TOKEN: ${{ matrix.agent == 'qoder' && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ (matrix.agent == 'qoder' || matrix.agent == 'qoder-sdk') && secrets.QODER_PERSONAL_ACCESS_TOKEN || '' }}
         run: |
           "$AW_NATIVE_PYTHON" -B src/aw/scripts/native_acceptance.py --agent "$NATIVE_AGENT" \
             --candidate-sha "$CANDIDATE_SHA" --bin src/aw/target/native-binaries \

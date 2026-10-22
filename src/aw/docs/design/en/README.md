@@ -61,3 +61,6 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | [AgentSight integration roadmap](integrations/agentsight/agentsight-integration.md) | Relates observation to future coverage, incremental export, and semantic evaluation; these later stages are not current capabilities |
 
 For install and daily use, see the [user guide](../../../../../docs/user-guide/en/aw/index.md).
+
+[Qoder SDK worker integration](../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
+uses per-Query registration with the existing Adapter and service contracts.

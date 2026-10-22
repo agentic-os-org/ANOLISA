@@ -59,3 +59,6 @@ flowchart LR
 | [AgentSight 集成规划](integrations/agentsight/agentsight-integration.md) | 说明观测与后续覆盖率、增量导出、语义评估的关系；这些后续阶段尚未提供 |
 
 安装和日常使用见[用户指南](../../../../../docs/user-guide/zh/aw/index.md)。
+
+[Qoder SDK Worker 接入](../../../../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)
+按 Query 注册回调，复用现有 Adapter 和服务契约。
