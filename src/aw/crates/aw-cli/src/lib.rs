@@ -40,6 +40,19 @@ fn run() -> cli::Result<cli::Exit> {
             help();
             Ok(cli::Exit::Code(0))
         }
+        routing::Route::Version => {
+            println!("aw {}", env!("CARGO_PKG_VERSION"));
+            Ok(cli::Exit::Code(0))
+        }
+        routing::Route::ServiceHelp => {
+            println!(
+                "aw service serve --config FILE --state-dir ABSOLUTE_DIR\n\
+aw service status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\n\
+serve runs in the foreground. No system service is installed.\n\
+Compatibility: aw serve, aw status and aw stop remain available."
+            );
+            Ok(cli::Exit::Code(0))
+        }
         routing::Route::Runtime { command, arguments } => runtime(command, arguments),
         routing::Route::Package { command, arguments } => {
             package::dispatch(command, arguments)?;
@@ -60,9 +73,12 @@ aw config validate --config FILE [--against BASELINE_FILE]\n\
 aw update (--config CURRENT_FILE | --socket ABSOLUTE_PATH) (--agent TARGET | --instance ID) --policy NEXT_FILE [--expected-revision SHA256]\n\
 aw inspect --config ABS_FILE --json\n\
 aw policy < provider-request.json\n\
+aw service serve --config FILE --state-dir ABSOLUTE_DIR\n\
+aw service status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
 aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
 aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
+aw --version\n\n\
 Pi Coding Agent/Core 0.84.2: run requires a Node SDK application module.\n\
 Qoder CLI >=1.1.64: run accepts optional --native-settings; records the detected version.\n\
 OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\

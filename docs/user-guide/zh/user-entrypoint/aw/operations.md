@@ -15,6 +15,20 @@ aw stop --config "$HOME/aw/aw.yaml"
 `inspect` 包含 Provider 摘要。退出 Agent 后 AW 服务仍可运行，用 `stop` 停止，
 再用 `status` 确认。sec-core 和 AgentSight 服务需分别管理。
 
+分组命令保留相同的参数与 JSON 响应：
+
+```bash
+aw service status --config "$HOME/aw/aw.yaml"
+aw service stop --config "$HOME/aw/aw.yaml"
+aw service serve --config "$HOME/aw/aw.yaml" --state-dir "$HOME/aw/state"
+aw service --help
+aw --version
+```
+
+`serve` 持续在前台运行，直到被停止或中断。它不安装 systemd 单元，也不启动 Agent。
+原有 `aw serve/status/stop` 命令保持兼容。`--version` 显示 CLI crate 版本，
+不是已安装包的 Preview 发布标识或原生 Agent 版本。
+
 ## 升级与卸载
 
 升级前退出 Agent，用旧版 AW 和原配置停止服务，备份配置与状态目录。

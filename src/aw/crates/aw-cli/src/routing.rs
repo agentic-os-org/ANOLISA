@@ -6,6 +6,8 @@ use std::ffi::OsString;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Route<'a> {
     Help,
+    Version,
+    ServiceHelp,
     Runtime {
         command: &'a str,
         arguments: &'a [String],
@@ -32,6 +34,20 @@ pub(crate) fn select(arguments: &[String]) -> Result<Route<'_>> {
     )?;
     match command.as_str() {
         "--help" => Ok(Route::Help),
+        "--version" if arguments.is_empty() => Ok(Route::Version),
+        "service" => {
+            let (subcommand, arguments) = arguments
+                .split_first()
+                .ok_or("expected service serve, status or stop")?;
+            match subcommand.as_str() {
+                "--help" if arguments.is_empty() => Ok(Route::ServiceHelp),
+                "serve" | "status" | "stop" => Ok(Route::Runtime {
+                    command: subcommand,
+                    arguments,
+                }),
+                _ => Err("unknown service command; expected serve, status or stop".into()),
+            }
+        }
         "agent" => {
             let (subcommand, arguments) =
                 arguments.split_first().ok_or("expected agent connect")?;
@@ -95,6 +111,23 @@ mod tests {
         let old = words("validate --config candidate.yaml --against original.yaml");
         let new = words("config validate --config candidate.yaml --against original.yaml");
         assert_eq!(select(&old).unwrap(), select(&new).unwrap());
+    }
+
+    #[test]
+    fn service_groups_preserve_runtime_arguments() {
+        for command in ["serve", "status", "stop"] {
+            let old = words(&format!("{command} --config aw.yaml"));
+            let new = words(&format!("service {command} --config aw.yaml"));
+            assert_eq!(select(&old).unwrap(), select(&new).unwrap());
+        }
+        for command in [
+            "service",
+            "service start",
+            "service install",
+            "service --help extra",
+        ] {
+            assert!(select(&words(command)).is_err());
+        }
     }
 
     #[test]

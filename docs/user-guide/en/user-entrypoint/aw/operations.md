@@ -16,6 +16,21 @@ aw stop --config "$HOME/aw/aw.yaml"
 `inspect` includes Provider summaries. The AW service can outlive the Agent; use `stop`
 to shut it down and `status` to confirm. Manage sec-core and AgentSight separately.
 
+The grouped commands preserve the same arguments and JSON responses:
+
+```bash
+aw service status --config "$HOME/aw/aw.yaml"
+aw service stop --config "$HOME/aw/aw.yaml"
+aw service serve --config "$HOME/aw/aw.yaml" --state-dir "$HOME/aw/state"
+aw service --help
+aw --version
+```
+
+`serve` stays in the foreground until stopped or interrupted. It does not install
+systemd units or start an Agent. The original `aw serve/status/stop` commands remain
+compatible. `--version` reports the CLI crate version, not an installed bundle's
+Preview release identifier or native Agent version.
+
 ## Upgrade and uninstall
 
 Before upgrading, exit Agents, stop the service using the old AW binary and original configuration,

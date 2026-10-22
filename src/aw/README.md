@@ -45,6 +45,10 @@ aw status --config "$HOME/aw/aw.yaml"
 aw stop --config "$HOME/aw/aw.yaml"
 ```
 
+The same operations are available as `aw service status` and `aw service stop`.
+`aw service serve` runs a foreground service; it does not install a system unit.
+Use `aw service --help` for options and `aw --version` for the CLI crate version.
+
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.

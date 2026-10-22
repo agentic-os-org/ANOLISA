@@ -71,3 +71,40 @@ fn help_separates_software_installation_from_native_agent_connection() {
     assert!(!text.contains("provider install"));
     assert!(!text.contains("aw-package"));
 }
+
+#[test]
+fn service_aliases_keep_legacy_errors_without_side_effects() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["serve", "status", "stop"] {
+        let old = invoke(&[command, "--config", "missing.yaml"], directory.path());
+        let new = invoke(
+            &["service", command, "--config", "missing.yaml"],
+            directory.path(),
+        );
+        assert_eq!(old.status.code(), Some(1));
+        assert_eq!(new.status.code(), old.status.code());
+        assert_eq!(new.stderr, old.stderr);
+        assert!(new.stdout.is_empty() && old.stdout.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn version_and_service_help_are_explicit_and_readonly() {
+    let directory = tempfile::tempdir().unwrap();
+    let version = invoke(&["--version"], directory.path());
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap(),
+        format!("aw {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let help = invoke(&["service", "--help"], directory.path());
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("foreground"));
+    assert!(help.contains("No system service is installed"));
+    assert!(!invoke(&["service", "start"], directory.path())
+        .status
+        .success());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
