@@ -468,6 +468,7 @@ export default definePluginEntry({
 
     // ── Auto-capture: persist notable observations after each turn ──
     let lastCaptureHash = "";
+    const pendingCaptureHashes = new Set<string>();
     api.on(
       "agent_end",
       async (
@@ -505,8 +506,7 @@ export default definePluginEntry({
             .update(contentStr)
             .digest("hex")
             .slice(0, 16);
-          if (hash === lastCaptureHash) return;
-          lastCaptureHash = hash;
+          if (hash === lastCaptureHash || pendingCaptureHashes.has(hash)) return;
 
           // Trigger-based filtering: only capture when the assistant
           // mentions decisions, findings, preferences, or notable items.
@@ -532,11 +532,25 @@ export default definePluginEntry({
             return;
           }
 
-          await client.callTool("memory_observe", {
-            content,
-            hint: `auto-capture-${hash}`,
-          });
-          api.logger.info?.("agent-memory: auto-captured observation");
+          // A dedicated tool lets older servers reject this request instead
+          // of silently treating an unknown capture flag as a manual write.
+          // Keep overlapping hooks deduplicated without remembering a denied
+          // or failed attempt as a successful capture on a later turn.
+          pendingCaptureHashes.add(hash);
+          try {
+            const result = await client.callTool("memory_capture", {
+              content,
+              hint: `auto-capture-${hash}`,
+            });
+            if (result.startsWith("observed at ")) {
+              lastCaptureHash = hash;
+              api.logger.info?.("agent-memory: auto-captured observation");
+            } else if (result === "automatic capture skipped by consent") {
+              api.logger.debug?.("agent-memory: auto-capture skipped by consent");
+            }
+          } finally {
+            pendingCaptureHashes.delete(hash);
+          }
         } catch (err) {
           api.logger.warn?.(
             `agent-memory: auto-capture hook failed (${err instanceof Error ? err.message : String(err)})`,

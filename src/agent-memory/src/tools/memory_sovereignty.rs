@@ -335,6 +335,25 @@ fn write_consent(config: &ConsentConfig, svc: &MemoryService) -> Result<()> {
     Ok(())
 }
 
+/// Read capture consent for each hook invocation, including changes by other clients.
+pub(super) fn capture_allowed(svc: &MemoryService) -> Result<bool> {
+    // OpenClaw owns a long-lived MCP child; users may change consent through
+    // another client. Its cached settings cannot authorize the next capture.
+    let path = std::path::Path::new(".anolisa/consent.toml");
+    let content = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), path) {
+        Ok(content) => content,
+        Err(MemoryError::NotFound(_)) => return Ok(true),
+        Err(e) => return Err(e),
+    };
+    let config: ConsentConfig = toml::from_str(&content).map_err(|_| {
+        // TOML diagnostics include source text, which must not reach the MCP caller.
+        MemoryError::InvalidArgument(
+            "cannot read capture consent from .anolisa/consent.toml: invalid TOML".into(),
+        )
+    })?;
+    Ok(config.auto_capture.is_allowed())
+}
+
 /// Check whether a given source is allowed by consent config.
 /// Uses cached consent config from MemoryService for performance.
 pub fn is_source_allowed(svc: &MemoryService, source: &str) -> bool {
@@ -362,6 +381,8 @@ pub fn is_source_allowed(svc: &MemoryService, source: &str) -> bool {
 
     match source {
         "auto-consolidation" => config.auto_consolidation.is_allowed(),
+        // Legacy cached inspection only. Actual capture writes must use
+        // capture_allowed, which reads fresh consent and fails closed.
         "auto-capture" => config.auto_capture.is_allowed(),
         _ => true, // Manual sources are always allowed
     }

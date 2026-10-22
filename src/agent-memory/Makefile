@@ -51,7 +51,7 @@ SPEC_FILE := $(NAME).spec
 
 .PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test test-openclaw-install lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
-        test-openclaw-plugin smoke help
+        test-openclaw-plugin test-auto-capture smoke help
 
 all: build
 
@@ -176,6 +176,11 @@ test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
 	@echo "==> Running openclaw adapter unit tests..."
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm $(NPM_INSTALL) --legacy-peer-deps --no-audit --no-fund
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm test
+
+# Run after test-openclaw-plugin has installed the pinned adapter dependencies.
+test-auto-capture: build-debug ## Exercise the OpenClaw hook against the real MCP binary
+	@test -x $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules/.bin/tsx || { echo "Run make test-openclaw-plugin first to install adapter dependencies." >&2; exit 1; }
+	AGENT_MEMORY_TEST_BINARY="$(abspath $(or $(CARGO_TARGET_DIR),target))/debug/$(NAME)" npm --prefix $(OPENCLAW_PLUGIN_SRC_DIR) run test:auto-capture
 
 # =============================================================================
 # REMOTE Linux build/test (for cross-platform development)

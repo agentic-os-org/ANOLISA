@@ -309,6 +309,7 @@ impl Profile {
             tool_name,
             "memory_search"
                 | "memory_observe"
+                | "memory_capture"
                 | "memory_get_context"
                 | "mem_consolidate"
                 | "memory_forget"
