@@ -299,9 +299,9 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 
 ## 13. Commit Discipline
 
-> **MANDATORY**: Fix attribution (`Fixes:` / `Supplements:` / `git commit
-> --fixup`), the version bump rule, CHANGELOG timing, and the pre-commit
-> format check are defined in
+> **MANDATORY**: Rebase preparation, fix attribution (`Fixes:` / `Supplements:` /
+> `git commit --fixup`), the version bump rule, CHANGELOG timing, and the
+> pre-commit format check are defined in
 > [`specs/commit-message-standard.md`](specs/commit-message-standard.md) §6–§8.
 
 One rule repeated here because it is broken most often: **never** create a

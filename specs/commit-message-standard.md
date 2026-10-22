@@ -21,13 +21,45 @@ Format: `type(scope): imperative description`, following
 
 ## 2. Body (when non-trivial)
 
-Separated from subject by a blank line. Cover three things:
+Separate the body from the subject with a blank line. First explain the concrete
+change and its main effect for users or maintainers. The subject's scope
+classifies the commit; it does not replace naming the affected command or
+component in the body. Follow the shared
+[change description standard](change-description-standard.md) for reader context
+and clear references.
 
-1. What architectural choice was made
-2. Why this approach over alternatives
-3. Known limitations or trade-offs
+Supporting paragraphs explain how the implementation achieves that effect and
+why the choice is appropriate. Name a crate or path where that helps the reader
+locate the change. Include meaningful alternatives, compatibility constraints,
+limitations and trade-offs when relevant, not as a fixed three-part template.
 
-Do **not** restate the diff line-by-line or paste design docs.
+The subject's imperative form does not require subjectless imperative prose
+throughout the body. A sequence such as "Expose facts. Keep errors. Retain
+contracts." is insufficient when the reader still cannot tell which program
+changes or what users gain.
+
+Wrap body prose at 72 columns and keep each inline command intact on one
+physical line. Do **not** restate the diff line by line or paste design docs.
+
+### User-visible changes are deltas
+
+End a non-trivial commit body with `User-visible changes:` before the trailers.
+This section describes changes relative to the commit's parent, while making
+clear when the underlying behavior already existed on main. It is not a command
+reference or a list of what the software can do.
+
+- Distinguish a new command, a new option, a new mode of an existing command, a
+  changed behavior or output, a code-only move, and retained compatibility.
+- State the actual parameter, default, output or removal change. If an operation
+  merely becomes available through another entrypoint, say which entrypoint is
+  new and where the operation was already available.
+- Give each affected complete command its own bullet in closed backticks. Keep
+  the command on one physical line, wrapping its explanation separately. Do not
+  combine command names with slashes or omit a shared prefix.
+- Include compatibility and removed commands when relevant. For internal-only
+  changes, explicitly state that command syntax and behavior are unchanged.
+- Claim only behavior implemented by this commit. A name in the design or a
+  parsed but unused flag is not a delivered feature.
 
 ## 3. Trailers
 
@@ -98,7 +130,30 @@ warning and should be justified or replaced before review.
 - Squash fixup commits before merge
 - Fold tests and formatting fixes into the logical commit when possible
 
-## 6. Fix attribution
+## 6. Rebases and fix attribution
+
+### Refresh before rebasing
+
+Before **every** rebase, use `git remote -v` to identify the remote whose fetch
+URL points to the official `agentic-os-org/ANOLISA` repository. Remote names
+alone do not establish repository identity:
+
+- In the documented fork workflow, `origin` is the contributor's fork and
+  `upstream` is official. Run `git fetch upstream main`, then inspect divergence
+  between `HEAD` and the freshly fetched `upstream/main`.
+- When `origin` points to the official repository, run `git fetch origin main`,
+  then inspect divergence between `HEAD` and the freshly fetched `origin/main`.
+
+For another remote name, use that verified official remote consistently for
+both the fetch and the comparison. If none is configured, configure an official
+remote before continuing; do not substitute the fork's `main`.
+
+Do not rely on an earlier fetch or a remembered remote-tracking state. This also
+applies to a rebase used only to edit commit messages. Fetching does not change
+a deliberately pinned review base; preserve that base unless the task calls for
+updating it.
+
+### Attribute fixes to their source
 
 Every fix commit must be attributed correctly:
 
@@ -137,15 +192,50 @@ caused the change — do not create a standalone "style" commit.
 
 ## 9. Examples
 
+### An existing command gains a software mode
+
+In this example, the parent commit already had
+`aw install --config FILE --agent TARGET` for connecting native Hooks.
+The software installer already existed behind `aw-package`. The change adds
+software installation to `aw`, including its local mode's `--prefix` and
+`--bundle` options. These facts describe this example's parent, not an enduring
+claim about what a later main branch supports.
+
+Poor description:
+
+```text
+User-visible changes:
+- `aw install`: add package installation.
 ```
-feat(cosh): add --json flag to config command
 
-Scripts need machine-readable config output; chose flat JSON over
-nested to keep parsing trivial. Nested config support tracked in #55.
+This hides the existing command's meaning and makes the old package installer
+sound like new functionality.
 
-Assisted-by: Qoder
+Clear description:
+
+```text
+feat(aw): expose software installation in the CLI
+
+The aw command now offers local software installation through its
+existing package library. Users can install a local bundle without
+switching to the separate aw-package executable.
+
+User-visible changes:
+- `aw install --prefix DIR --bundle DIR`:
+  The existing command gains a software mode and these two options.
+  The installer was already available through aw-package; this change
+  adds its aw entrypoint rather than a new installation engine.
+- `aw install --config FILE --agent TARGET`:
+  The existing native Hook-connection mode retains its arguments and
+  behavior.
+
+Assisted-by: <tool>:<version>
 Signed-off-by: Zhang San <zhangsan@example.com>
 ```
+
+These are examples of an accurate delta, not required sentences or a mandatory
+layout for every commit. Replace the trailer placeholders with the detected
+tool/version and the contributor's own Git identity.
 
 ## 10. What CI checks
 
@@ -158,6 +248,9 @@ extends `@commitlint/config-conventional`:
 | `header-max-length` | error | Subject longer than 120 characters fails (repository convention is 50). |
 | `scope-enum` | warning | Scope outside the table in §4 warns. |
 | `body-max-line-length` | warning | Body lines longer than 100 characters warn. |
+
+The looser CI thresholds do not replace the repository's 50-character subject
+limit and 72-column body prose convention.
 
 If **Commit Message Lint** rejects a commit, follow the recovery workflow in
 `CONTRIBUTING.md` §Commit messages.

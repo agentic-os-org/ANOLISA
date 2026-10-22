@@ -17,6 +17,11 @@ Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **doc
 - Code > README/user-guide > design docs
 - Before generating or modifying documentation: read source code, verify CLI examples against `clap`/`argparse` definitions, never document unimplemented features as available
 
+Before writing or revising design documents, technical explanations or change
+summaries, also read the [change description standard](change-description-standard.md).
+It defines reader context and accurate change descriptions alongside this file's
+placement, bilingual and maintenance rules.
+
 ---
 
 ## 1. Bilingual Naming Convention
@@ -138,6 +143,20 @@ Design documents live **only** in the component's own directory:
 ```
 src/<component>/docs/design/    ← component-specific design docs
 ```
+
+A single design may remain directly under this directory. A coherent batch or
+multi-stage change may use a dated topic subdirectory with a `README.md` entry
+and numbered files, without requiring a topic-specific exception:
+
+```text
+src/<component>/docs/design/2026-10-22_cli-refresh/
+  README.md
+  01-cli-foundation.md
+  02-package-management.md
+```
+
+Choose this grouping for an actual shared topic. Do not pre-create empty
+categories or introduce a cross-component architecture layer for filing alone.
 
 For distribution tooling or retained deprecated components, substitute the source
 root registered in `.github/components.json`, such as
