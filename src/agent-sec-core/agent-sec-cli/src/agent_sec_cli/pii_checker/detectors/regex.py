@@ -184,9 +184,9 @@ _PHONE_CN_RE = re.compile(
     r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)"
 )
 _CREDIT_CARD_RE = re.compile(r"\d[\d -]*")
-_CN_ID_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\w)")
+_CN_ID_RE = re.compile(r"(?<!\d)\d{17}[\dXxＸｘ](?!\w)")
 _JWT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
 )
 _API_KEY_RE = re.compile(
     r"\b(?:sk|pk|rk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_=-]{16,}\b"

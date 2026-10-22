@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import re
+import unicodedata
 from datetime import datetime
 
 _EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9._%+-]+")
@@ -99,7 +100,10 @@ def luhn_check(value: str) -> bool:
 
 def validate_cn_id(value: str) -> bool:
     """Validate an 18-digit Chinese Resident Identity Card number."""
-    normalized = value.strip().upper()
+    # NFKC folds the fullwidth digits and the fullwidth X (Ｘ/ｘ) that a
+    # Chinese IME produces back to their ASCII forms, matching the V2
+    # scanner which normalises them in both the pattern and the checksum.
+    normalized = unicodedata.normalize("NFKC", value).strip().upper()
     if not re.fullmatch(r"\d{17}[\dX]", normalized):
         return False
 

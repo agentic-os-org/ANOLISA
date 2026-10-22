@@ -39,6 +39,27 @@ def test_cn_id_accepts_lowercase_x_checksum():
     assert validate_cn_id("11010519491231002x")
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        # Fullwidth check digit as typed with a Chinese IME (V2 parity).
+        "11010519491231002Ｘ",
+        "11010519491231002ｘ",
+        # Fullwidth digits folded by NFKC before the checksum (V2 parity).
+        "110105１９４９1231002X",
+        "1101051949１２31002X",
+        "110105194912３１002X",
+        "1101051949123１002X",
+    ),
+)
+def test_cn_id_accepts_fullwidth_forms(value):
+    assert validate_cn_id(value)
+
+
+def test_cn_id_fullwidth_invalid_still_rejected():
+    assert not validate_cn_id("11010519490231002Ｘ")
+
+
 def test_cn_id_invalid_date():
     assert not validate_cn_id("11010519490231002X")
 
