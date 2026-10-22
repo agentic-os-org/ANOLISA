@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini;
@@ -157,9 +158,14 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let events = gemini::legacy_document(&content)
+    // Recognize whole-file formats before JSONL: individual pretty-printed
+    // lines can be valid JSON without representing session events.
+    let mut events = gemini::legacy_document(&content)
         .map(|document| vec![document])
+        .or_else(|| cline::record_array(&content))
         .unwrap_or_else(|| qoder::load_jsonl_events(&content));
+    // A compact Cline writer puts the whole array on one JSONL line.
+    cline::normalize_events(&mut events);
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).
@@ -169,15 +175,22 @@ fn process_session(
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
     // that needs a dedicated converter; Gemini CLI chats use an append-only
-    // record stream with `$`-prefixed correction records; everything else
-    // shares the Claude-style converter.
+    // record stream with `$`-prefixed correction records; Cline task files
+    // hold raw Anthropic message params plus a ui record stream; everything
+    // else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
     let is_gemini =
         !is_codex && (session.source == "gemini-cli" || gemini::is_gemini_chat(&events));
+    let is_cline = !is_codex && !is_gemini && cline::is_cline_task(&events);
+    if is_cline {
+        cline::append_ui_records(&session.path, &mut events);
+    }
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
     } else if is_gemini {
         gemini::convert_gemini_events(&events, &session.source)?
+    } else if is_cline {
+        cline::convert_cline_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -203,6 +216,8 @@ fn process_session(
         codex::extract_private_metadata(&events, &session.project)
     } else if is_gemini {
         gemini::extract_private_metadata(&events, &session.project)
+    } else if is_cline {
+        cline::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
