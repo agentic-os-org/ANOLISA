@@ -38,8 +38,6 @@ fi
 PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
-MARKETPLACE_NAME="anolisa-tokenless"
-PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
 
 DEREGISTER_ONLY=0
@@ -87,18 +85,75 @@ codex_list() {  # codex_list <args...> -> prints the listing, status = CLI statu
 # not `not installed` counts as a surviving registration. Other marketplaces
 # may offer a plugin with the same name; a bare row only identifies our plugin
 # inside our marketplace section. Qualified ids do not need section context.
-codex_plugin_registered() {  # <listing> -> 0 while an active plugin row survives
+# An active bare row without a recognised section is ambiguous: keep treating it
+# as registered until removal can be confirmed, so resources remain retryable.
+codex_plugin_registered() {  # <listing> -> status; saves surviving rows in CODEX_PLUGIN_ROWS
     local rows
     rows="$(printf '%s\n' "$1" \
-        | awk -v id="$PLUGIN_ID" -v market="$MARKETPLACE_NAME" '
-            $1 == "Marketplace" {
-                section = $2
-                gsub(/`/, "", section)
+        | awk -v id="$PLUGIN_ID" -v name="$PLUGIN_NAME" -v market="$MARKETPLACE_NAME" -v mdir="$MARKETPLACE_DIR" -v display="$MARKETPLACE_DISPLAY_NAME" -v home="$HOME" '
+            function trim(t) {
+                sub(/^[[:space:]]+/, "", t)
+                sub(/[[:space:]]+$/, "", t)
+                return t
+            }
+            function starts_identity(t, alias, insensitive,    value, key, next_char) {
+                if (alias == "") return 0
+                value = t
+                key = alias
+                if (insensitive) {
+                    value = tolower(value)
+                    key = tolower(key)
+                }
+                if (index(value, key) != 1) return 0
+                next_char = substr(value, length(key) + 1, 1)
+                return next_char == "" || next_char ~ /[[:space:]]/
+            }
+            function ours(s,    t, base, alt) {
+                t = trim(s)
+                # All aliases allow whitespace-separated annotations. This may
+                # conservatively block a foreign display label beginning with
+                # our full label, but never folds punctuation or path prefixes.
+                if (starts_identity(t, market, 1) || starts_identity(t, display, 1)) return 1
+                if (starts_identity(t, mdir, 0) || starts_identity(t, mdir "/", 0)) return 1
+                if (home != "") {
+                    base = home
+                    sub(/\/+$/, "", base)
+                    if (index(mdir, base "/") == 1) {
+                        alt = "~" substr(mdir, length(base) + 1)
+                        if (starts_identity(t, alt, 0) || starts_identity(t, alt "/", 0)) return 1
+                    }
+                }
+                return 0
+            }
+            BEGIN { owner = "unknown" }
+            tolower($1) ~ /^marketplaces?:?$/ {
+                # Reset even for an unreadable heading: never inherit an external owner.
+                owner = "unknown"
+                rest = $0
+                sub(/^[[:space:]]*[^[:space:]]+[[:space:]]*/, "", rest)
+                sub(/^[-:[:space:]]+/, "", rest)
+                sub(/[[:space:]]*$/, "", rest)
+                quote = substr(rest, 1, 1)
+                if (quote == sprintf("%c", 96) || quote == sprintf("%c", 39) || quote == sprintf("%c", 34)) {
+                    end = index(substr(rest, 2), quote)
+                    if (end == 0) next
+                    section = substr(rest, 2, end - 1)
+                } else {
+                    section = rest
+                }
+                sub(/^[[:space:]]*/, "", section)
+                sub(/[[:space:]]*$/, "", section)
+                if (section == "") next
+                if (ours(section))
+                    owner = "ours"
+                else
+                    owner = "external"
                 next
             }
-            ($1 == id || ($1 == "tokenless" && section == market)) &&
-            !(tolower($2) == "not" && tolower($3) ~ /^installed,?$/) { print }
+            tolower($2) == "not" && tolower($3) ~ /^installed,?$/ { next }
+            $1 == id || ($1 == name && owner != "external") { print }
         ')"
+    CODEX_PLUGIN_ROWS="$rows"
     [[ -n "$rows" ]]
 }
 
@@ -112,6 +167,7 @@ if [[ -n "$CODEX_BIN" ]]; then
             if after_listing="$(codex_list plugin list)"; then
                 if codex_plugin_registered "$after_listing"; then
                     echo "[tokenless] ERROR: codex still lists the tokenless plugin after 'plugin remove'." >&2
+                    printf '[tokenless] Unconfirmed plugin rows:\n%s\n' "$CODEX_PLUGIN_ROWS" >&2
                     DEREGISTER_FAILED=1
                 fi
             else
@@ -123,23 +179,26 @@ if [[ -n "$CODEX_BIN" ]]; then
         echo "[tokenless] ERROR: 'codex plugin list' failed, so it cannot be confirmed whether the plugin is registered." >&2
         DEREGISTER_FAILED=1
     fi
-    if market_listing="$(codex_list plugin marketplace list)"; then
-        if printf '%s\n' "$market_listing" | grep -q "^${MARKETPLACE_NAME}[[:space:]]"; then
-            echo "[tokenless] Removing marketplace '${MARKETPLACE_NAME}'..."
-            "$CODEX_BIN" plugin marketplace remove "$MARKETPLACE_NAME" 2>&1 || true
-            if after_market="$(codex_list plugin marketplace list)"; then
-                if printf '%s\n' "$after_market" | grep -q "^${MARKETPLACE_NAME}[[:space:]]"; then
-                    echo "[tokenless] ERROR: codex still lists the '${MARKETPLACE_NAME}' marketplace." >&2
+    # Keep the marketplace while plugin absence is unconfirmed, including query failures.
+    if [[ $DEREGISTER_FAILED -eq 0 ]]; then
+        if market_listing="$(codex_list plugin marketplace list)"; then
+            if printf '%s\n' "$market_listing" | grep -q "^${MARKETPLACE_NAME}[[:space:]]"; then
+                echo "[tokenless] Removing marketplace '${MARKETPLACE_NAME}'..."
+                "$CODEX_BIN" plugin marketplace remove "$MARKETPLACE_NAME" 2>&1 || true
+                if after_market="$(codex_list plugin marketplace list)"; then
+                    if printf '%s\n' "$after_market" | grep -q "^${MARKETPLACE_NAME}[[:space:]]"; then
+                        echo "[tokenless] ERROR: codex still lists the '${MARKETPLACE_NAME}' marketplace." >&2
+                        DEREGISTER_FAILED=1
+                    fi
+                else
+                    echo "[tokenless] ERROR: 'codex plugin marketplace list' failed after the removal, so it cannot be confirmed gone." >&2
                     DEREGISTER_FAILED=1
                 fi
-            else
-                echo "[tokenless] ERROR: 'codex plugin marketplace list' failed after the removal, so it cannot be confirmed gone." >&2
-                DEREGISTER_FAILED=1
             fi
+        else
+            echo "[tokenless] ERROR: 'codex plugin marketplace list' failed, so it cannot be confirmed whether the marketplace is registered." >&2
+            DEREGISTER_FAILED=1
         fi
-    else
-        echo "[tokenless] ERROR: 'codex plugin marketplace list' failed, so it cannot be confirmed whether the marketplace is registered." >&2
-        DEREGISTER_FAILED=1
     fi
 else
     # No CLI to ask, so neither the plugin nor the marketplace registration can be
@@ -169,7 +228,7 @@ fi
 #    marketplace entry aimed at a directory that no longer exists, and the failure
 #    is only reported at the end of this script.
 if [[ $DEREGISTER_FAILED -eq 1 ]]; then
-    echo "[tokenless] Keeping marketplace directory ${MARKETPLACE_DIR}: the Codex registration was not removed."
+    echo "[tokenless] Keeping marketplace directory ${MARKETPLACE_DIR}: the Codex registration could not be confirmed gone."
 elif [[ -d "$MARKETPLACE_DIR" ]]; then
     rm -rf "$MARKETPLACE_DIR"
     echo "[tokenless] Removed marketplace directory: $MARKETPLACE_DIR"
@@ -178,6 +237,8 @@ fi
 # 3. Remove binary
 if [[ $DEREGISTER_ONLY -eq 1 ]]; then
     echo "[tokenless] Deregistration only: keeping $BINDIR/tokenless (its owner decides)."
+elif [[ $DEREGISTER_FAILED -eq 1 ]]; then
+    echo "[tokenless] Deregistration unconfirmed: keeping $BINDIR/tokenless for the surviving registration."
 elif [[ -f "$BINDIR/tokenless" ]]; then
     if [[ $INTERACTIVE -eq 1 ]]; then
         answer=""
@@ -204,8 +265,10 @@ else
 fi
 
 if [[ $DEREGISTER_FAILED -eq 1 ]]; then
-    echo "[tokenless] Uninstall incomplete: the Codex registration is still in place." >&2
-    echo "[tokenless] Remove it, then run this script again:" >&2
+    echo "[tokenless] Uninstall incomplete: Codex deregistration could not be confirmed." >&2
+    echo "[tokenless] Inspect the listing and resolve any surviving or ambiguous rows before retrying:" >&2
+    echo "[tokenless]   codex plugin list" >&2
+    echo "[tokenless] If the target registration is present, remove it with:" >&2
     echo "[tokenless]   codex plugin remove ${PLUGIN_ID}" >&2
     echo "[tokenless]   codex plugin marketplace remove ${MARKETPLACE_NAME}" >&2
     exit 1
