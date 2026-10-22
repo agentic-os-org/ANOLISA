@@ -22,6 +22,11 @@ can alternatively install the CLI with `sudo yum install anolisa`.
 
 ### Reduce Agent Token usage
 
+Windows x64 users can build the native Tokenless npm packages and connect
+[QwenWorkCN local mode](../tokenless/framework-integration.md#qwenwork-windows-x64-local-mode).
+See [Windows build instructions](../../../developer-guide/en/tokenless/windows.md#build-and-test-on-windows); these packages
+are not yet published. The anolisa CLI installation above is for Linux/macOS.
+
 Install Tokenless, connect it to Codex, Claude Code, Qoder, OpenClaw, Hermes,
 Qwen Code, or cosh-ng, then verify a before/after Token record.
 

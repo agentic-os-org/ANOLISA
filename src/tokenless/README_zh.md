@@ -352,6 +352,18 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/tokenless/framework-integration.md#opencode)。
 
+### 千问办公插件（Windows x64 本地模式）
+
+Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
+Hook，不支持 Windows ARM64。Windows 软件包尚未发布，请按
+[Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并打包，
+不需要 Git Bash 或 WSL。
+
+Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
+是否改写由 RTK 决定，不支持的命令透传。PowerShell PostTool 输出按共享命令输出策略处理，
+保留 RTK 去重和文件内容保护。
+参见[Windows 安装与验证](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
+
 ### 千问办公插件（macOS）
 
 `qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。

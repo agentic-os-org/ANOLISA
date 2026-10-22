@@ -21,6 +21,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### 减少 Agent Token 开销
 
+Windows x64 用户可以构建 Tokenless 原生 npm 包，并接入
+[千问办公本地模式](../tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
+参见 [Windows 构建说明](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，这些软件包尚未发布。
+上面的 anolisa CLI 安装方式适用于 Linux/macOS。
+
 安装 Tokenless，将它接入 Codex、Claude Code、Qoder、OpenClaw、Hermes、
 Qwen Code 或 cosh-ng，然后确认一条压缩前后的 Token 记录。
 

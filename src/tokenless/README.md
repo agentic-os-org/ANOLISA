@@ -691,6 +691,20 @@ compression so the recovered payload reaches the model unchanged.
 make qoder-install
 ```
 
+## QwenWork Plugin (Windows x64 Local Mode)
+
+Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
+QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. The Windows package
+is not yet published; build and package it using the
+[Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
+Git Bash and WSL are not required.
+
+The Python adapter registers PowerShell hook commands and handles both Bash and
+PowerShell PreTool inputs. RTK decides which commands can be rewritten;
+unsupported commands pass through. PowerShell PostTool output uses the shared
+command-output policy, including RTK deduplication and file-content protection.
+See [Windows installation and validation](../../docs/user-guide/en/tokenless/framework-integration.md#qwenwork-windows-x64-local-mode).
+
 ## QwenWork Plugin (macOS)
 
 The `qwenwork` adapter targets QwenWorkCN (千问办公) native Bash and macOS workspace

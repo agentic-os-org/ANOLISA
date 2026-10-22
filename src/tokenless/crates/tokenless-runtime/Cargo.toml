@@ -22,3 +22,6 @@ tokenless-stats = { path = "../tokenless-stats" }
 libc.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

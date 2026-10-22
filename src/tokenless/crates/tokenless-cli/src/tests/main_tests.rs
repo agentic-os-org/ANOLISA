@@ -2,6 +2,10 @@ use std::sync::Mutex;
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+fn canonical_file(path: &std::path::Path) -> PathBuf {
+    path.parent().unwrap().canonicalize().unwrap().join(path.file_name().unwrap())
+}
+
 fn default_path_resolver(home: &str) -> DatabasePathResolver {
     DatabasePathResolver {
         home: std::sync::OnceLock::from(home.to_string()),
@@ -14,6 +18,7 @@ struct TempDbGuard {
     test_dir: String,
     sls_dir: String,
     stash_db_path: String,
+    prev_data_dir: Option<std::ffi::OsString>,
     prev_stats_db: Option<std::ffi::OsString>,
     prev_stash_db: Option<std::ffi::OsString>,
     prev_sls_path: Option<std::ffi::OsString>,
@@ -30,17 +35,23 @@ impl TempDbGuard {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let test_dir = format!("{home}/.tokenless-test-{nanos}");
+        // Explicit data roots isolate fixtures without requiring a writable user profile.
+        let test_dir = std::env::temp_dir().join(format!("tokenless-test-{nanos}")).to_string_lossy().into_owned();
+        #[cfg(unix)]
         let sls_dir = format!("/tmp/tokenless-sls-test-{nanos}");
+        #[cfg(windows)]
+        let sls_dir = std::env::temp_dir().join(format!("tokenless-sls-test-{nanos}")).to_string_lossy().into_owned();
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::create_dir_all(&sls_dir).unwrap();
         let sls_path = format!("{sls_dir}/tokenless.jsonl");
         // Pre-create the JSONL file so SlsWriter::write can open it.
         std::fs::write(&sls_path, "").unwrap();
+        let prev_data_dir = std::env::var_os("TOKENLESS_DATA_DIR");
         let prev_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
         let prev_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
         let prev_sls_path = std::env::var_os("TOKENLESS_SLS_PATH");
         unsafe {
+            std::env::set_var("TOKENLESS_DATA_DIR", &test_dir);
             std::env::set_var("TOKENLESS_STATS_DB", format!("{test_dir}/stats.db"));
             std::env::set_var("TOKENLESS_STASH_DB", format!("{test_dir}/stash.db"));
             std::env::set_var("TOKENLESS_SLS_PATH", &sls_path);
@@ -51,6 +62,7 @@ impl TempDbGuard {
             test_dir,
             sls_dir,
             stash_db_path,
+            prev_data_dir,
             prev_stats_db,
             prev_stash_db,
             prev_sls_path,
@@ -130,6 +142,10 @@ impl Drop for PersistConfigGuard {
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
         unsafe {
+            match &self.prev_data_dir {
+                Some(v) => std::env::set_var("TOKENLESS_DATA_DIR", v),
+                None => std::env::remove_var("TOKENLESS_DATA_DIR"),
+            }
             match &self.prev_stats_db {
                 Some(v) => std::env::set_var("TOKENLESS_STATS_DB", v),
                 None => std::env::remove_var("TOKENLESS_STATS_DB"),
@@ -166,7 +182,7 @@ fn temp_subdir(label: &str) -> std::path::PathBuf {
 
 #[test]
 fn validate_db_path_rejects_without_trusted_root() {
-    let err = validate_db_path(Path::new("/tmp/whatever.db"), "", None).unwrap_err();
+    let err = validate_db_path(&std::env::temp_dir().join("whatever.db"), "", None).unwrap_err();
     assert!(err.contains("no trusted root"));
 }
 
@@ -207,20 +223,16 @@ fn validate_db_path_rejects_path_outside_trusted_roots() {
 
 #[test]
 fn validate_db_path_rejects_parent_dir_bypass_with_existing_parent() {
-    // ~/foo/../../etc/evil.db where /etc exists: canonicalize() of
-    // the parent resolves to /etc, which must fail starts_with(home).
+    // Parent traversal toward a sibling of the trusted root must be rejected.
     let home = temp_subdir("pd-existing");
     let canon_home = std::fs::canonicalize(&home).unwrap();
-    let escape = canon_home.join("foo/../../etc/evil.db");
+    let escape = home.join("foo").join("..").join("..").join("etc").join("evil.db");
     let err = validate_db_path(
         &escape,
         canon_home.to_str().unwrap(),
         None,
     )
     .unwrap_err();
-    // Either "outside home" (parent canonicalized away from home) or
-    // "cannot be resolved" (parent itself unreachable). Both are valid
-    // rejections — what matters is no Ok return.
     assert!(err.contains("parent traversal"));
     std::fs::remove_dir_all(&home).ok();
 }
@@ -268,7 +280,7 @@ fn validate_data_dir_path_accepts_nonexistent_descendant() {
     let home = temp_subdir("data-dir-home");
     let candidate = home.join("nested/data");
     let result = tokenless_stats::validate_data_dir(&candidate).unwrap();
-    assert_eq!(result, candidate);
+    assert_eq!(result, home.canonicalize().unwrap().join("nested/data"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -491,8 +503,8 @@ fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
     }
 
     assert_eq!(managed_result.unwrap(), managed.path().canonicalize().unwrap());
-    assert_eq!(managed_stats_result.unwrap(), managed_stats);
-    assert_eq!(managed_stash_result.unwrap(), managed_stash);
+    assert_eq!(managed_stats_result.unwrap(), canonical_file(&managed_stats));
+    assert_eq!(managed_stash_result.unwrap(), canonical_file(&managed_stash));
     assert_eq!(
         ignored_result.unwrap(),
         home.path().canonicalize().unwrap().join(".tokenless")
@@ -501,20 +513,21 @@ fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
         explicit_result.unwrap(),
         explicit.path().canonicalize().unwrap()
     );
-    assert_eq!(explicit_stats_result.unwrap(), explicit_stats);
-    assert_eq!(explicit_stash_result.unwrap(), explicit_stash);
+    assert_eq!(explicit_stats_result.unwrap(), canonical_file(&explicit_stats));
+    assert_eq!(explicit_stash_result.unwrap(), canonical_file(&explicit_stash));
 }
 
 #[test]
 fn get_stash_db_path_with_valid_override() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };
     // Use the temp stash path as an explicit override; get_stash_db_path
-    // validates it (under home via TempDbGuard) and returns it directly.
+    // validates it under the explicit data root and returns it directly.
     let result = get_stash_db_path_with(
         &DatabasePathResolver::default(),
         Some(guard.stash_db_path()),
     );
-    assert_eq!(result.unwrap(), PathBuf::from(guard.stash_db_path()));
+    let expected = PathBuf::from(guard.stash_db_path());
+    assert_eq!(result.unwrap(), expected.parent().unwrap().canonicalize().unwrap().join("stash.db"));
 }
 
 #[test]
@@ -1574,6 +1587,8 @@ fn open_stash_store_or_err_none_returns_ok() {
     assert!(result.is_ok());
 }
 
+// The SLS collector and its /var/log contract are Unix-only.
+#[cfg(unix)]
 #[test]
 fn record_compression_stats_sls_only_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
@@ -1601,11 +1616,13 @@ fn record_compression_stats_sls_only_path() {
 ///
 /// Constructed after [`TempDbGuard`], which serializes environment mutation
 /// through `ENV_MUTEX`.
+#[cfg(unix)]
 struct TraceEnvGuard {
     prev_traceparent: Option<std::ffi::OsString>,
     prev_override: Option<std::ffi::OsString>,
 }
 
+#[cfg(unix)]
 impl TraceEnvGuard {
     fn new(traceparent: Option<&str>) -> Self {
         let prev_traceparent = std::env::var_os("TRACEPARENT");
@@ -1624,6 +1641,7 @@ impl TraceEnvGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for TraceEnvGuard {
     fn drop(&mut self) {
         unsafe {
@@ -1640,6 +1658,7 @@ impl Drop for TraceEnvGuard {
 }
 
 /// Reads the single JSONL line the SLS writer appended under `TempDbGuard`.
+#[cfg(unix)]
 fn read_sls_line(sls_dir: &str) -> serde_json::Value {
     let path = PathBuf::from(sls_dir).join("tokenless.jsonl");
     let content = std::fs::read_to_string(&path).unwrap();
@@ -1647,6 +1666,8 @@ fn read_sls_line(sls_dir: &str) -> serde_json::Value {
     serde_json::from_str(line).unwrap()
 }
 
+// The SLS collector and its /var/log contract are Unix-only.
+#[cfg(unix)]
 #[test]
 fn record_compression_stats_stamps_host_trace_context() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };
@@ -1682,6 +1703,8 @@ fn record_compression_stats_stamps_host_trace_context() {
     assert_eq!(obj["tokenless.tool_use_id"], "trace-tool");
 }
 
+// The SLS collector and its /var/log contract are Unix-only.
+#[cfg(unix)]
 #[test]
 fn record_compression_stats_prefers_traceparent_override() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };
@@ -1720,6 +1743,8 @@ fn record_compression_stats_prefers_traceparent_override() {
     assert_eq!(obj["tokenless.span_id"], "2222222222222222");
 }
 
+// The SLS collector and its /var/log contract are Unix-only.
+#[cfg(unix)]
 #[test]
 fn record_compression_stats_omits_trace_without_host_context() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };

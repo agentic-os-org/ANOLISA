@@ -37,6 +37,7 @@ via the `toon-format` library — see `tokenless compress-toon` /
 | Linux (glibc) | aarch64 | `@anolisa/tokenless-linux-arm64` |
 | macOS | x86_64 (Intel) | `@anolisa/tokenless-darwin-x64` |
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
+| Windows | x86_64 (MSVC; not yet published) | `@anolisa/tokenless-win32-x64` |
 
 The correct platform-specific binaries are automatically installed via `optionalDependencies`.
 
@@ -107,7 +108,10 @@ tokenless env-check --all
 
 ## Build from Source
 
-Source builds are **Linux-only**. macOS users should install the prebuilt
+Source builds support **Linux and Windows x64**. Windows uses
+`./scripts/build-windows.ps1` from the component directory; see
+[Windows build instructions](../../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
+Windows ARM64 is unsupported. macOS users should install the prebuilt
 binaries via `npm install -g anolisa-tokenless`; the macOS CLI binaries are
 cross-compiled from Linux and published as npm platform packages.
 

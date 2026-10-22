@@ -30,4 +30,8 @@ Use this guide when you need to understand, extend, test, or contribute to ANOLI
 Start with **Getting started**. It maps common changes to code owners and the
 smallest relevant test target; the remaining pages are focused references.
 
+## Tokenless
+
+- [Windows integration](tokenless/windows.md)
+
 For repository-wide build and contribution requirements, also read [Build from source](../../user-guide/en/getting-started/building.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).

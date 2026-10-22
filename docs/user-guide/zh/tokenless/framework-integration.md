@@ -83,6 +83,37 @@ Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
+### 千问办公（Windows x64 本地模式）
+
+Tokenless 可在千问办公中自动精简受支持的命令和工具输出，保留文件读取原文。
+Windows 支持范围为 x64 上的千问办公 1.3.2 本地会话，需要安装 Node.js/npm 和
+Python 3.10+。不支持 Windows ARM64 和安全工作区／VM 会话，其他 Windows Agent
+尚未验证。
+
+Windows 安装包尚未发布，目前需按
+[Windows 构建说明](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并安装本地 npm 包。
+
+安装 npm 包后，退出千问办公，在 PowerShell 中执行：
+
+```powershell
+$adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwork/scripts/lifecycle.ps1'
+& $adapter -Action detect
+& $adapter -Action install
+```
+
+重启千问办公，在应用内按需启用 Tokenless 插件，再开启新的本地会话。
+之后照常使用千问办公，受支持的输出会自动精简。
+
+如果找不到 Python，可在上述命令后添加 `-Python 'C:/path/to/python.exe'`。
+千问办公安装在自定义位置时，先将 `TOKENLESS_QWENWORK_APP` 设置为包含
+`QwenWorkCN.exe` 的目录，再执行安装命令。
+
+卸载时先退出千问办公，执行以下命令后再重启应用：
+
+```powershell
+& $adapter -Action uninstall
+```
+
 ### 千问办公（macOS）
 
 `qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。

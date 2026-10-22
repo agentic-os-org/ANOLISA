@@ -77,21 +77,46 @@ struct TempDataDir {
 }
 
 impl TempDataDir {
-    fn new() -> Option<Self> {
-        let home = get_home_dir();
+    /// Use system-wide temporary storage so rejection tests also run when the
+    /// default temporary directory is inside the trusted user profile.
+    fn new_external() -> Option<Self> {
+        #[cfg(windows)]
+        let base = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("Temp");
+        #[cfg(unix)]
+        let base = std::path::PathBuf::from("/tmp");
         let temp_dir = tempfile::Builder::new()
-            .prefix("tokenless-external-data-dir-integration-")
+            .prefix("tokenless-external-data-dir-")
+            .tempdir_in(&base)
+            .inspect_err(|error| {
+                eprintln!(
+                    "external-root fixture unavailable at {}: {error}",
+                    base.display()
+                )
+            })
+            .ok()?;
+        let root = temp_dir.path().canonicalize().ok()?;
+        let home = get_home_dir();
+        if !home.is_empty() && root.starts_with(std::path::Path::new(&home).canonicalize().ok()?) {
+            eprintln!(
+                "external-root fixture is inside the trusted home: {}",
+                root.display()
+            );
+            return None;
+        }
+        let data_dir = root.join("databases");
+        Some(Self {
+            _temp_dir: temp_dir,
+            root,
+            data_dir,
+        })
+    }
+
+    fn new() -> Option<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("tokenless-data-dir-integration-")
             .tempdir()
             .ok()?;
         let root = temp_dir.path().to_path_buf();
-        if !home.is_empty()
-            && root
-                .canonicalize()
-                .ok()?
-                .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
-        {
-            return None;
-        }
         let data_dir = root.join("databases");
         Some(Self {
             _temp_dir: temp_dir,
@@ -251,7 +276,7 @@ fn valid_stats_db_override_wins_over_invalid_data_dir() {
 
 #[test]
 fn stats_db_override_cannot_escape_selected_data_dir() {
-    let fixture = match TempDataDir::new() {
+    let fixture = match TempDataDir::new_external() {
         Some(fixture) => fixture,
         None => return,
     };
@@ -267,6 +292,26 @@ fn stats_db_override_cannot_escape_selected_data_dir() {
     assert!(!outside_db.exists());
     assert!(fixture.data_dir.join("stats.db").is_file());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
+}
+
+#[test]
+fn stats_db_override_allows_trusted_home_outside_selected_data_dir() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let data = tempfile::tempdir().unwrap();
+    let outside_db = fixture.dir.join("home-stats.db");
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", data.path())
+        .env("TOKENLESS_STATS_DB", &outside_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(outside_db.is_file());
+    assert!(!data.path().join("stats.db").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
 }
 
 #[test]
@@ -2123,6 +2168,14 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         .into_iter()
         .map(Into::into)
         .collect();
+        #[cfg(windows)]
+        paths.retain(|path| {
+            !path.to_string_lossy().ends_with(' ')
+                && !path
+                    .to_string_lossy()
+                    .chars()
+                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+        });
         // With quotePath=false these bytes are emitted raw, outside the
         // text input accepted by the compression API.
         #[cfg(unix)]
@@ -2419,6 +2472,7 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 }
 
 #[test]
+#[cfg(unix)]
 fn compress_pre_tool_resolves_the_independent_rtk_binary() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -3241,6 +3295,7 @@ fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading()
 
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
+#[cfg(target_os = "linux")]
 fn toon_encodable_response() -> String {
     let rows: Vec<String> = (0..24)
         .map(|index| format!(r#"{{"id":{index},"name":"row-{index}","note":"padding-{index}"}}"#))
@@ -3663,10 +3718,10 @@ fn post_tool_no_savings_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
-    // The fixture root is never under the real home (`TempDataDir::new`
+    // The fixture root is never under the real home (`TempDataDir::new_external`
     // refuses that case), so this path is outside both trusted roots.
     let rejected = fixture.root.join("rejected-stats.db");
     assert_notices_survive_unwritable_stderr(
@@ -3689,7 +3744,7 @@ fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");
@@ -3712,7 +3767,7 @@ fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_env_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");

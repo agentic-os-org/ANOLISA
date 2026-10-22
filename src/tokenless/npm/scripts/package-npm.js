@@ -46,6 +46,7 @@ import {
   openSync,
   readSync,
   statSync,
+  lstatSync,
 } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -79,15 +80,16 @@ if (!version) {
 const WHEEL_VERSION_SCRIPT = join(tokenlessRoot, 'packaging', 'raw', 'wheel-version.py');
 
 function wheelFilenameVersion() {
+  const python = process.platform === 'win32' ? 'python' : 'python3';
   let normalized;
   try {
-    normalized = execFileSync('python3', [WHEEL_VERSION_SCRIPT, version], {
+    normalized = execFileSync(python, [WHEEL_VERSION_SCRIPT, version], {
       encoding: 'utf-8',
     }).trim();
   } catch (error) {
     throw new Error(
       `cannot normalize ${version} into a wheel filename version ` +
-      `(python3 ${WHEEL_VERSION_SCRIPT}): ${error.message}`,
+      `(${python} ${WHEEL_VERSION_SCRIPT}): ${error.message}`,
     );
   }
   if (!normalized) {
@@ -109,6 +111,14 @@ const PUBLISH_CONFIG = { registry: NPM_REGISTRY, access: 'public' };
 const GLIBC_MIN = '2.17';
 
 const TARGETS = [
+  {
+    rust_target: 'x86_64-pc-windows-msvc',
+    npm_os: 'win32',
+    npm_cpu: 'x64',
+    pkg_suffix: 'win32-x64',
+    binary_os: 'windows',
+    binary_arch: 'x86_64',
+  },
   {
     rust_target: 'x86_64-unknown-linux-gnu',
     npm_os: 'linux',
@@ -230,6 +240,21 @@ function readHeader(path) {
 
 function verifyBinaryFormat(target, name, path) {
   const header = readHeader(path);
+  if (target.binary_os === 'windows') {
+    if (header.length < 64 || header.readUInt16LE(0) !== 0x5a4d) {
+      throw new Error(`${name} is not a PE binary: ${path}`);
+    }
+    const descriptor = openSync(path, 'r');
+    try {
+      const pe = Buffer.alloc(26);
+      const size = readSync(descriptor, pe, 0, pe.length, header.readUInt32LE(60));
+      if (size !== pe.length || pe.readUInt32LE(0) !== 0x4550 ||
+          pe.readUInt16LE(4) !== 0x8664 || pe.readUInt16LE(24) !== 0x20b) {
+        throw new Error(`${name} is not an x64 PE32+ binary: ${path}`);
+      }
+    } finally { closeSync(descriptor); }
+    return;
+  }
   if (target.binary_os === 'linux') {
     const elfMagic = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
     if (header.length < 20 || !header.subarray(0, 4).equals(elfMagic)) {
@@ -311,7 +336,7 @@ function verifyGlibcBaseline(target, name, path) {
 function collectPrebuiltBinaries(target, binDir) {
   const binaryPaths = {};
   for (const binary of BINARIES) {
-    const path = join(binDir, binary);
+    const path = join(binDir, binary + (target.binary_os === 'windows' ? '.exe' : ''));
     if (!existsSync(path) || !statSync(path).isFile()) {
       throw new Error(`missing prebuilt ${binary} for ${target.pkg_suffix}: ${path}`);
     }
@@ -335,7 +360,7 @@ function packagePlatform(target, binaryPaths) {
 
   // Copy binaries
   for (const [bin, binPath] of Object.entries(binaryPaths)) {
-    const destination = join(pkgDir, 'bin', bin);
+    const destination = join(pkgDir, 'bin', bin + (target.binary_os === 'windows' ? '.exe' : ''));
     copyFileSync(binPath, destination);
     chmodSync(destination, 0o755);
   }
@@ -403,7 +428,23 @@ function buildAdapters() {
   // never leak into a published tarball.
   console.log('  Building OpenClaw plugin (TypeScript -> dist/index.js)...');
   try {
-    execSync('make build-openclaw-plugin build-dsh-plugin', {
+    if (process.platform === 'win32') {
+      for (const name of ['openclaw', 'dsh']) {
+        const directory = join(tokenlessRoot, 'adapters', 'tokenless', name);
+        for (const entry of readdirSync(directory).filter((name) => name.endsWith('.in'))) {
+          writeFileSync(join(directory, entry.slice(0, -3)),
+            readFileSync(join(directory, entry), 'utf8').replaceAll('@VERSION@', version));
+        }
+      }
+      execSync('npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund && npm run build', {
+        stdio: 'inherit', cwd: openclawDir,
+      });
+      // dsh/dist/index.js is the ESM source, not a generated bundle; match Make's export check.
+      execFileSync(process.execPath, ['--input-type=module', '-e',
+        "import('./dist/index.js').then((plugin) => { if (typeof plugin.apply !== 'function' || plugin.name !== 'anolisa-tokenless') process.exit(1); })"], {
+        stdio: 'inherit', cwd: join(tokenlessRoot, 'adapters', 'tokenless', 'dsh'),
+      });
+    } else execSync('make build-openclaw-plugin build-dsh-plugin', {
       stdio: 'inherit',
       cwd: tokenlessRoot,
     });
@@ -437,21 +478,40 @@ function copyAdapters(rootPkgDir) {
   const adaptersSrc = join(tokenlessRoot, 'adapters', 'tokenless');
   const adaptersDest = join(rootPkgDir, 'adapters', 'tokenless');
   const legacyAgentscopeSrc = join(adaptersSrc, 'agentscope');
+  const filter = (src) =>
+    src !== legacyAgentscopeSrc &&
+    !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&
+    !src.split(sep).includes('node_modules') &&
+    !src.split(sep).includes('__pycache__') &&
+    !/\.py[co]$/.test(src) &&
+    !src.endsWith(`${sep}package-lock.json`) &&
+    !src.endsWith(`${sep}.gitignore`);
 
   console.log('  Bundling Agent adapters...');
   cpSync(adaptersSrc, adaptersDest, {
     recursive: true,
     // npm pack omits symlinks; shared hook dispatchers must ship as regular files.
     dereference: true,
-    filter: (src) =>
-      src !== legacyAgentscopeSrc &&
-      !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&
-      !src.split(sep).includes('node_modules') &&
-      !src.split(sep).includes('__pycache__') &&
-      !/\.py[co]$/.test(src) &&
-      !src.endsWith(`${sep}package-lock.json`) &&
-      !src.endsWith(`${sep}.gitignore`),
+    filter,
   });
+
+  // Git for Windows may check symlinks out as text files without Developer Mode.
+  // Materialize the tracked links in the package, leaving the checkout unchanged.
+  if (process.platform === 'win32') {
+    const entries = execFileSync('git', ['ls-files', '--stage', '-z', 'adapters/tokenless'],
+      { cwd: tokenlessRoot, encoding: 'utf8' }).split('\0');
+    for (const entry of entries) {
+      if (!entry.startsWith('120000 ')) continue;
+      const relative = entry.slice(entry.indexOf('\t') + 1);
+      const source = join(tokenlessRoot, relative);
+      const destination = join(rootPkgDir, relative);
+      if (!lstatSync(source).isSymbolicLink() && statSync(source).isFile()) {
+        const target = join(dirname(source), readFileSync(source, 'utf8').trim());
+        rmSync(destination, { force: true });
+        cpSync(target, destination, { recursive: true, dereference: true, filter });
+      }
+    }
+  }
 
   // Stamp *.in templates with the release version (Makefile does this via
   // stamp-adapter-templates for RPM installs) and drop the raw templates. The

@@ -17,7 +17,7 @@ and existing build and test entry points.
 | **cosh-ng** | `src/cosh-ng/` | Rust | Linux (full); macOS (limited functionality) |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux (full); macOS (trajectory/serve only) |
-| **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |
+| **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm); Windows x64 (native CLI + QwenWork adapter) |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 | **anolisa** | `distribution/anolisa/` | Rust | Linux + macOS (arm64) |

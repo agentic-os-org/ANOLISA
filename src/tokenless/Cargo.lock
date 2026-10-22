@@ -1708,6 +1708,7 @@ dependencies = [
  "tokenless-schema",
  "tokenless-stats",
  "toon-format",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

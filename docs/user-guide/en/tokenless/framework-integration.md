@@ -89,6 +89,40 @@ compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
+### QwenWork (Windows x64 local mode)
+
+Tokenless automatically reduces supported command and tool output in QwenWork,
+while preserving file reads. Windows support covers QwenWorkCN 1.3.2 local
+sessions on x64, with Node.js/npm and Python 3.10+ installed. Windows ARM64 and
+security-workspace/VM sessions are unsupported; other Windows agents have not
+been validated.
+
+The Windows package is not yet published. For now, follow the
+[Windows build instructions](../../../developer-guide/en/tokenless/windows.md#build-and-test-on-windows)
+to build and install the local npm packages.
+
+After installing the npm package, quit QwenWorkCN and run in PowerShell:
+
+```powershell
+$adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwork/scripts/lifecycle.ps1'
+& $adapter -Action detect
+& $adapter -Action install
+```
+
+Restart QwenWorkCN, enable the Tokenless plugin in the application if needed,
+and open a new local session. Continue using QwenWork as usual; supported output
+is reduced automatically.
+
+If Python cannot be found, add `-Python 'C:/path/to/python.exe'` to the commands
+above. For a custom QwenWork installation, set `TOKENLESS_QWENWORK_APP` to the
+directory containing `QwenWorkCN.exe` before running them.
+
+To remove the integration, quit QwenWorkCN, run the following, then restart it:
+
+```powershell
+& $adapter -Action uninstall
+```
+
 ### QwenWork (macOS)
 
 The `qwenwork` adapter targets QwenWorkCN (千问办公), independently of Qoder CLI,

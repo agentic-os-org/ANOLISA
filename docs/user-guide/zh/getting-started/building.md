@@ -26,7 +26,7 @@ cd anolisa
 | cosh-ng | [`src/cosh-ng`](../../../../src/cosh-ng/README_zh.md) | Rust Agent OS CLI 和 Shell，Linux 提供完整构建，macOS 提供受限源码构建 |
 | agent-sec-core | [`src/agent-sec-core`](../../../../src/agent-sec-core/README_zh.md) | Rust sandbox 与 Python 安全 CLI，Linux |
 | agentsight | [`src/agentsight`](../../../../src/agentsight/README_zh.md) | Rust/eBPF 可观测组件，Linux 提供完整 tracing，macOS 提供 `trace` 和 `serve` |
-| tokenless | [`src/tokenless`](../../../../src/tokenless/README_zh.md) | Rust Token 与命令输出优化，源码构建面向 Linux，macOS 使用从 Linux 交叉编译的 npm 制品 |
+| tokenless | [`src/tokenless`](../../../../src/tokenless/README_zh.md) | Rust Token 与命令输出优化，支持 Linux 和 Windows x64 源码构建，macOS 使用从 Linux 交叉编译的 npm 制品 |
 | agent-memory（`memory`） | [`src/agent-memory`](../../../../src/agent-memory/README_zh.md) | Rust MCP memory server，Linux |
 | os-skills（`skills`） | [`src/os-skills`](../../../../src/os-skills/README_zh.md) | 静态 Skill 定义和脚本，具体平台取决于各 Skill 的声明 |
 | anolisa | [`distribution/anolisa`](../../../../distribution/anolisa/README_zh.md) | Rust 组件生命周期 CLI，支持 Linux 和 macOS arm64 |
@@ -128,7 +128,7 @@ README 和开发指南。
 | [os-skills](../../../../src/os-skills/README_zh.md) | `cd src/os-skills && make build` |
 | [agent-sec-core](../../../../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` |
 | [agentsight](../../../../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make build-all`；macOS local viewer 使用 `cd src/agentsight && make build-mac` |
-| [tokenless](../../../../src/tokenless/README_zh.md) | `cd src/tokenless && make build` |
+| [tokenless](../../../../src/tokenless/README_zh.md) | Linux：`cd src/tokenless && make build`；[Windows x64](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试) |
 | [agent-memory](../../../../src/agent-memory/README_zh.md) | `cd src/agent-memory && make build` |
 | [ws-ckpt](../../../../src/ws-ckpt/README_zh.md) | `cd src/ws-ckpt && make build` |
 | [cosh-ng](../../../../src/cosh-ng/README_zh.md) | `cd src/cosh-ng && cargo build --workspace` |

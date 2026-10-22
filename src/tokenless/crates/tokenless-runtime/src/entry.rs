@@ -379,7 +379,11 @@ fn pre_tool_with_optional_rtk(
     if rewritten.is_empty() || rewritten == command {
         return Ok(pre_tool_passthrough(request));
     }
-    let anchored = anchor_rtk_prefix(command, rewritten, rtk_path, attribution, data_dir);
+    let anchored = if request.tool_name.eq_ignore_ascii_case("PowerShell") {
+        anchor_powershell_rtk(rewritten, rtk_path, attribution, data_dir)
+    } else {
+        anchor_rtk_prefix(command, rewritten, rtk_path, attribution, data_dir)
+    };
     let mut rewritten_arguments = arguments.clone();
     rewritten_arguments.insert(request.command_field.clone(), Value::String(anchored));
     let action = if request.capabilities.replace_arguments {
@@ -598,6 +602,53 @@ fn is_python_pytest(arguments: &[String], start: usize) -> bool {
     )
 }
 
+fn anchor_powershell_rtk(
+    rewritten: &str,
+    rtk_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+) -> String {
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let values = [
+        ("TOKENLESS_AGENT_ID", attribution.agent_id.as_str()),
+        (
+            "TOKENLESS_SESSION_ID",
+            attribution.session_id.as_deref().unwrap_or_default(),
+        ),
+        (
+            "TOKENLESS_TOOL_USE_ID",
+            attribution.tool_use_id.as_deref().unwrap_or_default(),
+        ),
+        ("TOKENLESS_DATA_DIR", &data_dir.to_string_lossy()),
+    ];
+    // A child scope's alias binds native RTK calls without parsing or translating
+    // RTK's script. Its pipelines, conditions, arguments and quoting stay intact.
+    let mut script = format!(
+        "& {{ [CmdletBinding()] param(); Set-Alias -Name rtk -Value {} -Scope Local; ",
+        quote(&rtk_path.to_string_lossy())
+    );
+    for (index, (name, _)) in values.iter().enumerate() {
+        script.push_str(&format!(
+            "$tokenlessOld{index} = [Environment]::GetEnvironmentVariable('{name}', 'Process'); "
+        ));
+    }
+    script.push_str("try { ");
+    for (name, value) in values {
+        script.push_str(&format!("$env:{name} = {}; ", quote(value)));
+    }
+    script.push_str(rewritten);
+    script.push_str("\n} finally { $tokenlessOk = $?; $tokenlessExit = $LASTEXITCODE; ");
+    for (index, (name, _)) in values.iter().enumerate() {
+        script.push_str(&format!(
+            "[Environment]::SetEnvironmentVariable('{name}', $tokenlessOld{index}, 'Process'); "
+        ));
+    }
+    // $? is read-only. An advanced script block must report its own failure;
+    // Ignore preserves that status without adding stderr or an $Error entry.
+    script.push_str("$global:LASTEXITCODE = $tokenlessExit } if (-not $tokenlessOk) { $ErrorActionPreference = 'Ignore'; $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([Exception]::new('Command failed'), 'TokenlessCommandFailed', [System.Management.Automation.ErrorCategory]::NotSpecified, $null)) } }");
+    script
+}
+
 fn anchor_rtk_prefix(
     original: &str,
     rewritten: &str,
@@ -741,8 +792,18 @@ fn shell_quote(value: &str) -> String {
     {
         value.to_owned()
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        let quoted = format!("'{}'", value.replace('\'', "'\\''"));
+        if cfg!(windows) {
+            msys_harden_quoted(&quoted)
+        } else {
+            quoted
+        }
     }
+}
+
+fn msys_harden_quoted(quoted: &str) -> String {
+    // MSYS decodes backslash pairs in -c arguments before Bash parses quotes.
+    quoted.replace(r"\\", r"\''\")
 }
 
 pub(crate) struct PostToolOutcome {
@@ -1006,8 +1067,104 @@ pub fn response_operation(outcome: &EntryOutcome) -> Operation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn msys_quoting_separates_backslash_pairs() {
+        for (quoted, expected) in [
+            (r"'\\server\share'", r"'\''\server\share'"),
+            (r"'C:\user'\''s\\data'", r"'C:\user'\''s\''\data'"),
+            (r"'C:\trailing\'", r"'C:\trailing\'"),
+            (r"'a\\\b'", r"'a\''\\b'"),
+            (r"'a\\\\b'", r"'a\''\\''\b'"),
+        ] {
+            assert_eq!(super::msys_harden_quoted(quoted), expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_binding_preserves_script_exit_and_restores_environment() {
+        let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/cmd.exe");
+        let mut attribution = tokenless_protocol::Attribution::new("test-agent");
+        attribution.session_id = Some("session 'quoted'".into());
+        let shell =
+            std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
+        for (command, status, last_exit, process_exit) in [
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'",
+                "False",
+                7,
+                1,
+            ),
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 0'",
+                "True",
+                0,
+                0,
+            ),
+            (
+                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'; Write-Output 'done'",
+                "True",
+                7,
+                0,
+            ),
+        ] {
+            let script = super::anchor_powershell_rtk(
+                command,
+                &path,
+                &attribution,
+                std::path::Path::new("C:/data with spaces"),
+            );
+            let preamble = "$env:TOKENLESS_AGENT_ID='before'; Set-Alias rtk Write-Output; $ErrorActionPreference='Stop'; $Error.Clear();";
+            let output = std::process::Command::new(&shell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
+                    "{preamble} {script}; [Console]::Write(\"ok=$?;exit=$LASTEXITCODE;env=$env:TOKENLESS_AGENT_ID;alias=$((Get-Alias rtk).Definition);errors=$($Error.Count);preference=$ErrorActionPreference\")")])
+                .output().unwrap();
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("test-agent"), "{stdout}");
+            assert!(stdout.contains(&format!("ok={status};exit={last_exit};env=before;alias=Write-Output;errors=0;preference=Stop")), "{stdout}");
+
+            let output = std::process::Command::new(&shell)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("{preamble} {script}"),
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(process_exit), "{command}");
+            assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_binding_restores_environment_on_throw() {
+        let script = super::anchor_powershell_rtk(
+            "throw 'expected-error'",
+            std::path::Path::new("C:/unused/rtk.exe"),
+            &tokenless_protocol::Attribution::new("test-agent"),
+            std::path::Path::new("C:/data"),
+        );
+        let shell =
+            std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
+        let output = std::process::Command::new(shell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
+                "$env:TOKENLESS_AGENT_ID='before'; try {{ {script} }} catch {{ [Console]::Write($_.Exception.Message) }}; [Console]::Write(\";env=$env:TOKENLESS_AGENT_ID\")")])
+            .output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "expected-error;env=before"
+        );
+    }
+    #[cfg(unix)]
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::time::Instant;
 
     use serde_json::json;
@@ -1037,12 +1194,14 @@ mod tests {
     // still open for writing on another thread makes this thread's exec fail
     // with ETXTBSY (`ExecutableFileBusy`). Tests that write and run scripts
     // hold this lock across both steps.
+    #[cfg(unix)]
     fn serialize_rtk_scripts() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(unix)]
     fn write_executable(path: &Path, script: &str) {
         fs::write(path, script).unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -1304,6 +1463,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_applies_rtk_exit_zero_and_anchors_path() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1583,6 +1743,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_build_log_owner_behind_env_flag_beats_rtk_rewriting() {
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("fake rtk");
@@ -1811,6 +1972,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_honors_rtk_exit_contract_and_preserves_arguments() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1853,6 +2015,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_passes_attribution_and_rejects_unexpected_exit() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1900,6 +2063,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_timeout_is_an_operation_error() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -1929,6 +2093,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_deadline_includes_stdout_held_by_a_descendant() {
         let _serial = serialize_rtk_scripts();
         for parent in ["exit 0", "wait"] {
@@ -1984,6 +2149,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_collects_descendant_output_before_the_deadline() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -2013,6 +2179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_preserves_invalid_utf8_output_errors() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
@@ -2038,6 +2205,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pre_tool_drains_large_rtk_output_before_exit() {
         let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
