@@ -268,7 +268,7 @@ tokenless compress-schema -f tools.json --batch \
 tokenless compress-response -f response.json
 ```
 
-默认会移除名称完全匹配且区分大小写的黑名单字段、`null`、空字符串/数组/对象，包括数组中的空项；随后截断长字符串、长数组和超过配置嵌套深度的值。常用参数：
+JSON 格式压紧保留全部字段，包括 `debug`/`trace`/`logs`，并在每层保留 `null`、空字符串/数组/对象。数组空项保留原来的位置。Record Reduction 和显式字符串、数组、深度限制仍可在既有恢复策略下省略内容。常用参数：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -296,15 +296,9 @@ tokenless compress-response -f response.json \
   --max-depth 6
 ```
 
-默认删除的字段名为：
+格式压紧只改变格式；宿主接受文本且往返校验保留值与类型时，也可选择 TOON 表示。显式截断和 Record Reduction 会生成有界视图。处理关键 Payload 前，应先保存样例并对比压缩结果。
 
-```text
-debug, trace, traces, stack, stacktrace, logs, logging
-```
-
-字段匹配和截断会改变模型看到的响应表示。处理关键 Payload 前，应先保存样例并对比压缩结果。
-
-Stash 会保存 Record Reduction 使用的完整原始数组、被截断的字符串、其他截断数组中被丢弃的中间段和深层子树。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
+Stash 会保存 Record Reduction 使用的完整原始数组、被截断的字符串、其他截断数组中被丢弃的中间段和深层子树。尾部元素直接保留在输出中，不进入 Stash。字段不会仅因名称或值为空而被删除。
 
 大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)和[用户手册 · 压缩的触发条件与阈值](user-manual.md#压缩的触发条件与阈值)。
 

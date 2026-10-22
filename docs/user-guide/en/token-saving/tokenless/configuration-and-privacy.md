@@ -233,7 +233,7 @@ ls -l ~/.tokenless/stats.db*
 
 ### Sensitivity of Stash
 
-Stash saves the original content removed by truncation, not a summary. For record reduction, the stashed entry is the complete original array before reduction, not only the omitted records. It does not save fields removed solely because they are blacklisted, `null`, or empty. The `tokenless` CLI restricts its path to the real user home or selected data directory, but also verify that the database and SQLite sidecar files are not readable by other local users:
+Stash saves the original content removed by truncation, not a summary. For record reduction, the stashed entry is the complete original array before reduction, not only the omitted records. JSON fields are retained regardless of their names or empty values; their names and empty values do not trigger Stash writes. Explicit truncation and record reduction can still write to Stash. The `tokenless` CLI restricts its path to the real user home or selected data directory, but also verify that the database and SQLite sidecar files are not readable by other local users:
 
 ```bash
 ls -l ~/.tokenless/stash.db*
@@ -246,6 +246,12 @@ TTL means that `retrieve` no longer returns an entry after one hour. Expired row
 Tokenless SLS JSONL includes the component, operation, session/tool-use identifiers, the host trace identity when one was propagated, and character/token metrics. It does not include `before_text` or `after_text`. Identifiers can still be organizational runtime metadata and should follow the platform's log policy.
 
 ## Guidance for sensitive workloads
+
+JSON compression retains diagnostic fields such as `debug`, `trace`, and `logs`.
+The host may send these values to its configured model endpoint. If those fields
+contain credentials or internal details, redact them at the tool or host boundary
+before model submission. The former name-based deletion was not a reliable
+sanitizer; disabling compression or Stash also does not redact outgoing content.
 
 ### Compress without recording
 
@@ -339,7 +345,7 @@ be safely optimized without retrieval pass through unchanged.
 
 RTK, the OpenClaw-side Tool Ready registration gate, and PostTool default to on; verbose logging
 defaults to off. The Tool Ready option currently has no operational effect because Tokenless
-hard-disables the underlying check. Tokenless automatically decides whether JSON cleanup or TOON is
+hard-disables the underlying check. Tokenless automatically decides whether JSON compaction or TOON is
 useful and which tool outputs must pass through unchanged. The removed
 `response_compression_enabled`, `toon_compression_enabled`, `skip_tools`, and `shell_tools` keys no
 longer control the adapter.

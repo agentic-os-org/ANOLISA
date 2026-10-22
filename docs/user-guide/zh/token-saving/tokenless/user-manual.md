@@ -213,7 +213,7 @@ AgentScope 则使用静态恢复 Tool，并对照模型当前的
 - 在 DSH 中，裸 `tokenless` 不存在于稳定的绝对 `PATH` 项中，或解析到与
   `tokenlessBin`/`TOKENLESS_BIN` 不同的可执行文件。
 
-Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、`null` 和空值、Schema `title`/`examples` 以及 Markdown 格式不会保存供取回。启用实际压缩前，应使用有代表性的数据验证关键 Payload。
+JSON 响应压缩保留诊断类名称的字段、`null` 和空值。Stash 并不能让所有压缩域都可逆：被移除的 Schema `title`/`examples` 以及 Markdown 格式不会保存供取回。启用实际压缩前，应使用有代表性的数据验证关键 Payload。
 
 ### 普通处理错误通常 fail-open
 

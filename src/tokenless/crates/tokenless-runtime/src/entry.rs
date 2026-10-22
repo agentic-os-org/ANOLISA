@@ -819,7 +819,6 @@ pub(crate) fn post_tool_with_store(
                 stash_enabled: options.stash_enabled,
                 require_reversibility: true,
                 force_json: false,
-                preserve_top_level_shape: !request.capabilities.replace_with_text,
                 allow_toon: true,
                 min_toon_chars: MIN_TOON_CHARS,
                 json: JsonCompressionConfig {
@@ -2491,7 +2490,11 @@ mod tests {
             assert!(outcome.stats.applied_operations.is_empty());
             assert!(outcome.response.stash_keys.is_empty());
         }
-        let input = serde_json::json!({"debug": "x".repeat(1000), "value": 1}).to_string();
+        let input = format!(
+            "{{\n{}\"debug\": null,\n{}\"value\": 1\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
+        );
         let mut request = post_tool_request(&input);
         request.tool_name = "SearchFiles".into();
         request.content_origin = ContentOrigin::ApiResponse;
@@ -2673,8 +2676,9 @@ mod tests {
     #[test]
     fn post_tool_accepts_lossless_json_and_requires_retrieve_for_truncation() {
         let cleanup = post_tool_request(&format!(
-            r#"{{"debug":"{}","value":"kept"}}"#,
-            "noise".repeat(100)
+            "{{\n{}\"debug\": null,\n{}\"value\": \"kept\"\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
         ));
         let outcome = post_tool_with_store(&cleanup, &options(), None).unwrap();
         assert_eq!(outcome.response.disposition, Disposition::Applied);
@@ -2682,6 +2686,10 @@ mod tests {
         assert_eq!(
             outcome.response.applied_operations,
             vec![AppliedOperation::JsonCleanup]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&outcome.response.output).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&cleanup.content).unwrap()
         );
 
         let lossy =
@@ -2725,6 +2733,126 @@ mod tests {
         assert_eq!(applied.response.disposition, Disposition::Applied);
         assert_eq!(applied.response.recoverability, Recoverability::Retrievable);
         assert!(!applied.response.stash_keys.is_empty());
+    }
+
+    #[test]
+    fn post_tool_preserves_json_values_in_text_and_structured_slots() {
+        let original = json!({
+            "debug": "x".repeat(1000), "trace": null, "traces": [],
+            "stack": {}, "stacktrace": "", "logs": [null, {}, "", [], false, 0],
+            "logging": {"debug": null, "items": [1, null, 2]},
+            "empty": null
+        });
+        for content in [
+            original.to_string(),
+            serde_json::to_string_pretty(&original).unwrap(),
+        ] {
+            for replace_with_text in [false, true] {
+                for recovery in [
+                    tokenless_protocol::RecoveryMethod::None,
+                    tokenless_protocol::RecoveryMethod::Shell,
+                ] {
+                    for have_store in [false, true] {
+                        let concrete = Arc::new(ReadCountingStore::default());
+                        let store: Arc<dyn StashStore> = concrete.clone();
+                        let mut request = post_tool_request(&content);
+                        request.content_origin = ContentOrigin::ApiResponse;
+                        request.capabilities.replace_with_text = replace_with_text;
+                        request.capabilities.recovery = recovery.clone();
+                        let outcome = post_tool_with_store(
+                            &request,
+                            &options(),
+                            have_store.then_some(&store),
+                        )
+                        .unwrap();
+                        let decoded: serde_json::Value = if outcome
+                            .response
+                            .applied_operations
+                            .contains(&AppliedOperation::Toon)
+                        {
+                            toon_format::decode_default(&outcome.response.output).unwrap()
+                        } else {
+                            serde_json::from_str(&outcome.response.output).unwrap()
+                        };
+                        assert_eq!(decoded, original);
+                        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+                        assert!(outcome.response.stash_keys.is_empty());
+                        assert_eq!(concrete.writes.load(Ordering::Relaxed), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_tool_applies_lossless_json_envelope_unwrapping() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/contract/fixtures/post_tool/double_encoded.json"
+        ))
+        .unwrap();
+        let content = fixture["tool_response"].as_str().unwrap();
+        let inner: String = serde_json::from_str(content).unwrap();
+        let original: Value = serde_json::from_str(&inner).unwrap();
+        for replace_with_text in [false, true] {
+            let concrete = Arc::new(ReadCountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut request = post_tool_request(content);
+            request.content_origin = ContentOrigin::ApiResponse;
+            request.capabilities.replace_with_text = replace_with_text;
+            let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+            assert_eq!(outcome.response.disposition, Disposition::Applied);
+            assert_eq!(
+                outcome.response.applied_operations,
+                [AppliedOperation::JsonCleanup]
+            );
+            assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                serde_json::from_str::<Value>(&outcome.response.output).unwrap(),
+                original
+            );
+            assert!(outcome.response.stash_keys.is_empty());
+            assert_eq!(concrete.writes.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn diagnostic_field_bounds_require_recovery_and_preserve_empty_siblings() {
+        let original =
+            json!({"debug": "x".repeat(100_000), "empty": null, "items": [null, {}, [], ""]});
+        for reachable in [false, true] {
+            let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+            let mut request = post_tool_request(&original.to_string());
+            request.capabilities.replace_with_text = false;
+            if reachable {
+                request.capabilities.recovery = tokenless_protocol::RecoveryMethod::Shell;
+            }
+            let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+            if reachable {
+                assert_eq!(outcome.response.disposition, Disposition::Applied);
+                assert_eq!(outcome.response.recoverability, Recoverability::Retrievable);
+                assert_eq!(
+                    outcome.response.applied_operations,
+                    [AppliedOperation::JsonTruncation]
+                );
+                assert_eq!(outcome.response.stash_keys.len(), 1);
+                let recovered = store
+                    .retrieve(&outcome.response.stash_keys[0])
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recovered, original["debug"].as_str().unwrap());
+                let mut output: serde_json::Value =
+                    serde_json::from_str(&outcome.response.output).unwrap();
+                output["debug"] = json!(recovered);
+                assert_eq!(output, original);
+            } else {
+                assert_eq!(
+                    outcome.response.disposition,
+                    Disposition::RecoverabilityUnavailable
+                );
+                assert_eq!(outcome.response.output, request.content);
+                assert!(outcome.response.stash_keys.is_empty());
+            }
+        }
     }
 
     #[test]

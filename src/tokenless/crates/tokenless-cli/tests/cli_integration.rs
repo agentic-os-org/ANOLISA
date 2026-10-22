@@ -461,8 +461,10 @@ fn compress_response_from_stdin() {
         .unwrap();
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result.get("data").is_some());
-    assert!(result.get("debug").is_none());
+    assert_eq!(
+        result,
+        serde_json::from_str::<serde_json::Value>(response).unwrap()
+    );
 }
 
 #[test]
@@ -1958,7 +1960,7 @@ fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &
 }
 
 fn debug_laden_content() -> String {
-    serde_json::to_string(&serde_json::json!({
+    serde_json::to_string_pretty(&serde_json::json!({
         "url": "https://registry.example.com/packages",
         "status": 200,
         "debug": "cache=miss upstream=registry-04 trace=9f2e11c0 backend_latency_ms=184 retries=0",
@@ -2004,6 +2006,11 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
     );
     assert_eq!(response["result"]["recoverability"], "lossless");
     assert_eq!(response["result"]["content_type"], "json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response["result"]["output"].as_str().unwrap())
+            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()
+    );
 }
 
 #[test]
@@ -2743,11 +2750,15 @@ fn stats_open_warning_survives_an_unwritable_stderr() {
     assert_eq!(output.stdout, baseline.stdout);
 }
 
-/// A compressible response: dropping the debug/trace fields yields token
+/// A compressible response: compacting indentation yields token
 /// savings, so the stats/SLS recording tail of the command runs.
 #[cfg(target_os = "linux")]
-const COMPRESSIBLE_RESPONSE: &str =
-    r#"{"data":"value","debug":"remove","trace":"remove","empty_field":""}"#;
+const COMPRESSIBLE_RESPONSE: &str = r#"{
+    "data": "value",
+    "debug": "diagnostic context",
+    "trace": "request trace",
+    "empty_field": ""
+}"#;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -3491,7 +3502,7 @@ fn stashable_tool_schema(name: &str) -> String {
     .to_string()
 }
 
-/// A clean, compact JSON object: `json_cleanup` has nothing to drop, so the
+/// A clean, compact JSON object: `json_cleanup` has nothing to compact, so the
 /// hook re-emits it byte-for-byte and reports no savings.
 #[cfg(target_os = "linux")]
 fn clean_json_object(keys: usize) -> String {
@@ -3576,7 +3587,7 @@ fn response_no_savings_notice_survives_an_unwritable_stderr() {
 }
 
 /// With compression disabled every run prints the dry-run notice, and a
-/// payload with nothing to drop adds the no-savings one; both precede the
+/// payload with nothing to compact adds the no-savings one; both precede the
 /// original payload on stdout.
 #[test]
 #[cfg(target_os = "linux")]

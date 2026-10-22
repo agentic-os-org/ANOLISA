@@ -8,7 +8,6 @@ fn context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext<'a> 
         recovery: &tokenless_protocol::RecoveryMethod::Shell,
         stash,
         allow_toon: false,
-        preserve_top_level_shape: false,
         min_toon_chars: 500,
         allow_unrecoverable: true,
     }
@@ -182,14 +181,15 @@ fn selected_record_ids(outcome: &JsonOutcome) -> Vec<u64> {
 }
 
 #[test]
-fn cleanup_reports_the_operation_without_side_channels() {
+fn compaction_preserves_fields_without_recovery() {
+    let input = "{\n  \"data\": \"kept\",\n  \"debug\": \"evidence\",\n  \"empty\": null\n}";
     let outcome = JsonCompressor::default()
-        .compress(
-            r#"{"data":"kept","debug":"drop","empty":null}"#,
-            &context(None),
-        )
+        .compress(input, &context(None))
         .unwrap();
-    assert_eq!(outcome.output, r#"{"data":"kept"}"#);
+    assert_eq!(
+        output_value(&outcome),
+        serde_json::from_str::<Value>(input).unwrap()
+    );
     assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
     assert_eq!(outcome.recoverability, Recoverability::Lossless);
     assert!(outcome.stash_writes.is_empty());
@@ -255,22 +255,123 @@ fn array_truncation_preserves_head_and_tail() {
 }
 
 #[test]
-fn drop_nulls_is_independent_from_empty_value_cleanup() {
-    let compressor = JsonCompressor::new(JsonCompressionConfig {
-        drop_nulls: false,
-        drop_empty_fields: true,
-        ..JsonCompressionConfig::default()
+fn complete_candidates_preserve_empty_values_fields_and_array_positions() {
+    let value = serde_json::json!({
+        "debug": {"cause": "connection refused"}, "trace": "request trace",
+        "traces": [], "stack": "frame", "stacktrace": "location", "logs": ["failure"],
+        "logging": false, "null": null, "empty_string": "", "empty_array": [], "empty_object": {},
+        "nested": {"debug": null, "empty": {}, "array": [10, null, 20, "", [], {}, false, 0, null]},
+        "duplicates": [{"value": null}, {"value": null}]
     });
-    let outcome = compressor
-        .compress(
-            r#"{"object_null":null,"empty":"","array":[null,""]}"#,
-            &context(None),
-        )
-        .unwrap();
+    for input in [
+        value.to_string(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    ] {
+        for allow_toon in [false, true] {
+            let store = InMemoryStore::new();
+            let outcome = JsonCompressor::default()
+                .compress(
+                    &input,
+                    &JsonCompressionContext {
+                        allow_toon,
+                        min_toon_chars: 0,
+                        ..context(Some(&store))
+                    },
+                )
+                .unwrap();
+            let decoded = if outcome.operations.contains(&JsonOperation::Toon) {
+                toon_format::decode_default::<Value>(&outcome.output).unwrap()
+            } else {
+                output_value(&outcome)
+            };
+            assert_eq!(decoded, value, "toon={allow_toon}");
+            assert_eq!(outcome.recoverability, Recoverability::Lossless);
+            assert_eq!(outcome.metrics, JsonMetrics::default());
+            assert!(outcome.stash_writes.is_empty());
+            assert!(store.is_empty());
+        }
+    }
+}
 
+#[test]
+fn string_bounds_preserve_sibling_and_nested_empty_fields() {
+    let input = serde_json::json!({
+        "body": "word ".repeat(1200),
+        "debug": "evidence", "trace": null, "logs": [],
+        "nested": {"stack": "frame", "empty": {}, "items": [null, "", [], {}, false, 0]}
+    });
+    for attached in [false, true] {
+        let store = InMemoryStore::new();
+        let outcome = JsonCompressor::default()
+            .compress(
+                &input.to_string(),
+                &context(attached.then_some(&store as &dyn StashStore)),
+            )
+            .unwrap();
+        assert_eq!(outcome.operations, [JsonOperation::Truncation]);
+        let mut output = output_value(&outcome);
+        assert!(output["body"].as_str().unwrap().len() < input["body"].as_str().unwrap().len());
+        output["body"] = input["body"].clone();
+        assert_eq!(output, input);
+        assert_eq!(
+            outcome.recoverability,
+            if attached {
+                Recoverability::Retrievable
+            } else {
+                Recoverability::Unrecoverable
+            }
+        );
+        if attached {
+            let key = extract_hash(&outcome.output).unwrap();
+            assert_eq!(
+                store.retrieve(key).unwrap().as_deref(),
+                input["body"].as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn array_bounds_keep_empty_head_and_tail_positions() {
+    let mut values = vec![
+        Value::Null,
+        serde_json::json!(""),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ];
+    let dropped = vec![
+        serde_json::json!("evidence ".repeat(200)),
+        Value::Null,
+        serde_json::json!({"logs": []}),
+    ];
+    values.extend(dropped.clone());
+    values.extend([
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::json!(""),
+        Value::Null,
+    ]);
+    let store = InMemoryStore::new();
+    let outcome = JsonCompressor::new(JsonCompressionConfig {
+        truncate_arrays_at: 4,
+        array_tail_preserve: 4,
+        ..Default::default()
+    })
+    .compress(
+        &serde_json::to_string(&values).unwrap(),
+        &context(Some(&store)),
+    )
+    .unwrap();
+    let output = output_value(&outcome);
+    let output = output.as_array().unwrap();
+    assert_eq!(&output[..4], &values[..4]);
+    assert_eq!(&output[5..], &values[values.len() - 4..]);
+    assert_eq!(output.len(), 9);
+    assert_eq!(outcome.recoverability, Recoverability::Retrievable);
+    let key = extract_hash(output[4].as_str().unwrap()).unwrap();
     assert_eq!(
-        output_value(&outcome),
-        serde_json::json!({"object_null": null, "array": [null]})
+        serde_json::from_str::<Value>(&store.retrieve(key).unwrap().unwrap()).unwrap(),
+        serde_json::json!(dropped)
     );
 }
 
@@ -316,28 +417,65 @@ fn stashed_array_tail_round_trips_exactly() {
 }
 
 #[test]
-fn structured_slots_restore_empty_top_level_fields() {
-    let context = JsonCompressionContext {
-        recovery: &tokenless_protocol::RecoveryMethod::Shell,
-        preserve_top_level_shape: true,
-        ..context(None)
-    };
+fn compact_structured_slots_preserve_all_fields_without_an_operation() {
+    let input =
+        r#"{"stdout":"value","stderr":"","debug":"evidence","nested":{"logs":[],"note":null}}"#;
     let outcome = JsonCompressor::default()
-        .compress(r#"{"stdout":"value","stderr":"","debug":"drop"}"#, &context)
+        .compress(input, &context(None))
         .unwrap();
-    assert_eq!(
-        output_value(&outcome),
-        serde_json::json!({"stdout": "value", "stderr": ""})
-    );
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(outcome.recoverability, Recoverability::Lossless);
 }
 
 #[test]
 fn json_string_envelope_is_normalized_once() {
-    let input = serde_json::to_string(r#"{"data":"kept","debug":"drop"}"#).unwrap();
+    let input =
+        serde_json::to_string(r#"{"data":"kept","debug":"evidence","empty":null}"#).unwrap();
     let outcome = JsonCompressor::default()
         .compress(&input, &context(None))
         .unwrap();
-    assert_eq!(outcome.output, r#"{"data":"kept"}"#);
+    assert_eq!(
+        outcome.output,
+        r#"{"data":"kept","debug":"evidence","empty":null}"#
+    );
+    assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
+    assert_eq!(outcome.recoverability, Recoverability::Lossless);
+    assert!(outcome.stash_writes.is_empty());
+}
+
+#[test]
+fn envelope_savings_prevent_unnecessary_record_reduction() {
+    let original = serde_json::json!(
+        (0..64)
+            .map(|id| serde_json::json!({"id": id, "name": "value", "empty": null}))
+            .collect::<Vec<_>>()
+    );
+    let inner = original.to_string();
+    let input = serde_json::to_string(&inner).unwrap();
+    assert!(saves_at_least_percent(&inner, &input, 15));
+    let store = InMemoryStore::new();
+    let outcome = JsonCompressor::default()
+        .compress(&input, &context(Some(&store)))
+        .unwrap();
+    assert_eq!(output_value(&outcome), original);
+    assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
+    assert_eq!(outcome.recoverability, Recoverability::Lossless);
+    assert_eq!(outcome.metrics, JsonMetrics::default());
+    assert!(outcome.stash_writes.is_empty());
+}
+
+#[test]
+fn strings_that_do_not_directly_wrap_containers_are_unchanged() {
+    let nested = serde_json::to_string(r#"{"data":"kept"}"#).unwrap();
+    for inner in ["42", "null", "ordinary text", &nested] {
+        let input = serde_json::to_string(inner).unwrap();
+        let outcome = JsonCompressor::default()
+            .compress(&input, &context(None))
+            .unwrap();
+        assert_eq!(outcome.output, input);
+        assert!(outcome.operations.is_empty());
+    }
 }
 
 #[test]
@@ -468,7 +606,9 @@ fn error_signals_require_nonempty_fields_or_matching_status_text() {
     assert!(!has_error_signal(members(&parsed(
         r#"{"error": null, "status": "ok"}"#
     ))));
-    assert!(has_error_signal(members(&parsed(r#"{"errors": ["boom"]}"#))));
+    assert!(has_error_signal(members(&parsed(
+        r#"{"errors": ["boom"]}"#
+    ))));
     assert!(has_error_signal(members(&parsed(
         r#"{"severity": "Critical warning"}"#
     ))));
@@ -539,12 +679,11 @@ fn record_stash_failure_keeps_every_record() {
 }
 
 #[test]
-fn record_reduction_counts_selected_records_removed_by_cleanup() {
+fn record_reduction_preserves_selected_empty_records_and_recovery() {
     let store = InMemoryStore::new();
     let mut values = records(40);
-    // This head-window record collapses to an empty object during cleanup, so
-    // it is selected for retention but never emitted.
-    values[0] = serde_json::json!({ "note": null });
+    values[0] = serde_json::json!({ "note": null, "debug": "evidence", "logs": [], "empty": "" });
+    values[1] = serde_json::json!({});
     let input = serde_json::to_string(&values).unwrap();
     let outcome = JsonCompressor::default()
         .compress(&input, &context(Some(&store)))
@@ -553,11 +692,10 @@ fn record_reduction_counts_selected_records_removed_by_cleanup() {
     let array = output_value(&outcome);
     let array = array.as_array().unwrap();
     let kept = array.iter().filter(|value| value.is_object()).count();
-    assert_eq!(kept, RECORD_MAX_ITEMS - 1);
-    assert_eq!(
-        outcome.operations,
-        [JsonOperation::Cleanup, JsonOperation::RecordReduction]
-    );
+    assert_eq!(kept, RECORD_MAX_ITEMS);
+    assert_eq!(array[0], values[0]);
+    assert_eq!(array[1], values[1]);
+    assert_eq!(outcome.operations, [JsonOperation::RecordReduction]);
     assert_eq!(outcome.metrics.record_reductions, 1);
     assert_eq!(outcome.metrics.records_omitted, values.len() - kept);
     assert_eq!(outcome.recoverability, Recoverability::Retrievable);
@@ -630,10 +768,7 @@ fn critical_records_can_exceed_the_normal_budget() {
 
 #[test]
 fn ordinary_duplicates_are_removed_before_stable_sampling() {
-    let text = format!(
-        "[{}]",
-        vec![r#"{"status":"ok"}"#; 100].join(",")
-    );
+    let text = format!("[{}]", vec![r#"{"status":"ok"}"#; 100].join(","));
 
     assert_eq!(
         select_record_indices(items(&parsed(&text))),
@@ -724,7 +859,7 @@ fn reduced_toon_can_win_after_lossless_toon_misses_the_gate() {
 }
 
 #[test]
-fn operations_follow_cleanup_reduction_truncation_toon_order() {
+fn operations_follow_reduction_truncation_order() {
     let store = InMemoryStore::new();
     let mut values = records(40);
     for value in &mut values {
@@ -739,11 +874,7 @@ fn operations_follow_cleanup_reduction_truncation_toon_order() {
 
     assert_eq!(
         outcome.operations,
-        [
-            JsonOperation::Cleanup,
-            JsonOperation::RecordReduction,
-            JsonOperation::Truncation,
-        ]
+        [JsonOperation::RecordReduction, JsonOperation::Truncation,]
     );
 }
 
@@ -753,11 +884,7 @@ fn unrecoverable_bounded_candidate_can_be_disallowed() {
         truncate_strings_at: 10,
         ..JsonCompressionConfig::default()
     });
-    let input = serde_json::to_string(&serde_json::json!({
-        "tail": "x".repeat(200),
-        "unused": null
-    }))
-    .unwrap();
+    let input = format!("{{ \"tail\": \"{}\", \"unused\": null }}", "x".repeat(200));
     let restricted = JsonCompressionContext {
         recovery: &tokenless_protocol::RecoveryMethod::Shell,
         allow_unrecoverable: false,
@@ -767,7 +894,7 @@ fn unrecoverable_bounded_candidate_can_be_disallowed() {
 
     assert_eq!(
         output_value(&outcome),
-        serde_json::json!({"tail": "x".repeat(200)})
+        serde_json::json!({"tail": "x".repeat(200), "unused": null})
     );
     assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
     assert_eq!(outcome.recoverability, Recoverability::Lossless);
@@ -786,19 +913,17 @@ fn inexact_json_numbers_compress_without_losing_their_literals() {
             " ".repeat(600),
             " ".repeat(600)
         );
-        // The string envelope is normalized into the baseline, so unwrapping it
-        // is not reported as a cleanup operation on top of that baseline.
-        for (source, operations) in [
-            (input.clone(), [JsonOperation::Cleanup].as_slice()),
-            (serde_json::to_string(&input).unwrap(), [].as_slice()),
-            (format!("\u{feff}{input}"), [JsonOperation::Cleanup].as_slice()),
-            (format!("[{input}]"), [JsonOperation::Cleanup].as_slice()),
+        for source in [
+            input.clone(),
+            serde_json::to_string(&input).unwrap(),
+            format!("\u{feff}{input}"),
+            format!("[{input}]"),
         ] {
             let store = InMemoryStore::new();
             let outcome = JsonCompressor::default()
                 .compress(&source, &context(Some(&store)))
                 .unwrap();
-            assert_eq!(outcome.operations, operations);
+            assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
             assert_eq!(outcome.recoverability, Recoverability::Lossless);
             assert!(outcome.stash_writes.is_empty());
             assert_eq!(outcome.metrics, JsonMetrics::default());
@@ -865,8 +990,7 @@ fn numbers_serde_json_cannot_read_stay_a_passthrough() {
             " ".repeat(600)
         );
         let store = InMemoryStore::new();
-        let outcome = JsonCompressor::default()
-            .compress(&input, &context(Some(&store)));
+        let outcome = JsonCompressor::default().compress(&input, &context(Some(&store)));
         assert!(outcome.is_err(), "{literal} must not be rewritten");
         assert!(store.retrieve("x").unwrap().is_none());
     }
@@ -917,7 +1041,10 @@ fn numeric_strings_and_reserved_key_objects_keep_their_shape() {
         .compress(&input, &context(None))
         .unwrap();
     let output = output_value(&outcome);
-    assert_eq!(output["big"], Value::String("18446744073709551617".to_owned()));
+    assert_eq!(
+        output["big"],
+        Value::String("18446744073709551617".to_owned())
+    );
     assert_eq!(
         output["raw"],
         serde_json::json!({"$serde_json::private::RawValue": "123"})
@@ -952,7 +1079,14 @@ fn stashed_omissions_carry_exact_numbers() {
         .retrieve(extract_hash(&outcome.output).unwrap())
         .unwrap()
         .expect("omitted items are stashed");
-    assert_eq!(serde_json::from_str::<Value>(&payload).unwrap().as_array().unwrap().len(), 7);
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
     assert_eq!(payload.matches(literal).count(), 7);
 
     // Complete record collection behind a reduction marker.
@@ -972,7 +1106,14 @@ fn stashed_omissions_carry_exact_numbers() {
         .retrieve(extract_hash(&outcome.output).unwrap())
         .unwrap()
         .expect("record collection is stashed");
-    assert_eq!(serde_json::from_str::<Value>(&payload).unwrap().as_array().unwrap().len(), 40);
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        40
+    );
     assert_eq!(payload.matches(literal).count(), 40);
 
     // Depth-truncated subtree.
@@ -1003,7 +1144,10 @@ fn stashed_omissions_carry_exact_numbers() {
 
 #[test]
 fn record_deduplication_sees_through_numeric_spelling() {
-    let uniform = format!("[{}]", vec![r#"{"status":"ok","value":1.2500}"#; 100].join(","));
+    let uniform = format!(
+        "[{}]",
+        vec![r#"{"status":"ok","value":1.2500}"#; 100].join(",")
+    );
     let mixed = format!(
         "[{}]",
         (0..100)
@@ -1039,7 +1183,6 @@ fn toon_context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext
         recovery: &tokenless_protocol::RecoveryMethod::Shell,
         stash,
         allow_toon: true,
-        preserve_top_level_shape: false,
         min_toon_chars: 0,
         allow_unrecoverable: true,
     }
@@ -1146,9 +1289,7 @@ fn toon_candidate_preserves_large_integers_and_types() {
         "18446744073709551615",
         "-9223372036854775808",
     ] {
-        let text = format!(
-            "{{\"nested\":[{{\"value\":{literal}}}],\"string\":\"{literal}\"}}"
-        );
+        let text = format!("{{\"nested\":[{{\"value\":{literal}}}],\"string\":\"{literal}\"}}");
         let document = parsed(&text);
         let compact = exact::write_to_string(&document);
         if let Some(candidate) = toon_candidate(&document, &compact, 0) {

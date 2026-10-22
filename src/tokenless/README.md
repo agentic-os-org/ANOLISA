@@ -39,7 +39,7 @@ retrieval, and attribution.
 | Capability | Savings indicator | Details |
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
-| Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
+| Content-aware response compression | workload-dependent | Routes successful JSON through `JsonCompressor`; complete candidates retain all fields and empty values; those saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
 | Search path sharing | workload-dependent | Enabled by default: API search records share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
 | Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
@@ -65,12 +65,12 @@ retrieval, and attribution.
 The schema, response, and TOON figures above are isolated results on the
 repository's committed reference fixtures; they are neither a
 production range nor additive. Compression depends on payload size and shape,
-removable fields, configured thresholds, and the share of tool data in the
+formatting overhead, removable schema metadata, configured thresholds, and the share of tool data in the
 session. Short or already compact payloads may save only a few percent or pass
 through unchanged. See [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md#run-the-repository-reference-workload)
 for the exact inputs, command, full output, and limitations.
 
-PostTool leaves the entire JSON response unchanged when its parser cannot preserve a numeric value. Otherwise, cleanup and record reduction can proceed; Core selects TOON only when decoding it recovers the same retained values and types.
+PostTool leaves the entire JSON response unchanged when its parser cannot preserve a numeric value. Otherwise, compaction and record reduction can proceed; Core selects TOON only when decoding it recovers the same retained values and types.
 
 ## Applicable Scenarios & Expected Effects
 
@@ -84,7 +84,7 @@ on the share and shape of that content in the session.
 | Workload | Primary strategy | Why |
 |----------|-----------------|-----|
 | Shell-heavy (build/test/triage) | Build-log compression + RTK | Recognized build/test commands keep their native output for PostTool compression; other supported shell commands use RTK |
-| API/fetch-heavy (REST, web_fetch) | Response compression + TOON | JSON may carry removable debug/null/empty fields; sufficiently large, regular structures also have reducible syntax overhead |
+| API/fetch-heavy (REST, web_fetch) | Response compression + TOON | Compaction and TOON reduce formatting and syntax overhead while retaining all fields and empty values |
 | Agents with many tools | Schema compression | Many Function Calling definitions carry verbose descriptions and removable metadata |
 | Long responses that must stay faithful | Reversible compression (Stash) | Truncated content is `retrieve`-able end-to-end lossless; thresholds can be tightened safely |
 
@@ -587,7 +587,7 @@ The plugin translates OpenClaw tool hooks and live result middleware into Protoc
 | PostTool | `registerAgentToolResultMiddleware` | Replaces supported tool text before the same-turn model request | ✅ Active |
 | BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor marker-authorized recovery | — |
 
-Core owns RTK execution, JSON detection, cleanup, TOON selection, thresholds, diagnostics, and final
+Core owns RTK execution, JSON detection, compaction, TOON selection, thresholds, diagnostics, and final
 arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
 PostTool request, so RTK output is not compressed twice. The local CLI recovery command is a trusted
 operator entry rather than Agent authorization, so the plugin applies only lossless candidates.
@@ -845,7 +845,7 @@ for the full reference.
 
 The native DSH bundle sends replaceable single-text tool results through
 Tokenless PostTool Core on `tools/post-execute`. Core owns content detection,
-JSON cleanup, TOON selection, acceptance, and environment-error diagnostics.
+JSON compaction, TOON selection, acceptance, and environment-error diagnostics.
 When a reduced response contains a Retrieve Marker, DSH can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter
 classifies the successful standalone command from `exec.arguments.command` and

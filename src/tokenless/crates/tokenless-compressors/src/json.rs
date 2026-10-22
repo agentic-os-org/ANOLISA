@@ -1,12 +1,12 @@
 //! JSON-domain compression for PostTool results.
 //!
-//! One call owns the complete JSON decision: tree cleanup, record reduction,
-//! truncation, structured-slot restoration, compact serialization, and
-//! optional TOON representation selection. The caller owns final acceptance
-//! and Stash commit or rollback.
+//! One call owns record reduction, truncation, compact serialization, and
+//! optional TOON representation selection. Fields and empty values are retained
+//! unless an explicit bound omits their containing content. The caller owns
+//! final acceptance and Stash commit or rollback.
 //!
 //! Every stage works on [`ExactValue`], which retains each number token as the
-//! source literal it was scanned from. Numbers therefore survive cleanup,
+//! source literal it was scanned from. Numbers therefore survive
 //! record reduction, truncation, compaction, and Stash payloads with their
 //! spelling and JSON numeric type intact, and no per-number exactness audit
 //! gates the rest of the document.
@@ -41,10 +41,6 @@ pub struct JsonCompressionConfig {
     pub array_tail_preserve: usize,
     /// Maximum JSON nesting depth before a subtree is replaced.
     pub max_depth: usize,
-    /// Removes null-valued object fields and array entries.
-    pub drop_nulls: bool,
-    /// Removes empty strings, arrays, and objects.
-    pub drop_empty_fields: bool,
     /// Emits a bounded marker when truncating content.
     pub add_truncation_marker: bool,
 }
@@ -55,8 +51,6 @@ impl Default for JsonCompressionConfig {
             truncate_strings_at: 4096,
             truncate_arrays_at: 32,
             array_tail_preserve: 8,
-            drop_nulls: true,
-            drop_empty_fields: true,
             max_depth: 8,
             add_truncation_marker: true,
         }
@@ -71,8 +65,6 @@ pub struct JsonCompressionContext<'a> {
     pub stash: Option<&'a dyn StashStore>,
     /// Whether the host accepts a non-JSON text representation such as TOON.
     pub allow_toon: bool,
-    /// Whether empty top-level fields must survive replacement.
-    pub preserve_top_level_shape: bool,
     /// Minimum candidate size before TOON is considered.
     pub min_toon_chars: usize,
     /// Whether an unrecoverable bounded candidate may displace a lossless one.
@@ -82,7 +74,8 @@ pub struct JsonCompressionContext<'a> {
 /// Stable operations performed inside the JSON domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonOperation {
-    /// Structural cleanup or compact JSON serialization changed the value.
+    /// JSON was serialized compactly, optionally unwrapping one JSON string
+    /// envelope, without omitting payload values.
     Cleanup,
     /// A record collection was reduced using deterministic importance signals.
     RecordReduction,
@@ -192,38 +185,35 @@ impl JsonCompressor {
             Ok(document) => document,
             Err(exact::ScanRejected) => return rejected(source, input),
         };
-        // A top-level string carrying a JSON document is unwrapped once, and
-        // the unwrapped document is compacted into the baseline every candidate
-        // is measured against. A scalar envelope, or an inner string that is not
-        // a document, keeps the source as its own baseline.
+        // Unwrap one string envelope carrying an object or array. Measure every
+        // candidate against the received wire form so unwrapping counts toward
+        // both operation attribution and the lossless savings gate.
         let unwrapped;
-        let (tree, baseline) = match &document {
+        let tree = match &document {
             ExactValue::String(inner) => match exact::parse(inner) {
                 Ok(inner_tree) if inner_tree.is_container() => {
                     unwrapped = inner_tree;
-                    (&unwrapped, exact::write_to_string(&unwrapped))
+                    &unwrapped
                 }
-                _ => (&document, source.to_owned()),
+                _ => &document,
             },
-            _ => (&document, source.to_owned()),
+            _ => &document,
         };
 
         let mut full_session = Session::new(&self.config, None, false, context.recovery);
         let full = build_candidate(
-            &baseline,
-            tree,
+            source,
             full_session.compress_value(tree, 0),
             &full_session,
             context,
         );
-        if saves_at_least_percent(&full.output, &baseline, LOSSLESS_MIN_SAVINGS_PERCENT) {
+        if saves_at_least_percent(&full.output, source, LOSSLESS_MIN_SAVINGS_PERCENT) {
             return Ok(full.into_outcome(Vec::new(), 0));
         }
 
         let mut bounded_session = Session::new(&self.config, context.stash, true, context.recovery);
         let bounded = build_candidate(
-            &baseline,
-            tree,
+            source,
             bounded_session.compress_value(tree, 0),
             &bounded_session,
             context,
@@ -266,18 +256,12 @@ impl Candidate {
     }
 }
 
-fn build_candidate<'a>(
+fn build_candidate(
     baseline: &str,
-    original: &ExactValue<'a>,
-    transformed: ExactValue<'a>,
+    transformed: ExactValue<'_>,
     session: &Session<'_>,
     context: &JsonCompressionContext<'_>,
 ) -> Candidate {
-    let transformed = if context.preserve_top_level_shape {
-        restore_top_level_shape(original, transformed)
-    } else {
-        transformed
-    };
     let compact = exact::write_to_string(&transformed);
     let mut output = baseline.to_owned();
     let mut transformed_selected = false;
@@ -302,11 +286,10 @@ fn build_candidate<'a>(
 
     let mut operations = Vec::new();
     if transformed_selected
-        && (session.cleanup_changes > 0
-            || (!toon_selected
-                && session.record_reductions == 0
-                && session.truncations == 0
-                && compact != baseline))
+        && !toon_selected
+        && session.record_reductions == 0
+        && session.truncations == 0
+        && compact != baseline
     {
         operations.push(JsonOperation::Cleanup);
     }
@@ -364,25 +347,6 @@ fn rejected(source: &str, input: &str) -> Result<JsonOutcome, JsonError> {
             metrics: JsonMetrics::default(),
         }),
     }
-}
-
-fn restore_top_level_shape<'a>(
-    original: &ExactValue<'a>,
-    transformed: ExactValue<'a>,
-) -> ExactValue<'a> {
-    let ExactValue::Object(original) = original else {
-        return transformed;
-    };
-    let mut transformed = match transformed {
-        ExactValue::Object(transformed) => transformed,
-        other => return other,
-    };
-    for (key, value) in original {
-        if !transformed.contains_key(key) && value.is_empty_or_null() {
-            transformed.insert(key.clone(), value.clone());
-        }
-    }
-    ExactValue::Object(transformed)
 }
 
 /// Builds the TOON candidate for an already-compacted exact document.
@@ -569,10 +533,8 @@ struct Session<'a> {
     config: &'a JsonCompressionConfig,
     stash: Option<&'a dyn StashStore>,
     bounds_enabled: bool,
-    drop_fields: HashSet<&'static str>,
     stash_writes: Vec<StashWrite>,
     stash_errors: usize,
-    cleanup_changes: usize,
     record_reductions: usize,
     records_omitted: usize,
     truncations: usize,
@@ -591,18 +553,8 @@ impl<'a> Session<'a> {
             config,
             stash: stash.filter(|_| recovery.is_available()),
             bounds_enabled,
-            drop_fields: HashSet::from([
-                "debug",
-                "trace",
-                "traces",
-                "stack",
-                "stacktrace",
-                "logs",
-                "logging",
-            ]),
             stash_writes: Vec::new(),
             stash_errors: 0,
-            cleanup_changes: 0,
             record_reductions: 0,
             records_omitted: 0,
             truncations: 0,
@@ -714,7 +666,7 @@ impl<'a> Session<'a> {
         let head_end = values.len().min(head);
         let mut output = Vec::new();
         for value in values.iter().take(head_end) {
-            self.push_if_kept(&mut output, value, depth);
+            output.push(self.compress_value(value, depth + 1));
         }
 
         if truncate && self.config.add_truncation_marker {
@@ -736,7 +688,7 @@ impl<'a> Session<'a> {
         }
 
         for value in values.iter().skip(values.len() - tail) {
-            self.push_if_kept(&mut output, value, depth);
+            output.push(self.compress_value(value, depth + 1));
         }
         ExactValue::Array(output)
     }
@@ -748,7 +700,7 @@ impl<'a> Session<'a> {
     ) -> ExactValue<'doc> {
         let mut output = Vec::with_capacity(values.len());
         for value in values {
-            self.push_if_kept(&mut output, value, depth);
+            output.push(self.compress_value(value, depth + 1));
         }
         ExactValue::Array(output)
     }
@@ -770,13 +722,8 @@ impl<'a> Session<'a> {
 
         let mut output = Vec::with_capacity(selected.len() + 1);
         for index in selected {
-            self.push_if_kept(&mut output, &values[index], depth);
+            output.push(self.compress_value(&values[index], depth + 1));
         }
-        // Cleanup can drop selected records that collapsed to null or empty
-        // values. Recount from the records actually emitted so the marker and
-        // `records_omitted` stay consistent with the output; the complete
-        // array is stashed either way.
-        let omitted = values.len() - output.len();
         output.push(ExactValue::String(format!(
             "{omitted} of {} records omitted. {}",
             values.len(),
@@ -787,36 +734,10 @@ impl<'a> Session<'a> {
         Some(ExactValue::Array(output))
     }
 
-    fn push_if_kept<'doc>(
-        &mut self,
-        output: &mut Vec<ExactValue<'doc>>,
-        value: &ExactValue<'doc>,
-        depth: usize,
-    ) {
-        let compressed = self.compress_value(value, depth + 1);
-        if (self.config.drop_nulls && compressed.is_null())
-            || (self.config.drop_empty_fields && compressed.is_empty())
-        {
-            self.cleanup_changes += 1;
-            return;
-        }
-        output.push(compressed);
-    }
-
     fn compress_object<'doc>(&mut self, values: &ExactMap<'doc>, depth: usize) -> ExactValue<'doc> {
         let mut output = ExactMap::new();
         for (key, value) in values {
-            if self.drop_fields.contains(key.as_str()) {
-                self.cleanup_changes += 1;
-                continue;
-            }
             let compressed = self.compress_value(value, depth + 1);
-            if (self.config.drop_nulls && compressed.is_null())
-                || (self.config.drop_empty_fields && compressed.is_empty())
-            {
-                self.cleanup_changes += 1;
-                continue;
-            }
             output.insert(key.clone(), compressed);
         }
         ExactValue::Object(output)

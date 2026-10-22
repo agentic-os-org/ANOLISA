@@ -516,7 +516,8 @@ pub enum AppliedOperation {
     /// An HTML page was rendered as Markdown with enumerated non-content elements
     /// removed and the original available in Stash.
     HtmlExtraction,
-    /// Empty and diagnostic JSON fields were removed.
+    /// JSON was serialized compactly, optionally unwrapping one JSON string
+    /// envelope, without omitting payload values.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
     JsonRecordReduction,

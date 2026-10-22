@@ -207,7 +207,7 @@ ls -l ~/.tokenless/stats.db*
 
 ### Stash 的敏感性
 
-Stash 保存压缩时被截断的原始内容，而不是摘要。记录缩减写入的条目是缩减前的完整原始数组，而不仅是被省略的记录。仅因字段在黑名单中、值为 `null` 或为空而被移除的内容不会写入 Stash。`tokenless` CLI 会把路径限制在真实用户 home 或选定的数据目录下，但仍应确认数据库及 SQLite sidecar 文件不会被其他本机用户读取：
+Stash 保存压缩时被截断的原始内容，而不是摘要。记录缩减写入的条目是缩减前的完整原始数组，而不仅是被省略的记录。JSON 字段不因名称或空值而删除；字段名称和空值本身不会触发 Stash 写入，显式截断和记录缩减仍可能写入。`tokenless` CLI 会把路径限制在真实用户 home 或选定的数据目录下，但仍应确认数据库及 SQLite sidecar 文件不会被其他本机用户读取：
 
 ```bash
 ls -l ~/.tokenless/stash.db*
@@ -220,6 +220,10 @@ TTL 表示条目超过一小时后不能再通过 `retrieve` 返回。过期行�
 Tokenless 的 SLS JSONL 只写入组件、Operation、Session/Tool Use 标识、宿主传入的 trace 标识（若存在）和字符/Token 度量，不写 `before_text` 或 `after_text`。但标识字段本身仍可能属于组织的运行元数据，应按照平台日志策略管理。
 
 ## 敏感工作负载建议
+
+JSON 压缩保留 `debug`、`trace`、`logs` 等诊断字段，宿主可能将这些值发送到配置的
+模型端点。字段中若包含凭据或内部信息，应在工具或宿主边界完成脱敏，再提交给模型。
+原先按字段名删除内容不能可靠地完成脱敏；禁用压缩或 Stash 也不会清除外发内容。
 
 ### 只压缩，不保存统计
 
@@ -313,7 +317,7 @@ OpenClaw Plugin 不压缩工具 Schema，也不提供内容恢复。无法在不
 
 RTK、OpenClaw 侧的 Tool Ready 注册门槛和 PostTool 默认开启，verbose 日志默认关闭。由于
 Tokenless 已硬关闭底层检查，Tool Ready 选项当前没有实际效果。Tokenless 会自动判断 JSON
-清理或 TOON 是否有收益，以及哪些工具输出必须原样透传。已经删除的
+格式压紧或 TOON 是否有收益，以及哪些工具输出必须原样透传。已经删除的
 `response_compression_enabled`、`toon_compression_enabled`、`skip_tools` 和 `shell_tools` 不再
 控制 Adapter。
 

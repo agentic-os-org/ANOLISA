@@ -164,11 +164,15 @@ cargo run --release --bin compression_rate -- --json
 `src/tokenless/benchmark/l1-compressor/fixtures/tool_response.json` 和
 `src/tokenless/benchmark/l1-compressor/fixtures/schema_search.json`，并应用当前检出源码的
 默认压缩配置。fixture 由 `python/gen_fixtures.py` 生成，不含随机数、逐字节可复现。
-Tokenless 0.8.2（commit `a30575361`）的参考结果如下：
+保留值的实现（commit `daf42d758`，PR #8814）产生以下参考快照。fixture 字节与
+Tokenless 0.8.2（`a30575361`）的快照保持一致。紧凑响应现在用于验证内容保留：全部
+20,813 字节原样保留，JSON 单独节省率从删除诊断字段时的 36.3% 降为 0.0%。另一个
+压缩率回归用例将同一组值格式化后输入，验证真正的格式压缩且无遗漏；专项测试覆盖
+记录缩减以及字符串、数组和深度限制。
 
 | JSON 字段 | 独立测试阶段与输入 | 节省率 |
 |---|---|---:|
-| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 36.3% |
+| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 0.0% |
 | `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
 | `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.0% |
 | `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
@@ -178,12 +182,12 @@ Tokenless 0.8.2（commit `a30575361`）的参考结果如下：
 
 | 配置 | 运行内容 | 节省率 |
 |---|---|---:|
-| `response_only` | 仅响应压缩 | 34.0% |
+| `response_only` | 仅响应压缩 | 0.0% |
 | `schema_only` | 仅 Schema 压缩 | 3.0% |
-| `schema_response` | Schema + 响应叠加 | 37.0% |
-| `response_toon` | 响应压缩 + TOON | 47.4% |
+| `schema_response` | Schema + 响应叠加 | 3.0% |
+| `response_toon` | 响应压缩 + TOON | 15.9% |
 | `toon_only` | 对原始 Payload 仅做 TOON 编码 | 15.8% |
-| `full_stack` | Schema + 响应 + TOON | 50.3% |
+| `full_stack` | Schema + 响应 + TOON | 18.8% |
 
 含 TOON 的叠加行是不做门控的度量（benchmark 无条件执行 TOON 编码）；部署中的
 Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结果与这些行可能略有
@@ -194,8 +198,8 @@ Runtime 只在 TOON 能减少估算 Token 数时才采用它，因此部署结�
 如需完整的质量/对抗测试加本报告（跳过 criterion 性能基准，约需几分钟），在同一
 目录运行 `./run-benchmarks.sh --quick`。
 
-这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、易于
-压缩的合成数据；测试只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
+这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、已经
+紧凑序列化的合成数据；报告只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
 估算 Token，而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
 会话中的占比。因此，这组结果只用于确认同一源码版本的行为是否相近；评估真实工作
 负载时，应使用有代表性的自有 Payload，并执行下文的 dry-run 双跑。详细口径见
@@ -250,8 +254,8 @@ tokenless stats summary \
 
 压缩率取决于 Payload 中有多少可移除内容，不同场景差异很大：
 
-- **收益高**：返回大量统一结构记录的工具（列表、表格、搜索结果），携带 `debug`/`trace`/`logs` 等冗余字段的 Payload，或描述冗长的 Schema。
-- **收益中等**：Shell 输出只有超过 Layer 2 阈值（字符串 65,536 字符、数组头部窗口 128 项、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损清理和记录缩减（至少 33 条记录的对象数组）。
+- **收益高**：返回大量统一结构记录的工具（列表、表格、搜索结果），含大量格式空白或重复结构开销的 JSON，或描述冗长的 Schema。
+- **收益中等**：Shell 输出只有超过 Layer 2 阈值（字符串 65,536 字符、数组头部窗口 128 项、深度 8）的部分才会被截断；未超过时，改变 Payload 的主要是无损格式压紧和记录缩减（至少 33 条记录的对象数组）。
 - **收益接近零**：短于 200 字符最小门禁的响应；已足够紧凑、没有冗余的 JSON；任何没有变小的输入（尺寸保护会保留原文）。
 - **不参与压缩**：内容读取类工具输出（Read/Glob/Grep 及别名，原生 Grep 的搜索路径共享窄例外除外）和文件内容类结果。构建/测试日志、CSV/TSV 表格和受支持的 API 搜索结果列表有各自的压缩器；Git Diff 默认原样透传，显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED` 后才做上下文裁剪；来自命令输出或 API 响应的完整 HTML 文档默认转写为 Markdown，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭；其他纯文本、Stack Trace 和源码目前原样透传。
 

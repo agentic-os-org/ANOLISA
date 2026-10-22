@@ -10,14 +10,14 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
-当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行清理和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
+当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
+| Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
@@ -28,7 +28,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
-结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、可移除字段、
+结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、排版开销、可移除的 Schema 元数据、
 配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
 点，也可能直接原样透传。精确输入、命令、完整结果和限制见
 [Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#运行仓库参考负载)。
@@ -48,7 +48,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 | 工作负载 | 主要受益策略 | 原因 |
 |----------|-------------|------|
 | Shell 密集（编译/测试/排查） | Build Log 压缩 + RTK | 已识别的构建/测试命令保留原生输出交给 PostTool 压缩，其他受支持 Shell 命令使用 RTK |
-| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | JSON 可能含可移除的 debug/null/空值；足够大且结构规则的数据也有可削减的语法开销 |
+| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | 格式压紧和 TOON 减少表示开销，同时保留全部字段与空值 |
 | 工具数量多的 Agent | Schema 压缩 | 大量 Function Calling 定义可能含冗长描述和可移除元数据 |
 | 长响应需保真 | 可逆压缩（Stash） | 截断后可 `retrieve` 原文，端到端无损，可放心收紧阈值 |
 
@@ -102,7 +102,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
 `tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
-结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
+结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
 本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
 候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
@@ -401,7 +401,7 @@ make qwenpaw-install
 ### DeepSeek Harness 插件
 
 DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
-PostTool Core。内容检测、JSON 清理、TOON 选择、最终接受和环境错误诊断均由 Core
+PostTool Core。内容检测、JSON 格式压紧、TOON 选择、最终接受和环境错误诊断均由 Core
 负责。缩减结果包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令。Adapter 从 `exec.arguments.command` 检查成功执行的单条恢复命令，
 并让其结果绕过 Core 压缩、原样返回。只有裸 `tokenless` 能从 Shell 的 `PATH` 解析到

@@ -231,7 +231,7 @@ model-visibility context. Recovery is unavailable when:
 - In DSH, bare `tokenless` is missing from a stable absolute `PATH` entry or resolves to a different
   executable than `tokenlessBin`/`TOKENLESS_BIN`.
 
-Stash does not make all compression reversible. Removed `debug`/`trace` fields, `null` and empty values, schema `title`/`examples`, and Markdown formatting are not stored for retrieval. Validate critical payloads with representative data before enabling active compression.
+JSON response compression retains diagnostic-named fields, `null`, and empty values. Stash does not make every compression domain reversible: removed schema `title`/`examples` and Markdown formatting are not stored for retrieval. Validate critical payloads with representative data before enabling active compression.
 
 ### Processing errors usually fail open
 

@@ -33,7 +33,6 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) stash_enabled: bool,
     pub(crate) require_reversibility: bool,
     pub(crate) force_json: bool,
-    pub(crate) preserve_top_level_shape: bool,
     pub(crate) allow_toon: bool,
     pub(crate) min_toon_chars: usize,
     pub(crate) json: JsonCompressionConfig,
@@ -243,7 +242,6 @@ impl PostToolPipeline {
                 recovery: &request.capabilities.recovery,
                 stash: attached_store,
                 allow_toon: config.allow_toon && request.capabilities.replace_with_text,
-                preserve_top_level_shape: config.preserve_top_level_shape,
                 min_toon_chars: config.min_toon_chars,
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
             };
@@ -725,7 +723,6 @@ mod tests {
             stash_enabled: true,
             require_reversibility: false,
             force_json: true,
-            preserve_top_level_shape: false,
             allow_toon: false,
             min_toon_chars: usize::MAX,
             json: JsonCompressionConfig {
@@ -754,7 +751,7 @@ mod tests {
     #[test]
     fn one_json_domain_trace_reaches_one_stash_commit() {
         let input = serde_json::to_string(&serde_json::json!({
-            "debug": "discarded noise",
+            "debug": "diagnostic context",
             "items": (0..12)
                 .map(|index| format!("item-{index}-{}", "x".repeat(80)))
                 .collect::<Vec<_>>(),
@@ -770,20 +767,13 @@ mod tests {
         );
 
         assert_eq!(run.response.disposition, Disposition::Applied);
-        assert_eq!(
-            run.operations,
-            [
-                AppliedOperation::JsonCleanup,
-                AppliedOperation::JsonTruncation
-            ]
-        );
+        assert_eq!(run.operations, [AppliedOperation::JsonTruncation]);
         assert_eq!(
             run.response.applied_operations,
-            [
-                AppliedOperation::JsonCleanup,
-                AppliedOperation::JsonTruncation
-            ]
+            [AppliedOperation::JsonTruncation]
         );
+        let output: serde_json::Value = serde_json::from_str(&run.response.output).unwrap();
+        assert_eq!(output["debug"], "diagnostic context");
         assert_eq!(run.response.stash_keys.len(), 1);
         assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
         assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
@@ -884,10 +874,9 @@ mod tests {
         let input = serde_json::to_string(&vec![serde_json::json!({}); 33]).unwrap();
         let concrete = Arc::new(CountingStore::default());
         let store: Arc<dyn StashStore> = concrete.clone();
-        let mut no_cleanup = config(Duration::from_secs(1), 32);
-        no_cleanup.json.drop_empty_fields = false;
+        let config = config(Duration::from_secs(1), 32);
 
-        let run = PostToolPipeline::run(&request(&input), &no_cleanup, Some(&store));
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
 
         assert_eq!(run.response.disposition, Disposition::NoSavings);
         assert_eq!(run.response.output, input);

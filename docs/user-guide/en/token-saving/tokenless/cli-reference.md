@@ -284,7 +284,7 @@ Compress a JSON response:
 tokenless compress-response -f response.json
 ```
 
-By default it removes exact, case-sensitive blacklisted keys, `null`, and empty strings/arrays/objects, including empty items inside arrays. It then truncates long strings, long arrays, and values beyond the configured nesting limit. Common options:
+JSON compaction preserves every field, including `debug`/`trace`/`logs`, and retains `null` and empty strings/arrays/objects at every level. Empty array elements keep their positions. Record reduction and explicit string, array, and depth limits can still omit content under the existing recovery policy. Common options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -312,15 +312,9 @@ tokenless compress-response -f response.json \
   --max-depth 6
 ```
 
-The default field-name blacklist is:
+Compaction changes formatting; TOON can change the representation when the host accepts text and a round trip preserves values and types. Explicit truncation and record reduction produce bounded views. Save representative samples and compare the result before processing critical payloads.
 
-```text
-debug, trace, traces, stack, stacktrace, logs, logging
-```
-
-Field matching and truncation change the response representation seen by the model. Save representative samples and compare the result before processing critical payloads.
-
-Stash applies to complete original arrays used by record reduction, truncated strings, the dropped middle segment of other truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Blacklisted fields, `null`, and empty values are removed without a retrieval marker.
+Stash applies to complete original arrays used by record reduction, truncated strings, the dropped middle segment of other truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Fields are never removed solely because of their name or an empty value.
 
 Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Agent integration · Adapter processing rules](framework-integration.md#adapter-processing-rules) and [User manual · Compression trigger conditions and thresholds](user-manual.md#compression-trigger-conditions-and-thresholds).
 
