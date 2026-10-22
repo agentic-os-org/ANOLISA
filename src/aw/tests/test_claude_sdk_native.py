@@ -404,7 +404,7 @@ def run_case(
                     assert json.loads(result) == json.loads(original), result
             if mode in {"bash-pretool", "bash-pretool-deny"}:
                 retry = json.loads((case / "retry.json").read_text())
-                assert "TOKENLESS_AGENT_ID=claude-sdk" in retry["command"], retry
+                assert "TOKENLESS_AGENT_ID=claude " in retry["command"], retry
                 assert before[0]["tool_input"]["command"] == "git status"
                 assert before[1]["tool_input"] == retry
                 if mode == "bash-pretool":

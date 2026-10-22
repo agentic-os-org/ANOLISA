@@ -108,6 +108,62 @@ class SecurityEvidenceTests(unittest.TestCase):
 
 
 class SecurityInventoryTests(GateFixture):
+    def test_socket_lookup_survives_container_ownership_handoff(self) -> None:
+        for mask in (0o077, 0o027):
+            with self.subTest(umask=oct(mask)):
+                case = self.root / str(mask)
+                case.mkdir(mode=0o700)
+                previous = os.umask(mask)
+                try:
+                    backend = runtime.Backend(case, case, None, case, "fixture-image")
+                finally:
+                    os.umask(previous)
+
+                def handoff(command: list[str]) -> None:
+                    self.assertEqual(command[:2], ["docker", "create"])
+                    self.assertEqual(case.stat().st_mode & 0o777, 0o700)
+                    # At root ownership transfer, the host runner has only the
+                    # directory's "other" permissions. Exercise that access in an
+                    # unprivileged child; root runners drop the child's identity
+                    # after opening the directory so private ancestors stay private.
+                    probe = subprocess.run(
+                        [
+                            sys.executable,
+                            "-B",
+                            "-c",
+                            "import os,sys\n"
+                            "from pathlib import Path\n"
+                            "directory = Path(sys.argv[1])\n"
+                            "fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)\n"
+                            "mode = os.fstat(fd).st_mode & 0o777\n"
+                            "try:\n"
+                            " os.fchdir(fd)\n"
+                            " if os.geteuid() == 0:\n"
+                            "  os.fchown(fd, 65534, 65534)\n"
+                            "  os.setgroups([])\n"
+                            "  os.setgid(65534)\n"
+                            "  os.setuid(65534)\n"
+                            " assert os.geteuid() != 0\n"
+                            " os.fchmod(fd, (mode & 0o007) << 6)\n"
+                            " try: Path('daemon.sock').stat()\n"
+                            " except FileNotFoundError: pass\n"
+                            " else: raise AssertionError('unexpected socket')\n"
+                            "finally:\n"
+                            " os.fchmod(fd, mode)\n"
+                            " os.close(fd)\n",
+                            str(backend.runtime),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    self.assertEqual(probe.returncode, 0, probe.stderr)
+                    raise InterruptedError("container handoff verified")
+
+                with patch.object(runtime, "checked", side_effect=handoff):
+                    with self.assertRaisesRegex(InterruptedError, "handoff verified"):
+                        backend.start()
+
     def test_emergency_cleanup_selects_owned_containers_and_removes_after_exec_failure(self):
         for fail_exec in (False, True):
             calls = []

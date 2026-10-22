@@ -104,7 +104,7 @@ async def worker() -> None:
     assert reason.startswith(prefix), reason
     retry = json.loads(reason[len(prefix) :])
     assert retry["cwd"] == original["cwd"] and retry["mode"] == original["mode"]
-    assert "TOKENLESS_AGENT_ID=agentscope" in retry["command"]
+    assert "TOKENLESS_AGENT_ID=sdk " in retry["command"]
     owned = await turn("exec", retry, "fresh-retry")
     assert owned["state"] == "success" and owned["output"][0]["text"] == TEXT, owned
     security = await turn(

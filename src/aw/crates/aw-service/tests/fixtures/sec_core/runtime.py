@@ -140,6 +140,9 @@ class Backend:
         )
         self.runtime = case / "sec-runtime"
         self.runtime.mkdir(parents=True)
+        # Preserve host readiness probes throughout the container's root chown.
+        # The enclosing case directory remains private to the native runner.
+        self.runtime.chmod(0o755)
         self.socket = self.runtime / "daemon.sock"
         self.name = "aw-sec-" + uuid.uuid4().hex[:16]
         self.created = False
@@ -160,7 +163,6 @@ class Backend:
         script = """set -eu
 umask 077
 chown 0:0 /run/agent-sec-core
-chmod 755 /run/agent-sec-core
 mkdir -p /etc/agent-sec /var/log/agent-sec
 printf '%s\\n' '{"stateDir":"/var/lib/agent-sec/skillsec","enableDefaultSkillDirs":false}' > /etc/agent-sec/skillsec.json
 cleanup() { chown -R UID:GID /run/agent-sec-core; }

@@ -217,7 +217,7 @@ def main() -> None:
                 item["tool"] != "exec" or item["command"] != "git status" for item in executed
             )
             retry = executed[0]
-            assert "TOKENLESS_AGENT_ID=agentscope" in retry["command"]
+            assert "TOKENLESS_AGENT_ID=sdk " in retry["command"]
             assert retry in permissions and retry["command"] in scans
             assert len(permissions) == 8 and len(scans) == 3, (permissions, scans)
             observed, native, late = records("observe"), records("native"), records("late")
