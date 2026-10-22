@@ -51,7 +51,9 @@ impl Source {
             stop.clone(),
         );
         let worker = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            // Keep the source alive across service startup and two foreground runs.
+            // This bounds fixture ownership, not the configured one-second query budget.
+            let deadline = Instant::now() + Duration::from_secs(120);
             while Instant::now() < deadline && !stopped.load(Ordering::Acquire) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,

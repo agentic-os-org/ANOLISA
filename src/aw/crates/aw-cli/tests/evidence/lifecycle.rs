@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::process::ExitStatusExt,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -15,13 +14,8 @@ use std::{
 #[path = "../launcher/support.rs"]
 mod launch;
 
-fn wait(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !predicate() {
-        assert!(Instant::now() < deadline, "lifecycle condition timed out");
-        thread::sleep(Duration::from_millis(5));
-    }
-}
+#[path = "lifecycle/wait.rs"]
+mod wait;
 
 fn configured(source: &support::Source, fixture: &launch::Fixture) -> Value {
     let mut source_document = json!({"spec":{"agents":{"target":{}}}});
@@ -47,10 +41,12 @@ fn run_observes_without_providers_and_resumed_history_belongs_to_new_instance() 
     let service = launch::Service::start(&fixture, &document);
     let mut instances = Vec::new();
     for id in ["first", "resumed"] {
-        let process =
+        let mut process =
             launch::Process::spawn(&fixture, fixture.launch(&["--run-id", id, "--hold"], None));
-        wait(|| fixture.root.join(format!("ready-{id}")).exists());
-        wait(|| service.status()["observations"][0]["source_state"] == "available");
+        wait::ready(&mut process, &fixture, id);
+        wait::observation(&mut process, &service, "available", |state| {
+            state["observations"][0]["source_state"] == "available"
+        });
         let state = service.status()["observations"][0].clone();
         assert_eq!(state["callbacks"], 2);
         assert_eq!(state["run"]["state"], "started");
@@ -139,13 +135,15 @@ fn actions_reuse_callbacks_and_optional_failure_preserves_native_exit() {
         fixture.provider(&mut document);
         *source.auth_status.lock().unwrap() = auth_status;
         let service = launch::Service::start(&fixture, &document);
-        let process = launch::Process::spawn(
+        let mut process = launch::Process::spawn(
             &fixture,
             fixture.launch(&["--hold", "--agent-exit", "7"], None),
         );
-        wait(|| fixture.root.join("ready-one").exists());
+        wait::ready(&mut process, &fixture, "one");
         if auth_status == 200 {
-            wait(|| service.status()["observations"][0]["source_state"] == "available");
+            wait::observation(&mut process, &service, "available", |state| {
+                state["observations"][0]["source_state"] == "available"
+            });
         }
         let state = service.status()["observations"][0].clone();
         assert_eq!(
@@ -199,14 +197,16 @@ fn missing_service_store_and_source_errors_preserve_observation_lifecycle() {
             _ => unreachable!(),
         }
         let service = launch::Service::start(&fixture, &document);
-        let process = launch::Process::spawn(&fixture, fixture.launch(&["--hold"], None));
-        wait(|| fixture.root.join("ready-one").exists());
+        let mut process = launch::Process::spawn(&fixture, fixture.launch(&["--hold"], None));
+        wait::ready(&mut process, &fixture, "one");
         let reason = match scenario {
             "service" => "source_unavailable",
             "store" => "record_or_store_unavailable",
             _ => "source_unavailable",
         };
-        wait(|| service.status()["observations"][0]["source_reason"] == reason);
+        wait::observation(&mut process, &service, reason, |state| {
+            state["observations"][0]["source_reason"] == reason
+        });
         let state = service.status()["observations"][0].clone();
         assert_eq!(state["callbacks"], 2);
         assert_eq!(state["coverage"], "unknown");
@@ -246,8 +246,8 @@ fn signal_exit_drains_slow_optional_reads_and_leaves_shared_service_alive() {
     let fixture = launch::Fixture::new();
     let document = configured(&source, &fixture);
     let service = launch::Service::start(&fixture, &document);
-    let process = launch::Process::spawn(&fixture, fixture.launch(&["--hold"], None));
-    wait(|| fixture.root.join("ready-one").exists());
+    let mut process = launch::Process::spawn(&fixture, fixture.launch(&["--hold"], None));
+    wait::ready(&mut process, &fixture, "one");
     let state = service.status()["observations"][0].clone();
     assert_eq!(state["callbacks"], 2);
     assert!(state["projection_revision"].is_null());
@@ -394,19 +394,21 @@ fn concurrent_session_conflict_is_visible_and_release_preserves_other_run() {
     let fixture = launch::Fixture::new();
     let document = configured(&source, &fixture);
     let service = launch::Service::start(&fixture, &document);
-    let first = launch::Process::spawn(
+    let mut first = launch::Process::spawn(
         &fixture,
         fixture.launch(&["--run-id", "first", "--hold"], None),
     );
-    wait(|| fixture.root.join("ready-first").exists());
-    wait(|| service.status()["observations"][0]["source_state"] == "available");
-    let second = launch::Process::spawn(
+    wait::ready(&mut first, &fixture, "first");
+    wait::observation(&mut first, &service, "available", |state| {
+        state["observations"][0]["source_state"] == "available"
+    });
+    let mut second = launch::Process::spawn(
         &fixture,
         fixture.launch(&["--run-id", "second", "--hold"], None),
     );
-    wait(|| fixture.root.join("ready-second").exists());
-    wait(|| {
-        service.status()["observations"]
+    wait::ready(&mut second, &fixture, "second");
+    wait::observation(&mut second, &service, "source_session_conflict", |state| {
+        state["observations"]
             .as_array()
             .unwrap()
             .iter()

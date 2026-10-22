@@ -16,6 +16,8 @@ use std::{
 };
 
 pub const TIMEOUT: Duration = Duration::from_secs(12);
+// A held Agent must outlive readiness, observation and a second concurrent run.
+const HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 pub const LITERAL: &str = "literal ; $(touch NEVER) $HOME ' spaces";
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -113,7 +115,11 @@ impl Fixture {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.root.join("home"))
-            .env("FAKE_ROOT", &self.root);
+            .env("FAKE_ROOT", &self.root)
+            .env(
+                "FAKE_HOLD_TIMEOUT_SECONDS",
+                HOLD_TIMEOUT.as_secs().to_string(),
+            );
         command
     }
     pub fn launch(&self, native: &[&str], settings: Option<&Path>) -> Command {
@@ -238,6 +244,44 @@ impl Process {
     pub fn signal(&self, signal: i32) {
         // SAFETY: this unreaped Child reserves its PID until finish or Drop.
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
+    }
+    // Lifecycle tests inspect live processes; other harness consumers only finish them.
+    #[allow(dead_code)]
+    pub fn wait_until(
+        &mut self,
+        phase: &str,
+        timeout: Duration,
+        mut inspect: impl FnMut(Instant) -> Result<(bool, String), String>,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last = String::from("not sampled");
+        let reason = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break format!("child exited: {status}"),
+                Ok(None) => {}
+                Err(error) => break format!("cannot inspect child: {error}"),
+            }
+            if Instant::now() >= deadline {
+                break String::from("deadline exceeded");
+            }
+            match inspect(deadline) {
+                Ok((ready, state)) => {
+                    last = state;
+                    if ready && Instant::now() < deadline {
+                        return Ok(());
+                    }
+                }
+                Err(error) => break format!("inspection failed: {error}"),
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        Err(format!(
+            "{phase}: {reason} after {:?} (limit {timeout:?}); last state: {last}\nprocess: {}\nstdout:\n{}\nstderr:\n{}",
+            started.elapsed(), self.value,
+            fs::read_to_string(&self.stdout).unwrap_or_else(|error| format!("unreadable: {error}")),
+            fs::read_to_string(&self.stderr).unwrap_or_else(|error| format!("unreadable: {error}")),
+        ))
     }
     pub fn finish(mut self) -> Output {
         let deadline = Instant::now() + TIMEOUT;

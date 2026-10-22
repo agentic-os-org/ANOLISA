@@ -88,10 +88,12 @@ if not blocked:
     hooks("PostToolUse")
 if "--hold" in arguments:
     (root / f"ready-{run_id}").write_text("waiting")
-    deadline = time.monotonic() + 5
+    # The parent releases after assertions, possibly after another Agent starts.
+    deadline = time.monotonic() + int(os.environ["FAKE_HOLD_TIMEOUT_SECONDS"])
     while not (root / f"release-{run_id}").exists() and time.monotonic() < deadline:
         time.sleep(0.005)
     if not (root / f"release-{run_id}").exists():
+        print(f"fixture timed out waiting for release-{run_id}", file=sys.stderr, flush=True)
         sys.exit(91)
 print(json.dumps({"events": results, "tool_executed": not blocked, "query": query}), flush=True)
 if "--agent-signal" in arguments:
