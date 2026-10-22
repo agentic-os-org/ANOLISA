@@ -12,6 +12,7 @@ aw-contracts = { workspace = true }
 aw-exec = { workspace = true }
 aw-provider = { workspace = true }
 libc = { workspace = true }
+reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

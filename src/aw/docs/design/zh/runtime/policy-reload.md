@@ -5,7 +5,8 @@
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
 运行时路径通过 `aw run --reloadable` 显式启用，首批固定 Qoder 1.1.73 TUI 和
 QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / bundled Worker
-1.1.74。外部接入和 steer 仍在规划中。
+1.1.74。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
+外部接入和 steer 仍在规划中。
 普通 `aw run` 保留现有注册路径。
 
 ## Qoder SDK 请求准入
@@ -74,8 +75,8 @@ aw validate --config next.yaml --against current.yaml
 
 `aw run --config current.yaml --agent TARGET --reloadable` 即使默认没有用户 Hook，
 也会预装稳定回调。`aw status` 返回实例 ID、激活策略版本、就绪、请求/工具数量和进程元数据。
-通过 `aw update --config current.yaml --agent TARGET --policy next.yaml` 定位原服务，
-选择目标的唯一实例并读取当前版本。多个匹配要求 `--instance`；`--socket` 和
+通过 `aw update --config current.yaml --agent TARGET` 应用同一份已编辑的配置，
+选择目标的唯一实例并读取当前版本；保留独立 `--policy next.yaml` 形式。多个匹配要求 `--instance`；`--socket` 和
 `--expected-revision` 用于显式定位及指定并发前置版本。查询到的版本仍约束激活，冲突不自动重试。
 不要求用户组装内部回调。
 仅修改配置文件不会激活。
@@ -105,9 +106,24 @@ AW 事件数或工具数为零不代表完整请求空闲；模型等待仍为 b
 原始回调关联声明跨版本保留，旧回调不能重新取得预算。事件证据使用所属 Host 的版本及
 策略约束，不再使用服务启动配置。
 
-本地协议为 `aw-service/v1alpha5`，旧 daemon/binding 通过版本和服务代次检查显式拒绝。
+本地协议为 `aw-service/v1alpha6`，旧 daemon/binding 通过版本和服务代次检查显式拒绝。
 进程关联不依赖可选观测，记录 root PID、启动 ticks、UID、PID namespace，交叉确认桥接
 进程祖先，并在激活前重新检查生命周期。审计保留关联与切换，不记录 Provider 配置值。
+
+
+CLI 在 reloadable 启动或原生连接时，记录规范配置路径、socket 和原服务身份。
+私有元数据按路径摘要保存在 `$XDG_RUNTIME_DIR/aw/connections`，未设置时使用
+`/tmp/aw-UID/connections`，不包含策略或凭据内容。原子替换用户文件不会改变连接。
+status、detach 和 update 使用记录的身份，不根据候选配置的 endpoint 或摘要重新选服务。
+代次过期或记录权限不安全时明确失败。`aw service stop --config` 删除对应连接记录；
+私有锁文件保留到运行时目录清理，避免并发锁 inode 被替换。新的显式 attach 可以接入重启后的
+服务，并在原生 readiness 之后、报告成功之前应用当前期望策略。每次 `aw run` 都在选择
+服务前检查已有连接。修改文件后重新启动需要先停止记录中的服务；活动实例使用
+`aw update`。原服务停止后，显式启动会刷新已有连接。没有连接记录的普通启动沿用原路径。
+
+用户只维护一份期望配置。文件编辑属于离线操作；更新失败或 busy 时，内存中的旧策略
+保持生效，不回写用户文件。现有服务快照和策略版本校验不变，不新增服务 RPC、
+每 session 策略语义或自动重试。
 
 ### 更新权限与审计
 
@@ -132,7 +148,7 @@ Hook 不追溯修改。pending/accepted 与 active 分开，实际切换后才�
 
 首个运行时版本不要求 steer 队列、自动延迟激活、空闲轮询推断或新增通用 Hook 事件。
 
-## Qoder 稳定桥接与后续旁路接入
+## Qoder 稳定桥接与外部接入
 
 热更新实例通过临时 `--settings` 注册稳定桥接；后续策略变化发生在 AW，不依赖原生文件监听。
 固定 TUI 入口通过 SessionStart、UserPromptSubmit 和 idle_prompt Notification 报告边界。
@@ -140,17 +156,18 @@ Stop Hook 可以要求继续运行，因此 Stop 不作为空闲确认。工具�
 生命周期，不增加 Provider 事件。缺少空闲通知时保守保持 busy。
 普通 print/TUI 启动保持不变；print 不作为可复用热更新宿主。
 
-外部接入需要使用支持 Hook 重载的原生 settings 来源。要求验证版本与入口，并使用
-独占配置作用域：共享 HOME 或项目 settings 不能建立精确到 PID 的接入。
-注册前检查目录信任、Hook 禁用状态和配置来源。保留其他 Hook 与并发编辑；
-detach 只删除 AW 拥有的条目，不能恢复整份旧 settings。
+外部接入使用独占 HOME 和项目作用域中的原生用户 settings，复用稳定路由。
+SessionStart 已发生，因此通过 `ConfigChange` 确认：有限次数的后续配置变更触发新
+注册回调，在用户输入前核验来源路径和原生进程，激活 Ready 并写入带 nonce 的凭据。
+该确认回调失败不会否决无关的 settings 修改；原生工作目录信任仍由调用者确认。
 
-settings 写入不等于就绪。需要与目标进程关联的握手，并单独验证原生采纳。
-成功的 `PostToolUse` 保留现有策略执行路径。
-生命周期通知不会自动扩展结构化 Provider 事件目录。
-print 与 TUI 必须分别进行固定版本原生验收。
+安装将所属配置组合并到最新 settings。移除先通过 Unbind 原子检查完整请求空闲状态并
+关闭服务准入，再将所属工具和生命周期路由替换为临时确认路由。原生采纳该路由证明
+工具路由已移除，随后删除确认路由和私有绑定产物。用户配置组与其他字段保留，不恢复
+过期的整份配置快照。发布时发现并发写入会保留被交换的文件供检查，并明确报错。
+新创建的原生 settings 文件在移除后保留为空文档。
 
-## QwenPaw 稳定桥接与后续旁路接入
+## QwenPaw 稳定桥接与外部接入
 
 预装一个稳定 middleware 桥接。`on_reply` 跟踪完整请求及模型等待，`on_acting` 跟踪实际
 工具 generator。回调从 AW 获取激活计划，保留原生调度、拒绝和最终结果替换。
@@ -163,13 +180,15 @@ ERROR/INTERRUPTED 片段就停止拉取，因此这些输出须等正常耗尽�
 结束时应使用新实例。
 外部实例通过目标 App 的插件管理接口接入，确认 endpoint、工作目录和执行进程的关联。
 
-用插件配置或受保护的本地描述文件发现桥接；已启动 App 不能继承后来由 launcher
-设置的 `AW_NATIVE_CONFIG`。新增独立于 startup Hook 的热安装确认，区分插件已安装、
-运行时注册已提交和请求已接入。不能假定插件安装会改变正在执行请求的 middleware；
-已有会话的后续请求需要单独验证。
+热安装复用固定版本的现有 AW 插件及 startup-ready 回调。2.2.2b4 原生插件 API
+在热安装时会执行 startup 回调；安装目录中的私有 `aw-attachment.json` 描述文件
+解决运行中 App 无法继承新增环境变量的问题。CLI 验证所选 App PID 拥有 loopback
+端口，并要求该 PID 返回带 nonce 的凭据；仅 API 成功不能证明回调成功。
+原生验收覆盖已有 Session 的后续请求和第二个独立 profile。
 
-当前 AW 固定 QwenPaw 2.2.2b4 / AgentScope 2.0.9。启用热安装前选择并验收精确版本组合，
-不能直接放宽版本检查。移除 AW 注册前等待现有调用结束，保留外部管理的进程。
+移除先检查完整原生空闲准入，再调用原生卸载 API，核验已安装描述文件和资产仍属于
+本次挂载，并保留外部 App。不会替换已为请求组装的 middleware；首次挂载要求 App
+位于首请求前的空闲状态。
 
 ## 进程关联与所有权
 
@@ -178,8 +197,9 @@ ERROR/INTERRUPTED 片段就停止拉取，因此这些输出须等正常耗尽�
 程序名；需要时用 pidfd 跟踪生命周期。这是同用户进程关联，不是跨用户认证边界。
 
 `aw run` 继续管理自己的原生子进程、信号转发和回收。外部 attach 仅管理所属注册、
-binding 和回调资源；detach 不终止 Agent。进程退出使关联失效并释放所属资源，
-不修改用户配置或其他实例。
+binding 和回调资源；detach 不终止 Agent。进程退出使关联失效。首版要求调用者停止
+进程前显式 detach，不增加进程监督或自动挂载回收器。失败的 detach 保留所有权记录
+供重试；进程或服务代次已替换时拒绝清理。
 
 ## 交付与回归验收
 
@@ -188,7 +208,8 @@ binding 和回调资源；detach 不终止 Agent。进程退出使关联失效�
    CLI 接入回归和 AgentScope middleware 测试覆盖这些契约；原生清单要求独立的
    Qoder 1.1.73 TUI 启动及派发前空闲切换用例。完整的托管 TUI 工具轮次采纳及 QwenPaw App
    热更新仍需独立验收，并保留 1.1.64 print 测试。
-3. 在作用域注册验收后提供这两个框架的原生 attach/detach。
+3. 通过 `aw install --pid` / `--remove` 提供原生 attach/detach，覆盖作用域注册、
+   原生确认及 PID/start ticks 不变验收。
 4. 逐步扩展其他 Adapter。OpenClaw/Hermes 及 Pi/Claude SDK/AgentScope 是后续候选；
    热更新和旁路接入是独立能力，SDK 接入可以要求预装桥接。
 

@@ -135,6 +135,17 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     }
     let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
+    let configuration = Path::new(args.required("--config")?);
+    let remember_connection =
+        args.flags.contains_key("--reloadable") || super::connection::recorded(configuration)?;
+    if let Some((client, _)) =
+        super::connection::selected(configuration, Instant::now() + Duration::from_secs(5), true)?
+    {
+        use sha2::{Digest, Sha256};
+        if client.identity().config_revision != format!("{:x}", Sha256::digest(&bytes)) {
+            return Err("configuration path already selects another service; use aw update for its active instances or stop it before launching the edited configuration".into());
+        }
+    }
     let service = launch_service::ensure_service(
         &bytes,
         &executable,
@@ -142,6 +153,9 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     )?;
     if let Some(exit) = interrupted() {
         return Ok(exit);
+    }
+    if remember_connection {
+        super::connection::remember(configuration, &service.paths.socket, &service.client)?;
     }
     let artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");

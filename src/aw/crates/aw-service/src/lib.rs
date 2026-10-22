@@ -15,6 +15,7 @@ pub mod inspect;
 pub mod launch_service;
 
 pub use client::Client;
+pub use runtime::process::Process as ProcessIdentity;
 pub use server::Server;
 pub use wire::{
     Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation, Request, Response,

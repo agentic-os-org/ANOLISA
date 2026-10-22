@@ -51,7 +51,8 @@ aw run --config "$HOME/aw/aw.yaml" --agent qoder
 通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
 AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / Worker 1.1.74
 预装实验性空闲更新桥接。
-`aw update --config current.yaml --agent TARGET --policy next.yaml` 选择目标的唯一实例，
+直接编辑同一份配置文件，再显式应用。
+`aw update --config aw.yaml --agent TARGET` 选择目标的唯一实例，
 保留宿主进程，忙碌实例返回 busy；见[预热实例更新](../../docs/user-guide/zh/aw/configuration.md#更新预热实例)。
 
 退出 Agent 后，本地服务仍可查询，使用结束后显式停止。
@@ -85,6 +86,12 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
 后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
+
+对于独立启动的 Qoder TUI 或 QwenPaw App，在首请求前执行
+`aw agent connect --config current.yaml --agent TARGET --pid PID`；添加 `--remove`
+可在空闲时移除挂载。原生启动与进程生命周期仍由调用者管理。QwenPaw peer 的启动
+profile 输入必须能排除原生 `.env` 的覆盖；无法确认的 peer 会阻止挂载。独占 profile、加载确认
+和清理要求见[原生接入](../../docs/user-guide/zh/aw/configuration.md#接入已启动的原生进程)。
 
 ## 文档导航
 

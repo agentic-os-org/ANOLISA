@@ -143,6 +143,15 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
 
 #[test]
 fn existing_queries_update_only_after_native_cleanup() {
+    reload_queries(false);
+}
+
+#[test]
+fn single_configuration_keeps_sdk_updates_busy_checks_and_service_identity() {
+    reload_queries(true);
+}
+
+fn reload_queries(single_configuration: bool) {
     for failure in [false, true] {
         let f = Fixture::new();
         let mut candidate = setup(&f);
@@ -174,6 +183,9 @@ fn existing_queries_update_only_after_native_cleanup() {
         let service = Service::start(&f, &initial);
         let mut command = launch(&f);
         command.arg("--reloadable");
+        if single_configuration {
+            command.env("QODER_SINGLE_CONFIG", "1");
+        }
         if failure {
             command.env("QODER_RELOAD_FAILURE", "1");
         }

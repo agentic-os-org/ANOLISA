@@ -6,8 +6,9 @@ AW can explicitly update the policy of an idle instance launched with a stable
 bridge. The native host process stays alive; busy instances reject the update.
 The runtime path is opt-in through `aw run --reloadable`, initially pinned to
 Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App and Qoder SDK
-1.0.54 / bundled Worker 1.1.74. External attachment
-and steer remain planned. Ordinary `aw run` keeps its existing registration path.
+1.0.54 / bundled Worker 1.1.74. External attachment supports the TUI and App
+through `aw agent connect --pid PID`; SDK daemon attachment and steer remain
+planned. Ordinary `aw run` keeps its existing registration path.
 
 ## Qoder SDK request admission
 
@@ -96,12 +97,32 @@ framework; this operation changes only the AW policy fields listed above.
 `aw run --config current.yaml --agent TARGET --reloadable` preinstalls stable
 callbacks even when the default policy has no user hooks. `aw status` reports
 instance IDs, active policy revisions, readiness, request/tool counts and process
-metadata. Use `aw update --config current.yaml --agent TARGET --policy next.yaml`
-to resolve the original service, select the unique target instance and read its
-revision. Multiple matches require `--instance`; `--socket` and
+metadata. Use `aw update --config current.yaml --agent TARGET`
+to apply the same edited document, select the unique target instance and read its
+revision. The separate `--policy next.yaml` form remains compatible. Multiple matches require `--instance`; `--socket` and
 `--expected-revision` allow explicit selection and concurrency preconditions.
 The observed revision still guards activation; conflicts never retry silently.
 No internal callback assembly is required. Editing a file alone never activates it.
+
+The CLI records the canonical configuration path, socket and original service
+identity at reloadable launch or native connection. The private metadata lives
+under `$XDG_RUNTIME_DIR/aw/connections` (or `/tmp/aw-UID/connections`), keyed by the
+path digest; it contains no policy or credential bytes. Atomic replacement of the
+user's file preserves the connection. Status, detach and update use the recorded
+identity, never a candidate's endpoint or digest. Stale generations and unsafe
+receipts fail visibly. `aw service stop --config` removes the matching connection
+receipt; its private lock inode remains until runtime-directory cleanup. A new
+explicit attach can adopt a restarted service and applies the current desired
+policy after native readiness and before reporting success. Every `aw run`
+checks an existing connection before selecting a service. A changed-file relaunch
+requires stopping the recorded service first; use `aw update` for active instances.
+After that service stops, an explicit launch refreshes the existing association.
+An ordinary launch without an existing association keeps its original launch path.
+
+Users maintain one desired document. Editing is offline; failed/busy updates
+retain the old in-memory policy without rewriting the user's desired file. The
+existing service snapshot and policy revision checks remain unchanged. No new
+service RPC, per-session policy semantics or automatic update retry is introduced.
 
 The service generation and bootstrap configuration digest remain fixed. Updates
 address an existing instance without resolving a service from the candidate's
@@ -139,7 +160,7 @@ switch. Original callback correlations remain claimed across revisions, so old
 callbacks cannot acquire a fresh execution budget. Event evidence uses the
 owning Host's revision and policy constraints, not the bootstrap configuration.
 
-The wire protocol is `aw-service/v1alpha5`. Old daemons and bindings fail explicit
+The wire protocol is `aw-service/v1alpha6`. Old daemons and bindings fail explicit
 version/generation checks. Process association is independent of optional
 observation; it records root PID, start ticks, UID and PID namespace, corroborates
 bridge ancestry and rechecks lifetime before activation. Audit stores association
@@ -178,7 +199,7 @@ activation only after the switch.
 No steer queue, automatic deferred activation, idle polling heuristic or new
 generic Hook event is required by the first runtime release.
 
-## Qoder stable bridge and future attachment
+## Qoder stable bridge and external attachment
 
 Reloadable launches retain temporary `--settings` for stable bridge registration;
 policy changes happen in AW and do not rely on native settings-file watching.
@@ -188,19 +209,24 @@ Agent. Tool failures and permission denial close tool lifetimes without adding
 new Provider events. Missing idle notifications conservatively retain busy.
 Ordinary print/TUI launches remain unchanged; print is not a reusable reload host.
 
-External attachment instead needs a native settings source that reloads Hooks.
-Require a verified version/entrypoint and an exclusive configuration scope:
-shared HOME or project settings cannot establish PID-specific attachment.
-Check trust, disabled Hooks and configuration sources before registration.
-Preserve unrelated Hooks and concurrent edits; detach removes only AW-owned
-entries rather than restoring an entire old settings file.
+External attachment uses the native user settings source with an exclusive HOME
+and project scope. It reuses the stable routes but confirms registration through
+`ConfigChange`, because SessionStart has already happened. A bounded second
+configuration change invokes the newly registered callback before user input.
+The callback corroborates the source path and native process, activates Ready
+and writes a nonce-bearing receipt. Its failure never vetoes unrelated settings
+edits. Native workspace trust still requires the caller's native approval.
 
-Writing settings is not readiness. Require a correlated handshake with the
-target process and separate native adoption evidence. Successful `PostToolUse` retains the existing policy path. Lifecycle-only notifications
-do not expand the structured Provider event catalog automatically.
-Print and TUI need separate pinned native acceptance.
+Installation merges owned groups into the latest settings. Removal first uses
+Unbind's atomic whole-request idle check and closes service admission, then
+replaces owned tool/lifecycle groups with a temporary confirmation route. Native
+adoption of that route proves the tool groups have been removed. The final
+confirmation route and private binding artifacts are then removed. User groups
+and unrelated fields survive; no stale whole-file snapshot is restored.
+Publication retains a displaced racing write for inspection and fails visibly.
+A newly created empty native settings document is retained after removal.
 
-## QwenPaw stable bridge and future attachment
+## QwenPaw stable bridge and external attachment
 
 Preinstall one stable middleware bridge. `on_reply` tracks the complete native
 request, including model waits; `on_acting` tracks the actual tool generator.
@@ -218,17 +244,18 @@ Early closure, cancellation and exceptions before confirmed completion retain bu
 instance when completion cannot be established. For external instances, use the target App's plugin-management
 interface and correlate its endpoint, working directory and executing process.
 
-Use plugin configuration or a protected local descriptor for bridge discovery.
-A running App cannot inherit `AW_NATIVE_CONFIG` set by a later launcher.
-Add a hot-install acknowledgement independent of the startup Hook. Distinguish
-plugin installed, runtime registration committed and request interception.
-Middleware constructed for an active request must not be assumed to change when
-a plugin is installed; verify subsequent requests in existing sessions separately.
+Hot installation uses the same pinned AW plugin and startup-ready callback. The
+2.2.2b4 native plugin API invokes startup callbacks during hot install. An owned
+`aw-attachment.json` descriptor beside the installed plugin replaces the need
+for post-start environment injection. The CLI verifies that the selected App PID
+owns its loopback port; success also requires that PID's nonce-bearing receipt.
+API success alone does not prove callback success. Existing-Session subsequent
+requests and a second independent profile are covered by native acceptance.
 
-Current AW pins QwenPaw 2.2.2b4 / AgentScope 2.0.9. Select and accept a precise
-version pair before enabling hot installation; do not simply loosen version
-checks. Drain existing invocations before removing AW-owned registrations and
-leave externally supervised processes running.
+Removal checks complete native idle admission before invoking the native unload
+API, verifies the installed descriptor and assets still belong to this attachment,
+and preserves the externally owned App. It does not replace middleware already
+assembled for a request; first attachment requires a quiescent pre-request App.
 
 ## Process association and ownership
 
@@ -240,8 +267,10 @@ same-user process association, not a cross-user authentication boundary.
 
 `aw run` continues owning its native child and signal/reaping lifecycle. External
 attachment owns only its registration, binding and callback resources. Detach
-must not kill that agent. Process exit invalidates the association and releases
-owned resources without touching user configuration or other instances.
+must not kill that agent. Process exit invalidates the association. First release requires explicit detach
+before the caller stops its process; it does not add a process supervisor or
+automatic attachment garbage collector. Failed detach retains the ownership
+record for retry; a replaced process or service generation is rejected.
 
 ## Delivery and regression acceptance
 
@@ -252,7 +281,8 @@ owned resources without touching user configuration or other instances.
    the native inventory requires a separate Qoder 1.1.73 TUI startup/idle-switch
    case before dispatch. Full hosted TUI tool-turn adoption and QwenPaw App
    reload acceptance remain separate checks. The 1.1.64 print lane is retained.
-3. Native attach/detach for those frameworks after scoped registration acceptance.
+3. Native attach/detach through `aw install --pid` / `--remove`, with scoped
+   registration, native confirmation and unchanged PID/start-ticks acceptance.
 4. Incremental Adapter support for other frameworks. OpenClaw/Hermes and then
    Pi/Claude SDK/AgentScope are candidates; reload and attachment are independent
    capabilities, and SDK integrations may require a preinstalled bridge.

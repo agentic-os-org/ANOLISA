@@ -197,6 +197,20 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(config) = self.root.join("aw.json").canonicalize() {
+            let key = format!("{:x}", Sha256::digest(config.as_os_str().as_bytes()));
+            let directory = std::path::PathBuf::from(format!("/tmp/aw-{}/connections", unsafe {
+                libc::geteuid()
+            }));
+            for suffix in ["json", "lock"] {
+                let path = directory.join(format!("{key}.{suffix}"));
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
         if let Some(profile) = &self.native_profile {
             fs::remove_dir_all(profile).unwrap();
         }
@@ -330,18 +344,21 @@ pub struct Service {
 }
 impl Service {
     pub fn start(fixture: &Fixture, document: &Value) -> Self {
+        Self::start_at(fixture, document, &fixture.root.join("state"))
+    }
+    pub fn start_at(fixture: &Fixture, document: &Value, state: &Path) -> Self {
         fixture.save(document);
         let mut command = fixture.command();
         command
             .args(["serve", "--config"])
             .arg(fixture.root.join("aw.json"))
             .arg("--state-dir")
-            .arg(fixture.root.join("state"));
+            .arg(state);
         let process = Process::spawn(fixture, command);
         let deadline = Instant::now() + TIMEOUT;
         let client = loop {
             if let Ok(client) = Client::connect(
-                fixture.root.join("state/aw.sock"),
+                state.join("aw.sock"),
                 Instant::now() + Duration::from_millis(100),
             ) {
                 break client;

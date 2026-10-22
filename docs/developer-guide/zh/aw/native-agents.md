@@ -336,7 +336,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 
 ## 升级服务
 
-本版本使用本地协议 `aw-service/v1alpha5`。旧版 daemon 会在 Agent 绑定和回调前
+本版本使用本地协议 `aw-service/v1alpha6`。旧版 daemon 会在 Agent 绑定和回调前
 被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
 **旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。

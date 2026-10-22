@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha5";
+pub const VERSION: &str = "aw-service/v1alpha6";
 
 /// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -252,7 +252,7 @@ pub enum Operation {
         /// Original native callback bytes used to corroborate the identity.
         native_input: Vec<u8>,
     },
-    /// Release a binding; active events must be closed first.
+    /// Release an idle binding; reloadable instances reject active native requests/tools.
     Unbind {
         /// Service-issued identifier.
         instance_id: String,

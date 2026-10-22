@@ -42,7 +42,7 @@ maintained separately under `providers/`.
 | `aw-package` | Local package database, plans, durable transactions and configuration APIs; `aw-build` | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
-on `aw-service`; CLI integration tests also use `aw-contracts`. Libraries do not
+on `aw-service`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
 depend on `aw-cli`. The `aw` frontend calls package APIs in-process. The standalone
 `aw-package` executable has been removed; the crate and `aw-build` remain.
 
@@ -201,3 +201,18 @@ transports lifecycle frames through the existing bridge RPC. See the
 [policy reload contract](runtime/policy-reload.md#qoder-sdk-request-admission).
 
 [Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi and Claude hosts.
+
+## Caller-owned native attachment
+
+`aw install --pid` reuses the existing configuration and Adapter preparation,
+Bind/Host admission, EnableReload, AssociateProcess and stable dispatch. The CLI
+owns the private attachment record and service binding. `aw-adapter` owns Qoder
+settings merging/confirmation and QwenPaw plugin API installation/removal;
+its bounded loopback HTTP transport uses the workspace's existing `reqwest`.
+The existing service process-identity helper is shared with the CLI.
+
+The native callback confirms readiness before the caller dispatches input.
+Later `aw update` uses the existing idle activation gate. `install --remove`
+uses Unbind to close complete request/tool admission atomically, then removes
+owned native registration and private artifacts. External processes are neither
+launched nor signalled by this path. Ordinary `aw run` keeps child supervision.

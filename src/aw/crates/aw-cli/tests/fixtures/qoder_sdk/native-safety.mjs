@@ -52,7 +52,7 @@ export async function safety({ session, turn, prompt, results, root, reloadable,
         observed.push(input);
         return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
       }] }] } });
-      const output = await prompt(q, `Call ${tool} exactly once with this JSON: ${JSON.stringify(input)}. If denied, report the denial and stop. Do not retry or substitute arguments.`);
+      const output = await prompt(q, `Call ${tool} exactly once with this JSON: ${JSON.stringify(input)}. Use only the JSON properties shown; do not include schema metadata such as additionalProperties. If denied, report the denial and stop. Do not retry or substitute arguments.`);
       assert(observed.some((e) => e.tool_name === tool && (tool === "CreateGoal" || (input.isolation
         ? e.tool_input.isolation === "worktree" : e.tool_input.run_in_background === true))), "model did not exercise the requested guard");
       assert(!fs.existsSync("background.txt"));

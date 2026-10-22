@@ -54,6 +54,9 @@ impl HookBinding {
 }
 
 pub(super) fn install(args: &Arguments) -> Result<Exit> {
+    if args.flags.contains_key("--pid") || args.flags.contains_key("--remove") {
+        return super::attachment::install(args);
+    }
     args.check(&["--config", "--agent", "--native-profile"], false)?;
     let bytes = read_file(args.required("--config")?, 4 * 1024 * 1024)?;
     let config = aw_config::Validator::new()?.parse(&bytes)?;

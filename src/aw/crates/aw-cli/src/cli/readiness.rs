@@ -89,7 +89,7 @@ fn wait(
     }
 }
 
-fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
+pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(&ready.path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
