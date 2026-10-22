@@ -240,6 +240,12 @@ class GateTests(GateFixture):
             ),
             ("aw-adapter", self.root / "crates/aw-adapter",
              ["aw-config", "aw-contracts", "aw-exec", "aw-provider", "serde_json"]),
+            (
+                "aw-cli", self.root / "crates/aw-cli",
+                ["aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
+                 "aw-provider", "aw-service", "libc", "serde", "serde_json",
+                 "serde_yaml_ng", "sha2", "tempfile"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -291,10 +297,21 @@ class GateTests(GateFixture):
             (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),
             (7, "asc-daemon-client"), (7, "aw-core"),
             (10, "aw-service"), (10, "aw-host"), (10, "aw-provider-tokenless"),
+            (11, "aw-provider-tokenless"), (11, "aw-provider-sec-core"),
         ):
             invalid = deepcopy(metadata)
             invalid["packages"][package]["dependencies"].append({"name": dependency})
             with self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
+        for package in metadata["packages"]:
+            if package["name"] == "aw-cli":
+                continue
+            invalid = deepcopy(metadata)
+            library = next(p for p in invalid["packages"] if p["name"] == package["name"])
+            library["dependencies"].append({"name": "aw-cli"})
+            with self.subTest(library=package["name"]), self.assertRaisesRegex(
+                ValueError, "unreviewed dependency aw-cli"
+            ):
                 gate.structure(invalid, self.root)
         invalid = deepcopy(metadata)
         invalid["packages"][1]["dependencies"][0]["path"] = str(self.root / "other-contracts")

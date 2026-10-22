@@ -12,7 +12,7 @@ environment snapshot to `invoke_step`; existing requests may omit it.
 
 Native dialects, callback interpretation and Python/JavaScript assets live in
 `crates/aw-adapter/`. The CLI and service consume this internal library; CLI
-arguments, RPCs, signals and launch-directory lifetime remain in `aw-service`.
+arguments, RPC orchestration, signals and launch-directory lifetime belong to `aw-cli`.
 See [Architecture boundaries](architecture-boundaries.md).
 
 ## Launch lifecycle

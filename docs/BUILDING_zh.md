@@ -134,7 +134,7 @@ daemon，默认 user profile 不会创建 user service。
 
 | 组件 | 构建 | 测试和质量门禁 |
 |------|------|----------------|
-| [AW](developer-guide/zh/aw/building.md) | `cd src/aw && cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
+| [AW](developer-guide/zh/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
 | [copilot-shell](../deprecated/copilot-shell/README_zh.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README_zh.md) | `cd src/os-skills && make build` | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
 | [agent-sec-core](../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |

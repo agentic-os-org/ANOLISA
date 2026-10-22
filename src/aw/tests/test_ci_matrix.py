@@ -15,18 +15,18 @@ from check_matrix import END, START, table, validate
 class InventoryTests(GateFixture):
     def test_build_once_and_reject_missing_empty_ignored_or_failed_targets(self) -> None:
         metadata = {
-            "workspace_members": ["service"],
+            "workspace_members": ["cli"],
             "packages": [
                 {
-                    "id": "service",
-                    "name": "aw-service",
+                    "id": "cli",
+                    "name": "aw-cli",
                     "targets": [{"name": "new_agent", "kind": ["test"]}],
                 }
             ],
         }
         artifact = {
             "reason": "compiler-artifact",
-            "package_id": "service",
+            "package_id": "cli",
             "target": metadata["packages"][0]["targets"][0],
             "profile": {"test": True},
             "executable": "/fixture/new_agent",
@@ -62,7 +62,7 @@ class InventoryTests(GateFixture):
 
             with self.subTest(mode=mode):
                 opt_in = (
-                    frozenset({"aw-service/test/new_agent"})
+                    frozenset({"aw-cli/test/new_agent"})
                     if mode.startswith("opt-in")
                     else frozenset()
                 )
@@ -70,7 +70,7 @@ class InventoryTests(GateFixture):
                     self.assertEqual(
                         collect(self.root, metadata, run, opt_in),
                         {
-                            "aw-service/test/new_agent": (
+                            "aw-cli/test/new_agent": (
                                 {"regression"} if mode == "valid" else set()
                             ),
                         },

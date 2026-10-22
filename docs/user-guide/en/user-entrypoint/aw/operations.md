@@ -27,7 +27,7 @@ Uninstall with the prefix used during installation. Use the command below for a 
 omit `sudo` for a personal install.
 
 ```bash
-sudo "$AW_PREFIX/bin/aw-package" uninstall --prefix "$AW_PREFIX"
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
 ```
 
 Uninstall preserves external configuration, audit history and native Agent data. Modified or missing

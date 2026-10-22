@@ -1,4 +1,4 @@
-//! User-facing offline editing and failure-preserving CLI contracts.
+//! Compatibility entrypoint's offline editing and failure-preserving CLI contracts.
 
 use aw_package::{Policy, Settings};
 use serde_json::{json, Value};

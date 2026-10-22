@@ -17,7 +17,7 @@
           "name": "middleware",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/agentscope/middleware.py"
+            "crates/aw-cli/tests/fixtures/agentscope/middleware.py"
           ],
           "timeout_seconds": 120,
           "report": "unittest",
@@ -27,7 +27,7 @@
           "name": "native",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/agentscope_native.py",
+            "crates/aw-cli/tests/agentscope_native.py",
             "--aw",
             "{bin}/aw",
             "--output",
@@ -53,7 +53,7 @@
           "name": "cancellation",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/agentscope_cancellation.py",
+            "crates/aw-cli/tests/agentscope_cancellation.py",
             "--aw",
             "{bin}/aw",
             "--output",
@@ -81,7 +81,7 @@
           "name": "arguments",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/agentscope_arguments.py",
+            "crates/aw-cli/tests/agentscope_arguments.py",
             "--aw",
             "{bin}/aw",
             "--output",
@@ -112,7 +112,7 @@
           "name": "lifecycle",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/agentscope_lifecycle.py",
+            "crates/aw-cli/tests/agentscope_lifecycle.py",
             "--aw",
             "{bin}/aw",
             "--tokenless",
@@ -239,7 +239,7 @@
           "name": "dispatcher",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/hermes/native_contract.py",
+            "crates/aw-cli/tests/fixtures/hermes/native_contract.py",
             "--source",
             "{source}",
             "--plugin",
@@ -253,7 +253,7 @@
           "name": "chat",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/hermes/live_cli.py",
+            "crates/aw-cli/tests/fixtures/hermes/live_cli.py",
             "--aw",
             "{bin}/aw",
             "--provider",
@@ -311,7 +311,7 @@
             "node",
             "--test",
             "--test-reporter=tap",
-            "crates/aw-service/tests/openclaw-native.mjs"
+            "crates/aw-cli/tests/openclaw-native.mjs"
           ],
           "timeout_seconds": 120,
           "report": "tap",
@@ -324,14 +324,14 @@
       "python": "3.12.3",
       "mode": "automated",
       "versions": {},
-      "npm_fixture": "crates/aw-service/tests/fixtures/pi",
+      "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
       "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures.",
       "cases": [
         {
           "name": "public-factory",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/pi/public-smoke.py",
+            "crates/aw-cli/tests/fixtures/pi/public-smoke.py",
             "--aw",
             "{bin}/aw",
             "--root",
@@ -394,7 +394,7 @@
           "name": "tokenless",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/pi/tokenless-smoke.py",
+            "crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py",
             "--aw",
             "{bin}/aw",
             "--root",
@@ -446,7 +446,7 @@
           "name": "middleware",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py"
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_middleware.py"
           ],
           "timeout_seconds": 180,
           "report": "unittest",
@@ -456,7 +456,7 @@
           "name": "runtime-reload",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/qwenpaw/native_reload.py",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_reload.py",
             "--bin",
             "{bin}"
           ],
@@ -468,7 +468,7 @@
           "name": "app-reload",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/qwenpaw/native_app_reload.py",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_app_reload.py",
             "--bin",
             "{bin}",
             "--qwenpaw",
@@ -482,7 +482,7 @@
           "name": "sec-core",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/sec_core/native.py",
+            "crates/aw-cli/tests/fixtures/sec_core/native.py",
             "--agent",
             "qwenpaw",
             "--bin",
@@ -533,7 +533,7 @@
           "name": "sec-core",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/sec_core/native.py",
+            "crates/aw-cli/tests/fixtures/sec_core/native.py",
             "--agent",
             "qoder",
             "--bin",
@@ -574,7 +574,7 @@
           "name": "runtime-reload",
           "argv": [
             "{python}",
-            "crates/aw-service/tests/fixtures/qoder/reload.py",
+            "crates/aw-cli/tests/fixtures/qoder/reload.py",
             "--bin",
             "{bin}",
             "--output",

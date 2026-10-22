@@ -205,7 +205,7 @@ Qoder CLI separately and verify its version. From the repository root:
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 qodercli --version
 target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
@@ -524,7 +524,7 @@ interpreter to enter the same native CLI process, preserving its arguments and
 working directory. Native profile loading determines the effective
 `HERMES_SAFE_MODE`, including profile `.env` overrides; safe mode is rejected,
 and plugin registration is required before chat can dispatch tools.
-Initialize its profile and model account through Hermes first. `aw install` is an
+Initialize its profile and model account through Hermes first. `aw agent connect` is an
 explicit one-time installation of the native AW plugin in the selected profile.
 It saves the original configuration before enabling that plugin, retains unknown
 configuration fields, and refuses a conflicting non-AW plugin. The native YAML
@@ -563,7 +563,7 @@ query values such as `--query=--help` remain supported.
 An AW upgrade can change the bundled plugin bytes. If launch or installation
 reports a mismatched or incomplete plugin, stop Hermes sessions and plugin writers, review
 `<profile>/plugins/aw-native-hooks`, and move that directory to a backup outside
-`<profile>/plugins`. Rerun the same `aw install` command to install matching files;
+`<profile>/plugins`. Rerun the same `aw agent connect` command to install matching files;
 the saved directory remains available for inspection or rollback.
 
 An empty `providers` and `events` configuration launches with zero AW callbacks.
@@ -589,7 +589,7 @@ profile/worktree/resume switches and option abbreviations are unsupported. Event
 budgets are limited to 55,000 ms and must fit the native callback timeout.
 
 ```bash
-target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+target/debug/aw agent connect --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -694,7 +694,7 @@ The local endpoint is a same-user boundary, not a sandbox.
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
+| `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and AgentScope SDK reject this command |
 | `aw update --config CURRENT --agent TARGET --policy NEXT` | Update an opted-in idle instance; busy rejects without queuing |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
@@ -704,17 +704,20 @@ The local endpoint is a same-user boundary, not a sandbox.
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
 the implementation. This build implements Qoder CLI >=1.1.64, OpenClaw 2026.9.6,
 QwenPaw 2.2.2b4 / AgentScope 2.0.9, Hermes revision `952c941e` and explicit
-Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw install`
+Claude SDK 0.2.88, Pi SDK 0.84.2 and AgentScope SDK 2.0.6 workers. `aw agent connect`
 validates the configuration and dispatches to that adapter. Hermes supports
 persistent plugin installation; Qoder, OpenClaw, QwenPaw, Pi, Claude SDK and
 AgentScope SDK reject it.
 This command does not install AW packages or Agent software, start an Agent,
-or configure model credentials. `aw run` does not implicitly call `install`.
+or configure model credentials. `aw run` does not implicitly call `agent connect`.
+The legacy `aw install --config FILE --agent TARGET [--native-profile PROFILE]`
+syntax keeps the same native-registration behavior. Software installation uses
+`aw install --prefix ABS_DIR --bundle ABS_DIR`; the two option sets cannot be mixed.
 
 | Adapter-specific option | Command | Current support |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder: optional extra JSON settings merged with generated Hooks; the original file remains unchanged. OpenClaw: required existing native JSON configuration |
-| `--native-profile PROFILE` | `run`, `install` | Hermes: required existing absolute profile for `run` and `install`. Qoder and OpenClaw reject it |
+| `--native-profile PROFILE` | `run`, `agent connect` | Hermes: required existing absolute profile for `run` and `agent connect`. Qoder and OpenClaw reject it |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
@@ -722,7 +725,7 @@ alone does not enable them for a framework. Pi, Claude SDK and AgentScope SDK
 reject all these native override options. QwenPaw also rejects them and uses
 `QWENPAW_WORKING_DIR`. Pass
 supported AW options before `--`; arguments
-after it are forwarded literally to the Agent. `install` accepts no Agent
+after it are forwarded literally to the Agent. `agent connect` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.
 
 In a source checkout, use `target/debug/aw` for `aw`. `aw hook` is an internal
@@ -990,7 +993,7 @@ need an explicit integration design before using this restricted first bridge.
 Only one client can be created in each foreground worker.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
-`aw install` does not provide persistent installation for it, and all `--native-*`
+`aw agent connect` does not provide persistent installation for it, and all `--native-*`
 overrides are unsupported.
 
 ### Enable Bash PreTool and PostTool optimization

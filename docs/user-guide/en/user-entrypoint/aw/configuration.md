@@ -7,10 +7,10 @@ Model accounts remain in the Agent's own configuration. Complete [installation](
 
 ## Generate configuration
 
-Reuse the installation variables. `configure` does not overwrite files; see the next section to edit one.
+Reuse the installation variables. `config init` does not overwrite files; see the next section to edit one.
 
 ```bash
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
   --qoder "$AW_QODER"
 ```
@@ -33,20 +33,20 @@ the idle-update workflow below.
 ```bash
 aw stop --config "$AW_HOME/aw.yaml"
 cp "$AW_HOME/aw.yaml" "$AW_HOME/aw.yaml.bak"
-aw-package config show --config "$AW_HOME/aw.yaml"
+aw config show --config "$AW_HOME/aw.yaml"
 ```
 
-Edit YAML directly or use `aw-package config` to add and remove Providers and Hooks.
+Edit YAML directly or use `aw config` to add and remove Providers and Hooks.
 The file and its parent must belong to the current user and must not be writable by others.
 The editor requires an absolute path and rejects symlinks. `show` includes private configuration
 values; remove sensitive data before sharing its output.
 
 ```bash
-aw-package config validate --config "$AW_HOME/aw.yaml"
+aw config validate --config "$AW_HOME/aw.yaml"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-Successful validation prints `Valid configuration`. It checks fields and references;
+Successful validation prints `configuration valid`. It checks fields and references;
 program availability is checked at launch. Write actual absolute paths in YAML;
 AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
@@ -68,6 +68,20 @@ It does not run Providers, modify files, check native readiness or update a
 running Agent. Use explicit idle updates below for a reloadable instance;
 otherwise use the stop/edit/run workflow above.
 Plain `aw validate --config FILE` still prints `configuration valid`.
+
+`aw config validate` is equivalent to `aw validate`, including `--against` and
+relative file paths; it does not enforce the editor's ownership checks. The old
+`aw-package config validate` retains its stricter editor checks and original output.
+Other legacy `aw-package config` commands and `aw-package configure` remain compatible.
+
+## Register native Hooks
+
+For Agents with persistent native registration, use
+`aw agent connect --config FILE --agent TARGET` and any required native options,
+such as Hermes `--native-profile`. It uses the existing Adapter registration and
+support checks; it does not install the Agent or software packages.
+The old `aw install --config FILE --agent TARGET` syntax remains compatible.
+Combining native-registration options with `--prefix` or `--bundle` is rejected.
 
 ## Update a prewarmed instance
 
@@ -183,7 +197,7 @@ export AW_NODE=/absolute/path/to/node
 export AW_OPENCLAW=/absolute/path/to/openclaw.mjs
 export AW_OPENCLAW_CONFIG=/absolute/path/to/openclaw.json
 export AW_OPENCLAW_STATE=/absolute/path/to/openclaw-state
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/openclaw.yaml" --state-dir "$AW_HOME/openclaw-aw-state" \
   --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \

@@ -1,6 +1,8 @@
-//! Standalone AW service, native Agent launcher and explicit local protocol.
+//! Unified AW command presentation and orchestration over reusable framework libraries.
 
 mod cli;
+mod package;
+mod routing;
 
 use aw_service::{Operation, Server};
 use std::{
@@ -15,7 +17,8 @@ extern "C" fn stop(_: libc::c_int) {
     STOP.store(true, Ordering::Release);
 }
 
-fn main() {
+/// Run the `aw` frontend and preserve native Agent exit codes and signals.
+pub fn main() {
     match run() {
         Ok(exit) => cli::finish(exit),
         Err(error) => {
@@ -25,17 +28,36 @@ fn main() {
     }
 }
 
+/// Run the legacy package frontend using the same implementation as `aw`.
+pub fn package_main() {
+    package::compatibility_main();
+}
+
 fn run() -> cli::Result<cli::Exit> {
-    let mut args = std::env::args().skip(1);
-    let command = args
-        .next()
-        .ok_or("expected run, install, validate, inspect, policy, serve, status, request, stop")?;
-    if command == "--help" {
-        println!(
+    let arguments = routing::decode(std::env::args_os().skip(1))?;
+    match routing::select(&arguments)? {
+        routing::Route::Help => {
+            help();
+            Ok(cli::Exit::Code(0))
+        }
+        routing::Route::Runtime { command, arguments } => runtime(command, arguments),
+        routing::Route::Package { command, arguments } => {
+            package::dispatch(command, arguments)?;
+            Ok(cli::Exit::Code(0))
+        }
+    }
+}
+
+fn help() {
+    println!(
             "aw run --config FILE --agent TARGET [--reloadable] [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
-aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
+aw install --prefix ABSOLUTE_DIR --bundle ABSOLUTE_DIR\n\
+aw uninstall --prefix ABSOLUTE_DIR\n\
+aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]\n\
+aw config init --prefix ABSOLUTE_DIR --config ABSOLUTE_FILE --state-dir ABSOLUTE_DIR [OPTIONS]\n\
+aw config show|add-provider|remove-provider|add-event|add-hook|remove-hook --config ABSOLUTE_FILE [OPTIONS]\n\
+aw config validate --config FILE [--against BASELINE_FILE]\n\
 aw update (--config CURRENT_FILE | --socket ABSOLUTE_PATH) (--agent TARGET | --instance ID) --policy NEXT_FILE [--expected-revision SHA256]\n\
-aw validate --config FILE [--against BASELINE_FILE]\n\
 aw inspect --config ABS_FILE --json\n\
 aw policy < provider-request.json\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
@@ -46,13 +68,16 @@ Qoder CLI >=1.1.64: run accepts optional --native-settings; records the detected
 OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\
 AgentScope 2.0.6: run requires Python script/-m entrypoint and explicit AwBridge.create_agent.\n\
 QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
-Hermes 952c941e: run and install require --native-profile; run requires the installed AW plugin.\n\
+Hermes 952c941e: run and agent connect require --native-profile; run requires the installed AW plugin.\n\
 Claude SDK 0.2.88: run requires a foreground Python worker using aw_claude.create_client; bundled CLI 2.1.161.\n\
-install dispatches native Hook installation; it does not install AW or an Agent."
+Package installation currently accepts local unpacked Preview bundles only.\n\
+Compatibility: aw install --config FILE --agent TARGET retains native Hook installation;\n\
+aw validate retains the config validate behavior. Agent connect does not install an Agent."
         );
-        return Ok(cli::Exit::Code(0));
-    }
-    let args = cli::Arguments::parse(args)?;
+}
+
+fn runtime(command: &str, arguments: &[String]) -> cli::Result<cli::Exit> {
+    let args = cli::Arguments::parse(arguments.iter().cloned())?;
     if command == "policy" || command == "inspect" {
         install_stop_signals()?;
     }
@@ -78,13 +103,13 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         return Ok(cli::Exit::Code(0));
     }
     if matches!(
-        command.as_str(),
+        command,
         "run" | "hook" | "install" | "policy" | "update" | "bridge"
     ) {
-        return cli::dispatch(&command, &args);
+        return cli::dispatch(command, &args);
     }
     let flags = &args.flags;
-    let allowed: &[&str] = match command.as_str() {
+    let allowed: &[&str] = match command {
         "validate" => &["--config", "--against"],
         "serve" => &["--config", "--state-dir"],
         "status" | "stop" => &["--socket", "--config"],
@@ -93,7 +118,7 @@ install dispatches native Hook installation; it does not install AW or an Agent.
     };
     args.check(allowed, false)?;
     let required = |name: &str| args.required(name);
-    match command.as_str() {
+    match command {
         "validate" if flags.contains_key("--against") => {
             let validator = aw_config::Validator::new()?;
             let load = |path: &str| -> cli::Result<_> {
@@ -131,7 +156,7 @@ install dispatches native Hook installation; it does not install AW or an Agent.
             if !(1..=60000).contains(&budget) {
                 return Err("timeout must be 1..60000 ms".into());
             }
-            let operation = match command.as_str() {
+            let operation = match command {
                 "status" => Operation::Status,
                 "stop" => Operation::Stop,
                 _ => {

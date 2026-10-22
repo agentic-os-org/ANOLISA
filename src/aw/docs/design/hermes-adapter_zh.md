@@ -340,7 +340,7 @@ before+after 和仅 after 路由均不能进入最终 handler，空路由保持�
 测试只将最终 registry handler 替换为执行记录器。
 
 ```bash
-python src/aw/crates/aw-service/tests/fixtures/hermes/native_contract.py \
+python src/aw/crates/aw-cli/tests/fixtures/hermes/native_contract.py \
   --source /absolute/hermes-agent \
   --plugin /absolute/anolisa/src/aw/crates/aw-adapter/native/hermes
 ```

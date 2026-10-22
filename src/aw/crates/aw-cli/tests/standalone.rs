@@ -1,4 +1,4 @@
-//! Installed core and public CLI generate complete configurations without a Provider package.
+//! Compatibility CLI generates configurations without a Provider package.
 
 use aw_package::{Component, Manifest, Payload};
 use serde_json::{json, Value};

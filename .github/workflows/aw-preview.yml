@@ -104,6 +104,8 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ! command -v python3
           cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-package
+          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-cli \
+            --test installation --test config_edit_cli --test standalone --test packages
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
             --output "$AW_PREVIEW_DIR/packages" --component all
@@ -250,7 +252,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-service/tests/fixtures/pi/package-lock.json') }}
+          key: aw-native-npm-${{ runner.os }}-${{ matrix.agent }}-${{ hashFiles('src/aw/tests/native-matrix.json', 'src/aw/crates/aw-cli/tests/fixtures/pi/package-lock.json') }}
       - uses: actions/download-artifact@v4
         with:
           name: aw-native-binaries-${{ needs.plan.outputs.sha }}

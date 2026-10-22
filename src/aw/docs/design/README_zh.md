@@ -7,6 +7,9 @@
 
 源码归属、内部接口与后续发布工作的范围见[架构边界](architecture-boundaries_zh.md)。
 
+`aw-cli` 提供 `aw` 与兼容 `aw-package` 入口；安装和离线编辑直接调用 `aw-package`
+库，运行时命令调用 `aw-service`。此次拆分不改变 Hook 路径或协议版本。
+
 ```mermaid
 flowchart LR
     Agent[原生 Agent] --> Adapter[aw-adapter]

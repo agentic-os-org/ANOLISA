@@ -4,7 +4,7 @@ use aw_package::{config_edit::ConfigurationEditor, Error, Result};
 use std::{collections::BTreeMap, fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
 /// Command reference also printed by the packaging CLI's top-level help.
-pub(super) const HELP: &str =
+const HELP: &str =
     "aw-package config show --config ABS_FILE [--provider NAME | --event EVENT [--id ID]]
 aw-package config validate --config ABS_FILE
 aw-package config add-provider --config ABS_FILE --name NAME --definition FILE
@@ -15,14 +15,29 @@ aw-package config remove-hook --config ABS_FILE --event EVENT --id ID
 Definitions are complete YAML/JSON objects. Show includes private Provider values.
 Edits are offline; changed files are rewritten as YAML. No service reload.";
 
+pub(super) fn help(program: &str) -> String {
+    let help = HELP.replace("aw-package", program);
+    if program == "aw" {
+        help.replace(
+            "aw config validate --config ABS_FILE",
+            "aw config validate --config FILE [--against BASELINE_FILE]",
+        )
+    } else {
+        help
+    }
+}
+
 /// Parses offline editor options and publishes at most one validated edit.
-pub(super) fn run(mut arguments: impl Iterator<Item = String>) -> Result<()> {
+pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()> {
     let action = arguments.next().unwrap_or_else(|| "--help".into());
     if action == "--help" {
         if arguments.next().is_some() {
             return Err(Error::Invalid("unexpected arguments after --help".into()));
         }
-        println!("{HELP}");
+        if program == "aw" {
+            println!("{}", super::configuration_usage(program));
+        }
+        println!("{}", help(program));
         return Ok(());
     }
     let allowed: &[&str] = match action.as_str() {

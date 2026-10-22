@@ -183,7 +183,7 @@ AW 尚未通过 `anolisa install` 或 RPM 发布。开发者可以在 Linux 上�
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 qodercli --version
 target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
@@ -455,7 +455,7 @@ Git 在工作目录与 checkout 中须解析为同一规范可执行文件。两
 或 `python -m` 入口。AW 使用该解释器进入同一个原生 CLI 进程，保留参数与工作
 目录。原生 profile 加载决定生效的 `HERMES_SAFE_MODE`，包括 profile `.env` 的
 覆盖；AW 拒绝 safe mode，并在 chat 调度工具前要求插件完成注册。先通过 Hermes 初始化 profile
-与模型账号。`aw install` 是显式的一次性原生 AW 插件安装：启用前备份原始配置，
+与模型账号。`aw agent connect` 是显式的一次性原生 AW 插件安装：启用前备份原始配置，
 保留未知配置字段，拒绝覆盖同名非 AW 插件。原生 YAML 写入器修改私有候选文件，
 AW 再与真实配置原子交换。命令报告初始字节备份 `backup` 与永久保留的
 `displaced` 文件（`<backup>.displaced`）；后者保留原 inode，包括已打开描述符
@@ -481,7 +481,7 @@ chat 的 `--help`/`-h` 会在插件就绪前退出，因此 AW 会在原生探�
 
 AW 升级可能改变随附插件的字节内容。启动或安装报告插件不匹配或缺少文件时，先停止
 Hermes 会话与插件写入者，检查 `<profile>/plugins/aw-native-hooks`，并将该目录
-移到 `<profile>/plugins` 之外备份。重新执行相同的 `aw install` 命令安装匹配文件；
+移到 `<profile>/plugins` 之外备份。重新执行相同的 `aw agent connect` 命令安装匹配文件；
 保留的目录可用于检查或回退。
 
 当 `providers` 和 `events` 为空时，AW 注册零个回调并正常启动。已有原生 Hook
@@ -501,7 +501,7 @@ Hermes 会话与插件写入者，检查 `<profile>/plugins/aw-native-hooks`，�
 同时必须留在原生回调超时范围内。
 
 ```bash
-target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+target/debug/aw agent connect --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -589,7 +589,7 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
+| `aw agent connect --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 不支持 |
 | `aw update --config CURRENT --agent TARGET --policy NEXT` | 更新已启用稳定桥接的空闲实例；busy 拒绝且不排队 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
@@ -600,20 +600,23 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 当前版本实现了 Qoder CLI、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.9
 和 Hermes 官方提交 `952c941e` Adapter，以及显式 Claude SDK 0.2.88、Pi SDK 0.84.2
 与 AgentScope SDK 2.0.6 worker。
-`aw install` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
+`aw agent connect` 校验配置后分派到对应 Adapter；Hermes 支持持久化插件安装，
 Qoder、OpenClaw、QwenPaw、Pi、Claude SDK 和 AgentScope SDK 拒绝此命令。
-该命令不安装 AW 包或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
+该命令不安装 AW 包或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `agent connect`。
+旧的 `aw install --config FILE --agent TARGET [--native-profile PROFILE]` 语法
+保留相同的原生注册行为。软件安装使用 `aw install --prefix ABS_DIR --bundle ABS_DIR`；
+两组参数不能混用。
 
 | Adapter 专用参数 | 命令 | 当前支持情况 |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder：可选的附加 JSON 配置，与生成的 Hook 合并，原文件保持不变。OpenClaw：必填的现有原生 JSON 配置 |
-| `--native-profile PROFILE` | `run`、`install` | Hermes：`run` 和 `install` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
+| `--native-profile PROFILE` | `run`、`agent connect` | Hermes：`run` 和 `agent connect` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw：必填的原生状态目录绝对路径。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
 
 公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。Pi、Claude SDK
 和 AgentScope SDK 拒绝这些原生覆盖参数。QwenPaw 也拒绝它们，使用 `QWENPAW_WORKING_DIR`。
 受支持的 AW 参数放在 `--` 前，之后的参数
-按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
+按字面量交给 Agent；`agent connect` 不接受 Agent 参数。用 `aw --help` 查看命令格式
 和当前支持范围。
 
 源码构建时将 `aw` 替换为 `target/debug/aw`。`aw hook` 是启动器生成的内部回调，
@@ -844,7 +847,7 @@ target/claude-sdk-venv/bin/python tests/test_claude_sdk_native.py --aw target/de
 配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
 使用该首版受限 Bridge。每个前台 worker 只允许创建一个 client。
 
-当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw install` 对该
+当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
 
 ### 启用 Bash PreTool 与 PostTool 优化

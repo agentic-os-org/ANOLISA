@@ -54,6 +54,17 @@ parent directory. A root backend needs a root-managed installation.
 
 ## Create configuration
 
+If AW is already installed, the same local installer is available through:
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "/absolute/path/to/unpacked-bundle"
+```
+
+This accepts unpacked Preview bundles, not component names, download URLs or
+RPM/DEB packages. Provider packages still require core from the same build.
+It does not start services, register Agent Hooks or enable Providers.
+The standalone `aw-package` installer remains available for bootstrap and compatibility.
+
 Create configuration as your ordinary user, keeping data outside the installation prefix.
 
 ```bash
@@ -61,13 +72,13 @@ export AW_HOME="$HOME/aw"
 export AW_QODER="$(command -v qodercli)"
 install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
 qodercli --version
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
   --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/aw.yaml"
 ```
 
-`AW_QODER` must be the absolute path to the real executable. `configure` creates a complete file
+`AW_QODER` must be the absolute path to the real executable. `config init` creates a complete file
 and refuses to overwrite it. Enable [sec-core](security.md) or [Tokenless](tokenless.md) separately.
 
 ## Launch and verify

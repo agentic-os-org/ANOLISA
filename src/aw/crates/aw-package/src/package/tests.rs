@@ -239,6 +239,22 @@ fn version_cannot_inject_paths_or_release_names() {
 }
 
 #[test]
+fn every_archive_builds_the_shared_cli_frontends() {
+    let repo = Path::new("/fixture/repo");
+    for selection in [
+        Selection::Core,
+        Selection::SecCore,
+        Selection::Tokenless,
+        Selection::All,
+    ] {
+        assert_eq!(
+            selection.builds(repo)[0],
+            (repo.join("src/aw"), vec!["aw-cli"])
+        );
+    }
+}
+
+#[test]
 fn core_selection_builds_and_stages_without_any_provider_tree() {
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
     fs::create_dir_all(&target).unwrap();
@@ -246,7 +262,7 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     let repo = directory.path().canonicalize().unwrap();
     assert_eq!(
         Selection::Core.builds(&repo),
-        vec![(repo.join("src/aw"), vec!["aw-package", "aw-service"])]
+        vec![(repo.join("src/aw"), vec!["aw-cli"])]
     );
     for name in ["aw", "aw-package"] {
         let path = repo.join("src/aw/target/release").join(name);
@@ -304,7 +320,8 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
     for (name, counterpart) in [("README.md", "README_zh.md"), ("README_zh.md", "README.md")] {
         let readme = fs::read_to_string(unpacked.join(name)).unwrap();
         assert!(readme.contains(&format!("]({counterpart})")));
-        assert!(readme.contains("aw-package configure"));
+        assert!(readme.contains("aw config init"));
+        assert!(readme.contains("./$AW_BUNDLE/aw-package\" install --prefix"));
         for target in readme.split("](").skip(1) {
             let target = target.split(')').next().unwrap();
             assert!(

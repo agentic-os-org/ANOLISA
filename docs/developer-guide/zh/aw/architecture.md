@@ -16,11 +16,12 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 
 ## Crate 关系
 
-AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 中单独维护。
+AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/` 中单独维护。
 
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
-| `aw-service` | `aw` CLI、本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
+| `aw-cli` | `aw` 与兼容 `aw-package` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
+| `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
 | `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
 | `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
 | `aw-provider` | 校验 Provider 消息和能力准入 | config |
@@ -28,9 +29,10 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
 | `aw-core` | 能力计划执行器、Host/Journal 接口和 FileJournal | contracts |
 | `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
-| `aw-package` | `aw-build` 构建打包，`aw-package` 安装和生成配置 | config、exec |
+| `aw-package` | 可复用的安装与配置 API，以及 `aw-build` 构建工具 | config、exec |
 
-依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`。
+依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
+`aw-contracts`。底层库不依赖 `aw-cli`；两个命令入口在进程内调用相同的安装 API。
 
 ### 独立 Provider
 
@@ -40,7 +42,7 @@ AW 框架包含 `crates/` 下的 9 个 crate。具体 Provider 在 `providers/` 
 | `aw-provider-tokenless` | `providers/tokenless/` | 桥接 Tokenless CLI，提供输出压缩 | exec、provider |
 
 这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
-接入，不计入 9 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
+接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
 其他团队可独立开发、分发 Provider，见[协作指南](providers.md)。
 
 ## 一次 Hook 请求
@@ -75,7 +77,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 ## 目录与代码入口
 
-`src/aw/Cargo.toml` 只定义 workspace。9 个通用框架 crate 位于 `crates/`，
+`src/aw/Cargo.toml` 只定义 workspace。10 个通用框架 crate 位于 `crates/`，
 2 个具体 Provider 位于仓库根 `providers/`，各自拥有 workspace、源码和测试。原来根目录 `src/`
 中的 contracts 代码已迁入 `crates/aw-contracts/`。
 
@@ -84,7 +86,7 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 | 路径，相对于 `src/aw/` | 内容 |
 | --- | --- |
-| `crates/aw-service/src/main.rs`、`crates/aw-service/src/cli/` | CLI、通用启动与 RPC 协调 |
+| `crates/aw-cli/src/bin/`、`crates/aw-cli/src/lib.rs`、`crates/aw-cli/src/cli/` | CLI 入口、通用启动与 RPC 协调 |
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
 | `crates/aw-core/src/journal.rs` | 持久审计实现 |

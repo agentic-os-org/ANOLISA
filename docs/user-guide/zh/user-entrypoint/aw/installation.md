@@ -51,6 +51,16 @@ aw --help
 
 ## 创建配置
 
+已有 AW 时，可以使用同一个本地安装器：
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "/absolute/path/to/unpacked-bundle"
+```
+
+此入口接受解压后的 Preview 包，不接受组件名、下载 URL 或 RPM/DEB 包。
+Provider 包仍要求先安装同一次构建的 core。安装不启动服务、不注册 Agent Hook、
+不启用 Provider。独立的 `aw-package` 安装器继续用于首次引导安装和兼容。
+
 以普通用户创建配置，数据保存在安装目录之外。
 
 ```bash
@@ -58,13 +68,13 @@ export AW_HOME="$HOME/aw"
 export AW_QODER="$(command -v qodercli)"
 install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
 qodercli --version
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
   --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/aw.yaml"
 ```
 
-`AW_QODER` 应为真实可执行文件的绝对路径。`configure` 创建完整配置，不覆盖已有文件。
+`AW_QODER` 应为真实可执行文件的绝对路径。`config init` 创建完整配置，不覆盖已有文件。
 安全与压缩需另行启用，见 [sec-core](security.md)和 [Tokenless](tokenless.md)。
 
 ## 启动并验证

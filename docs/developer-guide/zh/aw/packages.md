@@ -4,6 +4,14 @@
 
 本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
 
+统一入口以 `aw install`、`aw uninstall`、`aw config init`（原 `aw-package configure`）
+以及 `aw config` 编辑命令调用同一套本地安装 API。下文的 `aw-package` 示例继续用于
+兼容和首次引导安装。`aw config validate` 沿用 `aw validate` 的普通路径和 `--against`
+语义；旧 `aw-package config validate` 保留编辑器的所有权检查。
+原生 Hook 注册使用 `aw agent connect`；旧的 `aw install --config ... --agent ...`
+仍兼容，但不能混用软件安装选项。安装仍只接受解压后的本地 Preview 包，不接受
+URL 或任意组件名称。
+
 只安装 AW core 即可运行已有的 Qoder 或 OpenClaw，无需 Provider。按需添加 sec-core 或自定义布尔判断脚本，使用同一份 AW 配置。AW 和 sec-core 的构建、安装及运行使用 Rust 二进制，不依赖 Python；用户脚本自行承担其运行依赖。OpenClaw 仍需 Node.js，各 Agent 的模型账户由其原生配置管理。
 
 此 Preview 尚未通过 `anolisa install` 或 RPM 发布。请从运行成功的

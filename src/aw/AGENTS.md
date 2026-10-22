@@ -58,14 +58,15 @@ names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
 
-The root Cargo manifest is a virtual workspace. Present the nine framework
+The root Cargo manifest is a virtual workspace. Present the ten framework
 crates separately from concrete Providers:
 
 | Responsibility | Framework crates | Boundary |
 | --- | --- | --- |
 | Build and install | `aw-package` | Package composition, installation and configuration generation |
 | Native dialects | `aw-adapter` | Catalog, registration, callbacks, native phases and effect adoption |
-| Native entrypoint and local runtime | `aw-service` | CLI, bindings, events, deadlines, cancellation and audit |
+| Unified user entrypoint | `aw-cli` | CLI parsing, presentation, compatibility and command orchestration |
+| Local runtime | `aw-service` | Client, bindings, events, deadlines, cancellation and audit |
 | Hook execution | `aw-host`, `aw-exec` | Prepare Providers and execute steps; bound process lifetime and cleanup |
 | Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
 | Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
@@ -76,8 +77,14 @@ Results return to the Adapter for native adoption. The service uses
 Core plan API into this path or equate its `ProviderHost` port with `aw-host::Host`.
 Framework crates must not depend on concrete Provider implementations, including
 through dev-dependencies. `aw-adapter` must not depend on `aw-service`, `aw-host`
-or CLI internals. Keep Client, wire DTOs, full Binding, serialized HookBinding,
-argument parsing, signal handling and resource ownership in `aw-service`.
+or CLI internals. Keep Client, wire DTOs and full Binding in `aw-service`;
+serialized HookBinding, argument parsing, launch signal handling and CLI-owned
+resources belong in `aw-cli`. The CLI calls `aw-package` Rust APIs directly for
+software installation and offline configuration; libraries must not depend on
+the CLI or print its user-facing output. Keep the legacy `aw-package` executable
+as a shared-frontend compatibility entrypoint. `aw-build` remains in `aw-package`.
+Preserve legacy native `aw install --config ... --agent ...` semantics while
+offering `aw agent connect`; reject mixed package/native options before writes.
 Pass only NativeContext and typed options into the Adapter. The caller supplies
 cancellation and launch-file access; the Adapter returns plans, comparison data
 and native replies. Raw native verification must retain strict decoding and
@@ -107,7 +114,7 @@ Update these together in the same change:
    launcher. Reuse the existing admission and callback helpers.
 3. Add exact runnable case references to `tests/regression-matrix.json` for every
    event/effect and for lifecycle, security and Tokenless composition. Extend
-   `crates/aw-service/tests/regression/native.rs` for new native payloads. The
+   `crates/aw-cli/tests/regression/native.rs` for new native payloads. The
    shared PreTool and PostTool tests iterate the matrix without a fallback
    dialect, so an unimplemented fixture fails.
 4. Run `python3 scripts/check_matrix.py --write-readmes` from this directory and

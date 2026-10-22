@@ -18,7 +18,7 @@ from native_qoder import validate_pin
 from native_acceptance import redact_logs
 from native_cleanup import remove_containers
 
-FIXTURE = AW / "crates/aw-service/tests/fixtures/sec_core"
+FIXTURE = AW / "crates/aw-cli/tests/fixtures/sec_core"
 sys.path.insert(0, str(FIXTURE))
 SPEC = importlib.util.spec_from_file_location("aw_sec_native", FIXTURE / "native.py")
 NATIVE = importlib.util.module_from_spec(SPEC)

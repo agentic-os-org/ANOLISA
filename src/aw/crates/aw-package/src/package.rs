@@ -147,11 +147,8 @@ impl Selection {
     }
 
     fn builds(self, repo: &Path) -> Vec<(PathBuf, Vec<&'static str>)> {
-        let mut aw = vec!["aw-package"];
-        if matches!(self, Self::Core | Self::All) {
-            aw.push("aw-service");
-        }
-        let mut builds = vec![(repo.join("src/aw"), aw)];
+        // Every archive includes the installer frontend; Core also stages `aw`.
+        let mut builds = vec![(repo.join("src/aw"), vec!["aw-cli"])];
         if matches!(self, Self::SecCore | Self::All) {
             builds.push((
                 repo.join("providers/agent-sec-core"),

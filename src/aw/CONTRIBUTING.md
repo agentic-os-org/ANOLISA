@@ -181,7 +181,7 @@ inventory's isolated npm installation shape:
 ```bash
 npm install --prefix target/openclaw-native --ignore-scripts --no-audit --no-fund openclaw@2026.9.6
 OPENCLAW_PACKAGE_DIR="$PWD/target/openclaw-native/node_modules/openclaw" \
-  node --test --test-reporter=tap crates/aw-service/tests/openclaw-native.mjs
+  node --test --test-reporter=tap crates/aw-cli/tests/openclaw-native.mjs
 ```
 
 All eight TAP tests must pass without skips. The suite loads the actual AW
@@ -209,7 +209,7 @@ the repository-root `providers/<provider>/` with independent workspaces; the roo
 [Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
 dependencies, and the [design index](docs/design/README.md) for protocol reading order.
 
-Keep native dialects and bridge assets in `aw-adapter`; the CLI owns argument
+Keep native dialects and bridge assets in `aw-adapter`; `aw-cli` owns argument
 parsing, RPCs, signals and resources. The service owns state, budgets and audit.
 Both reuse the Adapter without exposing service internals to it.
 `aw-provider` owns offline protocol validation; process execution uses `aw-exec`.
@@ -222,7 +222,7 @@ its [regression tests](tests/test_ci_checks.py), and the
 Build the CLI and sample Provider from `src/aw` on Linux:
 
 ```bash
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 cargo build --locked -p aw-provider --example policy
 ```
 
@@ -236,10 +236,10 @@ protocol; Providers retain `aw-provider/v1alpha1`. They are versioned separately
 For focused local service checks:
 
 ```bash
-cargo test --locked -p aw-service
+cargo test --locked -p aw-service -p aw-cli
 ```
 
-Service tests use real Unix sockets, fixture Provider processes and private
+Service unit tests and CLI integration tests use real Unix sockets, fixture Provider processes and private
 temporary state directories. They need no model, Agent installation or cloud key.
 They check shared event budgets, binding and once-only invocation, cancellation
 and shutdown, durable audit, stale handles and endpoint ownership. Fixtures wait

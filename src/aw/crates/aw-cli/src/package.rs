@@ -1,34 +1,67 @@
-//! User-facing native installation, configuration and removal commands.
+//! Shared package presentation for the unified and compatibility entrypoints.
 
 use aw_package::{Error, Policy, Result, Settings};
 use std::{collections::BTreeMap, path::Path};
 
-#[path = "support/arguments.rs"]
 mod arguments;
-#[path = "support/signals.rs"]
+mod config;
 mod signals;
 
-#[path = "support/config.rs"]
-mod config;
-
-fn main() {
-    if let Err(error) = run() {
+pub(crate) fn compatibility_main() {
+    if let Err(error) = arguments::decode_all(std::env::args_os().skip(1))
+        .and_then(|arguments| run(arguments.into_iter(), "aw-package"))
+    {
         eprintln!("aw-package: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    // std::env::args panics on non-UTF-8 arguments; reject them cleanly first.
-    let mut arguments = arguments::decode_all(std::env::args_os().skip(1))?.into_iter();
+pub(crate) fn dispatch(command: &str, arguments: &[String]) -> crate::cli::Result<()> {
+    let (command, arguments) =
+        if command == "config" && arguments.first().is_some_and(|action| action == "init") {
+            ("configure", &arguments[1..])
+        } else {
+            (command, arguments)
+        };
+    if arguments == ["--help"] && command != "config" {
+        print_help("aw");
+        return Ok(());
+    }
+    run(
+        std::iter::once(command.to_owned()).chain(arguments.iter().cloned()),
+        "aw",
+    )?;
+    Ok(())
+}
+
+fn configuration_usage(program: &str) -> String {
+    let configure = if program == "aw" {
+        "config init"
+    } else {
+        "configure"
+    };
+    format!("{program} {configure} --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]")
+}
+
+fn print_help(program: &str) {
+    let configure = configuration_usage(program);
+    let bundle = if program == "aw" {
+        "--bundle ABS_DIR"
+    } else {
+        "[--bundle ABS_DIR]"
+    };
+    println!("{program} install --prefix ABS_DIR {bundle}\n{configure}\n{program} uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
+    println!("{}", config::help(program));
+}
+
+fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".into());
     if command == "--help" {
-        println!("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]\naw-package configure --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]\naw-package uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
-        println!("{}", config::HELP);
+        print_help(program);
         return Ok(());
     }
     if command == "config" {
-        return config::run(arguments);
+        return config::run(arguments, program);
     }
     let allowed: &[&str] = match command.as_str() {
         "install" => &["--prefix", "--bundle"],
@@ -70,6 +103,10 @@ fn run() -> Result<()> {
             .ok_or_else(|| Error::Invalid(format!("missing {name}")))
     };
     let prefix = required("--prefix")?;
+    if command == "install" && program == "aw" {
+        // The installed unified CLI is not colocated with an unpacked bundle.
+        required("--bundle")?;
+    }
     match command.as_str() {
         "install" => {
             let executable = std::env::current_exe()?;

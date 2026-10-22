@@ -24,7 +24,7 @@ There is no separate RTK, TOON, Python wheel or native Tokenless plugin to insta
 Avoid enabling an overlapping Tokenless plugin in the same session to prevent duplicate processing.
 
 ```bash
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
   --provider tokenless --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/tokenless.yaml"

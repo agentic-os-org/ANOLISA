@@ -1,4 +1,4 @@
-//! Public CLI contracts, independent of local Agent or backend installations.
+//! Compatibility package CLI contracts without local Agent or backend installations.
 use std::process::Command;
 #[test]
 fn help_exposes_native_installation_and_dual_agent_configuration() {
@@ -41,18 +41,11 @@ fn invalid_commands_and_duplicate_flags_fail_before_touching_disk() {
 fn non_utf8_arguments_are_rejected_without_panicking() {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
     let invalid = OsStr::from_bytes(b"/tmp/prefix-\xff");
-    for (program, arguments, prefix) in [
-        (
-            env!("CARGO_BIN_EXE_aw-package"),
-            vec!["install".into(), "--prefix".into(), invalid.to_os_string()],
-            "aw-package:",
-        ),
-        (
-            env!("CARGO_BIN_EXE_aw-build"),
-            vec!["--output".into(), invalid.to_os_string()],
-            "aw-build:",
-        ),
+    for (program, prefix) in [
+        (env!("CARGO_BIN_EXE_aw-package"), "aw-package:"),
+        (env!("CARGO_BIN_EXE_aw"), "aw:"),
     ] {
+        let arguments = ["install".into(), "--prefix".into(), invalid.to_os_string()];
         let output = Command::new(program).args(arguments).output().unwrap();
         // Non-UTF-8 argv must fail like any rejected invocation, not panic.
         assert_eq!(output.status.code(), Some(1), "{program}");

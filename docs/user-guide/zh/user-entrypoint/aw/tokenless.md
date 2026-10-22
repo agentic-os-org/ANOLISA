@@ -23,7 +23,7 @@ sudo "./$AW_TOKENLESS_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
 不要在同一会话叠加功能相同的 Tokenless 插件，以免重复处理。
 
 ```bash
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/tokenless.yaml" --state-dir "$AW_HOME/tokenless-state" \
   --provider tokenless --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/tokenless.yaml"

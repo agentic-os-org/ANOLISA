@@ -211,7 +211,7 @@ class NativeTests(GateFixture):
     def test_qoder_reload_rejects_missing_credential_before_launch(self) -> None:
         import importlib.util
 
-        source = AW / "crates/aw-service/tests/fixtures/qoder/reload.py"
+        source = AW / "crates/aw-cli/tests/fixtures/qoder/reload.py"
         spec = importlib.util.spec_from_file_location("aw_qoder_reload", source)
         fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixture)
@@ -360,7 +360,7 @@ class NativeTests(GateFixture):
                     verify_case(case, output, directory)
 
     def test_real_pi_fixture_with_empty_cases_fails_acceptance(self) -> None:
-        fixture = AW / "crates/aw-service/tests/fixtures/pi"
+        fixture = AW / "crates/aw-cli/tests/fixtures/pi"
         source = (fixture / "public-smoke.py").read_text()
         assignment = next(
             node

@@ -11,8 +11,16 @@ AW records execution locally for inspection. The current release is a Linux Prev
 
 AW ships as Preview packages and is not yet available through `anolisa install` or
 RPM. Follow the [installation guide](../../docs/user-guide/en/user-entrypoint/aw/installation.md)
-to install core or all-in-one, generate a configuration with `aw-package configure`,
+to install core or all-in-one, generate a configuration with `aw config init`,
 and run it.
+
+An existing AW installation can install an unpacked local Preview bundle with
+`aw install --prefix ABS_DIR --bundle ABS_DIR`, edit it with `aw config`, and
+remove its owned files with `aw uninstall --prefix ABS_DIR`. Native Hook
+registration uses `aw agent connect --config FILE --agent TARGET`. The legacy
+native `aw install --config ... --agent ...` and `aw-package` commands remain
+compatible. Named components, direct URLs and system package backends are not
+supported by this Preview installer.
 
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
@@ -87,11 +95,14 @@ See [Contributing](CONTRIBUTING.md) for real SDK and model-session acceptance co
 
 ![AW user workflow and component architecture](../../docs/images/aw/architecture.png)
 
-The root is a virtual workspace. `crates/` contains nine framework crates; repository-root `providers/`
+The root is a virtual workspace. `crates/` contains ten framework crates; repository-root `providers/`
 is the shared implementation space. Providers may also be developed and shipped
 from independent repositories; see [Provider collaboration](../../providers/README.md). Hook requests
 flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
 `aw-core` exposes a separate plan API; the service reuses only its Journal.
+
+`aw-cli` owns command parsing and presentation, calling the `aw-package` library
+for installation and configuration and `aw-service` for runtime operations.
 
 The [architecture overview](../../docs/developer-guide/en/aw/architecture.md)
 explains crate ownership and runtime flow. The [design index](docs/design/README.md)

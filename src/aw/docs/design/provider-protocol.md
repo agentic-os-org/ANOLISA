@@ -8,7 +8,7 @@
 external policy programs and checks their messages and requested capabilities
 offline. It connects the unified configuration to a Provider contract without
 starting a process, installing an Agent Hook or establishing a runtime binding.
-Native integration belongs to Adapters in the `aw-service` CLI; see the
+Native integration belongs to `aw-adapter`, orchestrated by `aw-cli`; see the
 [component README](../../README.md#hook-support) for supported capabilities.
 
 ## Delivery boundary
@@ -19,7 +19,7 @@ Native integration belongs to Adapters in the `aw-service` CLI; see the
 | `aw-provider` | Validate protocol messages, correlate responses and check configured steps against supplied Provider and Adapter evidence |
 | `aw-contracts` / `aw-core` | Validate and execute their existing capability profiles through a trusted Host and Journal |
 | `aw-host` | Execute Provider commands, enforce deadlines and output limits, handle cancellation and return correlated call reports |
-| Adapter and `aw-service` | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
+| Adapter, `aw-cli` and `aw-service` | Authenticate native capabilities, register callbacks, translate effects, manage bindings and audit native adoption |
 
 Configuration fields are unchanged. A named object under `spec.providers`
 selects `aw-provider/v1alpha1`, a literal `transport.argv` and private `config`.

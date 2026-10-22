@@ -19,12 +19,13 @@ subsequent release work.
 
 ## Crate relationships
 
-The AW framework contains nine crates under `crates/`. Concrete Providers are
+The AW framework contains ten crates under `crates/`. Concrete Providers are
 maintained separately under `providers/`.
 
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
-| `aw-service` | `aw` CLI, local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
+| `aw-cli` | `aw` and compatibility `aw-package` frontends, launch and command orchestration | adapter, config, exec, host, package, provider, service |
+| `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
 | `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
 | `aw-host` | Prepare Providers and execute admitted Hook steps | config, exec, provider |
 | `aw-provider` | Validate Provider messages and capability admission | config |
@@ -32,10 +33,11 @@ maintained separately under `providers/`.
 | `aw-config` | Parse configuration and validate fields and static references | None |
 | `aw-core` | Capability plan executor, Host/Journal ports, and FileJournal | contracts |
 | `aw-contracts` | Schemas, canonical encoding, and cross-record validation | None |
-| `aw-package` | `aw-build` builds packages; `aw-package` installs and configures them | config, exec |
+| `aw-package` | Reusable package installation and configuration APIs; `aw-build` packaging tool | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
-on `aw-service`.
+on `aw-service`; CLI integration tests also use `aw-contracts`. Libraries do not
+depend on `aw-cli`. Both command frontends call the same package APIs in-process.
 
 ### Independent Providers
 
@@ -46,7 +48,7 @@ on `aw-service`.
 
 These implementations each own an independent Cargo workspace and lockfile at
 the repository root. They connect as separate processes and are not part of the
-nine framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
+ten framework crates. Tokenless Provider tests also depend on the sec-core Provider. Other teams
 can develop and distribute Providers independently; see the [collaboration guide](providers.md).
 
 ## One Hook request
@@ -91,7 +93,7 @@ contracts and are not interchangeable call layers.
 
 ## Directories and source entry points
 
-`src/aw/Cargo.toml` defines only the workspace. Nine framework crates live in
+`src/aw/Cargo.toml` defines only the workspace. Ten framework crates live in
 `crates/`; two concrete Providers live in the repository-root `providers/`, each
 with its own workspace, source and tests. The former root `src/` contracts code now lives in `crates/aw-contracts/`.
 
@@ -102,7 +104,7 @@ and packaging scope.
 
 | Path, relative to `src/aw/` | Content |
 | --- | --- |
-| `crates/aw-service/src/main.rs`, `crates/aw-service/src/cli/` | CLI, launcher and RPC coordination |
+| `crates/aw-cli/src/bin/`, `crates/aw-cli/src/lib.rs`, `crates/aw-cli/src/cli/` | CLI entrypoints, launcher and RPC coordination |
 | `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
 | `crates/aw-core/src/journal.rs` | Durable audit storage |

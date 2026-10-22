@@ -2,6 +2,10 @@
   "version": 1,
   "required_targets": [
     "aw-adapter/lib/aw_adapter",
+    "aw-cli/lib/aw_cli",
+    "aw-cli/test/config_edit_cli",
+    "aw-cli/test/packages",
+    "aw-cli/test/standalone",
     "aw-config/test/configuration",
     "aw-config/test/policy_update",
     "aw-contracts/test/canonical",
@@ -12,7 +16,8 @@
     "aw-core/test/journal",
     "aw-exec/test/execution",
     "aw-host/test/host",
-    "aw-package/test/installation",
+    "aw-cli/test/installation",
+    "aw-package/test/build_cli",
     "aw-provider-sec-core/test/provider",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -21,18 +26,17 @@
     "aw-provider/test/admission",
     "aw-provider/test/protocol",
     "aw-provider/test/views",
-    "aw-service/bin/aw",
     "aw-service/lib/aw_service",
-    "aw-service/test/agentscope",
-    "aw-service/test/claude_sdk",
-    "aw-service/test/inspect",
-    "aw-service/test/launcher",
-    "aw-service/test/openclaw",
-    "aw-service/test/pi",
-    "aw-service/test/posttool",
-    "aw-service/test/pretool",
-    "aw-service/test/qwenpaw",
-    "aw-service/test/service"
+    "aw-cli/test/agentscope",
+    "aw-cli/test/claude_sdk",
+    "aw-cli/test/inspect",
+    "aw-cli/test/launcher",
+    "aw-cli/test/openclaw",
+    "aw-cli/test/pi",
+    "aw-cli/test/posttool",
+    "aw-cli/test/pretool",
+    "aw-cli/test/qwenpaw",
+    "aw-cli/test/service"
   ],
   "cases": {
     "catalog": {
@@ -40,39 +44,39 @@
       "test": "adapter::catalog::tests::registered_capabilities_match_the_regression_matrix_and_config_schema"
     },
     "security-retry": {
-      "target": "aw-service/test/pretool",
+      "target": "aw-cli/test/pretool",
       "test": "retry_neutrality_cannot_undo_security_denials_or_fail_closed_errors"
     },
     "final-replacement": {
-      "target": "aw-service/test/posttool",
+      "target": "aw-cli/test/posttool",
       "test": "adapters_keep_observers_and_user_hooks_before_one_final_replacement"
     },
     "qoder-lifecycle": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "two_agent_instances_release_independently_and_leave_the_daemon_running"
     },
     "openclaw-lifecycle": {
-      "target": "aw-service/test/openclaw",
+      "target": "aw-cli/test/openclaw",
       "test": "plugin_callbacks_preserve_configuration_profile_raw_events_and_native_parallelism"
     },
     "hermes-lifecycle": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "hermes_probes_and_install_writers_cancel_and_reap_on_signals"
     },
     "qwenpaw-lifecycle": {
-      "target": "aw-service/test/qwenpaw",
+      "target": "aw-cli/test/qwenpaw",
       "test": "app_exit_before_readiness_releases_instance_and_owned_files"
     },
     "pi-lifecycle": {
-      "target": "aw-service/test/pi",
+      "target": "aw-cli/test/pi",
       "test": "foreground_factory_installs_both_hooks_and_releases_binding"
     },
     "claude-sdk-lifecycle": {
-      "target": "aw-service/test/claude_sdk",
+      "target": "aw-cli/test/claude_sdk",
       "test": "claude_hook_cli_preserves_deny_success_failure_identity_and_audit"
     },
     "agentscope-lifecycle": {
-      "target": "aw-service/test/agentscope",
+      "target": "aw-cli/test/agentscope",
       "test": "no_factory_attachment_never_reports_ready_and_releases_binding_files"
     },
     "security-block": {
@@ -136,27 +140,27 @@
       "test": "launch_and_service_edits_are_rejected_without_values"
     },
     "policy_update_offline_cli": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "policy_update::policy_scope_validation_does_not_launch_agents_or_providers_or_modify_files"
     },
     "runtime-reload": {
-      "target": "aw-service/test/launcher",
+      "target": "aw-cli/test/launcher",
       "test": "runtime_policy::prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting"
     },
     "reload-busy": {
-      "target": "aw-service/test/service",
+      "target": "aw-cli/test/service",
       "test": "policy::whole_request_and_unfinished_tools_return_busy_without_deferred_activation"
     },
     "reload-race": {
-      "target": "aw-service/test/service",
+      "target": "aw-cli/test/service",
       "test": "policy::request_arriving_during_preparation_wins_and_parallel_update_is_busy"
     },
     "reload-rollback": {
-      "target": "aw-service/test/service",
+      "target": "aw-cli/test/service",
       "test": "policy::failed_preparation_conflict_and_frozen_edits_preserve_policy_and_context"
     },
     "reload-cancel": {
-      "target": "aw-service/test/service",
+      "target": "aw-cli/test/service",
       "test": "policy::disconnected_update_cancels_preparation_without_later_activation"
     }
   },

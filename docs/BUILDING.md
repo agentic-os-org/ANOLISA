@@ -153,7 +153,7 @@ guide before changing component internals.
 
 | Component | Build | Test and quality gate |
 |-----------|-------|-----------------------|
-| [AW](developer-guide/en/aw/building.md) | `cd src/aw && cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
+| [AW](developer-guide/en/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
 | [copilot-shell](../deprecated/copilot-shell/README.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README.md) | `cd src/os-skills && make build` | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
 | [agent-sec-core](../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |

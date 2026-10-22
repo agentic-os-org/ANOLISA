@@ -478,7 +478,7 @@ def main() -> None:
     asyncio.run(check_preserved_callbacks())
     worker = (
         Path(__file__).resolve().parents[1]
-        / "crates/aw-service/tests/fixtures/claude-sdk/native_worker.py"
+        / "crates/aw-cli/tests/fixtures/claude-sdk/native_worker.py"
     )
     results = [
         run_case(args.aw.resolve(), worker, args.output.resolve(), mode)

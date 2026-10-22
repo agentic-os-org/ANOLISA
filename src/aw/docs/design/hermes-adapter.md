@@ -456,7 +456,7 @@ routes cannot reach the final handler, while empty routes retain native behavior
 Only the final registry handler is replaced by a recorder.
 
 ```bash
-python src/aw/crates/aw-service/tests/fixtures/hermes/native_contract.py \
+python src/aw/crates/aw-cli/tests/fixtures/hermes/native_contract.py \
   --source /absolute/hermes-agent \
   --plugin /absolute/anolisa/src/aw/crates/aw-adapter/native/hermes
 ```

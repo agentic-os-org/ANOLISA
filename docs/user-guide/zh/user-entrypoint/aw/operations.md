@@ -24,7 +24,7 @@ Preview 尚无跨版本数据迁移，升级时使用新的状态目录。
 卸载使用安装时的前缀。系统安装执行下列命令，个人安装去掉 `sudo`。
 
 ```bash
-sudo "$AW_PREFIX/bin/aw-package" uninstall --prefix "$AW_PREFIX"
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
 ```
 
 卸载保留外部配置、审计和原生 Agent 数据。包文件被修改或缺失时会先报错，

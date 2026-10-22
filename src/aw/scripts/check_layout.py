@@ -7,6 +7,11 @@ from pathlib import Path
 def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and source sizes explicit."""
     allowed = {
+        "aw-cli": {
+            "aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
+            "aw-provider", "aw-service", "libc", "serde", "serde_json",
+            "serde_yaml_ng", "sha2", "tempfile",
+        },
         "aw-adapter": {
             "aw-config", "aw-contracts", "aw-exec", "aw-provider",
             "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror",

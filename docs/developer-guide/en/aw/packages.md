@@ -5,6 +5,17 @@
 This reference is for integration and maintenance. For installation and daily use,
 see the [user guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
 
+The unified frontend exposes the same local package APIs as `aw install`,
+`aw uninstall`, `aw config init` (formerly `aw-package configure`), and
+`aw config` editing commands. The `aw-package` examples below remain supported
+for compatibility and first-install bootstrap. `aw config validate` uses the
+broader `aw validate` semantics, including relative paths and `--against`;
+legacy `aw-package config validate` keeps the editor's ownership checks.
+Native Hook registration is `aw agent connect`; legacy native `aw install
+--config ... --agent ...` remains compatible and cannot mix package options.
+Installation still accepts only local unpacked Preview bundles, not URLs or
+arbitrary named components.
+
 Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec-core or your own boolean policy command when needed, using one AW configuration. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
 
 This Preview is not yet published through `anolisa install` or RPM. Download

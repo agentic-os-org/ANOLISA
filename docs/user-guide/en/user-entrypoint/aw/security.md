@@ -47,7 +47,7 @@ Set `AW_SEC_SOCKET` to the actual backend; this example uses the socket started 
 
 ```bash
 export AW_SEC_SOCKET=/run/aw-preview-sec/daemon.sock
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/security.yaml" --state-dir "$AW_HOME/security-state" \
   --provider sec-core --socket "$AW_SEC_SOCKET" --qoder "$AW_QODER"
 aw validate --config "$AW_HOME/security.yaml"

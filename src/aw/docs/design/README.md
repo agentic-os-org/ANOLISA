@@ -8,6 +8,10 @@ for crate dependencies and source entry points. The current Hook path is:
 Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
 internal interfaces and release work deferred from this migration.
 
+`aw-cli` owns the `aw` and compatibility `aw-package` frontends. Software
+installation and offline edits call `aw-package` APIs directly; runtime commands
+call `aw-service`. The extraction preserves the Hook path and protocol versions.
+
 ```mermaid
 flowchart LR
     Agent[Native Agent] --> Adapter[aw-adapter]

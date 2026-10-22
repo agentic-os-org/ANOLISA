@@ -24,7 +24,7 @@ From a checkout of the desired reviewed commit:
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
+cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
 export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
@@ -199,7 +199,7 @@ For component changes, run the appropriate checks from `AW_SOURCE`:
 
 ```bash
 cd "$AW_SOURCE"
-cargo test --locked -p aw-host -p aw-service
+cargo test --locked -p aw-host -p aw-service -p aw-cli
 ```
 
 Before submitting AW implementation changes, run the full Linux gate from the

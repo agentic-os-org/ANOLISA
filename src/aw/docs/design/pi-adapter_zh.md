@@ -74,11 +74,11 @@ AW 生成的 binding/config 文件属于前台启动的私有资源。Callback �
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 mkdir -p target/pi-sdk-validation
-cp crates/aw-service/tests/fixtures/pi/package*.json target/pi-sdk-validation/
+cp crates/aw-cli/tests/fixtures/pi/package*.json target/pi-sdk-validation/
 npm ci --prefix target/pi-sdk-validation --ignore-scripts --no-audit --no-fund
-python3 crates/aw-service/tests/fixtures/pi/public-smoke.py \
+python3 crates/aw-cli/tests/fixtures/pi/public-smoke.py \
   --aw target/debug/aw --root target/pi-sdk-validation
 ```
 
@@ -96,7 +96,7 @@ cargo build --locked --manifest-path ../../providers/tokenless/Cargo.toml
 cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
 cargo build --locked --manifest-path ../tokenless/Cargo.toml \
   --target-dir target/t -p tokenless-cli
-python3 crates/aw-service/tests/fixtures/pi/tokenless-smoke.py \
+python3 crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py \
   --aw target/debug/aw --root target/pi-sdk-validation \
   --tokenless-provider ../../providers/tokenless/target/debug/aw-provider-tokenless \
   --tokenless-cli target/t/debug/tokenless \

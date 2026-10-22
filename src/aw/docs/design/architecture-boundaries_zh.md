@@ -9,7 +9,7 @@ AW 内部接入库随 AW 编译，具体 Provider 通过进程协议接入。
 
 ```text
 ANOLISA/
-├── src/aw/                         # 9 个框架 crate 的 virtual workspace
+├── src/aw/                         # 10 个框架 crate 的 virtual workspace
 │   ├── Cargo.toml / Cargo.lock
 │   ├── crates/
 │   │   ├── aw-adapter/
@@ -21,7 +21,8 @@ ANOLISA/
 │   │   ├── aw-exec/                # 有界进程执行
 │   │   ├── aw-host/                # Provider 准备与调用
 │   │   ├── aw-core/                # 计划执行 API 与 Journal
-│   │   ├── aw-service/             # CLI、客户端、服务与运行状态
+│   │   ├── aw-cli/                 # aw 与兼容 aw-package 命令入口
+│   │   ├── aw-service/             # 客户端、服务与运行状态
 │   │   └── aw-package/             # 当前 Preview 构建、安装和配置编辑
 │   ├── tests/                     # 回归矩阵、原生验收清单与共享检查
 │   └── scripts/                   # 统一检查入口
@@ -39,8 +40,15 @@ AW workspace 的普通依赖和测试依赖均不引用它们。
 
 ## Adapter 与服务之间传什么
 
-`aw-service` 的 binary target 保留 `aw` 命令，library target 提供客户端与服务。
+`aw-cli` 提供 `aw` 命令和兼容的 `aw-package` 可执行文件，直接调用 `aw-package`
+库完成安装与离线编辑；`aw-build` 仍是 `aw-package` 中的维护者工具。
+`aw-service` 以库形式提供客户端与服务；底层库不依赖 `aw-cli`。
 启动器和服务共同使用 `aw-adapter`；Adapter 不依赖 service、Host 或 CLI 内部类型。
+
+软件安装使用 `aw install --prefix ... --bundle ...`，原生 Hook 注册使用
+`aw agent connect --config ... --agent ...`，旧的 `aw install --config ... --agent ...`
+仍兼容。混用安装和原生注册选项会在写入前失败。Preview 仍仅接受现有本地包；
+此次拆分不增加 URL 安装器、系统包后端、自动激活或安装记录迁移。
 
 | 接口或状态 | 归属 |
 | --- | --- |

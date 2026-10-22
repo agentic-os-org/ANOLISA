@@ -90,11 +90,11 @@ adapter contract, not a framework-independent scheduling guarantee. See the
 cancellation details.
 
 The executable contracts are in
-[`posttool.rs`](../../crates/aw-service/tests/posttool.rs),
-[`openclaw.mjs`](../../crates/aw-service/tests/openclaw.mjs), and the native
-[QwenPaw](../../crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py) and
-[Hermes](../../crates/aw-service/tests/fixtures/hermes/native_contract.py) fixtures.
-The [AgentScope lifecycle acceptance](../../crates/aw-service/tests/agentscope_lifecycle.py)
+[`posttool.rs`](../../crates/aw-cli/tests/posttool.rs),
+[`openclaw.mjs`](../../crates/aw-cli/tests/openclaw.mjs), and the native
+[QwenPaw](../../crates/aw-cli/tests/fixtures/qwenpaw/native_middleware.py) and
+[Hermes](../../crates/aw-cli/tests/fixtures/hermes/native_contract.py) fixtures.
+The [AgentScope lifecycle acceptance](../../crates/aw-cli/tests/agentscope_lifecycle.py)
 also exercises the public SDK with a real Tokenless CLI and offline model.
 Fixture success alone does not establish real-model adoption.
 

@@ -76,11 +76,11 @@ Qoder 在失败尝试结束后释放后续步骤，缺失回调则让事件过�
 调度保证。绑定和取消细节见[共享事件生命周期](local-service_zh.md#共享事件生命周期)。
 
 可执行合同位于
-[`posttool.rs`](../../crates/aw-service/tests/posttool.rs)、
-[`openclaw.mjs`](../../crates/aw-service/tests/openclaw.mjs)，以及原生
-[QwenPaw](../../crates/aw-service/tests/fixtures/qwenpaw/native_middleware.py) 和
-[Hermes](../../crates/aw-service/tests/fixtures/hermes/native_contract.py) fixture。
-[AgentScope 生命周期验收](../../crates/aw-service/tests/agentscope_lifecycle.py)
+[`posttool.rs`](../../crates/aw-cli/tests/posttool.rs)、
+[`openclaw.mjs`](../../crates/aw-cli/tests/openclaw.mjs)，以及原生
+[QwenPaw](../../crates/aw-cli/tests/fixtures/qwenpaw/native_middleware.py) 和
+[Hermes](../../crates/aw-cli/tests/fixtures/hermes/native_contract.py) fixture。
+[AgentScope 生命周期验收](../../crates/aw-cli/tests/agentscope_lifecycle.py)
 另通过公共 SDK、真实 Tokenless CLI 和离线模型验证接入。
 Fixture 通过本身不证明真实模型采用。
 

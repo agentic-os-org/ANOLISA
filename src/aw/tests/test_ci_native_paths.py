@@ -15,7 +15,7 @@ import test_claude_sdk_native as claude
 
 
 SPEC = importlib.util.spec_from_file_location(
-    "agentscope_lifecycle", AW / "crates/aw-service/tests/agentscope_lifecycle.py"
+    "agentscope_lifecycle", AW / "crates/aw-cli/tests/agentscope_lifecycle.py"
 )
 agentscope = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agentscope)

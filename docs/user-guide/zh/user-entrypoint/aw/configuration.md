@@ -7,10 +7,10 @@
 
 ## 生成配置
 
-沿用安装页的变量。`configure` 不覆盖已有文件；修改配置见下一节。
+沿用安装页的变量。`config init` 不覆盖已有文件；修改配置见下一节。
 
 ```bash
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
   --qoder "$AW_QODER"
 ```
@@ -32,19 +32,19 @@ aw-package configure --prefix "$AW_PREFIX" \
 ```bash
 aw stop --config "$AW_HOME/aw.yaml"
 cp "$AW_HOME/aw.yaml" "$AW_HOME/aw.yaml.bak"
-aw-package config show --config "$AW_HOME/aw.yaml"
+aw config show --config "$AW_HOME/aw.yaml"
 ```
 
-可以直接编辑 YAML，也可以用 `aw-package config` 增删 Provider 和 Hook。
+可以直接编辑 YAML，也可以用 `aw config` 增删 Provider 和 Hook。
 文件与父目录应属于当前用户，且不能被其他用户写入；配置编辑器要求绝对路径，
 不接受符号链接。`show` 会显示配置中的私有值，分享输出前请自行删去敏感内容。
 
 ```bash
-aw-package config validate --config "$AW_HOME/aw.yaml"
+aw config validate --config "$AW_HOME/aw.yaml"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-校验成功会打印 `Valid configuration`。它检查字段和引用，实际程序是否可用会在启动时检查。
+校验成功会打印 `configuration valid`。它检查字段和引用，实际程序是否可用会在启动时检查。
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
 完整编辑命令和自定义规则示例见[配置工具参考](../../../../developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。
 
@@ -62,6 +62,17 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 比较不运行 Provider、不修改文件、不检查原生就绪，也不更新运行中的 Agent。
 启用稳定桥接的实例可使用下述显式空闲更新；其他实例使用前述停止、编辑、启动流程。
 原有 `aw validate --config FILE` 继续打印 `configuration valid`。
+
+`aw config validate` 与 `aw validate` 等价，支持 `--against` 和相对文件路径，
+不执行编辑器的所有权检查。旧的 `aw-package config validate` 保留更严格的编辑器
+检查和原输出；其他 `aw-package config` 命令及 `aw-package configure` 也继续兼容。
+
+## 注册原生 Hook
+
+对于支持持久原生注册的 Agent，使用 `aw agent connect --config FILE --agent TARGET`，
+并提供所需的原生选项，例如 Hermes 的 `--native-profile`。它沿用既有 Adapter 注册
+和支持性检查，不安装 Agent 或软件包。旧的 `aw install --config FILE --agent TARGET`
+语法仍兼容；与 `--prefix` 或 `--bundle` 混用会被拒绝。
 
 ## 更新预热实例
 
@@ -158,7 +169,7 @@ export AW_NODE=/absolute/path/to/node
 export AW_OPENCLAW=/absolute/path/to/openclaw.mjs
 export AW_OPENCLAW_CONFIG=/absolute/path/to/openclaw.json
 export AW_OPENCLAW_STATE=/absolute/path/to/openclaw-state
-aw-package configure --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/openclaw.yaml" --state-dir "$AW_HOME/openclaw-aw-state" \
   --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \

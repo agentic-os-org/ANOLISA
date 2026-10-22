@@ -10,7 +10,7 @@
 
 原生方言、回调解释和 Python/JavaScript 资产统一位于 `crates/aw-adapter/`。
 CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录生命周期仍由
-`aw-service` 负责。详见[架构边界](architecture-boundaries_zh.md)。
+`aw-cli` 负责。详见[架构边界](architecture-boundaries_zh.md)。
 
 ## 启动生命周期
 

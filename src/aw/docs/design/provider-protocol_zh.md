@@ -6,7 +6,7 @@
 
 `aw-provider` 定义实验性的 `aw-provider/v1alpha1` 接口，供外部策略程序使用，
 并离线检查消息和请求的能力。它将统一配置衔接到 Provider 合同，本身不启动进程、
-安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-service` CLI 中的 Adapter 负责，支持范围见[组件 README](../../README_zh.md#hook-支持)。
+安装 Agent Hook 或建立运行时绑定。原生接入由 `aw-adapter` 实现、`aw-cli` 编排，支持范围见[组件 README](../../README_zh.md#hook-支持)。
 
 ## 交付边界
 
@@ -16,7 +16,7 @@
 | `aw-provider` | 校验协议消息、关联响应，并依据调用方提供的 Provider 和 Adapter 证据检查配置步骤 |
 | `aw-contracts` / `aw-core` | 通过可信 Host 和 Journal 校验、执行已有能力模型 |
 | `aw-host` | 执行 Provider 命令，限制时间和输出，处理取消，返回可关联的调用报告 |
-| Adapter 与 `aw-service` | 认证原生能力，注册回调，转换效果，管理绑定并审计原生采用情况 |
+| Adapter、`aw-cli` 与 `aw-service` | 认证原生能力，注册回调，转换效果，管理绑定并审计原生采用情况 |
 
 配置字段保持不变。`spec.providers` 中的命名对象选择 `aw-provider/v1alpha1`、
 固定的 `transport.argv` 和私有 `config`。脚本、二进制程序或后台服务的 CLI

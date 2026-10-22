@@ -11,7 +11,13 @@ Agent 继续管理自己的模型、界面和权限；AW 保存本地执行记�
 
 AW 使用 Preview 包分发，尚未接入 `anolisa install` 或 RPM。
 从[安装指南](../../docs/user-guide/zh/user-entrypoint/aw/installation.md)下载并安装 core
-或 all-in-one，用 `aw-package configure` 生成配置后运行。
+或 all-in-one，用 `aw config init` 生成配置后运行。
+
+已有 AW 后，可用 `aw install --prefix ABS_DIR --bundle ABS_DIR` 安装解压后的本地
+Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR` 移除其拥有的文件。
+原生 Hook 注册使用 `aw agent connect --config FILE --agent TARGET`。
+旧的原生 `aw install --config ... --agent ...` 和 `aw-package` 命令保持兼容。
+此 Preview 安装器尚不支持按组件名、直接 URL 或系统包后端安装。
 
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
@@ -80,10 +86,13 @@ Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经�
 
 ![AW 用户流程与组件架构](../../docs/images/aw/architecture_zh.png)
 
-根目录是纯 workspace。`crates/` 保存 9 个框架 crate，仓库根 `providers/` 收录可独立协作的
+根目录是纯 workspace。`crates/` 保存 10 个框架 crate，仓库根 `providers/` 收录可独立协作的
 具体实现。Provider 也可以在外部仓库开发、单独分发，见[协作入口](../../providers/README_zh.md)。
 Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider；
 `aw-core` 提供独立的计划执行接口，服务只复用它的 Journal。
+
+`aw-cli` 负责命令解析和呈现，调用 `aw-package` 库完成安装与配置，调用
+`aw-service` 完成运行时操作。
 
 [架构总览](../../docs/developer-guide/zh/aw/architecture.md)说明各包职责与运行顺序，
 [设计索引](docs/design/README_zh.md)按调用流程组织详细协议。

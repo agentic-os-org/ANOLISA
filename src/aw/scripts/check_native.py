@@ -40,7 +40,7 @@ def load(root: Path) -> dict:
             validate_pin(row.get("qoder_reload_cli", {}))
             reload = [case for case in row.get("cases", []) if case["name"] == "runtime-reload"]
             expected = [
-                "{python}", "crates/aw-service/tests/fixtures/qoder/reload.py",
+                "{python}", "crates/aw-cli/tests/fixtures/qoder/reload.py",
                 "--bin", "{bin}", "--output", "{output}/runtime-reload",
             ]
             if (
@@ -66,7 +66,7 @@ def load(root: Path) -> dict:
                 raise ValueError(f"{agent}: pin the sec-core runtime container digest")
             expected_argv = [
                 "{python}",
-                "crates/aw-service/tests/fixtures/sec_core/native.py",
+                "crates/aw-cli/tests/fixtures/sec_core/native.py",
                 "--agent",
                 agent,
                 "--bin",

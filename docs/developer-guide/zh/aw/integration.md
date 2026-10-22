@@ -21,7 +21,7 @@ AW 当前为 Preview，尚未提供 `anolisa install aw` 或 RPM 分发。使用
 
 ```bash
 cd src/aw
-cargo build --locked -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
+cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
 export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
@@ -172,7 +172,7 @@ OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Herm
 
 ```bash
 cd "$AW_SOURCE"
-cargo test --locked -p aw-host -p aw-service
+cargo test --locked -p aw-host -p aw-service -p aw-cli
 ```
 
 提交 AW 实现改动前，在仓库根目录运行完整 Linux 门禁：

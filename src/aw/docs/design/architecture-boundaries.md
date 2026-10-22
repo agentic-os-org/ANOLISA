@@ -10,7 +10,7 @@ while preserving commands, protocols and Preview installation behavior.
 
 ```text
 ANOLISA/
-├── src/aw/                         # Virtual workspace: nine framework crates
+├── src/aw/                         # Virtual workspace: ten framework crates
 │   ├── Cargo.toml / Cargo.lock
 │   ├── crates/
 │   │   ├── aw-adapter/
@@ -22,7 +22,8 @@ ANOLISA/
 │   │   ├── aw-exec/                # Bounded process execution
 │   │   ├── aw-host/                # Provider preparation and invocation
 │   │   ├── aw-core/                # Plan API and Journal
-│   │   ├── aw-service/             # CLI, client, service and runtime state
+│   │   ├── aw-cli/                 # aw and legacy aw-package command frontends
+│   │   ├── aw-service/             # Client, service and runtime state
 │   │   └── aw-package/             # Current Preview build, install and config editing
 │   ├── tests/                     # Regression matrix, native inventory and shared checks
 │   └── scripts/                   # Unified gate
@@ -42,9 +43,19 @@ development dependencies on them.
 
 ## Adapter and service interfaces
 
-The `aw-service` binary target retains the `aw` command; its library target
-provides the client and service. Both launcher and service use `aw-adapter`,
-which does not depend on service, Host or CLI internals.
+`aw-cli` owns the `aw` command and the compatibility `aw-package` executable.
+It directly calls the `aw-package` library for installation and offline editing;
+`aw-build` remains a maintenance binary in `aw-package`. `aw-service` provides
+the client and service as a library. Libraries do not depend on `aw-cli`.
+Both launcher and service use `aw-adapter`, which does not depend on service,
+Host or CLI internals.
+
+Software installation uses `aw install --prefix ... --bundle ...`; native Hook
+registration uses `aw agent connect --config ... --agent ...`. The old native
+`aw install --config ... --agent ...` remains compatible. Mixed installation
+and native-registration arguments fail before mutation. Preview still accepts
+only its existing local packages; this extraction adds no URL installer, package
+manager backend, automatic activation or receipt migration.
 
 | Interface or state | Ownership |
 | --- | --- |

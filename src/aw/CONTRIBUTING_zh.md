@@ -148,7 +148,7 @@ python3 -B scripts/native_acceptance.py --agent agentscope \
 ```bash
 npm install --prefix target/openclaw-native --ignore-scripts --no-audit --no-fund openclaw@2026.9.6
 OPENCLAW_PACKAGE_DIR="$PWD/target/openclaw-native/node_modules/openclaw" \
-  node --test --test-reporter=tap crates/aw-service/tests/openclaw-native.mjs
+  node --test --test-reporter=tap crates/aw-cli/tests/openclaw-native.mjs
 ```
 
 八项 TAP 测试必须全部通过且不得跳过。套件通过 OpenClaw 官方 loader 加载实际 AW
@@ -172,7 +172,7 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
 协议阅读顺序见[设计索引](docs/design/README_zh.md)。
 
-原生方言和桥接资产归 `aw-adapter`；CLI 负责参数、RPC、信号和资源，服务负责
+原生方言和桥接资产归 `aw-adapter`；`aw-cli` 负责参数、RPC、信号和资源，服务负责
 状态、预算和审计。两者共用 Adapter，不向它传递服务内部类型。
 `aw-provider` 负责离线协议校验，进程执行统一使用 `aw-exec`。
 修改 crate 边界时，同时更新 [check_layout.py](scripts/check_layout.py)
@@ -183,7 +183,7 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 在 Linux 的 `src/aw` 中构建 CLI 和样例 Provider：
 
 ```bash
-cargo build --locked -p aw-service --bin aw
+cargo build --locked -p aw-cli --bin aw
 cargo build --locked -p aw-provider --example policy
 ```
 
@@ -197,10 +197,10 @@ cargo build --locked -p aw-provider --example policy
 本地服务定向检查：
 
 ```bash
-cargo test --locked -p aw-service
+cargo test --locked -p aw-service -p aw-cli
 ```
 
-服务测试使用真实 Unix socket、样例 Provider 子进程和私有临时状态目录，不需要
+服务单元测试和 CLI 集成测试使用真实 Unix socket、样例 Provider 子进程和私有临时状态目录，不需要
 模型、Agent 安装或云端密钥。检查共享事件预算、调用关联与单次执行、取消和关闭、
 持久审计、陈旧句柄及端点所有权。fixture 负责等待所属进程并删除临时目录；构建
 产物保留在 `target/`。验收边界见[本地服务合同](docs/design/local-service_zh.md)。
