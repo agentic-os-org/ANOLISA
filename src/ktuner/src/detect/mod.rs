@@ -2081,6 +2081,7 @@ const SERVICE_COMPANION_TOOLS: &[&str] = &[
     "clickhouse-keeper",
     "oracle-cloud-agent",
     "oracle-cloud-agent-updater",
+    "postgres-operator",
 ];
 
 /// Whether the program `program` is a *tool* of a service rather than the
@@ -4852,6 +4853,10 @@ mod tests {
             // platform's default agents reported an Oracle database.
             ("oracle-cloud-agent", "oracle", "Oracle"),
             ("oracle-cloud-agent-updater", "oracle", "Oracle"),
+            // Crunchy Data's Postgres control plane: it provisions PostgreSQL
+            // clusters as separate pods and never runs the database itself, but
+            // its comm keeps `postgres` as the first name run.
+            ("postgres-operator", "postgres", "PostgreSQL"),
         ] {
             let path = root.join(name);
             fs::copy("/bin/sleep", &path).expect("copy sleep to the companion's name");
