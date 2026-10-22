@@ -17,6 +17,7 @@ path = "src/bin/aw-package.rs"
 doc = false
 
 [dependencies]
+tempfile = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 aw-adapter = { workspace = true }
@@ -31,7 +32,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 aw-contracts = { workspace = true }
 serde_yaml_ng = { workspace = true }
 sha2 = { workspace = true }
-tempfile = { workspace = true }

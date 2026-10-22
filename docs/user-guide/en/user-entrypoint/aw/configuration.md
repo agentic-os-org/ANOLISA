@@ -95,7 +95,7 @@ This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 with
 AgentScope 2.0.9 App. For QwenPaw, use its configured target and initialized
 `QWENPAW_WORKING_DIR` as in the native integration reference. Ordinary `aw run`
 keeps its existing behavior. An instance started without the stable bridge
-cannot be upgraded by this command; external attach is a later capability.
+cannot be upgraded by this command. For a caller-owned native process, use the installation flow below.
 
 Prepare `next.yaml` separately. In another terminal, update the target using the
 original launch configuration to locate its existing service:
@@ -107,8 +107,27 @@ aw update --config "$AW_HOME/aw.yaml" --agent qoder --policy next.yaml
 The command selects the target's unique live instance and reads its current
 policy revision. That revision remains an optimistic concurrency check: if a
 concurrent update wins, the command fails with a conflict rather than retrying.
-No matching instance fails; multiple matching instances require `--instance ID`.
-Use `aw status --config "$AW_HOME/aw.yaml"` to inspect instance IDs and revisions.
+No matching instance fails; disambiguate multiple instances with `--instance ID`
+or `--pid PID`. For a process already attached or launched with `aw run --reloadable`:
+
+```bash
+aw update --config "$AW_HOME/aw.yaml" --pid "$PID" --policy next.yaml
+```
+
+`--pid` requires exactly one recorded live process association, including its PID,
+startup ticks, UID and PID namespace. Dead, reused, unknown or unassociated PIDs
+fail without activation. The CLI, process and service must share user, PID and mount
+namespaces; QwenPaw also requires the same network namespace. Select the local
+container context before invoking AW; PIDs are not global addresses.
+`--pid` conflicts with `--instance`; optional `--agent TARGET` constrains either
+selector to that target. It never attaches a process or enables reload on an
+ordinary launch. `--config` still locates the existing service and `--policy` supplies
+only the candidate policy.
+
+Use `aw status --config "$AW_HOME/aw.yaml"` to correlate `instances[].target`,
+`process.pid`, `process.start_ticks`, `instance_id`, `ready`, `requests`, `tools` and
+`policy_revision` in the existing JSON output. Process metadata contains no
+credentials or policy payloads.
 Selection includes unready and nonreloadable instances; it never silently chooses
 an idle instance over a busy one.
 
@@ -215,3 +234,59 @@ Configuration chooses observation or blocking when the rule matches. `on_error` 
 failures; safety checks typically use `block`. Follow the
 [boolean rule tutorial](../../../../developer-guide/en/aw/integration.md) to prepare a script and verify
 both allowed and blocked calls.
+
+## Attach to an already started native process
+
+A container controller can start Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 /
+AgentScope 2.0.9 App normally, then install AW before dispatching the first request.
+The controller owns the process, its terminal and its lifetime. Record its PID
+when starting it and keep request dispatch paused until installation succeeds.
+
+```bash
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
+aw update --config current.yaml --pid "$NATIVE_PID" --policy next.yaml
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
+```
+
+`aw install --config ... --agent ... --pid ... [--remove]` remains a compatible
+entrypoint for the same operation.
+
+The connection command reports the instance, active policy revision and
+process identity after native confirmation. Subsequent policy changes use the
+same `update` command as reloadable `aw run`. `--remove` checks the complete native
+request/tool boundary; busy returns an error without removing protection or
+queuing work. It leaves the native process alive and preserves unrelated Hooks
+and configuration edits. Keep request dispatch paused during removal as well.
+Ordinary `aw run` and Hermes installation keep their existing behavior.
+
+Use one exclusive native configuration scope for each prewarmed process. AW and
+the Agent must run as the same user in the same PID and mount namespaces. The
+selected native configuration directory must be canonical, owned by that user
+and mode `0700`. Known shared processes and duplicate attachment are rejected;
+the controller must also prevent another process from entering that scope later.
+
+- Qoder uses `HOME/.qoder/settings.json`; start without `--settings`, custom
+  configuration directories or Hook-disable options. AW reads the running
+  process's environment and arguments, merges its own groups, and confirms them
+  through native `ConfigChange` before input. Existing settings must be regular,
+  same-user files without group/world write permission. If settings were absent,
+  AW creates the native file and retains the empty document after removal.
+  Native workspace trust and permission decisions remain with Qoder.
+- QwenPaw uses the running App's initialized `QWENPAW_WORKING_DIR`. Start the
+  App listening on `127.0.0.1`; AW verifies that the selected PID owns its port.
+  The native plugin API installs the existing AW middleware with a private
+  descriptor. An acknowledgement from that App is required; an HTTP success
+  alone is insufficient. Separate managed runtimes are not supported.
+
+QwenPaw also requires the same network namespace as AW. If its installed plugin
+tree is missing, detach cannot prove that in-memory middleware was unloaded: it
+returns an error and retains ownership and bridge files. Restore the owned tree
+and retry detach before dispatching further requests.
+
+First attachment requires a quiescent process before its first request. AW
+cannot reconstruct work already in flight before its bridge existed. Remove
+attachment before stopping the external process; this first release does not
+supervise that process or run an automatic attachment garbage collector. A
+failed removal retains its ownership record and bridge files for an explicit
+retry with the same command. A replaced native plugin or service generation is
+rejected for inspection, rather than removing another owner's resources.

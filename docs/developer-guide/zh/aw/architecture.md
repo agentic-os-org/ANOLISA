@@ -32,7 +32,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-package` | 可复用的安装与配置 API，以及 `aw-build` 构建工具 | config、exec |
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
-`aw-contracts`。底层库不依赖 `aw-cli`；两个命令入口在进程内调用相同的安装 API。
+`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；两个命令入口在进程内调用相同的安装 API。
 
 公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
 调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
@@ -125,3 +125,14 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 有效及无效样例。受支持的版本可以并存；新增版本使用独立的名称和 `$id`，保留旧版
 合同及其测试，直到明确结束兼容。迁移现有 Schema 时保持字节、`$id`、Registry 名称
 与跨语言摘要向量不变。
+
+## 外部管理进程的原生接入
+
+`aw install --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
+AssociateProcess 和稳定 dispatch。CLI 管理私有挂载记录及服务绑定；`aw-adapter`
+管理 Qoder settings 合并与确认，以及 QwenPaw 插件 API 安装和移除，有限时长的
+loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享现有进程身份帮助函数。
+
+原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
+`install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
+私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。

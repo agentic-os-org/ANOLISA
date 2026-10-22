@@ -191,6 +191,50 @@
     "reload-cancel": {
       "target": "aw-cli/test/service",
       "test": "policy::disconnected_update_cancels_preparation_without_later_activation"
+    },
+    "attach-cli": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_first_hook_busy_detach_isolation_and_owned_cleanup"
+    },
+    "attach-scope": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_rejects_wrong_pid_and_shared_profile_without_writes"
+    },
+    "attach-cancel": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::cancelled_unconfirmed_install_rolls_back_native_groups_and_binding"
+    },
+    "detach-idle": {
+      "target": "aw-cli/test/service",
+      "test": "policy::detach::unbind_keeps_busy_requests_and_native_cleanup_protected"
+    },
+    "attach-settings": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "attachment::files::tests::settings_updates_preserve_native_data_and_reject_symlinks_and_racing_edits"
+    },
+    "attach-default-settings": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_install_creates_missing_native_settings_without_launching_an_agent"
+    },
+    "attach-qwenpaw": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection"
+    },
+    "attach-network": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::attachment::process::tests::qwenpaw_requires_the_callers_network_namespace"
+    },
+    "pid-update": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::pid_update_isolates_same_target_attachments_and_rejects_invalid_selection"
+    },
+    "pid-identity": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::update::tests::pid_selection_requires_one_complete_live_identity_and_intersects_target"
+    },
+    "pid-dead": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::pid_update_rejects_a_dead_associated_process_without_changing_policy"
     }
   },
   "agents": {
@@ -370,7 +414,16 @@
         "reload-busy",
         "reload-race",
         "reload-rollback",
-        "reload-cancel"
+        "reload-cancel",
+        "attach-cli",
+        "attach-scope",
+        "attach-cancel",
+        "detach-idle",
+        "attach-settings",
+        "attach-default-settings",
+        "pid-update",
+        "pid-identity",
+        "pid-dead"
       ],
       "security": [
         "security-retry"
@@ -405,7 +458,12 @@
         "reload-busy",
         "reload-race",
         "reload-rollback",
-        "reload-cancel"
+        "reload-cancel",
+        "detach-idle",
+        "attach-qwenpaw",
+        "attach-network",
+        "pid-update",
+        "pid-identity"
       ],
       "security": [
         "security-retry"

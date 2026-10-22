@@ -36,7 +36,7 @@ maintained separately under `providers/`.
 | `aw-package` | Reusable package installation and configuration APIs; `aw-build` packaging tool | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
-on `aw-service`; CLI integration tests also use `aw-contracts`. Libraries do not
+on `aw-service`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
 depend on `aw-cli`. Both command frontends call the same package APIs in-process.
 
 The public `aw` tree uses one typed Clap declaration for parsing and help.
@@ -148,3 +148,18 @@ valid and invalid examples together. Supported versions can coexist: give new
 versions distinct names and `$id` values, retaining the old contracts and tests
 until compatibility is explicitly retired. Relocating existing schemas must
 preserve their bytes, `$id`, registry names and canonical digest vectors.
+
+## Caller-owned native attachment
+
+`aw install --pid` reuses the existing configuration and Adapter preparation,
+Bind/Host admission, EnableReload, AssociateProcess and stable dispatch. The CLI
+owns the private attachment record and service binding. `aw-adapter` owns Qoder
+settings merging/confirmation and QwenPaw plugin API installation/removal;
+its bounded loopback HTTP transport uses the workspace's existing `reqwest`.
+The existing service process-identity helper is shared with the CLI.
+
+The native callback confirms readiness before the caller dispatches input.
+Later `aw update` uses the existing idle activation gate. `install --remove`
+uses Unbind to close complete request/tool admission atomically, then removes
+owned native registration and private artifacts. External processes are neither
+launched nor signalled by this path. Ordinary `aw run` keeps child supervision.

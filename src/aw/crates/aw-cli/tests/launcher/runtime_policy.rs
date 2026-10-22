@@ -269,7 +269,8 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
             "transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","provider","--behavior","replace"]},
             "timeout_ms":4500,"max_output_bytes":4096,"config":{}});
         candidate["spec"]["events"]["tool.after"]["steps"].as_array_mut().unwrap().push(json!({"id":"compress","provider":"compress","operation":"record","effects":["replace_result"],"on_error":"report"}));
-        let changed = update(&fixture, &candidate, &[]);
+        let identity = aw_service::ProcessIdentity::read(native_pid).unwrap();
+        let changed = update(&fixture, &candidate, &["--pid", &native_pid.to_string()]);
         assert!(
             changed.status.success(),
             "{}",
@@ -321,7 +322,7 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
         // No tools are active yet: an in-flight model wait alone must return busy.
         command(&fixture, 2, json!({"action":"turn","hold":true}));
         wait(&fixture.root.join("entered-2"));
-        let busy = update(&fixture, &baseline, &[]);
+        let busy = update(&fixture, &baseline, &["--pid", &native_pid.to_string()]);
         assert!(!busy.status.success());
         assert!(String::from_utf8_lossy(&busy.stderr).contains("busy"));
         assert!(busy.stdout.is_empty());
@@ -344,7 +345,8 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
             assert_eq!(held["output"][0]["metadata"]["kept"], true);
         }
         assert_eq!(active(&service)["policy_revision"], revision);
-        let removed = update(&fixture, &baseline, &[]);
+        let removed = update(&fixture, &baseline, &["--pid", &native_pid.to_string()]);
+        identity.check().unwrap();
         assert!(
             removed.status.success(),
             "{}",

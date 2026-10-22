@@ -1,6 +1,8 @@
 //! CLI-to-service hook bridge contracts; fake-host scheduling is not native adoption.
 #![cfg(target_os = "linux")]
 
+#[path = "launcher/attachment.rs"]
+mod attachment;
 #[path = "support/command_policy.rs"]
 mod command_policy;
 #[path = "launcher/hermes_trust.rs"]

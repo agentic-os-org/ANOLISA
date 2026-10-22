@@ -22,7 +22,7 @@ use std::{
 mod binding;
 mod evidence;
 mod hooks;
-mod policy;
+pub(crate) mod policy;
 
 const MAX_BINDINGS: usize = 16;
 const MAX_EVENTS: usize = 32;
@@ -237,7 +237,13 @@ impl Runtime {
                     .instances
                     .lock()
                     .map_err(|_| rejected("state_poisoned"))?;
-                if self
+                let instance = instances
+                    .get_mut(&instance_id)
+                    .and_then(Option::as_mut)
+                    .ok_or_else(|| rejected("unknown_instance"))?;
+                if instance.reload.is_some() && !instance.closing {
+                    self.idle(instance, &instance_id)?;
+                } else if self
                     .events
                     .lock()
                     .map_err(|_| rejected("state_poisoned"))?
@@ -246,11 +252,7 @@ impl Runtime {
                 {
                     return Err(rejected("instance_has_events"));
                 }
-                instances
-                    .get_mut(&instance_id)
-                    .and_then(Option::as_mut)
-                    .ok_or_else(|| rejected("unknown_instance"))?
-                    .closing = true;
+                instance.closing = true;
                 drop(instances);
                 self.release_instance(&instance_id, deadline)
             }

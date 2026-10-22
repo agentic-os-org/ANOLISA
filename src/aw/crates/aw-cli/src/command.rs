@@ -88,7 +88,7 @@ enum Command {
 #[derive(Subcommand, Debug, PartialEq)]
 enum Agent {
     /// Connect supported native Hooks; does not install Agent software
-    Connect(Native),
+    Connect(Connect),
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -132,6 +132,25 @@ struct Native {
     /// Native framework profile, not an AW deployment profile
     #[arg(long, value_name = "NAME")]
     native_profile: Option<String>,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Connect {
+    #[command(flatten)]
+    native: Native,
+    #[command(flatten)]
+    attachment: Attachment,
+}
+
+#[derive(Args, Debug, PartialEq)]
+#[group(multiple = true)]
+struct Attachment {
+    /// Attach to an idle caller-owned Qoder TUI or QwenPaw App process
+    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), requires_all = ["config", "agent"], conflicts_with = "native_profile")]
+    pid: Option<u32>,
+    /// Detach owned Hooks while idle; leave the native process running
+    #[arg(long, requires = "pid")]
+    remove: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -195,12 +214,15 @@ struct ManagedValidate {
 struct Update {
     #[command(flatten)]
     endpoint: Endpoint,
-    /// Select a configured target; combine with --instance to disambiguate
-    #[arg(long, value_name = "TARGET", required_unless_present = "instance")]
+    /// Select a unique target, or constrain --instance or --pid to this target
+    #[arg(long, value_name = "TARGET", required_unless_present_any = ["instance", "pid"])]
     agent: Option<String>,
     /// Select an instance, optionally intersecting --agent
-    #[arg(long, value_name = "ID", required_unless_present = "agent")]
+    #[arg(long, value_name = "ID", conflicts_with = "pid")]
     instance: Option<String>,
+    /// Select an existing verified local process association; never attach it
+    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "instance")]
+    pid: Option<u32>,
     /// Candidate policy document; does not replace the launch configuration
     #[arg(long, value_name = "FILE")]
     policy: String,
