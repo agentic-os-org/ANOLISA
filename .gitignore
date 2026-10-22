@@ -31,6 +31,8 @@ website/build/
 *.dll
 *.tar.gz
 *.rpm
+# Git-bundle salvage artifacts from the branch-recovery workflow.
+*.bundle
 
 # IDE
 .idea/

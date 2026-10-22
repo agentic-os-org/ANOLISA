@@ -82,48 +82,46 @@ impl Default for ExportFilter {
 /// Returns (frontmatter_map, body).
 fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut fm = HashMap::new();
-    let body;
 
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
-            let mut current_list_key: Option<String> = None;
-            let mut current_list_items: Vec<String> = Vec::new();
-            for line in fm_str.lines() {
-                if let Some(item) = line.strip_prefix("  - ") {
-                    // List item under the current list header
-                    if current_list_key.is_some() {
-                        current_list_items.push(item.trim().to_string());
-                    }
-                    continue;
+    // Fence matching mirrors the canonical reader (parse_frontmatter_flat
+    // in user_profile.rs): the closing fence is a line that is exactly
+    // `---` (see `split_frontmatter`), it may end the file, and it may
+    // close an empty frontmatter block.
+    if let Some((fm_str, body)) = super::split_frontmatter(content) {
+        let mut current_list_key: Option<String> = None;
+        let mut current_list_items: Vec<String> = Vec::new();
+        for line in fm_str.lines() {
+            if let Some(item) = line.strip_prefix("  - ") {
+                // List item under the current list header
+                if current_list_key.is_some() {
+                    current_list_items.push(item.trim().to_string());
                 }
-                // Flush any accumulated list items
-                if let Some(key) = current_list_key.take() {
-                    let json = serde_json::to_string(&current_list_items)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    fm.insert(key, json);
-                    current_list_items.clear();
-                }
-                if let Some((key, value)) = line.split_once(": ") {
-                    fm.insert(key.trim().to_string(), value.trim().to_string());
-                } else if let Some(key) = line.strip_suffix(':') {
-                    current_list_key = Some(key.trim().to_string());
-                }
+                continue;
             }
-            // Flush trailing list
+            // Flush any accumulated list items
             if let Some(key) = current_list_key.take() {
                 let json =
                     serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
                 fm.insert(key, json);
+                current_list_items.clear();
             }
-            return (fm, body);
+            if let Some((key, value)) = line.split_once(": ") {
+                fm.insert(key.trim().to_string(), value.trim().to_string());
+            } else if let Some(key) = line.strip_suffix(':') {
+                current_list_key = Some(key.trim().to_string());
+            }
         }
+        // Flush trailing list
+        if let Some(key) = current_list_key.take() {
+            let json =
+                serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
+            fm.insert(key, json);
+        }
+        return (fm, body.to_string());
     }
 
     // No frontmatter found
-    body = content.to_string();
-    (fm, body)
+    (fm, content.to_string())
 }
 
 /// Export the memory store to AMA JSON format.
@@ -261,5 +259,17 @@ mod tests {
         assert_eq!(fm.get("title").unwrap(), "Test");
         assert!(fm.contains_key("next_steps"));
         assert!(body.contains("Body"));
+    }
+
+    #[test]
+    fn parse_frontmatter_accepts_fence_without_trailing_newline() {
+        // Regression: requiring "\n---\n" made the whole frontmatter block
+        // disappear for files whose closing fence ends the file, so an
+        // export dropped id/category and category filtering misfiled them.
+        let content = "---\nid: abc123\ncategory: lesson\n---";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        assert_eq!(fm.get("category").unwrap(), "lesson");
+        assert_eq!(body, "");
     }
 }
