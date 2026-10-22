@@ -23,7 +23,7 @@ fn configuration_usage(program: &str) -> String {
     } else {
         "configure"
     };
-    format!("{program} {configure} --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]")
+    format!("{program} {configure} --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--qwenpaw ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]")
 }
 
 fn print_help(program: &str) {
@@ -54,6 +54,7 @@ fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()>
             "--state-dir",
             "--socket",
             "--qoder",
+            "--qwenpaw",
             "--node",
             "--openclaw",
             "--provider",
@@ -163,6 +164,7 @@ pub(crate) fn execute(
                 state: required("--state-dir")?,
                 policy,
                 qoder: optional("--qoder"),
+                qwenpaw: optional("--qwenpaw"),
                 node: optional("--node"),
                 openclaw: optional("--openclaw"),
             })?;

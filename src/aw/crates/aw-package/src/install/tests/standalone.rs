@@ -10,6 +10,7 @@ fn settings<'a>(fixture: &'a Fixture, config: &'a Path) -> Settings<'a> {
         config,
         state: &fixture.state,
         qoder: Some(Path::new("/bin/true")),
+        qwenpaw: None,
         node: None,
         openclaw: None,
         policy: Policy::None,
@@ -28,15 +29,19 @@ fn read(config: &Path) -> Value {
 
 #[test]
 fn core_alone_initializes_each_agent_without_provider_or_second_agent_inputs() {
-    for qoder in [false, true] {
+    for adapter in ["qoder", "openclaw", "qwenpaw"] {
         let f = Fixture::new();
         install(&f.core, &f.prefix).unwrap();
         let config = f.root.join("aw.yaml");
         let mut settings = settings(&f, &config);
-        if !qoder {
+        if adapter == "openclaw" {
             settings.qoder = None;
             settings.node = Some(Path::new("/bin/true"));
             settings.openclaw = Some(Path::new("/bin/true"));
+        }
+        if adapter == "qwenpaw" {
+            settings.qoder = None;
+            settings.qwenpaw = Some(Path::new("/bin/true"));
         }
         crate::configure(&settings).unwrap();
         let value = read(&config);
@@ -194,4 +199,28 @@ fn invalid_agent_or_command_inputs_preserve_existing_configuration() {
         assert!(crate::configure(&settings).is_err());
         assert_eq!(fs::read(&config).unwrap(), existing);
     }
+}
+
+#[test]
+fn qwenpaw_security_template_maps_the_existing_shell_tool() {
+    let f = Fixture::new();
+    install(&f.combined, &f.prefix).unwrap();
+    let config = f.root.join("qwenpaw.yaml");
+    let mut settings = settings(&f, &config);
+    settings.qoder = None;
+    settings.qwenpaw = Some(Path::new("/bin/true"));
+    settings.policy = Policy::SecCore {
+        socket: Path::new("/run/aw-test/sec.sock"),
+    };
+    crate::configure(&settings).unwrap();
+    let value = read(&config);
+    assert_eq!(
+        value["spec"]["providers"]["security"]["config"]["tools"],
+        json!({"execute_shell_command":{"language":"bash","input_pointer":"/command"}})
+    );
+    assert_eq!(
+        value["spec"]["events"]["tool.before"]["steps"][0]["on_error"],
+        "block"
+    );
+    assert!(!f.state.exists());
 }

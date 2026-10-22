@@ -1,7 +1,10 @@
 //! Offline Provider and event-step editing with validated, atomic publication.
 //! No operation starts an Agent, discovers capabilities or executes a Hook.
 
+mod command;
 mod publication;
+
+pub use command::CommandHook;
 
 use crate::{require, Error, Result};
 use publication::Snapshot;
@@ -21,6 +24,37 @@ pub struct ConfigurationEditor {
 }
 
 impl ConfigurationEditor {
+    /// Appends a boolean command and its Provider as one validated edit.
+    ///
+    /// Creates an absent event; existing event options and step order are retained.
+    /// An identical Provider/step pair is a no-op. Save publishes both together.
+    ///
+    /// # Errors
+    /// Rejects disabled events, conflicting names/IDs or invalid Hook parameters.
+    pub fn add_command_hook(&mut self, event: &str, command: CommandHook<'_>) -> Result<bool> {
+        let (provider, hook) = command.definitions()?;
+        self.edit(|document| {
+            let providers = object(document, "providers")?;
+            let mut changed = insert(providers, command.provider, provider, "Provider")?;
+            let events = object(document, "events")?;
+            if !events.contains_key(event) {
+                events.insert(event.into(), serde_json::json!({"enabled":true,"steps":[]}));
+                changed = true;
+            }
+            require(
+                events[event]["enabled"] == true,
+                "event is disabled; enable it explicitly before adding a command Hook",
+            )?;
+            let steps = steps(document, event)?;
+            if let Some(existing) = steps.iter().find(|step| step["id"] == command.id) {
+                require(existing == &hook, "conflicting Hook ID in event")?;
+            } else {
+                steps.push(hook);
+                changed = true;
+            }
+            Ok(changed)
+        })
+    }
     /// Opens an existing, owned regular file through an absolute, symlink-free path.
     ///
     /// The parent must be owned and not group/world writable; extended POSIX and

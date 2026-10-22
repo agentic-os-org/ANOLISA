@@ -136,8 +136,10 @@ Remove operations preserve the file when the identity is already absent. Success
 mutations print `Updated configuration` or `Configuration unchanged`. Remove all
 referencing steps, including disabled steps, before removing their Provider.
 Removing an event's last step retains its event options and empty `steps` array.
-`add-hook` requires an existing event: `add-event` makes enablement explicit and
+The `add-hook --definition` form requires an existing event: `add-event` makes enablement explicit and
 never overrides an existing event's options.
+
+The boolean-script shortcut also accepts `--id`, `--check`, `--effect`, `--on-error`, optional `--provider`/`--reason-code` and literal arguments after `--`. It creates a missing event and atomically adds its Provider and step, refusing disabled events and preserving existing options/order. See the [user guide](../../../user-guide/en/user-entrypoint/aw/configuration.md#append-a-boolean-script-hook) for examples and compatibility rules. `configure --qwenpaw ABS_FILE` generates the same HTTP App target as `aw config init --qwenpaw ABS_FILE`.
 
 Each mutating command publishes one operation atomically. Several commands are
 separate publications, so earlier successful commands remain applied if a later

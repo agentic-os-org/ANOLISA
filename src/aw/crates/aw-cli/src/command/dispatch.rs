@@ -164,6 +164,7 @@ fn package(action: &'static str, args: Arguments, output: crate::output::Options
 }
 
 fn config(command: Config) -> Result<Exit> {
+    let mut arguments = Vec::new();
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
         Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
@@ -172,6 +173,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("config", Some(value.config)),
                 ("state-dir", Some(value.state_dir)),
                 ("qoder", value.qoder),
+                ("qwenpaw", value.qwenpaw),
                 ("node", value.node),
                 ("openclaw", value.openclaw),
                 ("provider", value.provider),
@@ -223,16 +225,25 @@ fn config(command: Config) -> Result<Exit> {
             .flags,
             value.output,
         ),
-        Config::AddHook(value) => (
-            "add-hook",
-            options([
-                ("config", Some(value.configuration.config)),
-                ("event", Some(value.event)),
-                ("definition", Some(value.definition)),
-            ])
-            .flags,
-            value.output,
-        ),
+        Config::AddHook(value) => {
+            arguments = value.arguments;
+            (
+                "add-hook",
+                options([
+                    ("config", Some(value.configuration.config)),
+                    ("event", Some(value.event)),
+                    ("definition", value.definition),
+                    ("id", value.id),
+                    ("check", value.check),
+                    ("provider", value.provider),
+                    ("effect", value.effect),
+                    ("on-error", value.on_error),
+                    ("reason-code", value.reason_code),
+                ])
+                .flags,
+                value.output,
+            )
+        }
         Config::RemoveHook(value) => (
             "remove-hook",
             options([
@@ -244,7 +255,7 @@ fn config(command: Config) -> Result<Exit> {
             value.output,
         ),
     };
-    let result = match crate::package::config::execute(action, &flags) {
+    let result = match crate::package::config::execute(action, &flags, &arguments) {
         Ok(Some(outcome)) => Ok(outcome),
         // Show owns its existing raw JSON contract, including private values.
         Ok(None) => return Ok(Exit::Code(0)),

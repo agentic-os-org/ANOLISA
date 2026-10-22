@@ -48,6 +48,11 @@ aw stop --config "$HOME/aw/aw.yaml"
 `aw service serve` 在前台运行服务，不安装系统服务单元。
 使用 `aw service --help` 查看参数，`aw --version` 查看 CLI crate 版本。
 
+`aw config init --qwenpaw /absolute/path/to/qwenpaw` 可生成无界面的 HTTP App 目标。
+`aw config add-hook` 可通过 `--id`、`--check`、`--effect` 和 `--on-error` 追加布尔脚本，
+保留完整定义文件编辑及已有步骤；编辑仍为离线操作。
+详见[配置指南](../../docs/user-guide/zh/user-entrypoint/aw/configuration.md#追加布尔脚本-hook)。
+
 通过 `aw --help`、`aw config --help`、`aw config validate --help` 逐级查看
 已实现的命令。公开命令也支持 `-h`，`aw -V` 显示 CLI 版本。
 帮助选项须放在最后；未知或重复参数会在开始操作前报错。

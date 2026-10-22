@@ -24,6 +24,20 @@ aw config init --prefix "$AW_PREFIX" \
 
 先安装所选 Provider；生成器会填入程序路径和校验信息。
 
+QwenPaw HTTP App 可直接选择其可执行文件。生成的目标名为 `qwenpaw`，
+入口为 `qwenpaw app`，无需图形界面。初始化检查入口，但不启动 App，
+不修改模型账户，也不改变原生版本准入范围。
+
+```bash
+export AW_QWENPAW=/absolute/path/to/qwenpaw
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/qwenpaw.yaml" --state-dir "$AW_HOME/qwenpaw-state" \
+  --qwenpaw "$AW_QWENPAW"
+```
+
+原有 `--qoder`、成对的 `--node`/`--openclaw` 仍然可用，也可以与 `--qwenpaw`
+组合。一份配置中的目标共享事件步骤；初始化不会生成单 Agent 或单 Session 的独立策略。
+
 ## 修改已有配置
 
 退出使用这份配置的 Agent，用原配置停止服务后再编辑。配置文件不会被监听；
@@ -47,6 +61,54 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 校验成功会打印 `configuration valid`。它检查字段和引用，实际程序是否可用会在启动时检查。
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
 完整编辑命令和自定义规则示例见[配置工具参考](../../../../developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。
+
+## 追加布尔脚本 Hook
+
+布尔脚本从 stdin 读取规范化事件，向 stdout 输出 JSON `true` 或 `false`。
+返回 true 时请求配置的效果；仅退出码为零不代表返回布尔值。
+请先在以下绝对路径准备可执行脚本。
+
+```bash
+aw config add-hook --config "$AW_HOME/aw.yaml" \
+  --event tool.before --id tenant-check --check /opt/hooks/check \
+  --effect block --on-error block --reason-code tenant_policy \
+  -- arg1 "arg with spaces"
+aw config add-hook --config "$AW_HOME/aw.yaml" \
+  --event tool.after --id completion-log --check /opt/hooks/record \
+  --effect observe --on-error report
+aw config validate --config "$AW_HOME/aw.yaml"
+```
+
+简写在一次经过校验的原子文件编辑中生成 Provider 和步骤。事件不存在时创建为启用状态；
+已有事件保留选项、预算、过滤条件和步骤顺序，新步骤追加到末尾。
+事件已禁用时拒绝编辑，避免静默启用；已有安全步骤保持不变。
+`--id`、`--check`、`--effect` 和 `--on-error` 必填，`--reason-code` 可选。
+效果可选 `block` 和 `observe`，工具后步骤只接受 `observe`。
+失败策略沿用事件约束，例如执行前可使用 `block`，`report` 则保留继续执行行为。
+生成的 Provider 沿用命令模板限制：1000 ms 超时和 32 字节 stdout。
+更大或专用的限制请使用完整定义。
+
+Provider 名默认等于 Hook ID，可通过 `--provider NAME` 指定其他名称。
+Provider 名属于整个配置，Hook ID 则属于各个事件。同名同定义不重复写入；
+Provider 名或 Hook ID 冲突时失败，文件不变。`--` 后的脚本参数按字面保存，
+包括空格、shell 字符及看似选项的字符串。
+编辑器不执行脚本，不检查原生就绪状态，也不连接运行中的服务。
+
+使用已有命令删除步骤；Provider 保留到显式删除时，仍被其他步骤引用时不能删除：
+
+```bash
+aw config remove-hook --config "$AW_HOME/aw.yaml" --event tool.before --id tenant-check
+aw config remove-provider --config "$AW_HOME/aw.yaml" --name tenant-check
+```
+
+`add-hook --definition FILE` 保留原有完整步骤行为，要求事件已存在，
+不能与简写参数混用。原生脚本和结构化 Provider 继续使用完整定义及各自协议；
+布尔简写不会转换它们的输出。
+
+这些命令只离线编辑期望配置。普通实例使用前述停止、编辑、启动流程；
+运行中的可更新实例应编辑独立候选文件，再通过下述空闲更新流程显式激活。
+更新返回 busy 时保留候选文件，运行中策略不变，不排队等待激活。
+配置编辑不会预留或选择一个运行中的 Agent。
 
 ## 比较策略修改
 
