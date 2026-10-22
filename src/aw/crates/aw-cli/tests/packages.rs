@@ -1,5 +1,8 @@
 //! Unified package commands share ownership and offline configuration contracts.
 
+#[path = "packages/output.rs"]
+mod output;
+
 use aw_package::{Component, Manifest, Payload};
 use serde_json::{json, Value};
 use std::{

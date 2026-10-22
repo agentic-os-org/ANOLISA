@@ -3,10 +3,10 @@
 use clap::Args;
 
 #[derive(Args, Debug, PartialEq)]
-#[group(required = true, multiple = true)]
+#[group(multiple = true)]
 pub(super) struct Install {
     /// Absolute destination for a local Preview bundle
-    #[arg(long, value_name = "ABS_DIR", requires = "bundle", conflicts_with_all = ["config", "agent", "native_profile"])]
+    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile"])]
     pub prefix: Option<String>,
     /// Absolute unpacked Preview bundle directory; no URL or RPM/DEB backend
     #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile"])]
@@ -20,6 +20,9 @@ pub(super) struct Install {
     /// Native framework profile for legacy Hook connection
     #[arg(long, value_name = "NAME", requires_all = ["config", "agent"])]
     pub native_profile: Option<String>,
+    /// Emit a versioned management report; package installation only
+    #[arg(long, conflicts_with_all = ["config", "agent", "native_profile"])]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -27,6 +30,9 @@ pub(super) struct Prefix {
     /// Absolute immutable Preview installation prefix
     #[arg(long, value_name = "ABS_DIR")]
     pub prefix: String,
+    /// Emit a versioned management report instead of the human summary
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -112,6 +118,9 @@ pub(super) struct RemoveProvider {
     /// Exact Provider name
     #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
     pub name: String,
+    /// Emit a versioned offline-edit report without private configuration values
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -132,6 +141,9 @@ pub(super) struct Event {
     /// Complete YAML/JSON object; never executed
     #[arg(long, value_name = "FILE")]
     pub definition: String,
+    /// Emit a versioned offline-edit report without private configuration values
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -142,4 +154,7 @@ pub(super) struct RemoveHook {
     pub event: String,
     #[arg(long, value_name = "ID", allow_hyphen_values = true)]
     pub id: String,
+    /// Emit a versioned offline-edit report without private configuration values
+    #[arg(long)]
+    pub json: bool,
 }

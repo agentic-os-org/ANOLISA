@@ -2,6 +2,7 @@
 
 mod cli;
 mod command;
+mod output;
 mod package;
 
 use aw_service::{Operation, Server};

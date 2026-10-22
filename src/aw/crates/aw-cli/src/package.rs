@@ -1,5 +1,6 @@
 //! Shared package presentation for the unified and compatibility entrypoints.
 
+use crate::output::Outcome;
 use aw_package::{Error, Policy, Result, Settings};
 use std::{collections::BTreeMap, path::Path};
 
@@ -78,7 +79,8 @@ fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()>
             .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
         flags.insert(flag, value);
     }
-    execute(&command, &flags, check_args, program)
+    crate::output::human(&execute(&command, &flags, check_args, program)?)?;
+    Ok(())
 }
 
 pub(crate) fn execute(
@@ -86,7 +88,7 @@ pub(crate) fn execute(
     flags: &BTreeMap<String, String>,
     check_args: Vec<String>,
     program: &str,
-) -> Result<()> {
+) -> Result<Outcome> {
     let required = |name: &str| -> Result<&Path> {
         flags
             .get(name)
@@ -108,7 +110,9 @@ pub(crate) fn execute(
                 .ok_or_else(|| Error::Invalid("missing package directory".into()))?;
             signals::register()?;
             aw_package::install_cancellable(bundle, prefix, &signals::CANCEL)?;
-            println!("Installed verified AW components in {}", prefix.display());
+            Ok(Outcome::Installed {
+                prefix: prefix.into(),
+            })
         }
         "configure" => {
             let optional = |name: &str| flags.get(name).map(Path::new);
@@ -162,17 +166,16 @@ pub(crate) fn execute(
                 node: optional("--node"),
                 openclaw: optional("--openclaw"),
             })?;
-            println!(
-                "Created {}; Provider template: {selection}",
-                required("--config")?.display()
-            );
+            Ok(Outcome::Configured {
+                config: required("--config")?.into(),
+                provider_template: selection.into(),
+            })
         }
         "uninstall" => {
             signals::register()?;
             aw_package::uninstall_cancellable(prefix, &signals::CANCEL)?;
-            println!("Removed AW package files; external configuration and state retained");
+            Ok(Outcome::Uninstalled)
         }
         _ => unreachable!("command was validated before parsing flags"),
     }
-    Ok(())
 }

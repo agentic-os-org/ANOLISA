@@ -55,6 +55,11 @@ discover the implemented command tree. Public commands also accept `-h`;
 or repeated options fail before work starts. Options such as `--json` remain
 command-local. See [command help](../../docs/user-guide/en/user-entrypoint/aw/operations.md#command-help-and-arguments).
 
+Local package install/uninstall, `config init`, and offline configuration edits
+accept `--json` for a versioned management result. Human summaries remain the
+default; existing service and protocol JSON is unchanged. See
+[management reports](../../docs/user-guide/en/user-entrypoint/aw/operations.md#management-reports) for supported commands and failure semantics.
+
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.

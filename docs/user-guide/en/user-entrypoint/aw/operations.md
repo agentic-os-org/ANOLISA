@@ -38,6 +38,46 @@ Internal Hook and lifecycle callbacks retain their protocol-specific replies
 and error codes. The compatibility `aw-package` executable keeps its original
 parser, including optional adjacent-bundle discovery for installation.
 
+## Management reports
+
+Use command-local `--json` with local-bundle `install`, `uninstall`, `config init`,
+or `config add-provider/remove-provider/add-event/add-hook/remove-hook`. It does
+not apply to legacy native `install --config`, `agent connect`, `config validate`
+or the compatibility `aw-package` executable.
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --json
+aw config remove-hook --config "$HOME/aw/aw.yaml" --event tool.before --id check --json
+```
+
+The report is one JSON object on stdout. `format: 1` identifies its schema;
+`command` identifies the operation and `status` is `succeeded` or `failed`.
+Success returns a typed `result`, for example:
+
+```json
+{"format":1,"command":"config remove-hook","status":"succeeded","result":{"kind":"configuration_edited","changed":true}}
+```
+
+`changed: false` means a semantic no-op preserved the file. Installation results
+include the selected prefix; configuration generation includes its path and
+template name. Neither reports Provider configuration values or runtime
+activation. `uninstalled` means owned package removal succeeded; external
+configuration and state remain. Installation verification is the existing
+Preview package check, not publisher trust or native Agent acceptance.
+
+An operation failure returns exit code 1 and a `failed` object with an `error`
+containing `code` and a fixed summary `message`. Codes are `io`, `invalid_json`,
+`invalid_yaml` and `package_contract`; raw library errors are not copied into
+this report. Success returns 0. A failed command makes no claim that all changes
+were rolled back. Existing installer cleanup warnings can still appear on
+stderr; the report does not replace those warnings with a transaction inventory.
+
+Syntax errors remain text on stderr with exit code 1 and empty stdout, even
+when `--json` was among the rejected arguments. Default human diagnostics and
+explicit `config show` output retain their existing contracts; this is not a
+global private-data redaction feature. Service JSON, stdin/stdout protocols and
+native Agent output do not receive this management envelope.
+
 ## Check status and stop
 
 ```bash

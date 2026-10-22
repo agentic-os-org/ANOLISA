@@ -1,5 +1,6 @@
 //! Offline edits reuse the same parser and publication boundary as the library.
 
+use crate::output::Outcome;
 use aw_package::{config_edit::ConfigurationEditor, Error, Result};
 use std::{collections::BTreeMap, fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
@@ -59,10 +60,13 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) ->
             .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
         flags.insert(flag, value);
     }
-    execute(&action, &flags)
+    if let Some(outcome) = execute(&action, &flags)? {
+        crate::output::human(&outcome)?;
+    }
+    Ok(())
 }
 
-pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<Option<Outcome>> {
     let required = |name: &str| -> Result<&str> {
         flags
             .get(name)
@@ -111,12 +115,11 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
             }
             .ok_or_else(|| Error::Invalid("selected Provider, event or Hook is absent".into()))?;
             println!("{}", serde_json::to_string_pretty(value)?);
-            return Ok(());
+            return Ok(None);
         }
         "validate" => {
             editor.validate()?;
-            println!("Valid configuration");
-            return Ok(());
+            return Ok(Some(Outcome::ConfigurationValidated));
         }
         "add-provider" => {
             editor.add_provider(required("--name")?, definition(required("--definition")?)?)?;
@@ -135,12 +138,9 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
         }
         _ => unreachable!("action was validated before parsing flags"),
     }
-    if editor.save()? {
-        println!("Updated configuration");
-    } else {
-        println!("Configuration unchanged");
-    }
-    Ok(())
+    Ok(Some(Outcome::ConfigurationEdited {
+        changed: editor.save()?,
+    }))
 }
 
 fn definition(path: &str) -> Result<serde_json::Value> {

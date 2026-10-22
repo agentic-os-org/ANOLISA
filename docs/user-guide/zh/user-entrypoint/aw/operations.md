@@ -33,6 +33,39 @@ aw -V
 内部 Hook 与生命周期回调保留协议特定的回复和错误码。兼容入口 `aw-package`
 保留原解析器，包括安装时可自动查找二进制旁的 bundle。
 
+## 管理结果
+
+本地 bundle 的 `install`、`uninstall`、`config init`，以及
+`config add-provider/remove-provider/add-event/add-hook/remove-hook` 支持局部
+`--json`。旧原生连接 `install --config`、`agent connect`、`config validate`
+和兼容入口 `aw-package` 不支持这个管理输出选项。
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --json
+aw config remove-hook --config "$HOME/aw/aw.yaml" --event tool.before --id check --json
+```
+
+报告在 stdout 输出一个 JSON 对象。`format: 1` 标识格式版本，`command` 标识
+操作，`status` 为 `succeeded` 或 `failed`。成功返回有类型的 `result`，例如：
+
+```json
+{"format":1,"command":"config remove-hook","status":"succeeded","result":{"kind":"configuration_edited","changed":true}}
+```
+
+`changed: false` 表示语义未变，保留原文件。安装结果包含所选前缀；配置生成结果
+包含配置路径和模板名，不返回 Provider 配置值，也不代表运行时已生效。
+`uninstalled` 表示所属包文件已移除，外部配置与状态保留。安装验证沿用现有
+Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
+
+操作失败返回退出码 1 和 `failed` 对象，其中 `error` 包含 `code` 与固定摘要
+`message`。错误码为 `io`、`invalid_json`、`invalid_yaml`、`package_contract`，
+不会把底层原始错误复制进这份报告。成功返回 0。失败不声称全部变更已经回滚。
+安装器已有的清理警告仍可能写入 stderr；这份报告不将这些警告替换为事务清单。
+
+语法错误仍在 stderr 输出文本，退出码为 1，stdout 为空，即使被拒绝的参数中
+包含 `--json`。默认人类诊断与显式 `config show` 保留原有契约；这不是全局
+私有数据脱敏功能。服务 JSON、stdin/stdout 协议和原生 Agent 输出不套管理报告。
+
 ## 查看状态与停止
 
 ```bash

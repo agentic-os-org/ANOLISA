@@ -49,6 +49,10 @@ aw stop --config "$HOME/aw/aw.yaml"
 帮助选项须放在最后；未知或重复参数会在开始操作前报错。
 `--json` 等参数只在对应命令有效，详见[命令帮助](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#命令帮助与参数)。
 
+本地包安装/卸载、`config init` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
+默认仍为人类摘要，已有服务和协议 JSON 保持不变。
+支持范围与失败语义见[管理结果](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#管理结果)。
+
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core
 后端；这些能力都要通过配置启用。AW 不安装 Agent，也不配置模型凭据。
 
