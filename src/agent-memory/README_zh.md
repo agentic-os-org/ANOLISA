@@ -67,6 +67,9 @@ OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 AN
 保留在 OpenClaw 2026.9.2 的 `coding` 会话 profile 中。自定义白名单、sandbox 策略及
 不采用该元数据的宿主需要显式添加新名称；指南说明了如何追加而不覆盖已有策略。
 
+对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
+往返后仍然可用，包括名称中含逗号的条目。多行导入条目仍受 #4626 中的序列化限制影响。
+
 ## 架构
 
 单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 37 个 MCP 工具：

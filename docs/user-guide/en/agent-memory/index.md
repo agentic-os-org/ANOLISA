@@ -284,6 +284,18 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `memory_session_context` | — | `limit` | session-start context injection |
 | `mem_dream` | — | — | user profile synthesis JSON |
 
+`memory_summary` counts the `concepts` and `files` frontmatter lists in
+`top_concepts` and `top_files`. It accepts JSON string arrays and the block lists
+written by `mem_import`, so these rankings survive an AMA export/import round trip.
+For example, `concepts: ["parser, writer", "rust"]` contains two concepts, and
+`files: ["src/a,b.rs"]` contains one file reference. Commas, quotes and backslashes
+inside each single-line JSON string remain part of that entry.
+
+A block list has one entry on each list line; an entry containing a literal
+newline is different. Import round trips for entries containing newlines
+remain limited by [#4626](https://github.com/agentic-os-org/ANOLISA/pull/4626),
+which can also affect unrelated scalar summary fields after import.
+
 ### Error code semantics
 
 | MCP code | Meaning |
