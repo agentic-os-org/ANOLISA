@@ -28,7 +28,7 @@ pub struct MemorySummaryEntry {
 pub struct MemorySummary {
     /// Total memory files found.
     pub total_memories: usize,
-    /// Created by auto-consolidation.
+    /// Created by auto-consolidation or auto-capture.
     pub auto_created: usize,
     /// Created by manual memory_observe or mem_write.
     pub manual_created: usize,

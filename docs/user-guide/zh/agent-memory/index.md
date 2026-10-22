@@ -94,7 +94,7 @@ make remote-test    # 同上 + 跑测试 + clippy
 }
 ```
 
-`/usr/share/anolisa/mcp-servers/agent-memory.json` 描述符列出全部 37 个工具名，支持自动发现的客户端可直接识别。
+`/usr/share/anolisa/mcp-servers/agent-memory.json` 描述符列出工具名，支持自动发现的客户端可直接识别。
 
 ### OpenClaw
 
@@ -211,7 +211,7 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 
 ---
 
-## MCP 工具集（37 个）
+## MCP 工具集（38 个）
 
 所有工具通过 MCP `tools/call` 调用，参数为 JSON 对象。错误以 `CallToolResult { isError: true }` 返回，客户端可据此区分"成功但内容含 failed 字面"与真实错误。Profile 在 `tools/list` 与 `tools/call` 两层校验。
 
@@ -231,12 +231,13 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件原子移入持久化仓 |
 | `mem_session_log` | — | — | 当前会话 JSONL |
 
-### Tier B — 结构化检索（6 个）
+### Tier B — 结构化检索（7 个）
 
 | 工具 | 必填 | 可选 | 返回 |
 |------|------|------|------|
 | `memory_search` | `query` | `top_k`（默认 5）、`mode`（bm25/vector/hybrid）、`category` | `{path, score, snippet, suspicious}` 数组 |
 | `memory_observe` | `content` | `hint`、`type` | `observed at notes/observed/<ulid>.md` |
+| `memory_capture` | `content` | `hint`, `type` | 记录路径，或 `automatic capture skipped by consent` |
 | `memory_get_context` | — | `max_tokens`（默认 2048） | 最近修改文件的 markdown 预览，每条含 `suspicious` |
 | `memory_sessions` | — | `limit`（默认 10） | 历史会话列表 |
 | `memory_timeline` | `session_id` | `limit`（默认 50） | 指定会话的工具调用时间线 |
@@ -271,6 +272,26 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `memory_summary` | — | `recent_limit`（默认 10） | 记忆仓统计概览 JSON |
 | `memory_session_context` | — | `limit` | 会话启动上下文注入 |
 | `mem_dream` | — | — | 用户画像合成 JSON |
+
+使用 `memory_consent` 的 `{"action":"deny","scope":"capture"}`（或 scope `all`）
+可停止 OpenClaw 自动记录。钩子调用 `memory_capture`，每次都读取持久化授权设置，
+因此另一个 MCP 客户端的修改也会生效。没有设置时保持默认允许；设置无法读取或格式错误时，
+返回错误且不写入。允许的自动记录带有 `source: auto-capture`，可在
+`memory_auto_created` 以及 `memory_summary` 的自动记录计数中查看。
+撤销授权作用于后续采集，不会中止已经通过授权检查的采集。本设置限制自动钩子，
+并不禁止所有写入：`memory_observe` 和 `mem_write` 不受此限制，agent 自主调用它们时亦然。
+被拒绝或失败的尝试可在后续钩子调用时重试；成功记录以及同时进行的相同调用仍会去重。
+
+来源字段标识自动记录；审计条目和 git 提交标签仍使用 `memory_observe`，以保持已有
+版本管理和整合行为。授权查询及整合读取器保留原有策略：格式错误的设置可能被查询
+报告为默认允许，而自动采集会拒绝它。对于格式错误的普通设置文件，可通过显式的
+`memory_consent` allow/deny 操作修复。若设置路径是符号链接，安全写入同样会拒绝：
+请先检查并删除链接本身（不要删除目标文件），再执行 allow/deny 操作以创建普通设置文件。
+服务端不会自动删除符号链接。
+
+请同时升级服务端和适配器。OpenClaw agent 可见的四个工具不变；`memory_capture`
+由钩子调用。服务端不支持此工具时，钩子记录失败，不会回退到 `memory_observe`。
+已经保存的记录不会被重新标记或删除。
 
 ### 错误码语义
 
@@ -481,9 +502,9 @@ conflict_bm25_threshold = -2.0
 
 Profile 是 UX 提示而非安全边界，但在 `tools/list` 和 `tools/call` 两层校验：
 
-- **basic** —— 37 个工具全部展示；弱模型也能用 Tier B 的结构化 API。
-- **advanced**（默认）—— 37 个工具全部展示；强模型应优先使用 Tier A 文件操作。
-- **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
+- **basic** —— 38 个工具全部展示；弱模型也能用 Tier B 的结构化 API。
+- **advanced**（默认）—— 38 个工具全部展示；强模型应优先使用 Tier A 文件操作。
+- **expert** —— 隐藏 Tier B（`memory_search`、`memory_observe`、`memory_capture`、`memory_get_context`、`mem_consolidate`、`memory_forget`、`memory_consent`），`tools/call` 调用会以 `METHOD_NOT_FOUND` 拒绝。熟练操作文件系统的前沿模型只需 Tier A 与 Tier C.
 
 `expert` 面向直连 MCP 的客户端——它们自己驱动 Tier A 文件工具。OpenClaw 适配器在插件加载阶段就会拒绝
 `plugins.entries["memory-anolisa"].config.profile = "expert"`：它为宿主 memory 契约注册的 4 个工具有

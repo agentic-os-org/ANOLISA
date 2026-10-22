@@ -8,7 +8,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::time::timeout;
 
-const TIER_B: &[&str] = &["memory_search", "memory_observe", "memory_get_context"];
+const TIER_B: &[&str] = &[
+    "memory_search",
+    "memory_observe",
+    "memory_capture",
+    "memory_get_context",
+];
 
 async fn list_tools_for_profile(profile: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().unwrap();
@@ -84,9 +89,9 @@ async fn recv(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdou
     serde_json::from_str(&line).unwrap()
 }
 
-// 11 Tier A + 6 Tier B + 3 snapshot + 2 git + 2 consolidation + 4 task + 2 export/import + 2 sovereignty (read-only) + 2 session-history = 33
-const TOTAL_TOOLS: usize = 37;
-const TIER_B_COUNT: usize = 6;
+// Expert excludes all Tier B tools from the runtime tool list.
+const TOTAL_TOOLS: usize = 38;
+const TIER_B_COUNT: usize = 7;
 
 #[tokio::test]
 async fn basic_profile_exposes_all_tools() {

@@ -6,7 +6,7 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 
 ## Features
 
-- **File-form memory** — read/write with filesystem semantics via 37 MCP tools; namespace isolation and path sandboxing (openat2 RESOLVE_BENEATH)
+- **File-form memory** — read/write with filesystem semantics via 38 MCP tools; namespace isolation and path sandboxing (openat2 RESOLVE_BENEATH)
 - **Hybrid semantic search** — BM25 keyword + dense vector embeddings with reciprocal rank fusion (RRF); time-decay ranking
 - **Auto capture & recall** — observes at conversation end, injects relevant context before the next prompt
 - **Memory consolidation** — automatic extraction of atomic facts from session audit logs
@@ -105,12 +105,18 @@ all four plugin tools in OpenClaw 2026.9.2's `coding` conversation profile. Cust
 allowlists, sandbox policies, and hosts that ignore this metadata need explicit
 new-name entries; the guide shows how to add them without replacing your policy.
 
+Automatic OpenClaw observations use `memory_capture`, which checks the current
+capture consent before writing and marks the source as `auto-capture`. Explicit
+`memory_observe` calls remain available when automatic capture is disabled.
+Upgrade the server and adapter together; an older server rejects automatic
+capture requests without falling back to a manual write.
+
 ## Architecture
 
-Single-process Tokio async runtime exposing 37 MCP tools over stdio JSON-RPC 2.0:
+Single-process Tokio async runtime exposing 38 MCP tools over stdio JSON-RPC 2.0:
 
 - **Tier A** (11 tools): file operations — read, write, append, edit, list, grep, diff, mkdir, remove, promote, session_log
-- **Tier B** (6 tools): structured retrieval — search, observe, get_context, sessions, timeline, index_refresh
+- **Tier B** (7 tools): structured retrieval — search, observe, capture, get_context, sessions, timeline, index_refresh
 - **Tier C** (7 tools): governance — snapshot, restore, git log/revert, consolidate, compact
 - **Sovereignty** (13 tools): about, forget, consent, export/import, tasks, dream
 
