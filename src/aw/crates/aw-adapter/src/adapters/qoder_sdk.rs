@@ -23,8 +23,13 @@ impl Adapter for QoderSdk {
         input: LaunchInput,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Box<dyn PreparedLaunch>> {
-        if !input.options.is_empty() {
-            return Err("Qoder SDK uses explicit Query options; native overrides and reload are unsupported".into());
+        if input.options.settings.is_some()
+            || input.options.profile.is_some()
+            || input.options.state_dir.is_some()
+        {
+            return Err(
+                "Qoder SDK uses explicit Query options; native overrides are unsupported".into(),
+            );
         }
         let application = input
             .command
@@ -70,10 +75,33 @@ impl PreparedLaunch for Prepared {
         adapter::catalog::QODER_SDK.capabilities("1.0.54", "sdk-worker")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+        if self.input.options.reloadable {
+            crate::reload::validate(
+                &self.input.document,
+                &self.input.target,
+                &self.capabilities(),
+            )
+        } else {
+            super::sdk_tools::routes(&self.input.document, steps).map(|_| ())
+        }
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        let (events, hooks) = super::sdk_tools::routes(&self.input.document, context.steps)?;
+        let (events, hooks) = if self.input.options.reloadable {
+            (
+                crate::reload::routes(),
+                ["tool.before", "tool.after"]
+                    .map(|event| {
+                        json!({
+                            "event":event,"step":crate::reload::DISPATCH,
+                            "on_error":if event == "tool.before" { "block" } else { "report" },
+                            "budget_ms":55000,"replace_result":false
+                        })
+                    })
+                    .to_vec(),
+            )
+        } else {
+            super::sdk_tools::routes(&self.input.document, context.steps)?
+        };
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
@@ -86,11 +114,15 @@ impl PreparedLaunch for Prepared {
             "callback.mjs",
             include_bytes!("../../native/qoder-sdk/callback.mjs"),
         )?;
+        context.files.write(
+            "reload.mjs",
+            include_bytes!("../../native/qoder-sdk/reload.mjs"),
+        )?;
         let config = context.files.write(
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
                 "executable":context.executable, "binding":context.binding_path, "sdk":self.sdk,
-                "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
+                "reloadable":self.input.options.reloadable, "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;
         let mut command = self.input.command.clone();

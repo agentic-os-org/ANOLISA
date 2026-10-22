@@ -5,8 +5,35 @@
 AW can explicitly update the policy of an idle instance launched with a stable
 bridge. The native host process stays alive; busy instances reject the update.
 The runtime path is opt-in through `aw run --reloadable`, initially pinned to
-Qoder 1.1.73 TUI and QwenPaw 2.2.2b4 / AgentScope 2.0.9 App. External attachment
+Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App and Qoder SDK
+1.0.54 / bundled Worker 1.1.74. External attachment
 and steer remain planned. Ordinary `aw run` keeps its existing registration path.
+
+## Qoder SDK request admission
+
+The Query factory registers stable tool routes and wraps input/output only when
+`--reloadable` is selected. Every message acquires an existing AW request claim
+before SDK submission. All managed Queries in one binding share the active
+policy; native daemon ownership stays with the application. The associated
+process is the application worker, which issues the SDK callbacks, rather than
+an arbitrary daemon PID supplied by a caller.
+
+Worker 1.1.74 can emit command completion and result frames before its generator
+cleanup finishes. Its public `getContextUsage()` control is queued behind the
+active native turn; the bridge awaits that read-only barrier before releasing
+the completed command's claim. This depends on the tested native command-loop
+contract, not just a version comparison or receipt of `Stop`. If it fails, the
+bridge closes the Query and awaits its native close handshake and in-flight
+callbacks. Failed cleanup retains busy admission until the owning worker exits.
+A background reader observes terminal frames even when the caller stops reading
+after a result. Input exhaustion is held until outstanding claims are released,
+so SDK automatic end-input shutdown cannot race the control barrier.
+
+Updates reuse `HookPlan`, `UpdatePolicy`, revision checks, policy validation,
+Provider preparation and audit. No SDK code enters the service. The control
+queue barrier, cancellation and multi-Query claim isolation must be revalidated
+when extending the accepted SDK/Worker combination. External attachment and
+per-session policies remain separate capabilities.
 
 ## Separate lifecycles
 

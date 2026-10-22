@@ -928,6 +928,48 @@ Hook 覆盖不受支持，防止实际执行参数与检查参数不同。
 覆盖。进程环境和启动环境中的 Hook 禁用标志按 bundled Worker 的去除首尾空白
 语义解析并拒绝。所有接入 AW 的 Query 使用绑定的工作目录。回调按 Query 注册；同一 daemon 上
 直接使用原生 SDK 创建的 Query 不受修改，**也不受 AW 保护**。同一 AW 实例内接入的
-Query 共用配置的策略，不支持分别选择 session 策略。注册后不要通过 `applyFlagSettings`
-修改 Hook 路由。此适配器不支持 `--reloadable`、策略更新或外部 PID attach/detach，
-这些能力需要后续单独接入请求生命周期。
+Query 共用配置的策略，不支持分别选择 session 策略。注册后通过 `applyFlagSettings` 修改 Hook 路由不在支持范围内；
+AW 不保证修改后的策略执行和审计完整性。
+
+需要在不重启 daemon 的情况下更新已有 Query 时，使用
+`aw run --config aw.yaml --agent sdk --reloadable` 显式启用。沿用同一个
+`createQuery` 工厂和调用方管理的 `startDaemon()`；异步输入迭代器可让 Query
+在请求之间保持可用。使用 `aw update --config aw.yaml --agent sdk --policy desired.yaml`
+显式激活完整候选策略；不增加 SDK 专用命令或服务 RPC。
+
+实例内所有受管 Query 必须空闲。已提交或排队的消息、模型等待、原生回调、Query 关闭
+清理期间，实例都保持 busy。结果消息本身不是空闲确认：可检查
+`aw service status --config aw.yaml`，在 requests 回到零后重新显式更新。
+失败的更新保留原活动策略。即使初始策略没有 Hook，也会注册稳定回调；新增和移除
+会作用于已有 Query 的下一次请求，原生权限保持优先。
+
+可更新 Query 要求显式 daemon 和 `msg_lifecycle_v1` 能力。桥接等待原生命令队列
+完成后释放请求准入；提前 return 或出错时，等待原生 `close()` 和仍在执行的回调结束。
+普通 Bash 命令超时后可能自动转入后台。子进程退出且原生完成通知回合清理结束之前，
+对应请求持续保持 busy。提前关闭 Query 时，先通过原生 `stopTask()` 停止这些任务，
+再释放请求准入。
+通过 prompt 输入或 `streamInput` 提交工作。此模式拒绝 goal 选项、`setGoal`、
+`resumeGoal`、host-action 调度、`backgroundTasks`、`CreateGoal`、`ScheduleWakeup`、
+`CronCreate` 和 `run_in_background`
+工具，因为这些入口可以在准入边界之外调度工作。定时器触发的回合绕过输入迭代器，
+因此不支持创建定时唤醒或 cron 任务；`CronList` 和 `CronDelete` 仍可使用。
+Worker 1.1.74 的 `UpdateGoal` 只能完成或
+阻塞已有 goal，不能激活 goal，因此仍可使用。
+创建 Query 时还会拒绝自定义 `agents` 中的 `background: true` 或 `isolation: "worktree"`。
+`Agent` 工具传入 `isolation: "worktree"` 也会在执行前被拒绝，因为 worktree 执行不属于
+支持的绑定边界。前台定义和默认隔离的 Agent 调用仍可使用。普通 `aw run` 保留原 SDK 路径。此接入不提供外部 PID attach/detach、按 session 独立选择 AW 策略或 steer。
+
+普通模式下，Worker 1.1.74 的 worktree 子代理回调仍携带父 Query 的 `cwd` 和子代理
+`agent_id`，而工具实际在 worktree 中执行。AW 能观察到这些回调，但不会重建实际执行
+工作目录。依赖该目录的策略不支持 worktree 执行；普通模式不会在创建 Query 时拒绝它。
+可更新模式会按上述规则在执行前拒绝 worktree。
+
+可更新桥接会持续读取原生输出，以便在应用暂停读取时仍能观察清理完成。
+输出缓冲区没有固定上限：提交工作期间应持续消费 Query 输出，收到 result 后也应继续读取。
+若应用停止消费，应停止提交新工作，并等待 `close()` 或 `return()`；这两个操作会
+丢弃缓冲输出并等待原生清理。此模式不为无限期暂停的消费者提供背压。
+
+长寿命 SDK 实例同样受现有服务容量限制：每实例最多保留 1024 条 Hook 关联记录，
+request/tool 两类 claim 集合各最多 64 个活动 claim。请求结束后释放 claim；Hook 关联
+记录保留到实例释放。这些数值不是可支持的累计 turn 数。调用方需控制实例生命周期和
+并发提交量；策略更新不会清空关联历史。

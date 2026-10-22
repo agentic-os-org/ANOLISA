@@ -1087,6 +1087,64 @@ All managed Queries must use the bound working directory.
 Each Query gets its own callbacks; an ordinary SDK Query on the same daemon is
 unmodified and is **not protected by AW**. Managed Queries within one AW instance
 share its configured policy, not independently selectable per-session policies.
-Do not change Hook routing through `applyFlagSettings` after registration.
-This adapter does not support `--reloadable`, policy update or external PID
-attach/detach; those require a separate request-lifecycle integration.
+Changing Hook routing through `applyFlagSettings` after registration is outside
+the supported contract; AW does not guarantee policy enforcement or complete
+auditing after such changes.
+To update existing Queries without restarting the daemon, opt in with
+`aw run --config aw.yaml --agent sdk --reloadable`. Keep using the same
+`createQuery` factory and caller-owned `startDaemon()`; an asynchronous input
+iterator keeps a Query available between requests. Use `aw update --config
+aw.yaml --agent sdk --policy desired.yaml` to explicitly activate a complete
+candidate policy. No SDK-specific command or service RPC is introduced.
+
+All managed Queries in the instance must be idle. Submitted/queued messages,
+model waits, native callbacks and Query close cleanup keep the instance busy.
+A result message alone is not an idle acknowledgement: inspect `aw service
+status --config aw.yaml` and retry an explicit update after the request count
+returns to zero. Failed updates preserve the active policy. Stable callbacks
+are registered even for an empty initial policy; additions and removals affect
+the next request on existing Queries. Native permissions remain authoritative.
+
+Reloadable Queries require an explicit daemon and `msg_lifecycle_v1` support.
+The bridge retains request admission until the native command queue has drained,
+and awaits native `close()` plus in-flight callbacks on early return or error.
+Ordinary Bash commands can automatically move to the background on timeout.
+Their request remains busy until the child exits and the native completion
+notification turn finishes cleanup. Closing the Query first stops those tasks
+through the native `stopTask()` API before releasing admission.
+Use prompt input or `streamInput` to submit work. Goal options, `setGoal`,
+`resumeGoal`, host-action scheduling, `backgroundTasks`, `CreateGoal`,
+`ScheduleWakeup`, `CronCreate` and
+`run_in_background` tools are rejected because they can schedule work outside
+that admission boundary. Timer-created turns bypass the input iterator, so
+creating a scheduled wakeup or cron job is unsupported; `CronList` and `CronDelete`
+remain available. Worker 1.1.74's `UpdateGoal` only completes or blocks an
+existing goal; it does not activate one and remains available. Query creation also
+rejects custom `agents`
+definitions with `background: true` or `isolation: "worktree"`. The `Agent` tool's
+`isolation: "worktree"` input is denied before execution because worktree
+execution is outside the supported binding boundary. Foreground definitions and default-isolation
+Agent calls remain allowed. Ordinary `aw run` keeps the original SDK path.
+External PID attach/detach, independently selected per-session AW policies and
+steer are not provided by this integration.
+
+In ordinary mode, Worker 1.1.74 sends worktree child callbacks with the parent
+Query's `cwd` and a child `agent_id`, although tools execute in the worktree.
+AW observes those callbacks; it does not reconstruct the actual execution
+working directory. Worktree execution is not supported for policies that depend
+on that directory, and ordinary mode does not reject it at Query creation.
+Reloadable mode rejects it before execution as described above.
+
+The reloadable bridge keeps reading native output to observe cleanup even when
+application reads pause. Its output buffer is not bounded: continuously consume
+Query output while submitting work, including across result messages. If the
+application stops consuming, stop submitting and await `close()` or `return()`;
+these discard buffered output and await native cleanup. This mode does not
+provide backpressure for an indefinitely paused consumer.
+
+The existing service limits also apply to long-lived SDK instances: 1024 retained
+Hook correlation entries per instance, and 64 active claims per request/tool
+claim set. Completed request claims are released; Hook correlation entries are
+retained until instance release. These are not a count of supported lifetime
+turns. Bound instance lifetime and concurrent submissions; policy updates do not
+reset correlation history.

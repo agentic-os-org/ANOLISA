@@ -58,7 +58,8 @@ edits offline. See [configuration](../../docs/user-guide/en/aw/configuration.md#
 this does not update a running instance.
 
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
-Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 / AgentScope 2.0.9 App.
+Qoder 1.1.73 TUI, QwenPaw 2.2.2b4 / AgentScope 2.0.9 App, or
+Qoder SDK 1.0.54 / Worker 1.1.74.
 `aw update --config current.yaml --agent TARGET --policy next.yaml` selects the
 unique target instance, retains its process and rejects busy instances; see
 [prewarmed instances](../../docs/user-guide/en/aw/configuration.md#update-a-prewarmed-instance).
@@ -142,9 +143,10 @@ for supported versions, tool types, and text replacement boundaries.
 
 Qoder SDK 1.0.54 / Worker 1.1.74 requires the bridge daemon and Query factories
 to admit the native runtime and register per-Query callbacks through
-`aw run`; see the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
-Its first release supports before observation/denial and after observation,
-without policy reload, external attach or result replacement.
+`aw run`; `--reloadable` enables explicit policy updates for idle existing Queries,
+returning busy during requests and native cleanup. See the [SDK worker guide](../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker).
+It supports before observation/denial and after observation; external attach
+and result replacement remain unsupported.
 
 
 A Tokenless retry suggestion blocks the original call. The Agent must make a new

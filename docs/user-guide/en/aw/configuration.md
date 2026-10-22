@@ -94,7 +94,10 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
 This runtime path is pinned to Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 with
-AgentScope 2.0.9 App. For QwenPaw, use its configured target and initialized
+AgentScope 2.0.9 App, and Qoder SDK 1.0.54 / bundled Worker 1.1.74.
+For SDK targets, use the [explicit daemon and Query factories](../../../developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker);
+all managed sessions in the instance must be idle, including native cleanup.
+For QwenPaw, use its configured target and initialized
 `QWENPAW_WORKING_DIR` as in the native integration reference. Ordinary `aw run`
 keeps its existing behavior. An instance started without the stable bridge
 cannot be upgraded by this command; external attach is a later capability.

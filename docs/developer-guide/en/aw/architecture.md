@@ -188,3 +188,8 @@ runtime launch options and registers its identity before a Query can use it.
 Tool dispatch reuses the existing CLI callback →
 service → Host → Provider path. The application retains daemon and Query
 ownership; no SDK-specific service operation or Provider is introduced.
+
+Reloadable Qoder SDK Queries reuse the stable dispatcher and service policy gate.
+The Adapter owns message admission and native queue/close completion; the CLI
+transports lifecycle frames through the existing bridge RPC. See the
+[policy reload contract](../../../../src/aw/docs/design/en/runtime/policy-reload.md#qoder-sdk-request-admission).

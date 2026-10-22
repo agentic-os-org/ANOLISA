@@ -65,7 +65,7 @@ fn invoke(args: &Arguments) -> Result<Exit> {
             key,
             unsafe { libc::getppid() } as u32,
         )
-    } else if binding.adapter == "qwenpaw" {
+    } else if matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk") {
         (
             serde_json::from_value::<LifecyclePhase>(native["phase"].clone())?,
             native["key"]

@@ -406,6 +406,10 @@
     "qoder-sdk-lifecycle": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "query_hooks_preserve_first_call_identity_and_cleanup"
+    },
+    "qoder-sdk-reload": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "existing_queries_update_only_after_native_cleanup"
     }
   },
   "agents": {
@@ -647,7 +651,8 @@
       },
       "lifecycle": [
         "qoder-sdk-lifecycle",
-        "cancel-initialization"
+        "cancel-initialization",
+        "qoder-sdk-reload"
       ],
       "security": [
         "security-retry"

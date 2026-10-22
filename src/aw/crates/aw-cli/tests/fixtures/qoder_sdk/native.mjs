@@ -1,14 +1,46 @@
 /** Real startDaemon()/query() tool turns against the pinned SDK and bundled Worker. */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { query } from "@qoder-ai/qoder-agent-sdk";
+import { safety } from "./native-safety.mjs";
 const { createQuery, startDaemon } = await import(pathToFileURL(process.env.AW_QODER_SDK_BRIDGE));
 const root = process.env.QODER_TEST_ROOT;
 const results = [];
 const queries = [];
 let daemon;
+const reloadable = process.env.QODER_RELOAD_ACCEPTANCE === "1";
+const awConfig = JSON.parse(fs.readFileSync(process.env.AW_QODER_SDK_CONFIG));
+const awBinding = JSON.parse(fs.readFileSync(awConfig.binding));
+function update(file, busy = false) {
+  const result = spawnSync(awConfig.executable, ["update", "--socket", awBinding.socket,
+    "--agent", "sdk", "--policy", path.join(root, file)], { encoding: "utf8", timeout: 15000 });
+  if (busy) { assert.notEqual(result.status, 0); assert.match(result.stderr, /busy/); }
+  else assert.equal(result.status, 0, result.stderr);
+}
+function state() {
+  const result = spawnSync(awConfig.executable, ["service", "status", "--socket", awBinding.socket],
+    { encoding: "utf8", timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout).result.instances[0];
+}
+async function idle() {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const active = state();
+    if (active.requests === 0 && active.tools === 0) return;
+    assert(Date.now() < deadline, `SDK did not become idle: ${JSON.stringify(active)}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+function bounded(promise, label) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} deadline`)), 30000);
+  })]).finally(() => clearTimeout(timer));
+}
 const children = () => fs.readFileSync(`/proc/${process.pid}/task/${process.pid}/children`, "utf8").trim().split(/\s+/).filter(Boolean);
 const identity = (pid) => ({ pid: Number(pid), start: fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")[19] });
 async function session(managed, options = {}) {
@@ -30,14 +62,16 @@ async function session(managed, options = {}) {
   queries.push({ q, end() { ended = true; release?.(); } });
   return { q, send(text) { messages.push(text); release?.(); } };
 }
-async function turn(s, command, marker, expected) {
-  s.send(`Use Bash exactly once to execute this exact command: ${command}. If denied or failed, report it and stop; do not retry or use another tool.`);
+async function prompt(s, text) {
+  s.send(text);
+  const messages = [];
   let completed = false;
   const timeout = setTimeout(() => s.q.return(), 90000);
   try {
     for (;;) {
       const next = await s.q.next();
       if (next.done) break;
+      messages.push(next.value);
       if (next.value.type === "result") {
         assert.equal(next.value.is_error, false, `native turn failed: ${next.value.subtype}`);
         completed = true;
@@ -46,7 +80,13 @@ async function turn(s, command, marker, expected) {
     }
   } finally { clearTimeout(timeout); }
   assert(completed, "native turn did not complete within its deadline");
+  if (reloadable) await idle();
+  return messages;
+}
+async function turn(s, command, marker, expected) {
+  const messages = await prompt(s, `Use Bash exactly once to execute this exact command: ${command}. If denied or failed, report it and stop; do not retry or use another tool.`);
   assert.equal(fs.existsSync(marker), expected, command);
+  return messages;
 }
 try {
   daemon = await startDaemon({ auth: { type: "accessToken", accessToken: { envVar: "QODER_PERSONAL_ACCESS_TOKEN" } },
@@ -56,11 +96,12 @@ try {
   assert.equal(pids.length, 1, "expected one owned SDK daemon");
   fs.writeFileSync(path.join(root, "daemon-process.json"), JSON.stringify({ identities: pids,
     command: fs.readFileSync(`/proc/${pids[0].pid}/cmdline`, "utf8").split("\0").filter(Boolean), cwd: process.cwd(), ports: [],
-    log: path.join(root, "daemon.log"), deadline_seconds: 480,
+    log: path.join(root, "daemon.log"), deadline_seconds: 900,
     stop: `kill -TERM -- ${pids[0].pid}` }));
   const managed = await session(true);
   await daemon.getModels({ fetchStrategy: "live" });
   const unbound = await session(false);
+  if (reloadable) update("candidate.json");
   await turn(managed, "printf AW_DENY > denied.txt", "denied.txt", false);
   const events = () => fs.readFileSync(path.join(root, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
   const first = events();
@@ -88,6 +129,41 @@ try {
   await turn(veto, "printf NATIVE_VETO > native-veto.txt", "native-veto.txt", false);
   assert(permissions > 0, "the native permission callback was not exercised");
   results.push({ case: "native-permission-veto", status: "passed" });
+  if (reloadable) {
+    const originalSession = first.find((event) => event.name === "tool.before").session_id;
+    update("aw.json");
+    await turn(managed, "printf AW_DENY > removed.txt", "removed.txt", true);
+    update("candidate.json");
+    await turn(managed, "printf AW_DENY > readded.txt", "readded.txt", false);
+    assert(events().some((event) => event.session_id === originalSession &&
+      JSON.stringify(event.tool.input).includes("readded.txt")));
+    results.push({ case: "existing-session-policy-update", status: "passed" });
+    let entered, release;
+    const pendingPermission = new Promise((resolve) => { entered = resolve; });
+    const cleanup = new Promise((resolve) => { release = resolve; });
+    const held = await session(true, { permissionMode: "default", canUseTool: async () => {
+      entered();
+      await cleanup;
+      return { behavior: "deny", message: "Native cleanup regression veto" };
+    } });
+    held.send("Use Bash exactly once to run: printf NATIVE_HOLD > held.txt. Do not retry.");
+    try {
+      await bounded(pendingPermission, "native permission");
+      update("aw.json", true);
+      results.push({ case: "other-session-busy-update", status: "passed" });
+      const closing = held.q.return();
+      // The native callback is still held even if the SDK aborts its request.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      update("aw.json", true);
+      release();
+      await bounded(closing, "native close");
+      update("aw.json");
+      assert(!fs.existsSync("held.txt"));
+      results.push({ case: "native-cleanup-busy-until-closed", status: "passed" });
+    } finally { release(); }
+  }
+  if (reloadable) update("candidate.json");
+  await safety({ session, turn, prompt, results, root, reloadable, update, state });
   assert.deepEqual(pids.map(({ pid }) => identity(pid)), pids);
   results.push({ case: "daemon-not-restarted", status: "passed" });
   fs.writeFileSync(path.join(root, "results.json"), JSON.stringify(results));

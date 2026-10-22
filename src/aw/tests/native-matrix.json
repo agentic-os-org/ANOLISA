@@ -645,7 +645,7 @@
       "npm_packages": [
         "@qoder-ai/qoder-agent-sdk@1.0.54"
       ],
-      "boundary": "Real SDK 1.0.54 / bundled Worker 1.1.74 startDaemon and query, hosted Bash allow/deny, first request, per-Query hook isolation and daemon cleanup. No runtime policy update, external PID attach, per-session AW policy or result replacement.",
+      "boundary": "Real SDK 1.0.54 / bundled Worker 1.1.74 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy or result replacement.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -659,7 +659,7 @@
             "--output",
             "{output}/sdk"
           ],
-          "timeout_seconds": 600,
+          "timeout_seconds": 1200,
           "report": "json",
           "results": [
             {
@@ -673,7 +673,57 @@
                   "allow-before-after",
                   "tool-failure-observed",
                   "native-permission-veto",
-                  "daemon-not-restarted"
+                  "daemon-not-restarted",
+                  "application-allow-aw-deny",
+                  "denial-reason-preserved",
+                  "permission-allow-aw-deny",
+                  "native-goal-create-and-complete",
+                  "worktree-callback-cwd"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "daemon-policy-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-reload",
+            "--reloadable"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-reload/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "first-request-denied",
+                  "session-isolation",
+                  "allow-before-after",
+                  "tool-failure-observed",
+                  "native-permission-veto",
+                  "daemon-not-restarted",
+                  "existing-session-policy-update",
+                  "other-session-busy-update",
+                  "native-cleanup-busy-until-closed",
+                  "application-allow-aw-deny",
+                  "denial-reason-preserved",
+                  "permission-allow-aw-deny",
+                  "agent-definition-admission",
+                  "background-tool-denied",
+                  "goal-activation-denied",
+                  "worktree-agent-denied",
+                  "native-timeout-background-busy",
+                  "native-timeout-close-cleanup"
                 ]
               }
             }

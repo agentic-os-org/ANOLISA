@@ -155,3 +155,7 @@ Qoder SDK 接入通过每个 Query 的 `options.hooks` 注册回调。前台 Wor
 Adapter 的 daemon 和 Query 工厂；daemon 工厂先校验启动参数并登记对象身份，
 Query 才能使用该 daemon。工具分发复用现有 CLI callback → service → Host → Provider 路径。
 应用保留 daemon 和 Query 的管理责任，不新增 SDK 专用服务操作或 Provider。
+
+可更新的 Qoder SDK Query 复用稳定分发器和服务策略准入锁。Adapter 负责消息准入与
+原生队列/关闭完成边界，CLI 通过已有桥接 RPC 传输生命周期消息。参见
+[策略更新契约](../../../../src/aw/docs/design/zh/runtime/policy-reload.md#qoder-sdk-请求准入)。

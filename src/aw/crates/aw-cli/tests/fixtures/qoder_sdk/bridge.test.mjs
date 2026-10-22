@@ -224,3 +224,26 @@ test("Hook-disable flags use the pinned Worker's whitespace normalization", asyn
   assert(fs.existsSync(f.config.ready_path));
   await q.return();
 });
+
+
+test("reloadable Queries reject background and isolated agent definitions before SDK creation", async (t) => {
+  const f = fixture(t);
+  const daemon = await bridge.startDaemon({});
+  fs.writeFileSync(f.file, JSON.stringify({ ...f.config, reloadable: true }));
+  for (const definition of [{ background: true }, { isolation: "worktree" }]) {
+    await assert.rejects(createQuery({ prompt: "first", options: { ...f.options, daemon,
+      agents: { foreground: { description: "foreground", prompt: "inspect" },
+        unsafe: { description: "unsafe", prompt: "inspect", ...definition } } } }),
+    /Background or worktree agents/);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(f.config.ready_path));
+  }
+  // Ordinary Query registration does not impose reload lifecycle restrictions.
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const agents = { native: { description: "native", prompt: "inspect",
+    background: true, isolation: "worktree" } };
+  const q = await createQuery({ prompt: "first", options: { ...f.options, daemon, agents } });
+  assert.deepEqual(q.options.agents, agents);
+  await q.return();
+  await daemon.stop();
+});

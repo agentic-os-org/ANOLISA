@@ -288,3 +288,9 @@ Protocol and Core tests use synthetic inputs and Hosts. Native integration needs
 separate evidence that callbacks were installed, tools ran or were blocked as
 intended, and returned effects were adopted by the Agent. Record validation
 commands and results in the pull request; keep experiment logs out of the README.
+
+The Qoder SDK native inventory runs both ordinary `aw run` and `--reloadable`
+lanes. The latter adds existing-Query policy addition/removal, another session's
+busy gate and held native callback cleanup through real `aw update` RPCs. Both
+lanes use caller-owned `startDaemon()`, require the runtime-only PAT and assert
+unchanged daemon identity and zero bindings/events after cleanup.

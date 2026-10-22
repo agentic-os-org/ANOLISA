@@ -242,3 +242,8 @@ Adapter 证据和工具事件运行样例 Provider，不代表原生 Agent 验�
 Qoder SDK 1.0.54 原生验收使用随包的 Worker 1.1.74 和托管 `auto` 模型，
 复用 `QODER_PERSONAL_ACCESS_TOKEN` Secret。依赖安装不接收凭据，SDK 运行阶段
 验证首请求拒绝、session Hook 隔离、成功/失败观察、原生权限拒绝和 daemon 不重启。
+
+Qoder SDK 原生清单分别运行普通 `aw run` 和 `--reloadable` 两条路径。后者增加已有
+Query 的策略新增/移除、另一 session 活跃时 busy，以及保留原生回调直到清理结束的真实
+`aw update` RPC 检查。两条路径都由调用方管理 `startDaemon()`，仅运行阶段注入 PAT，
+并断言 daemon 身份不变、清理后 bindings/events 为零。

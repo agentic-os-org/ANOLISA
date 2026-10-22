@@ -49,7 +49,8 @@ aw run --config "$HOME/aw/aw.yaml" --agent qoder
 此命令不更新运行中的实例。
 
 通过 `aw run --reloadable` 为 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
-AgentScope 2.0.9 App 预装实验性空闲更新桥接。
+AgentScope 2.0.9 App，以及 Qoder SDK 1.0.54 / Worker 1.1.74
+预装实验性空闲更新桥接。
 `aw update --config current.yaml --agent TARGET --policy next.yaml` 选择目标的唯一实例，
 保留宿主进程，忙碌实例返回 busy；见[预热实例更新](../../docs/user-guide/zh/aw/configuration.md#更新预热实例)。
 
@@ -123,8 +124,9 @@ core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需
 
 Qoder SDK 1.0.54 / Worker 1.1.74 使用 Bridge 的 daemon 和 Query 工厂校验
 原生运行时，通过 `aw run` 显式注册每个 Query 的回调，
+可通过 `--reloadable` 显式启用已有 Query 的空闲策略更新；忙碌或清理未完成时返回 busy。
 参见 [SDK Worker 指南](../../docs/developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)。
-首版支持调用前观察/拒绝、调用后观察，不包含策略热更新、外部 attach 或结果替换。
+支持调用前观察/拒绝和调用后观察，不包含外部 attach 或结果替换。
 
 
 Tokenless 重试建议会阻止原调用，Agent 需发起新调用并重新经过安全和原生权限检查。

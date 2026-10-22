@@ -21,6 +21,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--reloadable", action="store_true")
 args = parser.parse_args()
 evidence = args.output.resolve()
 evidence.mkdir(parents=True, exist_ok=True)
@@ -42,6 +43,8 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
         args.npm.resolve() / "node_modules", target_is_directory=True
     )
     shutil.copyfile(fixture / "native.mjs", case / "work/app.mjs")
+    shutil.copyfile(fixture / "native-safety.mjs", case / "work/native-safety.mjs")
+    shutil.copyfile(fixture / "native-timeout.mjs", case / "work/native-timeout.mjs")
     environment = {
         **os.environ,
         "HOME": str(case / "home"),
@@ -52,6 +55,8 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
     config = case / "aw.json"
     providers = {
         "policy": {
+            "protocol": "aw-provider/v1alpha1",
+            "config": {},
             "transport": {
                 "type": "stdio",
                 "location": "agent",
@@ -89,6 +94,7 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
                             {
                                 "id": label,
                                 "provider": "policy",
+                                "operation": "check",
                                 "effects": effects,
                                 "on_error": action,
                             }
@@ -102,6 +108,13 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
             },
         },
     )
+    if args.reloadable:
+        environment["QODER_RELOAD_ACCEPTANCE"] = "1"
+        policy = json.loads(config.read_text())
+        save(case / "candidate.json", policy)
+        policy["spec"]["providers"] = {}
+        policy["spec"]["events"] = {}
+        save(config, policy)
     processes = Processes(case, evidence, environment)
     try:
         service = processes.start(
@@ -119,9 +132,14 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
 
         await_condition(lambda: (case / "state/aw.sock").exists(), 10, "AW service readiness")
         run = processes.start(
-            "worker", [str(args.aw.resolve()), "run", "--config", str(config), "--agent", "sdk"]
+            "worker",
+            [str(args.aw.resolve()), "run", "--config", str(config), "--agent", "sdk"]
+            + (["--reloadable"] if args.reloadable else []),
         )
-        assert processes.wait(run, 480) == 0, "native worker failed; inspect worker.log"
+        for _, _, record in processes.items:
+            record["deadline_seconds"] = 930
+        processes.record()
+        assert processes.wait(run, 900) == 0, "native worker failed; inspect worker.log"
         status = subprocess.run(
             [str(args.aw.resolve()), "service", "status", "--config", str(config)],
             cwd=case / "work",
@@ -142,7 +160,13 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
             {"sdk": metadata["version"], "worker": metadata["qoderCliVersion"]},
         )
     finally:
-        for name in ("events.jsonl", "daemon-process.json", "daemon.log"):
+        for name in (
+            "events.jsonl",
+            "daemon-process.json",
+            "daemon.log",
+            "safety.json",
+            "timeout.json",
+        ):
             if (case / name).exists():
                 shutil.copyfile(case / name, evidence / name)
         processes.close()
@@ -155,8 +179,9 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
             ]
         assert all(not Path(f"/proc/{pid}").exists() for pid in daemon_pids)
         token = environment["QODER_PERSONAL_ACCESS_TOKEN"]
-        for log in evidence.glob("*.log"):
-            log.write_text(log.read_text(errors="replace").replace(token, "[REDACTED]"))
+        for log in evidence.iterdir():
+            if log.is_file() and log.suffix in {".log", ".json", ".jsonl"}:
+                log.write_text(log.read_text(errors="replace").replace(token, "[REDACTED]"))
         save(
             evidence / "cleanup.json",
             {

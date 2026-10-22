@@ -83,7 +83,10 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 ```
 
-运行时路径固定 Qoder 1.1.73 TUI，或 QwenPaw 2.2.2b4 / AgentScope 2.0.9 App。
+运行时路径支持已验证的 Qoder 1.1.73 TUI、QwenPaw 2.2.2b4 / AgentScope 2.0.9 App，
+以及 Qoder SDK 1.0.54 / bundled Worker 1.1.74。SDK 目标使用
+[显式 daemon 和 Query 工厂](../../../developer-guide/zh/aw/native-agents.md#启动-qoder-sdk-worker)；
+实例内所有受管 session 都须空闲，包括原生清理完成。
 QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
 普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级，外部 attach 后续提供。
 

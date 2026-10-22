@@ -1,25 +1,13 @@
 /** Bounded callback subprocess; only neutral or deny directives are admitted. */
 import { spawn } from "node:child_process";
-export async function invoke(config, hook, payload, signal) {
+async function execute(config, args, payload, signal, timeout) {
   const input = Buffer.from(JSON.stringify(payload));
   if (input.length > 1024 * 1024) throw new Error("native_input_limit");
   if (signal?.aborted) throw new Error("callback_aborted");
   return await new Promise((resolve, reject) => {
     const child = spawn(
       config.executable,
-      [
-        "hook",
-        "--adapter",
-        "qoder-sdk",
-        "--binding",
-        config.binding,
-        "--event",
-        hook.event,
-        "--step",
-        hook.step,
-        "--on-error",
-        hook.on_error,
-      ],
+      args,
       { stdio: ["pipe", "pipe", "pipe"], detached: true },
     );
     let failure;
@@ -38,7 +26,7 @@ export async function invoke(config, hook, payload, signal) {
     const abort = () => stop(new Error("callback_aborted"));
     const timer = setTimeout(
       () => stop(new Error("callback_timeout")),
-      hook.budget_ms + 3000,
+      timeout,
     );
     signal?.addEventListener("abort", abort, { once: true });
     child.on("error", stop);
@@ -58,23 +46,34 @@ export async function invoke(config, hook, payload, signal) {
       signal?.removeEventListener("abort", abort);
       if (stderr.length) process.stderr.write(stderr);
       if (failure) return reject(failure);
-      if (code === 2 && hook.event === "tool.before") {
-        try {
-          const reason = stdout.length ? JSON.parse(stdout.toString("utf8")) : "Tool blocked by AW policy";
-          if (typeof reason !== "string") throw new Error("invalid_native_response");
-          return resolve({ hookSpecificOutput: { hookEventName: "PreToolUse",
-            permissionDecision: "deny", permissionDecisionReason: reason } });
-        } catch (error) { return reject(error); }
-      }
-      if (code !== 0) return reject(new Error(`callback_exit_${code}`));
-      try {
-        const value = stdout.length ? JSON.parse(stdout.toString("utf8")) : {};
-        if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).length)
-          throw new Error("unsupported_qoder_sdk_directive");
-        resolve(value);
-      } catch (error) { reject(error); }
+      resolve({ code, stdout });
     });
     child.stdin.end(input);
     if (signal?.aborted) abort();
   });
+}
+
+export async function lifecycle(config, phase, key = "") {
+  const { code } = await execute(config,
+    ["bridge", "--adapter", "qoder-sdk", "--binding", config.binding],
+    { phase, key, pid: process.pid }, undefined, 5000);
+  if (code !== 0) throw new Error(`lifecycle_${phase}_exit_${code}`);
+}
+
+export async function invoke(config, hook, payload, signal) {
+  const { code, stdout } = await execute(config,
+    ["hook", "--adapter", "qoder-sdk", "--binding", config.binding,
+      "--event", hook.event, "--step", hook.step, "--on-error", hook.on_error],
+    payload, signal, hook.budget_ms + 3000);
+  if (code === 2 && hook.event === "tool.before") {
+    const reason = stdout.length ? JSON.parse(stdout.toString("utf8")) : "Tool blocked by AW policy";
+    if (typeof reason !== "string") throw new Error("invalid_native_response");
+    return { hookSpecificOutput: { hookEventName: "PreToolUse",
+      permissionDecision: "deny", permissionDecisionReason: reason } };
+  }
+  if (code !== 0) throw new Error(`callback_exit_${code}`);
+  const value = stdout.length ? JSON.parse(stdout.toString("utf8")) : {};
+  if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).length)
+    throw new Error("unsupported_qoder_sdk_directive");
+  return value;
 }

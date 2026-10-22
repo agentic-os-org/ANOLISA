@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { invoke } from "./callback.mjs";
+import { Reload } from "./reload.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -114,15 +115,22 @@ function ready(config) {
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
 export async function createQuery({ prompt, options }) {
   const config = configuration();
+  const reload = config.reloadable ? new Reload(config) : undefined;
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
-  const query = sdk.query({ prompt, options: composed });
+  const query = sdk.query({ prompt: reload ? reload.input(prompt) : prompt,
+    options: reload ? reload.decorate(composed) : composed });
   try {
-    await query.initializationResult();
+    const initialization = await query.initializationResult();
+    const managed = reload ? await reload.attach(query, initialization) : query;
     ready(config);
-    return query;
+    return managed;
   } catch (error) {
-    await query.return();
+    if (reload?.admitted) await reload.close();
+    else {
+      if (reload) { reload.closing = true; reload.initialized.resolve(); }
+      await query.return();
+    }
     throw error;
   }
 }
