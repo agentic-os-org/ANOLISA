@@ -54,13 +54,16 @@ enum WorkspaceNodeKind {
 
 pub(super) enum WorkspaceRootError {
     Missing(String),
+    UnsupportedOpenat2(String),
     Permanent(String),
 }
 
 impl fmt::Display for WorkspaceRootError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing(message) | Self::Permanent(message) => formatter.write_str(message),
+            Self::Missing(message)
+            | Self::UnsupportedOpenat2(message)
+            | Self::Permanent(message) => formatter.write_str(message),
         }
     }
 }
@@ -1867,8 +1870,8 @@ fn reopen_pinned(
 #[cfg(target_os = "linux")]
 fn platform_support_error(error: rustix::io::Errno) -> WorkspaceRootError {
     if error == rustix::io::Errno::NOSYS {
-        WorkspaceRootError::Permanent(format!(
-            "Workspace-confined read tools require Linux openat2 support \
+        WorkspaceRootError::UnsupportedOpenat2(format!(
+            "Workspace-confined file tools require Linux openat2 support \
              (kernel 5.6 or newer): {error}"
         ))
     } else {

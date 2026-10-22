@@ -100,32 +100,59 @@ pub(crate) struct ToolRuntimeContext {
     pub(crate) active_extensions: Vec<String>,
 }
 
+const WORKSPACE_FILE_TOOLS: &[&str] = &[
+    "read_file",
+    "read_many_files",
+    "list_directory",
+    "glob",
+    "grep",
+    "write_file",
+    "edit",
+];
+
+/// Controls startup when the kernel cannot provide workspace confinement.
+pub(crate) enum WorkspaceStartupPolicy {
+    /// Reject startup if workspace confinement is unavailable.
+    RequireConfinement,
+    /// Allow startup with the affected file tools disabled when openat2 is missing.
+    AllowUnavailableFileTools,
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionWorkspace {
     root: Arc<PathBuf>,
     pinned: Arc<OnceLock<Arc<workspace_fs::WorkspaceFs>>>,
     permanent_error: Option<Arc<str>>,
     retry_missing: bool,
+    openat2_unavailable: bool,
 }
 
 impl SessionWorkspace {
-    pub(crate) fn try_new(root: &Path) -> Result<Self, String> {
+    pub(crate) fn try_new(root: &Path, policy: WorkspaceStartupPolicy) -> Result<Self, String> {
         let workspace = Self::new(root);
         if let Some(error) = &workspace.permanent_error {
-            Err(error.to_string())
-        } else {
-            Ok(workspace)
+            if !(matches!(policy, WorkspaceStartupPolicy::AllowUnavailableFileTools)
+                && workspace.openat2_unavailable)
+            {
+                return Err(error.to_string());
+            }
         }
+        Ok(workspace)
     }
 
     pub(crate) fn new(root: &Path) -> Self {
         let pinned = Arc::new(OnceLock::new());
+        let mut openat2_unavailable = false;
         let (permanent_error, retry_missing) = match workspace_fs::WorkspaceFs::open_root(root) {
             Ok(workspace) => {
                 let _ = pinned.set(Arc::new(workspace));
                 (None, false)
             }
             Err(workspace_fs::WorkspaceRootError::Missing(_)) => (None, true),
+            Err(workspace_fs::WorkspaceRootError::UnsupportedOpenat2(error)) => {
+                openat2_unavailable = true;
+                (Some(error.into()), false)
+            }
             Err(workspace_fs::WorkspaceRootError::Permanent(error)) => (Some(error.into()), false),
         };
         Self {
@@ -133,6 +160,29 @@ impl SessionWorkspace {
             pinned,
             permanent_error,
             retry_missing,
+            openat2_unavailable,
+        }
+    }
+
+    pub(crate) fn openat2_unavailable(&self) -> bool {
+        self.openat2_unavailable
+    }
+
+    pub(crate) fn append_model_guidance(&self, prompt: &mut String, shell_available: bool) {
+        if !self.openat2_unavailable {
+            return;
+        }
+        prompt.push_str("\n\n# File Tool Availability\nLinux openat2 is unavailable. ");
+        prompt.push_str(&WORKSPACE_FILE_TOOLS.join(", "));
+        prompt.push_str(" are disabled for this session. ");
+        if shell_available {
+            prompt.push_str(
+                "Use the shell tool with commands such as cat, sed, ls, find, and grep for file \
+                 operations, subject to the existing approval policy and hooks. Shell commands \
+                 do not provide the disabled tools' workspace confinement.",
+            );
+        } else {
+            prompt.push_str("The shell tool is also unavailable. Do not call the disabled tools.");
         }
     }
 
@@ -261,6 +311,11 @@ impl ToolRegistry {
         }
         names.sort();
         names
+    }
+
+    pub(crate) fn disable_workspace_file_tools(&mut self) {
+        self.tools
+            .retain(|name, _| !WORKSPACE_FILE_TOOLS.contains(&name.as_str()));
     }
 
     pub fn retain_selected_tools(&mut self, selection: &str) -> Result<(), String> {

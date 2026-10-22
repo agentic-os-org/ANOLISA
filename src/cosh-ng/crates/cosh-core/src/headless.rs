@@ -125,6 +125,7 @@ pub async fn run(
             .with_shell_evidence(args.enable_shell_evidence_tool)
             .with_skill_loading(!args.bare)
             .with_tool_selection(args.tools.as_deref())
+            .with_workspace_file_tools(!workspace.openat2_unavailable())
             .build()
             .await
     };
@@ -180,6 +181,7 @@ pub async fn run(
         executable_agents = 0,
         "loaded extension runtime snapshot"
     );
+    let workspace_file_tools = !workspace.openat2_unavailable();
     let mut engine = CoshCore::new_with_snapshot_and_session_id(
         config,
         provider,
@@ -197,7 +199,8 @@ pub async fn run(
         (!args.execution_profile.is_brokered())
             .then(|| args.tools.clone())
             .flatten(),
-    );
+    )
+    .with_workspace_file_tools(workspace_file_tools);
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
     engine.compaction.load_state(

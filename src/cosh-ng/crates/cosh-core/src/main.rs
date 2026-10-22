@@ -168,8 +168,20 @@ async fn run() {
     }
     let (project_root, session_workspace) = if agent_headless {
         let requested_root = args.workspace_path();
-        match tool::SessionWorkspace::try_new(&requested_root) {
+        let workspace_policy = if args.execution_profile.is_brokered() {
+            tool::WorkspaceStartupPolicy::RequireConfinement
+        } else {
+            tool::WorkspaceStartupPolicy::AllowUnavailableFileTools
+        };
+        match tool::SessionWorkspace::try_new(&requested_root, workspace_policy) {
             Ok(workspace) => {
+                if workspace.openat2_unavailable() {
+                    eprintln!(
+                        "[cosh-core] openat2 is unavailable; workspace-confined file tools are \
+                         disabled. Shell commands remain subject to the configured tool selection, \
+                         approval policy, and hooks."
+                    );
+                }
                 let project_root = workspace.root().to_path_buf();
                 (project_root, Some(workspace))
             }
