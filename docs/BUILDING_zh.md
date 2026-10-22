@@ -188,6 +188,7 @@ PR 应根据变更文件选择组件矩阵中的对应行，运行相应的构�
 - [开发指南索引](developer-guide/zh/README.md)
 - [组件接入规范](../specs/component-onboarding.md)
 - [文档规范](../specs/documentation-standard.md)
+- [Commit 规范](../specs/commit-message-standard.md)
 
 组件特有的构建细节、生成制品和运行配置应放在组件 README 或对应开发指南中。本页
 只维护仓库级入口，组件清单或脚本接口发生变化时同步更新这里。

@@ -214,6 +214,7 @@ pull-request acceptance criterion.
 - [Developer guide index](developer-guide/en/README.md)
 - [Component onboarding specification](../specs/component-onboarding.md)
 - [Documentation standard](../specs/documentation-standard.md)
+- [Commit message standard](../specs/commit-message-standard.md)
 
 Component-specific build details, generated artifacts, and runtime setup belong
 in the component README or its linked developer guide. Keep this page focused

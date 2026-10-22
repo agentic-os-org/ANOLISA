@@ -168,37 +168,12 @@ adapter 时请查看 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)。
 
 ## Commit 规范
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/)，subject 使用英文祈使句，格式如下。
+Commit 规则正文见 [`specs/commit-message-standard.md`](specs/commit-message-standard.md)：
+subject 格式、body 要求、`Assisted-by` 与 `Signed-off-by` trailer、scope 清单与
+按路径推断、原子性、修复指涉（`Fixes:` / `Supplements:` / `--fixup`）以及版本升级
+收尾规则。提交前请读该文件，本节只保留人类需要的返工流程。
 
-```text
-type(scope): imperative description
-```
-
-scope 必填。Commitlint 会拒绝空 scope。下表列出仓库推荐使用的 scope。使用表外
-scope 会产生警告，发起 review 前应说明理由或改用推荐值。
-
-| Scope | 路径或用途 |
-| --- | --- |
-| `cosh` | `deprecated/copilot-shell/` |
-| `cosh-ng` | `src/cosh-ng/` |
-| `sec-core` | `src/agent-sec-core/` |
-| `skill` | `src/os-skills/` |
-| `sight` | `src/agentsight/` |
-| `tokenless` | `src/tokenless/` |
-| `ckpt` | `src/ws-ckpt/` |
-| `memory` | `src/agent-memory/` |
-| `anolisa` | `distribution/anolisa/` |
-| `skillfs` | `src/skillfs/` |
-| `ktuner` | `src/ktuner/` |
-| `deps` | 依赖变更，包括 lockfile。 |
-| `ci` | `.github/workflows/` 和 CI 配置。 |
-| `docs` | 纯文档变更。 |
-| `chore` | 根目录脚本、工具和其他维护工作。 |
-
-仓库规范要求完整 subject 不超过 50 个字符，commitlint 当前的硬限制是 120 个字符。
-description 以小写开头，不要以句号结尾。测试和格式修正应尽量合并到对应的逻辑
-commit。每个 commit 都必须使用贡献者自己的 Git identity 添加 `Signed-off-by`
-trailer。
+每个 commit 都必须使用贡献者自己的 Git identity 添加 `Signed-off-by` trailer。
 
 ```bash
 git commit -s -m 'docs(docs): refresh contribution guide'
@@ -222,11 +197,8 @@ git push --force-with-lease
 不要使用普通的 `git push --force`。lease 会防止覆盖本地 checkout 中不存在的
 远端改动。
 
-若缺陷由同一 PR 中较早的 commit 引入，请使用 `git commit --fixup=<commit>`，随后
-执行 autosquash rebase。修复已经进入 `main` 的代码时，应创建独立 commit，并用
-`Fixes:` 指向引入缺陷的 commit。补充已经进入 `main` 的功能时使用 `Supplements:`。
-组件版本升级应放在功能分支的最后一个 commit，并在同一 commit 中原子更新所有带
-版本号的文件。
+修复同一 PR 内较早 commit 引入的缺陷、`Fixes:` 与 `Supplements:` 的用法，以及版本
+升级收尾规则，见规范 §6–§7。
 
 ## Pull Request 和 CI
 

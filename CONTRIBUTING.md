@@ -215,40 +215,14 @@ when changing generated packages or framework adapters.
 
 ## Commit messages
 
-Use [Conventional Commits](https://www.conventionalcommits.org/) with an
-English, imperative subject in this form:
+Commit message rules are defined in
+[`specs/commit-message-standard.md`](specs/commit-message-standard.md) —
+subject format, body content, `Assisted-by` and `Signed-off-by` trailers, the
+scope list with its path inference, atomicity, fix attribution, and the
+version bump rule. Read that file before committing; this section keeps only
+the recovery workflow that humans need.
 
-```text
-type(scope): imperative description
-```
-
-The scope is mandatory. Commitlint rejects an empty scope. The following
-values are the repository's recommended scopes; an unlisted scope produces a
-warning and should be justified or replaced before review.
-
-| Scope | Path or purpose |
-| --- | --- |
-| `cosh` | `deprecated/copilot-shell/` |
-| `cosh-ng` | `src/cosh-ng/` |
-| `sec-core` | `src/agent-sec-core/` |
-| `skill` | `src/os-skills/` |
-| `sight` | `src/agentsight/` |
-| `tokenless` | `src/tokenless/` |
-| `ckpt` | `src/ws-ckpt/` |
-| `memory` | `src/agent-memory/` |
-| `anolisa` | `distribution/anolisa/` |
-| `skillfs` | `src/skillfs/` |
-| `ktuner` | `src/ktuner/` |
-| `deps` | Dependency changes, including lockfiles. |
-| `ci` | `.github/workflows/` and CI configuration. |
-| `docs` | Documentation-only changes. |
-| `chore` | Root scripts, tooling, and other maintenance. |
-
-Repository convention limits the full subject to 50 characters; commitlint
-currently enforces a hard ceiling of 120 characters. Start the description
-with lowercase, and omit a trailing period. Fold tests and formatting fixes
-into the logical commit when possible. Every commit must carry a
-`Signed-off-by` trailer using the contributor's own Git identity:
+Every commit must carry a `Signed-off-by` trailer using your own Git identity:
 
 ```bash
 git commit -s -m 'docs(docs): refresh contribution guide'
@@ -271,13 +245,6 @@ git push --force-with-lease
 
 Do not use plain `git push --force`. The lease prevents overwriting remote work
 that is not present in your local checkout.
-
-Use `git commit --fixup=<commit>` followed by an autosquash rebase when fixing
-a defect introduced earlier in the same PR. A fix for code already on `main`
-uses a standalone commit with a `Fixes:` reference to the introducing commit.
-An enhancement to a feature already on `main` uses `Supplements:`. Keep a
-component version bump as the final commit in its feature branch and update
-all version-bearing files atomically.
 
 ## Pull requests and CI
 
