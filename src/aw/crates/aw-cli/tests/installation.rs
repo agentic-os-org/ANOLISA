@@ -1,39 +1,40 @@
-//! Compatibility package CLI contracts without local Agent or backend installations.
+//! Unified package CLI contracts without local Agent or backend installations.
 use std::process::Command;
 #[test]
 fn help_exposes_native_installation_and_dual_agent_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    for expected in [
-        "install --prefix",
-        "configure --prefix",
-        "--qoder",
-        "--openclaw",
-        "uninstall --prefix",
+    for (arguments, expected) in [
+        (vec!["install", "--help"], vec!["--prefix", "--bundle"]),
+        (
+            vec!["config", "init", "--help"],
+            vec!["--prefix", "--qoder", "--openclaw"],
+        ),
+        (vec!["uninstall", "--help"], vec!["--prefix", "--yes"]),
     ] {
-        assert!(text.contains(expected), "missing {expected}");
+        let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        for option in expected {
+            assert!(text.contains(option), "missing {option}");
+        }
+        assert!(!text.contains("aw-package"));
     }
-    assert!(!text.contains("python"));
 }
 #[test]
 fn invalid_commands_and_duplicate_flags_fail_before_touching_disk() {
     for args in [
         vec!["unknown"],
         vec!["install", "--prefix", "/unused", "--prefix", "/other"],
-        vec!["configure", "--prefix"],
+        vec!["config", "init", "--prefix"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+        let output = Command::new(env!("CARGO_BIN_EXE_aw"))
             .args(args)
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("aw-package:"));
+        assert!(String::from_utf8(output.stderr).unwrap().contains("aw:"));
     }
 }
 
@@ -41,19 +42,16 @@ fn invalid_commands_and_duplicate_flags_fail_before_touching_disk() {
 fn non_utf8_arguments_are_rejected_without_panicking() {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
     let invalid = OsStr::from_bytes(b"/tmp/prefix-\xff");
-    for (program, prefix) in [
-        (env!("CARGO_BIN_EXE_aw-package"), "aw-package:"),
-        (env!("CARGO_BIN_EXE_aw"), "aw:"),
-    ] {
-        let arguments = ["install".into(), "--prefix".into(), invalid.to_os_string()];
-        let output = Command::new(program).args(arguments).output().unwrap();
-        // Non-UTF-8 argv must fail like any rejected invocation, not panic.
-        assert_eq!(output.status.code(), Some(1), "{program}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains(prefix), "{program}: {stderr}");
-        assert!(stderr.contains("UTF-8"), "{program}: {stderr}");
-        assert!(!stderr.contains("panicked"), "{program}: {stderr}");
-    }
+    let arguments = ["install".into(), "--prefix".into(), invalid.to_os_string()];
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("aw:"), "{stderr}");
+    assert!(stderr.contains("UTF-8"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
 struct Installer(std::process::Child);
@@ -83,7 +81,7 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
     let bundle = root.join("bundle");
     let mut files = std::collections::BTreeMap::new();
     // Enough small owned files to observe an actual deletion before signalling.
-    for name in ["bin/aw".to_string(), "bin/aw-package".to_string()]
+    for name in ["bin/aw".to_string()]
         .into_iter()
         .chain((0..4096).map(|index| format!("share/doc/file-{index:04}")))
     {
@@ -125,8 +123,8 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
         let receipt_before = fs::read(&receipt).unwrap();
         let log = root.join(format!("stderr-{signal}"));
         let mut child = Installer(
-            Command::new(env!("CARGO_BIN_EXE_aw-package"))
-                .arg("uninstall")
+            Command::new(env!("CARGO_BIN_EXE_aw"))
+                .args(["uninstall", "--yes"])
                 .arg("--prefix")
                 .arg(&prefix)
                 .current_dir(&root)
@@ -136,7 +134,7 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
                 .spawn()
                 .unwrap(),
         );
-        eprintln!("uninstaller PID={} command=aw-package uninstall --prefix {} cwd={} log={} ports=none deadline=30s stop=kill -KILL {}; then wait owned child", child.0.id(),prefix.display(),root.display(),log.display(),child.0.id());
+        eprintln!("uninstaller PID={} command=aw uninstall --yes --prefix {} cwd={} log={} ports=none deadline=30s stop=kill -KILL {}; then wait owned child", child.0.id(),prefix.display(),root.display(),log.display(),child.0.id());
         let deadline = Instant::now() + Duration::from_secs(30);
         while prefix.join("bin/aw").exists() {
             assert!(
@@ -214,8 +212,7 @@ fn termination_signals_roll_back_cli_install_and_allow_retry() {
         .unwrap()
         .set_len(128 * 1024 * 1024)
         .unwrap();
-    fs::write(bundle.join("payload/bin/aw-package"), "fixture installer").unwrap();
-    let files: std::collections::BTreeMap<_, _> = ["bin/aw", "bin/aw-package"]
+    let files: std::collections::BTreeMap<_, _> = ["bin/aw"]
         .into_iter()
         .map(|name| {
             (
@@ -250,7 +247,7 @@ fn termination_signals_roll_back_cli_install_and_allow_retry() {
         let prefix = root.join(format!("prefix-{signal}"));
         let log = root.join(format!("stderr-{signal}"));
         let mut child = Installer(
-            Command::new(env!("CARGO_BIN_EXE_aw-package"))
+            Command::new(env!("CARGO_BIN_EXE_aw"))
                 .arg("install")
                 .arg("--bundle")
                 .arg(&bundle)

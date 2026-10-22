@@ -90,20 +90,6 @@ fn output_options_are_strict_local_and_never_approval_flags() {
             assert!(output.stdout.is_empty());
         }
     }
-    for flag in [vec!["--quiet"], vec!["--verbose"], vec!["--color", "never"]] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_aw-package"));
-        command
-            .current_dir(&f.root)
-            .args(["install", "--prefix"])
-            .arg(&f.prefix)
-            .arg("--bundle")
-            .arg(&f.bundle)
-            .args(flag);
-        let output = invoke(&command);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
-        assert!(!f.prefix.exists());
-    }
     assert!(!f.config.exists());
 }
 

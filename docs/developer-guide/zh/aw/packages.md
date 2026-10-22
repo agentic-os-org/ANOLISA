@@ -4,10 +4,11 @@
 
 本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
 
-统一入口以 `aw install`、`aw uninstall`、`aw config init`（原 `aw-package configure`）
-以及 `aw config` 编辑命令调用同一套本地安装 API。下文的 `aw-package` 示例继续用于
-兼容和首次引导安装。`aw config validate` 沿用 `aw validate` 的普通路径和 `--against`
-语义；旧 `aw-package config validate` 保留编辑器的所有权检查。
+本地安装、卸载、初始化和编辑分别使用 `aw install`、`aw uninstall`、`aw config init`
+及 `aw config` 编辑命令。独立 `aw-package` 可执行文件已删除，Rust 库保留。
+每个 bundle 根目录携带 `aw` 用于首次安装，必须显式提供绝对 `--bundle` 路径。
+`aw config validate` 沿用 `aw validate` 的相对路径与 `--against` 语义。
+原独立命令的编辑器验证已移除，没有提供相同所有权检查的 CLI 替代入口；Rust 编辑器 API 保留这些检查。
 原生 Hook 注册使用 `aw agent connect`；旧的 `aw install --config ... --agent ...`
 仍兼容，但不能混用软件安装选项。安装仍只接受解压后的本地 Preview 包，不接受
 URL 或任意组件名称。
@@ -25,7 +26,7 @@ URL 或任意组件名称。
 从源码到组件接入的连续步骤及无需后端的策略示例见
 [组件教程](integration.md)。需要 QwenPaw 或 Hermes 共用
 Provider 时，复制[四框架配置](native-agents.md#四框架使用同一份配置)，填写已安装的二进制路径。
-下方 `aw-package configure` 仅生成 Qoder/OpenClaw 条目，不初始化原生 Agent profile。
+下方 `aw config init` 仅生成 Qoder/OpenClaw 条目，不初始化原生 Agent profile。
 容器状态目录与卷要求见[运行指南](native-agents.md#容器与持久化数据)。
 
 ## 1. 安装包
@@ -39,10 +40,10 @@ AW_PREVIEW_BUNDLE="aw-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_PREVIEW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
-sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_BUNDLE/aw" install --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-默认构建只生成 core；`--component all` 生成四个包。`aw-core` 包含 `aw` 和 `aw-package`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。分包安装时，分别解压 core 和 Provider，依次用包内 `aw-package install` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
+默认构建只生成 core；`--component all` 生成四个包。`aw-core` 安装 `bin/aw`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。每个归档根目录另带 `aw` 用于引导，Provider-only 归档也包含它。分包安装时，分别解压 core 和 Provider，依次用包内 `aw install --bundle ABS_BUNDLE --prefix ABS_PREFIX` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
 
 安装器校验哈希、权限、架构、版本及源码提交，拒绝覆盖，并在 `.aw-packages` 记录文件归属。安装过程中收到 Ctrl-C（SIGINT）或 SIGTERM 会回滚本次写入，随后可重试；强制终止（SIGKILL）不在自动回滚范围内。校验和用于发现损坏，不是发布者签名。安装父目录须归安装用户所有，且不可被其他用户写入。系统后端的安装由 root 管理；若连接已有后端，也支持普通用户安装到自己的目录。
 
@@ -55,7 +56,7 @@ export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
 export AW_QODER=/absolute/path/to/qodercli
 export AW_DEMO="$HOME/aw-preview"
 install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-core.yaml" --state-dir "$AW_DEMO/core-state" \
   --qoder "$AW_QODER"
 "$AW_PREVIEW_PREFIX/bin/aw" validate --config "$AW_DEMO/aw-core.yaml"
@@ -64,20 +65,20 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 
 只使用 OpenClaw 时，将 `--qoder "$AW_QODER"` 换成 `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`；启动时按第 5 步提供原生配置和状态目录。也可同时提供两个 Agent 入口。不需要 sec-core socket 或 Provider 包。空 `providers` 和 `events` 表示没有 AW 策略检查或每次工具调用的 AW 审计；原生权限和已有 Hook/插件继续生效。AW 仍创建实例并启动或复用共享服务。退出 Agent 后用 `aw stop --config "$AW_DEMO/aw-core.yaml"` 停止该服务。
 
-`configure` 就是初始化命令：安装 core 后，它生成包含 Agent、daemon、execution
+`aw config init` 就是初始化命令：安装 core 后，它生成包含 Agent、daemon、execution
 和 audit 设置的完整 `aw.yaml`。不传 `--provider`（或传 `--provider none`），
 `providers` 和 `events` 都为空。它只创建新文件，拒绝覆盖已有配置。若要一次生成
 带策略的配置，按[布尔脚本指南](native-agents.md#布尔判断脚本)选择 `--provider command`。
-后续逐项添加规则则按 `configure` → `config add-provider` → `config add-event` →
-`config add-hook` → `config validate` 执行。所有 `config` 命令（包括 `add-*`）都要求
-已有合法文件，不会自动初始化；只有事件不存在时才需要 `add-event`。
+后续逐项添加规则则按 `aw config init` → `aw config add-provider` → `aw config add-event` →
+`aw config add-hook` → `aw config validate` 执行。查看、编辑和校验需要已有文件，
+只有 `init` 创建新文件；只有事件不存在时才需要 `aw config add-event`。
 QwenPaw/Hermes 或四框架共用配置则复制
 [共用模板](integration.md#2-准备四框架共用配置)并填写路径；
-当前 `configure` 只生成 Qoder/OpenClaw 条目，不初始化框架原生 profile。
+当前 `aw config init` 只生成 Qoder/OpenClaw 条目，不初始化框架原生 profile。
 
 ## 编辑已有 Provider 与 Hook 配置
 
-以配置文件所属用户运行 `aw-package config`，查看、校验和修改已有 YAML 或 JSON
+以配置文件所属用户运行 `aw config show` 和编辑命令，查看和修改已有 YAML 或 JSON
 文件。这些命令离线执行，不运行 Provider 或 Hook、不安装原生回调、不启动 Agent，
 也不重载服务。修改前退出当前 Agent 会话，并使用原配置停止服务；修改后使用新文件
 重新运行 Agent。新配置字节选择新的 revision，已有服务不会自动采用修改。
@@ -97,25 +98,28 @@ Provider 私有 `config` 中的键保持不透明。
 
 | 命令 | 行为 |
 | --- | --- |
-| `aw-package config show --config ABS_FILE` | 以格式化 JSON 打印完整工作配置 |
-| `aw-package config show --config ABS_FILE --provider NAME` | 打印一个 Provider |
-| `aw-package config show --config ABS_FILE --event EVENT [--id ID]` | 打印一个事件，或其中按事件作用域 ID 选择的步骤 |
-| `aw-package config validate --config ABS_FILE` | 校验完整配置，成功时打印 `Valid configuration` |
-| `aw-package config add-provider --config ABS_FILE --name NAME --definition FILE` | 添加完整 Provider 定义 |
-| `aw-package config remove-provider --config ABS_FILE --name NAME` | 删除没有引用的 Provider |
-| `aw-package config add-event --config ABS_FILE --event EVENT --definition FILE` | 添加显式配置的事件 |
-| `aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE` | 追加完整步骤，定义中包含其 `id` |
-| `aw-package config remove-hook --config ABS_FILE --event EVENT --id ID` | 删除指定事件下的步骤 |
+| `aw config show --config ABS_FILE` | 以格式化 JSON 打印完整工作配置 |
+| `aw config show --config ABS_FILE --provider NAME` | 打印一个 Provider |
+| `aw config show --config ABS_FILE --event EVENT [--id ID]` | 打印一个事件，或其中按事件作用域 ID 选择的步骤 |
+| `aw config add-provider --config ABS_FILE --name NAME --definition FILE` | 添加完整 Provider 定义 |
+| `aw config remove-provider --config ABS_FILE --name NAME` | 删除没有引用的 Provider |
+| `aw config add-event --config ABS_FILE --event EVENT --definition FILE` | 添加显式配置的事件 |
+| `aw config add-hook --config ABS_FILE --event EVENT --definition FILE` | 追加完整步骤，定义中包含其 `id` |
+| `aw config remove-hook --config ABS_FILE --event EVENT --id ID` | 删除指定事件下的步骤 |
+
+`aw config validate --config FILE` 另行校验字段与引用，成功打印 `configuration valid`。
+它接受相对路径和 `--against`，不打开 `ConfigurationEditor`，也不执行上文的文件所有权检查。
+原独立命令的编辑器验证已移除。
 
 `show` 会有意显示 Provider 私有值，须自行选择输出的展示或保存位置。Provider 和
 事件选择器互斥，`--id` 必须与 `--event` 一起使用；指定的对象不存在时会报错。
-`show` 和 `validate` 不改变原文件。
+`show` 和 `aw config validate` 不改变原文件。
 
 添加已有的相同定义时保留文件；同名对象或同一事件下同 ID 步骤已有不同定义时报告
 冲突。删除不存在的对象或步骤也保留文件。成功的修改操作打印 `Updated configuration`
 或 `Configuration unchanged`。删除 Provider 前须先删除所有引用步骤，包括禁用的
-步骤。删除事件最后一个步骤后仍保留事件选项及空 `steps` 数组。`add-hook` 要求事件
-已存在；`add-event` 显式指定是否启用事件，不覆盖已有事件的选项。
+步骤。删除事件最后一个步骤后仍保留事件选项及空 `steps` 数组。`aw config add-hook` 要求事件
+已存在；`aw config add-event` 显式指定是否启用事件，不覆盖已有事件的选项。
 
 每条修改命令原子发布一个操作。多条命令分别发布，后续命令失败时，先前已成功的
 命令仍然生效。
@@ -155,15 +159,15 @@ reason_code: demo_marker_denied
 on_error: block
 YAML
 chmod 600 "$AW_DEMO/check-tool.py" "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company --definition "$AW_DEMO/provider.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-event --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/event.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/hook.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config show --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --id check-marker
-"$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw" config validate --config "$AW_DEMO/aw-core.yaml"
 ```
 
 Provider 省略 `protocol` 就使用 `aw-hook/v1alpha1`，步骤省略 `operation` 就默认
@@ -177,9 +181,9 @@ Provider 省略 `protocol` 就使用 `aw-hook/v1alpha1`，步骤省略 `operatio
 空事件会保留；脚本保留到不再使用它或清理演示目录时。
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --id check-marker
-"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company
 rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 ```
@@ -201,7 +205,7 @@ AW_PREVIEW_VERSION=0.1.0-preview.1
 AW_PREVIEW_PROVIDER="aw-provider-sec-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 tar -xzf "$AW_PREVIEW_PROVIDER.tar.gz"
-sudo "./$AW_PREVIEW_PROVIDER/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_PROVIDER/aw" install --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
 在独立终端以 root 启动包内后端，保持前台运行，Ctrl-C 停止。配置和数据放在安装前缀之外。
@@ -238,13 +242,13 @@ export AW_NODE=/absolute/path/to/node
 export AW_OPENCLAW=/absolute/path/to/openclaw/openclaw.mjs
 export AW_DEMO="$HOME/aw-preview"
 install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace" "$AW_DEMO/openclaw"
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw.yaml" --state-dir "$AW_DEMO/state" \
   --provider sec-core --socket /run/aw-preview-sec/daemon.sock --qoder "$AW_QODER" \
   --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 ```
 
-Qoder 和 Node 入口须可由当前用户执行；OpenClaw `.mjs` 文件须可读，无需执行权限。配置和 state 路径需为 Unix socket 留出空间（socket 路径少于 108 字节）。配置文件不能与 state 目录同路径或位于其祖先路径；已有 state 路径须为当前用户所有、权限为 `0700` 的目录。`configure` 从校验到发布全程持有包的共享锁，普通用户读取 root 所有的安装前缀时也适用；安装或卸载正在进行时，会报告可重试的锁错误。它仅复核 core 与显式选用的 Provider 文件哈希及权限，必需文件缺失或被修改时拒绝生成配置；未选用的 Provider 不成为初始化依赖。默认无策略；`--socket` 必须显式搭配 `--provider sec-core`，避免旧安全命令静默生成空策略。配置先写入私有临时文件，再排他提交；写入失败不会留下半份配置，可直接重试。两个 Agent 共用同一个 Provider 和 before/after 步骤：Qoder 的 `Bash`、OpenClaw 的 `exec` 都将 `/command` 输入交给 sec-core Bash 扫描。风险命令或执行前检查失败会阻断；执行后记录框架上报的结果（OpenClaw 也会上报被阻断的工具结果），其他工具未扫描。这里提供原生 Hook 拦截，不是 OS 沙箱或跨框架审批。
+Qoder 和 Node 入口须可由当前用户执行；OpenClaw `.mjs` 文件须可读，无需执行权限。配置和 state 路径需为 Unix socket 留出空间（socket 路径少于 108 字节）。配置文件不能与 state 目录同路径或位于其祖先路径；已有 state 路径须为当前用户所有、权限为 `0700` 的目录。`aw config init` 从校验到发布全程持有包的共享锁，普通用户读取 root 所有的安装前缀时也适用；安装或卸载正在进行时，会报告可重试的锁错误。它仅复核 core 与显式选用的 Provider 文件哈希及权限，必需文件缺失或被修改时拒绝生成配置；未选用的 Provider 不成为初始化依赖。默认无策略；`--socket` 必须显式搭配 `--provider sec-core`，避免旧安全命令静默生成空策略。配置先写入私有临时文件，再排他提交；写入失败不会留下半份配置，可直接重试。两个 Agent 共用同一个 Provider 和 before/after 步骤：Qoder 的 `Bash`、OpenClaw 的 `exec` 都将 `/command` 输入交给 sec-core Bash 扫描。风险命令或执行前检查失败会阻断；执行后记录框架上报的结果（OpenClaw 也会上报被阻断的工具结果），其他工具未扫描。这里提供原生 Hook 拦截，不是 OS 沙箱或跨框架审批。
 
 ## 4. 测试 Qoder
 
@@ -301,10 +305,10 @@ test ! -e "$AW_DEMO/workspace/openclaw-blocked.marker"
 
 ```bash
 "$AW_PREVIEW_PREFIX/bin/aw" stop --config "$AW_DEMO/aw.yaml"
-sudo "$AW_PREVIEW_PREFIX/bin/aw-package" uninstall --prefix "$AW_PREVIEW_PREFIX"
+sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --prefix "$AW_PREVIEW_PREFIX" --yes
 ```
 
-卸载先检查所有包属文件，遇到被修改或缺失的文件，会在删除任何文件之前报错。删除失败或完成前收到 SIGINT/SIGTERM 时，恢复已删除的文件和收据，随后可重试；SIGKILL 不在自动恢复范围内。若恢复也失败，诊断会列出保留的备份和未恢复路径。所有 payload 和收据删除后，卸载即成功；若备份清理失败，警告会列出残留备份路径，供手动删除。未知文件、前缀和锁、外部配置、凭据及审计数据均保留，确认不再需要后再自行删除。
+卸载先检查所有包属文件，遇到被修改或缺失的文件，会在删除任何文件之前报错。删除失败或完成前收到 SIGINT/SIGTERM 时，恢复已删除的文件和安装记录，随后可重试；SIGKILL 不在自动恢复范围内。若恢复也失败，诊断会列出保留的备份和未恢复路径。所有 payload 和安装记录删除后，卸载即成功；若备份清理失败，警告会列出残留备份路径，供手动删除。未知文件、前缀和锁、外部配置、凭据及审计数据均保留，确认不再需要后再自行删除。
 
 升级时安装到新前缀、生成新配置，保留旧包和配置即可回退。此 Preview 不提供热加载或审计格式迁移；升级前备份 state，后续 Preview 若改变格式，应使用新的 state 目录。
 
@@ -327,6 +331,6 @@ CI / AW Integration 每晚运行，也可针对确切源码提交手动触发；
 
 `--component tokenless` 构建 `aw-provider-tokenless`；`--component all` 也将它纳入
 `aw-all-in-one`。扩展包含桥接、Tokenless CLI 和固定版本带补丁的 RTK，要求匹配的 core，沿用 sec-core 的
-收据与完整性规则。通过 `configure --provider tokenless` 或
-`--provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
+安装记录与完整性规则。通过 `aw config init --provider tokenless` 或
+`aw config init --provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
 结果槽和故障行为见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。

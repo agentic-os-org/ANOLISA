@@ -5,12 +5,13 @@
 This reference is for integration and maintenance. For installation and daily use,
 see the [user guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
 
-The unified frontend exposes the same local package APIs as `aw install`,
-`aw uninstall`, `aw config init` (formerly `aw-package configure`), and
-`aw config` editing commands. The `aw-package` examples below remain supported
-for compatibility and first-install bootstrap. `aw config validate` uses the
-broader `aw validate` semantics, including relative paths and `--against`;
-legacy `aw-package config validate` keeps the editor's ownership checks.
+Use `aw install`, `aw uninstall`, `aw config init`, and `aw config` editing
+commands for local package operations. The standalone `aw-package` executable
+has been removed; its Rust library remains. Every bundle includes `aw` at its
+root for first installation and requires an explicit absolute `--bundle` path.
+`aw config validate` uses `aw validate` semantics, including relative paths
+and `--against`. The removed editor-specific validation command has no CLI
+replacement with the same ownership checks; the Rust editor API retains them.
 Native Hook registration is `aw agent connect`; legacy native `aw install
 --config ... --agent ...` remains compatible and cannot mix package options.
 Installation still accepts only local unpacked Preview bundles, not URLs or
@@ -32,7 +33,7 @@ For source-to-integration steps, including a backend-free policy, see the
 [component walkthrough](integration.md). To use
 QwenPaw or Hermes with the same Providers, copy the
 [four-framework configuration](native-agents.md#use-one-configuration-for-four-frameworks)
-and set the installed binary paths. `aw-package configure` below generates
+and set the installed binary paths. `aw config init` below generates
 Qoder/OpenClaw entries only; it does not initialize native Agent profiles.
 Container state and volume requirements are covered in the
 [runtime guide](native-agents.md#containers-and-persistent-data).
@@ -48,10 +49,10 @@ AW_PREVIEW_BUNDLE="aw-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_PREVIEW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
-sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_BUNDLE/aw" install --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-The default build produces core only; `--component all` produces four packages. `aw-core` contains `aw` and `aw-package`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge, Tokenless CLI and pinned patched RTK; `aw-all-in-one` contains exactly the same three components. For split installation, extract core and Provider and run each bundle’s `aw-package install` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
+The default build produces core only; `--component all` produces four packages. `aw-core` installs `bin/aw`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge, Tokenless CLI and pinned patched RTK; `aw-all-in-one` contains exactly the same three components. Every archive also carries a root-level `aw` for bootstrap, including Provider-only archives. For split installation, extract core and Provider and run each bundle's `aw install --bundle ABS_BUNDLE --prefix ABS_PREFIX` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
 
 The installer verifies hashes, modes, architecture, version and source commit, refuses replacements and records ownership in `.aw-packages`. Ctrl-C (SIGINT) or SIGTERM during installation rolls back this invocation’s writes so installation can be retried; forced termination (SIGKILL) is outside automatic rollback. Checksums detect corruption; they are not publisher signatures. Install parents must belong to the installer user and must not be writable by other users. Root owns the system backend installation; when connecting to an existing backend, a user-owned prefix is also supported.
 
@@ -64,7 +65,7 @@ export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
 export AW_QODER=/absolute/path/to/qodercli
 export AW_DEMO="$HOME/aw-preview"
 install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-core.yaml" --state-dir "$AW_DEMO/core-state" \
   --qoder "$AW_QODER"
 "$AW_PREVIEW_PREFIX/bin/aw" validate --config "$AW_DEMO/aw-core.yaml"
@@ -73,23 +74,23 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 
 For OpenClaw alone, replace `--qoder "$AW_QODER"` with `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`; supply the native settings and state options described in step 5 when launching. You can also provide both Agent entrypoints. No sec-core socket or Provider package is required. Empty `providers` and `events` mean no AW policy checks or per-tool AW audit; native permissions and existing Hooks/plugins still apply. AW still creates an instance and starts/reuses its shared service. Exit the Agent and stop that service with `aw stop --config "$AW_DEMO/aw-core.yaml"`.
 
-`configure` is the initialization command: after core installation, it creates
+`aw config init` is the initialization command: after core installation, it creates
 a complete `aw.yaml` with Agent, daemon, execution and audit settings. Omitting
 `--provider` (or passing `--provider none`) leaves `providers` and `events` empty.
 It creates a new file and refuses to overwrite an existing one. To initialize a
 policy in one command, select `--provider command` as shown in the
 [boolean script guide](native-agents.md#boolean-policy-commands). To add rules later, follow
-`configure` → `config add-provider` → `config add-event` → `config add-hook` →
-`config validate`. Every `config` action, including `add-*`, needs an existing
-valid file; it does not initialize one. Only an absent event needs `add-event`.
+`aw config init` → `aw config add-provider` → `aw config add-event` →
+`aw config add-hook` → `aw config validate`. Viewing, editing and validation
+need an existing file; only `init` creates one. Only an absent event needs `aw config add-event`.
 For QwenPaw/Hermes or all four targets, copy the
 [shared template](integration.md#2-prepare-one-configuration-for-four-frameworks)
-and fill its paths instead; `configure` currently generates Qoder/OpenClaw
+and fill its paths instead; `aw config init` currently generates Qoder/OpenClaw
 entries only and never initializes framework profiles.
 
 ## Edit existing Provider and Hook configuration
 
-Use `aw-package config` as the configuration owner to view, validate and change
+Use `aw config show` and the editing commands as the configuration owner to view and change
 an existing YAML or JSON file. These commands are offline: they do not execute
 Providers or Hooks, install native callbacks, start an Agent or reload a service.
 Exit active Agent sessions and stop the service using the original configuration
@@ -115,20 +116,24 @@ Provider-owned `config` keys remain opaque.
 
 | Command | Behavior |
 | --- | --- |
-| `aw-package config show --config ABS_FILE` | Print the complete working configuration as pretty JSON |
-| `aw-package config show --config ABS_FILE --provider NAME` | Print one Provider |
-| `aw-package config show --config ABS_FILE --event EVENT [--id ID]` | Print one event, or a step with its event-scoped ID |
-| `aw-package config validate --config ABS_FILE` | Check the complete configuration; print `Valid configuration` on success |
-| `aw-package config add-provider --config ABS_FILE --name NAME --definition FILE` | Add a complete Provider definition |
-| `aw-package config remove-provider --config ABS_FILE --name NAME` | Remove an unreferenced Provider |
-| `aw-package config add-event --config ABS_FILE --event EVENT --definition FILE` | Add an explicitly configured event |
-| `aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE` | Append a complete step, whose `id` is in the definition |
-| `aw-package config remove-hook --config ABS_FILE --event EVENT --id ID` | Remove one event-scoped step |
+| `aw config show --config ABS_FILE` | Print the complete working configuration as pretty JSON |
+| `aw config show --config ABS_FILE --provider NAME` | Print one Provider |
+| `aw config show --config ABS_FILE --event EVENT [--id ID]` | Print one event, or a step with its event-scoped ID |
+| `aw config add-provider --config ABS_FILE --name NAME --definition FILE` | Add a complete Provider definition |
+| `aw config remove-provider --config ABS_FILE --name NAME` | Remove an unreferenced Provider |
+| `aw config add-event --config ABS_FILE --event EVENT --definition FILE` | Add an explicitly configured event |
+| `aw config add-hook --config ABS_FILE --event EVENT --definition FILE` | Append a complete step, whose `id` is in the definition |
+| `aw config remove-hook --config ABS_FILE --event EVENT --id ID` | Remove one event-scoped step |
+
+`aw config validate --config FILE` separately validates fields and references,
+printing `configuration valid` on success. It accepts relative paths and
+`--against`; it does not open `ConfigurationEditor` or enforce the file-ownership
+checks described above. The former standalone editor validator has been removed.
 
 `show` intentionally includes private Provider values; choose where its output is
 displayed or saved. Provider and event selectors are mutually exclusive, and
 `--id` requires `--event`. A selected identity that does not exist is an error.
-`show` and `validate` leave the source file unchanged.
+`show` and `aw config validate` leave the source file unchanged.
 
 Add operations preserve the file when an identical definition already exists;
 a different definition under the same name or event-scoped step ID is a conflict.
@@ -136,7 +141,7 @@ Remove operations preserve the file when the identity is already absent. Success
 mutations print `Updated configuration` or `Configuration unchanged`. Remove all
 referencing steps, including disabled steps, before removing their Provider.
 Removing an event's last step retains its event options and empty `steps` array.
-`add-hook` requires an existing event: `add-event` makes enablement explicit and
+`aw config add-hook` requires an existing event: `aw config add-event` makes enablement explicit and
 never overrides an existing event's options.
 
 Each mutating command publishes one operation atomically. Several commands are
@@ -180,15 +185,15 @@ reason_code: demo_marker_denied
 on_error: block
 YAML
 chmod 600 "$AW_DEMO/check-tool.py" "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company --definition "$AW_DEMO/provider.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-event --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/event.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config add-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --definition "$AW_DEMO/hook.yaml"
-"$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config show --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --id check-marker
-"$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw" config validate --config "$AW_DEMO/aw-core.yaml"
 ```
 
 The omitted Provider `protocol` selects `aw-hook/v1alpha1`, and the omitted step
@@ -205,9 +210,9 @@ the referencing step, then its Provider. The empty event is retained. The script
 remains on disk until you finish using it or clean up the demo directory.
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
   --event tool.before --id check-marker
-"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
+"$AW_PREVIEW_PREFIX/bin/aw" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
   --name company
 rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
 ```
@@ -233,7 +238,7 @@ AW_PREVIEW_VERSION=0.1.0-preview.1
 AW_PREVIEW_PROVIDER="aw-provider-sec-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 tar -xzf "$AW_PREVIEW_PROVIDER.tar.gz"
-sudo "./$AW_PREVIEW_PROVIDER/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_PROVIDER/aw" install --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
 In a separate terminal, start the installed backend as root. Keep it in the foreground; Ctrl-C stops it. Configuration and data stay outside the immutable package prefix.
@@ -250,7 +255,7 @@ sudo env AGENT_SEC_DATA_DIR=/var/lib/aw-preview/sec-data OTEL_SDK_DISABLED=true 
 ```
 
 The package also contains the authenticated `agent-sec-daemon-health` helper and
-receipt-covered official service/configuration reference assets. For a persistent
+official service/configuration reference assets listed in its installation record. For a persistent
 backend, reuse the existing root system service or install the independently
 managed sec-core system package. AW install/uninstall does not change that
 service or `/etc`; do not register a root service against a user-writable prefix.
@@ -274,13 +279,13 @@ export AW_NODE=/absolute/path/to/node
 export AW_OPENCLAW=/absolute/path/to/openclaw/openclaw.mjs
 export AW_DEMO="$HOME/aw-preview"
 install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace" "$AW_DEMO/openclaw"
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw.yaml" --state-dir "$AW_DEMO/state" \
   --provider sec-core --socket /run/aw-preview-sec/daemon.sock --qoder "$AW_QODER" \
   --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 ```
 
-Qoder and Node entrypoints must be executable by the current user; the OpenClaw `.mjs` file must be readable and does not need execute permission. Keep the configuration and socket paths short enough for Unix sockets (less than 108 bytes). The configuration file must not be the state directory or one of its ancestors; an existing state path must be a directory owned by the current user with mode `0700`. `configure` holds a shared package lock through validation and publication, including for a regular user reading a root-owned prefix. An active installation or uninstall causes a retryable lock error. It rechecks core and the explicitly selected Provider file hashes and permission modes, refusing missing or modified required payloads. A Provider installed but not selected adds no initialization dependency. Without `--provider`, configuration has no policy; `--socket` requires explicit `--provider sec-core` so old security commands cannot silently generate an unprotected configuration. It writes a private temporary file before exclusively publishing the configuration; a failed write leaves no partial configuration and can be retried. Both Agent bindings share the same Provider and before/after steps: Qoder `Bash` and OpenClaw `exec` both map their `/command` input to the sec-core Bash scanner. A risky command or a failed before-check blocks execution; after-checks observe the results reported by each framework (OpenClaw also reports blocked tool results). Other tools are not scanned. This provides native Hook enforcement, not an OS sandbox or cross-framework approval service.
+Qoder and Node entrypoints must be executable by the current user; the OpenClaw `.mjs` file must be readable and does not need execute permission. Keep the configuration and socket paths short enough for Unix sockets (less than 108 bytes). The configuration file must not be the state directory or one of its ancestors; an existing state path must be a directory owned by the current user with mode `0700`. `aw config init` holds a shared package lock through validation and publication, including for a regular user reading a root-owned prefix. An active installation or uninstall causes a retryable lock error. It rechecks core and the explicitly selected Provider file hashes and permission modes, refusing missing or modified required payloads. A Provider installed but not selected adds no initialization dependency. Without `--provider`, configuration has no policy; `--socket` requires explicit `--provider sec-core` so old security commands cannot silently generate an unprotected configuration. It writes a private temporary file before exclusively publishing the configuration; a failed write leaves no partial configuration and can be retried. Both Agent bindings share the same Provider and before/after steps: Qoder `Bash` and OpenClaw `exec` both map their `/command` input to the sec-core Bash scanner. A risky command or a failed before-check blocks execution; after-checks observe the results reported by each framework (OpenClaw also reports blocked tool results). Other tools are not scanned. This provides native Hook enforcement, not an OS sandbox or cross-framework approval service.
 
 ## 4. Test Qoder
 
@@ -337,10 +342,10 @@ Exit Qoder and stop the foreground OpenClaw Gateway with Ctrl-C, then stop AW. S
 
 ```bash
 "$AW_PREVIEW_PREFIX/bin/aw" stop --config "$AW_DEMO/aw.yaml"
-sudo "$AW_PREVIEW_PREFIX/bin/aw-package" uninstall --prefix "$AW_PREVIEW_PREFIX"
+sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --prefix "$AW_PREVIEW_PREFIX" --yes
 ```
 
-Uninstall preflights all owned files and refuses modified or missing payloads before deleting anything. If deletion fails or SIGINT/SIGTERM arrives before completion, it restores the files and receipts already removed so you can retry. SIGKILL is outside automatic restoration. If restoration also fails, diagnostics identify the retained backup and unrestored paths. Once all payloads and receipts are removed, uninstall succeeds even if backup cleanup fails; a warning identifies the remaining backup for manual removal. Unknown files, the prefix/lock, external configuration, credentials and audit data remain. Remove those only after checking that you no longer need them.
+Uninstall preflights all owned files and refuses modified or missing payloads before deleting anything. If deletion fails or SIGINT/SIGTERM arrives before completion, it restores the files and installation records already removed so you can retry. SIGKILL is outside automatic restoration. If restoration also fails, diagnostics identify the retained backup and unrestored paths. Once all payloads and installation records are removed, uninstall succeeds even if backup cleanup fails; a warning identifies the remaining backup for manual removal. Unknown files, the prefix/lock, external configuration, credentials and audit data remain. Remove those only after checking that you no longer need them.
 
 For upgrades, install into a new prefix and generate a new configuration. Keep the old package and configuration for rollback. This Preview has no hot reload or audit format migration; back up state and use a new state directory if a later Preview changes its format.
 
@@ -363,7 +368,7 @@ CI / AW Integration runs nightly and can be dispatched manually for an exact sou
 
 `--component tokenless` builds `aw-provider-tokenless`; `--component all` also
 includes it in `aw-all-in-one`. The extension contains its bridge, Tokenless CLI and pinned patched RTK,
-requires matching core, and follows the same receipt/integrity rules as sec-core.
-Use `configure --provider tokenless` or `--provider sec-core+tokenless --socket ABS_FILE`
+requires matching core, and follows the same installation-record and integrity rules as sec-core.
+Use `aw config init --provider tokenless` or `aw config init --provider sec-core+tokenless --socket ABS_FILE`
 to enable compression explicitly. See the [Tokenless guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md) for
 four-framework configuration, native result slots and failure behavior.

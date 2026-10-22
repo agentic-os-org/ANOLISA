@@ -3,8 +3,8 @@
 [中文版](../../zh/configuration/configuration-editing.md)
 
 `aw_package::config_edit::ConfigurationEditor` edits an existing desired YAML or
-JSON configuration. The packaging CLI exposes the same boundary through
-`aw-package config`. It does not install an Agent, run a command, discover Provider
+JSON configuration. The unified CLI exposes viewing and mutation through
+`aw config show` and its editing commands. It does not install an Agent, run a command, discover Provider
 capabilities or establish native effect support.
 
 ## Editing contract
@@ -106,7 +106,7 @@ also change the runtime configuration revision.
 
 ## CLI boundary
 
-`aw-package config` exposes `show`, `validate`, `add-provider`, `remove-provider`,
+`aw config` exposes the editor's `show`, `add-provider`, `remove-provider`,
 `add-event`, `add-hook` and `remove-hook`. Each mutating invocation stages one
 operation and saves once; separate invocations are not a batch transaction.
 Library callers may stage several validated operations before saving. Required,
@@ -120,10 +120,14 @@ duplicate-key, alias-expansion and JSON-compatible type checks before the editor
 validates the resulting complete configuration. There is no stdin input or
 command execution. `show` prints pretty JSON, including private Provider values;
 selectors choose a Provider, event or event-scoped step, and absent selections
-are errors. `show` and `validate` publish nothing.
+are errors. `show` publishes nothing.
 
-Mutations print `Updated configuration` or `Configuration unchanged`;
-`validate` prints `Valid configuration`. CLI editing changes no Schema,
+Mutations print `Updated configuration` or `Configuration unchanged`.
+`aw config validate` is a separate static validator: it accepts relative paths
+and `--against`, prints `configuration valid` for a plain successful check,
+and does not enforce the editor's ownership checks. The standalone `aw-package`
+executable and its editor-specific validator have been removed; the Rust
+`ConfigurationEditor::validate` API remains. CLI editing changes no Schema,
 registry or service contracts and does not reload the running service. See the
 [CLI reference](../../../../../../docs/developer-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
 for options, rollback and restarting with the edited revision.

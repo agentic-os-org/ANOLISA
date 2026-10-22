@@ -42,7 +42,7 @@ fn noninteractive_and_json_removal_require_explicit_consent_without_writes() {
 }
 
 #[test]
-fn explicit_consent_preserves_integrity_checks_and_legacy_package_behavior() {
+fn explicit_consent_preserves_integrity_checks() {
     let f = Fixture::new();
     success(f.install().output().unwrap());
     fs::write(f.prefix.join("bin/aw"), b"modified").unwrap();
@@ -57,8 +57,8 @@ fn explicit_consent_preserves_integrity_checks_and_legacy_package_behavior() {
     assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
     let f = Fixture::new();
     success(f.install().output().unwrap());
-    let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
-        .args(["uninstall", "--prefix"])
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+        .args(["uninstall", "--yes", "--prefix"])
         .arg(&f.prefix)
         .current_dir(&f.root)
         .output()

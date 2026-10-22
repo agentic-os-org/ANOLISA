@@ -53,7 +53,7 @@ need only the public process protocol and YAML, not a Rust SDK or OS checkout.
 The bundled implementations still use local SDK paths. Preview delivers one
 build set and checks matching versions and source commits for common origin.
 Independent SDK publication and installation compatibility changes are a later
-stage, including receipt migration tests. Preserve existing package and binary
+stage, including installation-record migration tests. Preserve existing package and binary
 names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
@@ -81,8 +81,10 @@ or CLI internals. Keep Client, wire DTOs and full Binding in `aw-service`;
 serialized HookBinding, argument parsing, launch signal handling and CLI-owned
 resources belong in `aw-cli`. The CLI calls `aw-package` Rust APIs directly for
 software installation and offline configuration; libraries must not depend on
-the CLI or print its user-facing output. Keep the legacy `aw-package` executable
-as a shared-frontend compatibility entrypoint. `aw-build` remains in `aw-package`.
+the CLI or print its user-facing output. The standalone `aw-package` executable
+has been removed; do not reintroduce a second installer CLI. Bundles carry `aw`
+at their root for bootstrap, and software installation requires an explicit
+absolute `--bundle` path. `aw-build` remains in the `aw-package` Rust crate.
 Preserve legacy native `aw install --config ... --agent ...` semantics while
 offering `aw agent connect`; reject mixed package/native options before writes.
 Pass only NativeContext and typed options into the Adapter. The caller supplies

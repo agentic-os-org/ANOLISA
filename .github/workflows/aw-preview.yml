@@ -168,18 +168,33 @@ jobs:
           chmod 700 "$root"
           runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
           trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
-          aw-core-*/aw-package install --prefix "$root/core-only"
+          bundle_dir() {
+            local matches=( "$PWD/$1-"*/ )
+            test "${#matches[@]}" -eq 1 || return 1
+            test -d "${matches[0]}" || return 1
+            printf '%s\n' "${matches[0]%/}"
+          }
+          core_bundle="$(bundle_dir aw-core)"
+          security_bundle="$(bundle_dir aw-provider-sec-core)"
+          tokenless_bundle="$(bundle_dir aw-provider-tokenless)"
+          combined_bundle="$(bundle_dir aw-all-in-one)"
+          for bundle in "$core_bundle" "$security_bundle" "$tokenless_bundle" "$combined_bundle"; do
+            test -x "$bundle/aw"
+            test ! -e "$bundle/aw-package"
+          done
+          "$core_bundle/aw" install --bundle "$core_bundle" --prefix "$root/core-only"
           mkdir -m 700 "$runtime/core"
-          "$root/core-only/bin/aw-package" configure --prefix "$root/core-only" \
+          "$root/core-only/bin/aw" config init --prefix "$root/core-only" \
             --config "$runtime/core/aw.yaml" --state-dir "$runtime/core/state" \
             --qoder /bin/true
-          "$root/core-only/bin/aw" validate --config "$runtime/core/aw.yaml"
+          "$root/core-only/bin/aw" config validate --config "$runtime/core/aw.yaml"
           test ! -e "$root/core-only/libexec"
-          "$root/core-only/bin/aw-package" uninstall --prefix "$root/core-only"
-          aw-core-*/aw-package install --prefix "$root/split"
-          aw-provider-sec-core-*/aw-package install --prefix "$root/split"
-          aw-provider-tokenless-*/aw-package install --prefix "$root/split"
-          aw-all-in-one-*/aw-package install --prefix "$root/combined"
+          test ! -e "$root/core-only/bin/aw-package"
+          "$root/core-only/bin/aw" uninstall --prefix "$root/core-only" --yes
+          "$core_bundle/aw" install --bundle "$core_bundle" --prefix "$root/split"
+          "$security_bundle/aw" install --bundle "$security_bundle" --prefix "$root/split"
+          "$tokenless_bundle/aw" install --bundle "$tokenless_bundle" --prefix "$root/split"
+          "$combined_bundle/aw" install --bundle "$combined_bundle" --prefix "$root/combined"
           diff -r "$root/split/.aw-packages" "$root/combined/.aw-packages"
           AW_TOKENLESS_TEST_CLI="$root/combined/libexec/aw/providers/tokenless/tokenless" \
           AW_TOKENLESS_TEST_RTK="$root/combined/libexec/aw/providers/tokenless/rtk" \
@@ -191,16 +206,16 @@ jobs:
             timeout 180 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \
             -p aw-package --test installed -- --ignored
           # Preview upgrades use a new prefix; retain the old one for rollback.
-          aw-all-in-one-*/aw-package install --prefix "$root/next"
+          "$combined_bundle/aw" install --bundle "$combined_bundle" --prefix "$root/next"
           diff -r "$root/combined/.aw-packages" "$root/next/.aw-packages"
-          "$root/next/bin/aw-package" configure --prefix "$root/next" \
+          "$root/next/bin/aw" config init --prefix "$root/next" \
             --config "$runtime/next.yaml" --state-dir "$runtime/next-state" --qoder /bin/true
-          "$root/next/bin/aw" validate --config "$runtime/next.yaml"
-          aw-all-in-one-*/aw-package uninstall --prefix "$root/next"
+          "$root/next/bin/aw" config validate --config "$runtime/next.yaml"
+          "$combined_bundle/aw" uninstall --prefix "$root/next" --yes
           test -x "$root/combined/bin/aw"
-          cp aw-all-in-one-*/manifest.json "$root/demo-manifest.json"
-          aw-all-in-one-*/aw-package uninstall --prefix "$root/combined"
-          aw-core-*/aw-package uninstall --prefix "$root/split"
+          cp "$combined_bundle/manifest.json" "$root/demo-manifest.json"
+          "$combined_bundle/aw" uninstall --prefix "$root/combined" --yes
+          "$core_bundle/aw" uninstall --prefix "$root/split" --yes
           test -f "$runtime/demo/result.json"
       - uses: actions/upload-artifact@v4
         if: success()

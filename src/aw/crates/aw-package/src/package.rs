@@ -309,16 +309,7 @@ fn stage(
         let root = stage.path().join(name);
         let mut files = BTreeMap::new();
         if *name == "aw-core" {
-            for binary in ["aw", "aw-package"] {
-                add(
-                    &root,
-                    &format!("bin/{binary}"),
-                    &aw.join(binary),
-                    true,
-                    &mut files,
-                    cancel,
-                )?;
-            }
+            add(&root, "bin/aw", &aw.join("aw"), true, &mut files, cancel)?;
         } else if *name == "aw-provider-tokenless" {
             for (binary, directory) in [
                 (
@@ -441,7 +432,7 @@ fn stage(
                 components: selected,
             })?,
         )?;
-        copy(&aw.join("aw-package"), &root.join("aw-package"), cancel)?;
+        copy(&aw.join("aw"), &root.join("aw"), cancel)?;
         for (language, name) in [("en", "README.md"), ("zh", "README_zh.md")] {
             let mut text = fs::read_to_string(repo.join(format!(
                 "docs/user-guide/{language}/user-entrypoint/aw/installation.md"

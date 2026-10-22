@@ -4,68 +4,6 @@ use crate::output::Outcome;
 use aw_package::{config_edit::ConfigurationEditor, Error, Result};
 use std::{collections::BTreeMap, fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
-/// Command reference also printed by the packaging CLI's top-level help.
-const HELP: &str =
-    "aw-package config show --config ABS_FILE [--provider NAME | --event EVENT [--id ID]]
-aw-package config validate --config ABS_FILE
-aw-package config add-provider --config ABS_FILE --name NAME --definition FILE
-aw-package config remove-provider --config ABS_FILE --name NAME
-aw-package config add-event --config ABS_FILE --event EVENT --definition FILE
-aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE
-aw-package config remove-hook --config ABS_FILE --event EVENT --id ID
-Definitions are complete YAML/JSON objects. Show includes private Provider values.
-Edits are offline; changed files are rewritten as YAML. No service reload.";
-
-pub(super) fn help(program: &str) -> String {
-    let help = HELP.replace("aw-package", program);
-    if program == "aw" {
-        help.replace(
-            "aw config validate --config ABS_FILE",
-            "aw config validate --config FILE [--against BASELINE_FILE]",
-        )
-    } else {
-        help
-    }
-}
-
-/// Parses offline editor options and publishes at most one validated edit.
-pub(super) fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()> {
-    let action = arguments.next().unwrap_or_else(|| "--help".into());
-    if action == "--help" {
-        if arguments.next().is_some() {
-            return Err(Error::Invalid("unexpected arguments after --help".into()));
-        }
-        if program == "aw" {
-            println!("{}", super::configuration_usage(program));
-        }
-        println!("{}", help(program));
-        return Ok(());
-    }
-    let allowed: &[&str] = match action.as_str() {
-        "show" => &["--config", "--provider", "--event", "--id"],
-        "validate" => &["--config"],
-        "add-provider" => &["--config", "--name", "--definition"],
-        "remove-provider" => &["--config", "--name"],
-        "add-event" | "add-hook" => &["--config", "--event", "--definition"],
-        "remove-hook" => &["--config", "--event", "--id"],
-        _ => return Err(Error::Invalid(format!("unknown config action: {action}"))),
-    };
-    let mut flags = BTreeMap::new();
-    while let Some(flag) = arguments.next() {
-        if !allowed.contains(&flag.as_str()) || flags.contains_key(&flag) {
-            return Err(Error::Invalid(format!("unknown or duplicate flag: {flag}")));
-        }
-        let value = arguments
-            .next()
-            .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
-        flags.insert(flag, value);
-    }
-    if let Some(outcome) = execute(&action, &flags)? {
-        crate::output::human(&outcome)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<Option<Outcome>> {
     let required = |name: &str| -> Result<&str> {
         flags
@@ -117,10 +55,6 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
             println!("{}", serde_json::to_string_pretty(value)?);
             return Ok(None);
         }
-        "validate" => {
-            editor.validate()?;
-            return Ok(Some(Outcome::ConfigurationValidated));
-        }
         "add-provider" => {
             editor.add_provider(required("--name")?, definition(required("--definition")?)?)?;
         }
@@ -136,7 +70,7 @@ pub(crate) fn execute(action: &str, flags: &BTreeMap<String, String>) -> Result<
         "remove-hook" => {
             editor.remove_hook(required("--event")?, required("--id")?)?;
         }
-        _ => unreachable!("action was validated before parsing flags"),
+        _ => unreachable!("the typed command selects an existing config action"),
     }
     Ok(Some(Outcome::ConfigurationEdited {
         changed: editor.save()?,

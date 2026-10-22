@@ -217,6 +217,23 @@ fn explicit_legacy_prefix_reads_stable_versions_and_records_without_registering_
 }
 
 #[test]
+fn existing_record_layout_accepts_new_core_files_without_the_removed_cli() {
+    let fixture = Fixture::new();
+    fixture.legacy("1.2.3");
+    let record = fixture.prefix.join(".aw-packages/aw-core.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    value["files"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bin/aw-package");
+    fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+    fs::remove_file(fixture.prefix.join("bin/aw-package")).unwrap();
+    let inventory = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap();
+    assert_eq!(inventory.installations[0].packages[0].files.len(), 1);
+    assert!(inventory.doctor().unwrap().healthy());
+}
+
+#[test]
 fn registered_prefix_rejects_live_legacy_records_instead_of_merging_or_hiding_them() {
     let fixture = Fixture::new();
     fixture.legacy("1.2.3");
@@ -501,6 +518,18 @@ fn package_description_rejects_unknown_fields_inside_payload_metadata() {
     let error = PackageDescription::read(&path).unwrap_err();
     assert!(error.to_string().contains("unknown field `extra`"));
     assert_eq!(before, snapshot(fixture.directory.path()));
+}
+
+#[test]
+fn new_package_description_needs_only_the_unified_aw_binary() {
+    let fixture = Fixture::new();
+    let path = fixture.directory.path().join("package.json");
+    let value = json!({"schema_version":1,"package_id":"aw-core","version":"1.2.3","os":"linux","arch":std::env::consts::ARCH,"files":{"bin/aw":fixture.file("bin/aw", b"unified CLI")},"dependencies":[]});
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let description = PackageDescription::read(&path).unwrap();
+    assert_eq!(description.files.len(), 1);
+    assert!(description.files.contains_key("bin/aw"));
+    assert!(description.provider.is_none());
 }
 
 #[test]

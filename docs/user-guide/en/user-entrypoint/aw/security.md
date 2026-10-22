@@ -15,7 +15,7 @@ artifact directory. Skip this step if all-in-one is installed.
 export AW_VERSION=0.1.0-preview.1
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
-sudo "./$AW_SEC_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
+sudo "./$AW_SEC_BUNDLE/aw" install --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
 ```
 
 AW does not start sec-core automatically.

@@ -125,7 +125,7 @@ fn validate(value: &Component) -> Result<()> {
         "unsupported legacy Provider protocol",
     )?;
     let required: &[&str] = match value.component.as_str() {
-        "aw-core" => &["bin/aw", "bin/aw-package"],
+        "aw-core" => &["bin/aw"],
         "aw-provider-sec-core" => &[
             "libexec/aw/providers/sec-core/aw-provider-sec-core",
             "libexec/aw/providers/sec-core/agent-sec-cli",
@@ -148,6 +148,11 @@ fn validate(value: &Component) -> Result<()> {
         }),
         "incomplete legacy package file list",
     )?;
+    if value.component == "aw-core" {
+        if let Some(file) = value.files.get("bin/aw-package") {
+            require(file.mode == 0o755, "invalid legacy package CLI file mode")?;
+        }
+    }
     for (name, version) in &value.requires {
         require(
             matches!(

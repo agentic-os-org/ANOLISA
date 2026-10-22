@@ -249,12 +249,19 @@ class GateTests(GateFixture):
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
+            binary = {"aw-cli": "aw", "aw-package": "aw-build"}.get(name)
+            if name in provider_directories:
+                binary = name
+            targets = [{"src_path": str(directory / "src/lib.rs"), "kind": ["lib"]}]
+            if binary:
+                targets.append({"name": binary, "kind": ["bin"],
+                                "src_path": str(directory / "src/bin" / f"{binary}.rs")})
             packages.append(
                 {
                     "id": name,
                     "name": name,
                     "manifest_path": str(directory / "Cargo.toml"),
-                    "targets": [{"src_path": str(directory / "src/lib.rs")}],
+                    "targets": targets,
                     "dependencies": [
                         {
                             "name": dependency,
@@ -278,6 +285,19 @@ class GateTests(GateFixture):
             ],
         }
         gate.structure(metadata, self.root)
+        for name in ("aw-cli", "aw-package", "aw-core", "aw-provider-sec-core"):
+            invalid = deepcopy(metadata)
+            package = next(p for p in invalid["packages"] if p["name"] == name)
+            package["targets"].append({"name": "aw-package", "kind": ["bin"],
+                                       "src_path": str(Path(package["manifest_path"]).parent / "src/bin/aw-package.rs")})
+            with self.subTest(binary_owner=name), self.assertRaisesRegex(ValueError, "executable targets changed"):
+                gate.structure(invalid, self.root)
+        for name in ("aw-cli", "aw-package", "aw-provider-sec-core", "aw-provider-tokenless"):
+            invalid = deepcopy(metadata)
+            package = next(p for p in invalid["packages"] if p["name"] == name)
+            package["targets"] = [target for target in package["targets"] if "bin" not in target["kind"]]
+            with self.subTest(missing_binary=name), self.assertRaisesRegex(ValueError, "executable targets changed"):
+                gate.structure(invalid, self.root)
         for workspaces in ([], metadata["provider_workspaces"][:1],
                            metadata["provider_workspaces"][:1] * 2):
             with self.assertRaises(ValueError):

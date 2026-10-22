@@ -43,7 +43,7 @@ The existing view/schema and its unknown readiness fields are unchanged.
 
 After installing core, install the matching Tokenless extension into the same
 prefix, or install all-in-one into a new prefix. For Qoder/OpenClaw, initialize
-with `aw-package configure --provider tokenless` and the usual Agent flags.
+with `aw config init --provider tokenless` and the usual Agent flags.
 Choose `--provider sec-core+tokenless --socket ABS_FILE` to generate sec-core
 checks before execution, append PreTool, retain its completion observer, and append
 compression after the existing after steps. Installing a component
@@ -213,7 +213,7 @@ or calling generic service RPC:
 aw inspect --config /absolute/path/to/aw.yaml --json
 ```
 
-Use matching AW binaries. New `aw-package configure` Tokenless selections register
+Use matching AW binaries. New `aw config init` Tokenless selections register
 the optional view automatically. For existing configurations, stop Agents and the
 original service before editing offline. Add this alongside the Tokenless
 Provider's existing `transport`, not inside its private `config`:

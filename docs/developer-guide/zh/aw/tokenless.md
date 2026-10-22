@@ -34,7 +34,7 @@ PostTool 不依赖 RTK。包生成的 PreTool 先校验受管理 RTK 及其直�
 PostTool 和只读 view 继续工作。现有 view/schema 及其 unknown 就绪字段保持不变。
 
 先安装 core，再把匹配的 Tokenless 扩展安装到同一前缀；也可以将 all-in-one 安装到新
-前缀。Qoder/OpenClaw 使用 `aw-package configure --provider tokenless`，并提供既有
+前缀。Qoder/OpenClaw 使用 `aw config init --provider tokenless`，并提供既有
 Agent 参数。选择 `--provider sec-core+tokenless --socket ABS_FILE`，可生成执行前
 sec-core 检查，追加 PreTool，保留完成观察，并在既有 after 步骤末尾追加压缩。安装组件不会自动启用。
 原有单独 `sec-core` 选项保持既有行为。

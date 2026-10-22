@@ -377,7 +377,7 @@ print(json.dumps(contains(event["tool"]["input"])))
 Provider 和步骤。只提供所需 Agent 入口；本例声明两个框架：
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
   --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
   --provider command --check /usr/bin/python3 --effect block \
@@ -432,7 +432,7 @@ Provider 协议，无需迁移。切换自定义规则时，将 transport argv �
 放到步骤中。切换配置前退出旧 Agent 会话并停止旧服务。旧 AW 二进制不接受新的
 缺省形式，回滚时保留原配置。
 
-`configure` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
+`aw config init` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
 （或传 `--provider none`）生成新的基础文档，退出旧 Agent、停止其服务后显式切换
 配置。Provider 与关联步骤一起移除；修改运行服务的文件不会触发重新加载。
 通用的已有 YAML 编辑不属于此命令。

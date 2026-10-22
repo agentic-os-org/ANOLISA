@@ -3,18 +3,12 @@ name = "aw-cli"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Unified AW command-line entrypoint and compatibility frontends"
+description = "Unified AW command-line entrypoint"
 publish = false
 
 [[bin]]
 name = "aw"
 path = "src/bin/aw.rs"
-
-[[bin]]
-name = "aw-package"
-path = "src/bin/aw-package.rs"
-# Preserve the aw-package library's rustdoc output under the shared crate name.
-doc = false
 
 [dependencies]
 clap = { workspace = true }

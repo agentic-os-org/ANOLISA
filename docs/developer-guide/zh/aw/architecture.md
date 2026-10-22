@@ -20,7 +20,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
-| `aw-cli` | `aw` 与兼容 `aw-package` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
+| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
 | `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
 | `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
 | `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
@@ -32,12 +32,13 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-package` | 可复用的安装与配置 API，以及 `aw-build` 构建工具 | config、exec |
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
-`aw-contracts`。底层库不依赖 `aw-cli`；两个命令入口在进程内调用相同的安装 API。
+`aw-contracts`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
+独立 `aw-package` 可执行文件已删除，Rust crate 和 `aw-build` 保留。
 
 公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
 调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
-和失败回复；`aw-package` 保留兼容解析器。两条路径都不改变服务消息、
-Provider 效果或安装所有权。
+和失败回复。软件安装、配置和卸载全部使用同一棵 `aw` 命令树；
+移除另一个可执行文件不改变服务消息、Provider 效果或已有文件归属记录。
 
 ### 独立 Provider
 

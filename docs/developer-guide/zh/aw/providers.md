@@ -62,5 +62,5 @@ cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
 Preview 将 core 与 Provider 作为一批构建产物交付，安装时校验版本和源码提交一致。
 
-`aw-build` 和 `aw-package` 当前只打包、安装内置组件，不能自动安装任意社区 Provider。
+`aw-build` 和 `aw install` 当前只打包、安装内置组件，不能自动安装任意社区 Provider。
 独立安装不影响协议接入；加入统一安装包需另补打包清单和安装验收。

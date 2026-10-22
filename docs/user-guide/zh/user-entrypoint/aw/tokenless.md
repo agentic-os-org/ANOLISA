@@ -15,7 +15,7 @@ Tokenless 压缩工具返回给模型的文本，减少后续上下文占用。
 export AW_VERSION=0.1.0-preview.1
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
-sudo "./$AW_TOKENLESS_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
+sudo "./$AW_TOKENLESS_BUNDLE/aw" install --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
 ```
 
 已安装 all-in-one 时跳过这一步。包内包含 Tokenless CLI 和所需 RTK，

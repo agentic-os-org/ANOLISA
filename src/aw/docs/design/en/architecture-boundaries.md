@@ -22,7 +22,7 @@ ANOLISA/
 │   │   ├── aw-exec/                # Bounded process execution
 │   │   ├── aw-host/                # Provider preparation and invocation
 │   │   ├── aw-core/                # Plan API and Journal
-│   │   ├── aw-cli/                 # aw and legacy aw-package command frontends
+│   │   ├── aw-cli/                 # Unified aw command frontend
 │   │   ├── aw-service/             # Client, service and runtime state
 │   │   └── aw-package/             # Current Preview build, install and config editing
 │   ├── tests/                     # Regression matrix, native inventory and shared checks
@@ -43,7 +43,8 @@ development dependencies on them.
 
 ## Adapter and service interfaces
 
-`aw-cli` owns the `aw` command and the compatibility `aw-package` executable.
+`aw-cli` owns the unified `aw` command. The standalone `aw-package` executable
+has been removed; the Rust crate remains.
 It directly calls the `aw-package` library for installation and offline editing;
 `aw-build` remains a maintenance binary in `aw-package`. `aw-service` provides
 the client and service as a library. Libraries do not depend on `aw-cli`.

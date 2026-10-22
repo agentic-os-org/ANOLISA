@@ -30,8 +30,8 @@ aw -V
 支持 `--option value` 和 `--option=value`；值以 `--` 开头时使用后一种写法。
 `run` 和 command 模板的 `config init` 中，`--` 后的参数按原样传递，
 包括 `--help`、空字符串和空格。原生 Agent 保留原有输出、退出码和信号处理。
-内部 Hook 与生命周期回调保留协议特定的回复和错误码。兼容入口 `aw-package`
-保留原解析器，包括安装时可自动查找二进制旁的 bundle。
+内部 Hook 与生命周期回调保留协议特定的回复和错误码。独立 `aw-package` 可执行文件已删除。
+首次安装使用 bundle 根目录的 `aw`，必须显式提供绝对 `--bundle` 路径，不再自动查找旁边的 bundle。
 
 ## 命令发现与补全
 
@@ -63,7 +63,7 @@ aw completion elvish
 `aw config init`、`aw config validate`、
 `aw config add-provider`、`aw config remove-provider`、`aw config add-event`、
 `aw config add-hook` 和 `aw config remove-hook` 支持局部 `--json`。
-旧原生连接、`aw agent connect`、旧 `aw validate` 和兼容入口 `aw-package`
+旧原生连接、`aw agent connect` 和旧 `aw validate`
 不支持这个管理输出选项。
 
 ```bash
@@ -101,7 +101,7 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 模式均可见。失败且恢复不完整时使用 `partial`，退出 1，并保留主因 `error.code`，
 包括取消。其他已观察到的包协作取消使用 `cancelled`，保持既有包退出惯例返回 1；
 其余失败使用 `failed` 并返回 1。失败不表示全部变更已回滚。
-包报告将通知放入 JSON，不额外输出 stderr 警告；兼容 `aw-package` 保留旧诊断通道。
+包报告将通知放入 JSON，不额外输出 stderr 警告。
 
 语法错误仍在 stderr 输出文本，退出码为 1，stdout 为空，即使被拒绝的参数中
 包含 `--json`。默认人类诊断与显式 `config show` 保留原有契约；这不是全局
@@ -169,17 +169,16 @@ aw uninstall --prefix "$AW_PREFIX" --yes --color never
 ```
 
 `--quiet` 与 `--verbose` 互斥。`--json` 与这三种选项都冲突，不会被静默隐藏。
-它们不是全局参数，不用于原生连接、服务或协议命令、`config show`、
-旧 `aw validate` 或 `aw-package`。转发分隔符 `--` 后的参数仍按原样传递。
+它们不是全局参数，不用于原生连接、服务或协议命令、`config show`
+或旧 `aw validate`。转发分隔符 `--` 后的参数仍按原样传递。
 
 非空 `NO_COLOR` 或 `TERM=dumb` 会禁用自动着色；显式 `always` 覆盖这些设置。
 成功摘要使用 stdout，操作错误使用 stderr，分别检查各自是否连接终端。
 呈现选项不授予权限，也不代替确认。新卸载入口使用下文的命令局部确认规则；quiet 不会跳过确认。
 
 CLI 自己生成的管理摘要和操作错误，会转义元数据中的控制字符与双向文本控制符，
-避免路径注入终端指令或额外行。`aw-package` 共用的成功摘要也转义这些元数据，
-但不着色。新入口的安装／卸载通知同样转义；兼容入口的清理警告与其他命令诊断
-不在此格式化范围内。这不是全局私有数据脱敏。
+避免路径注入终端指令或额外行。安装／卸载通知同样转义，其他命令保留现有诊断格式。
+这不是全局私有数据脱敏。
 JSON 值和原生输出、协议流保留原格式。
 
 输出流失败时，文件可能已经发布，命令仍返回非零；这不代表操作已回滚。
@@ -213,13 +212,17 @@ aw --version
 ## 升级与卸载
 
 升级前退出 Agent，用旧版 AW 和原配置停止服务，备份配置与状态目录。
-新包安装到新目录，再用新路径生成配置。保留旧包和备份，便于回退；
+新包安装到新目录，再用新路径生成配置。保留旧安装目录和备份，便于回退；
 Preview 尚无跨版本数据迁移，升级时使用新的状态目录。
+
+回退时切回保留的旧安装目录与配置。新 core 只安装 `bin/aw`，旧独立安装器还要求
+`bin/aw-package`，不能把旧安装器复制到新目录继续管理。需要移除新安装时，
+使用该版本的 `aw uninstall --yes`，再决定是否安装旧包。
 
 卸载使用安装时的前缀。系统安装执行下列命令，个人安装去掉 `sudo`。
 
 ```bash
-sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --yes
 ```
 
 卸载保留外部配置、审计和原生 Agent 数据。包文件被修改或缺失时会先报错，
@@ -245,7 +248,7 @@ aw uninstall --prefix "$AW_PREFIX" -y --json
 归属、完整性、路径和权限检查，也不会执行 sudo。它仅用于卸载，不适用于安装、配置、
 服务或原生 Agent 命令。
 
-兼容命令 `aw-package uninstall --prefix ...` 保留原非交互行为，不接受 `--yes`。
+脚本使用 `aw uninstall --prefix ... --yes`。
 包操作中的既有协作取消与取消提示阶段不同，仍按上文返回 typed 管理结果和退出码 1。
 
 ## 保存数据

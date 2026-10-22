@@ -29,18 +29,17 @@ impl Fixture {
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
         let mut files = BTreeMap::new();
-        for name in ["bin/aw", "bin/aw-package"] {
-            let path = bundle.join("payload").join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::copy("/bin/true", &path).unwrap();
-            files.insert(
-                name.into(),
-                Payload {
-                    sha256: aw_package::digest(&path).unwrap(),
-                    mode: 0o755,
-                },
-            );
-        }
+        let name = "bin/aw";
+        let path = bundle.join("payload").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy("/bin/true", &path).unwrap();
+        files.insert(
+            name.into(),
+            Payload {
+                sha256: aw_package::digest(&path).unwrap(),
+                mode: 0o755,
+            },
+        );
         fs::write(
             bundle.join("manifest.json"),
             serde_json::to_vec(&Manifest {

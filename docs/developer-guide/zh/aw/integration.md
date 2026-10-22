@@ -24,10 +24,8 @@ cd src/aw
 cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
-export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
 export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 "$AW_BIN" --help
-"$AW_PACKAGE" --help
 ```
 
 debug 二进制位于 `src/aw/target/debug`，此步骤不安装系统服务。需要可分发的
@@ -37,16 +35,16 @@ release 包时，按[打包构建说明](building.md)
 
 ## 2. 准备四框架共用配置
 
-运行任何 `aw-package config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
-使用 Qoder/OpenClaw 时，通过 `aw-package configure` 创建；不传 `--provider` 就生成
+运行任何 `aw config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
+使用 Qoder/OpenClaw 时，通过 `aw config init` 创建；不传 `--provider` 就生成
 空策略配置。按[初始化与编辑流程](packages.md#编辑已有-provider-与-hook-配置)
-依次执行 `configure` → `add-provider` → `add-event` → `add-hook` → `validate`。
-`configure` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
+依次执行 `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`。
+`aw config init` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
 新文件，拒绝覆盖已有文件。
 
 本源码教程及 QwenPaw/Hermes 使用下方完整四框架示例作为初始配置。生成器目前只
 支持 Qoder/OpenClaw，编辑器不能添加 Agent 条目。示例已声明两个工具事件；只有
-事件不存在时，才需要先 `add-event` 再 `add-hook`。
+事件不存在时，才需要先 `aw config add-event` 再 `aw config add-hook`。
 
 在同一终端保留这些变量。另开终端时，重新 export 打印出的绝对路径，避免再次
 创建一个新的演示目录。
@@ -80,15 +78,15 @@ printf 'AW_BIN=%s\nAW_CONFIG=%s\nAW_DEMO=%s\n' "$AW_BIN" "$AW_CONFIG" "$AW_DEMO"
 命名程序，`events` 将有序步骤挂到工具执行边界。四个目标共用一个布尔 Hook 命令，各步骤分别声明命中后的效果。示例在工具前输入包含 `AW_DENY_TEST` 时请求阻断，在工具完成后请求
 观察。它用于演示接线，不是生产安全规则。
 
-[配置参考](configuration.md)解释全部字段。当前 `aw-package configure` 只生成
+[配置参考](configuration.md)解释全部字段。当前 `aw config init` 只生成
 Qoder/OpenClaw 条目；四框架配置使用本 YAML 副本。
 [配置编辑器](packages.md#编辑已有-provider-与-hook-配置)
 可以增删 Provider 和 Hook 步骤，不修改 Agent 条目。
 
 ```bash
 "$AW_BIN" validate --config "$AW_CONFIG"
-"$AW_PACKAGE" config show --config "$AW_CONFIG" --event tool.before
-"$AW_PACKAGE" config validate --config "$AW_CONFIG"
+"$AW_BIN" config show --config "$AW_CONFIG" --event tool.before
+"$AW_BIN" config validate --config "$AW_CONFIG"
 ```
 
 校验检查文档结构与引用，不执行策略、不检查凭据，也不证明框架采纳了阻断。
@@ -188,7 +186,7 @@ cargo test --locked -p aw-host -p aw-service -p aw-cli
 cd "$AW_SOURCE"
 rm -r -- "$AW_DEMO"
 test ! -e "$AW_DEMO"
-unset AW_CONFIG AW_DEMO AW_HOST AW_PACKAGE AW_BIN AW_SOURCE
+unset AW_CONFIG AW_DEMO AW_HOST AW_BIN AW_SOURCE
 ```
 
 该清理不影响框架安装与 profile；Hermes 插件安装的回退步骤另见使用指南。

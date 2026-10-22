@@ -42,6 +42,14 @@
     "aw-cli/test/service"
   ],
   "cases": {
+    "package-unified-bootstrap": {
+      "target": "aw-cli/test/packages",
+      "test": "bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command"
+    },
+    "package-unified-provider-bootstrap": {
+      "target": "aw-cli/test/packages",
+      "test": "provider_bundle_root_aw_appends_to_core_without_a_second_command"
+    },
     "package-inventory-readonly": {
       "target": "aw-cli/test/inventory",
       "test": "legacy_queries_preserve_every_file_and_do_not_create_a_database"

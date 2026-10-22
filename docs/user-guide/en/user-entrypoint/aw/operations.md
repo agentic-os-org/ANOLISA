@@ -35,8 +35,9 @@ a value begins with `--`. Arguments after `--` in `run` and command-template
 `config init` are forwarded literally, including `--help`, empty strings and
 spaces. The native Agent retains its output, exit code and signal handling.
 Internal Hook and lifecycle callbacks retain their protocol-specific replies
-and error codes. The compatibility `aw-package` executable keeps its original
-parser, including optional adjacent-bundle discovery for installation.
+and error codes. The standalone `aw-package` executable has been removed.
+First installation uses the `aw` in the bundle root and requires an explicit
+absolute `--bundle` path; it does not discover an adjacent bundle automatically.
 
 ## Command discovery and completion
 
@@ -75,8 +76,7 @@ Use command-local `--json` with local-bundle `aw install`, `aw uninstall`,
 `aw config init`, `aw config validate`, `aw config add-provider`,
 `aw config remove-provider`, `aw config add-event`, `aw config add-hook` or
 `aw config remove-hook`. It does not apply to legacy native installation,
-`aw agent connect`, legacy `aw validate` or the compatibility `aw-package`
-executable.
+`aw agent connect` or legacy `aw validate`.
 
 ```bash
 aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --json
@@ -122,8 +122,7 @@ mode. A failure with incomplete recovery uses `partial` and exit 1; its original
 cooperative package cancellation uses `cancelled` and exit 1, preserving the
 existing package exit convention; other failures use `failed` and exit 1.
 A failed command never implies that all changes were rolled back. Reported
-package operations place notices inside JSON without separate stderr warnings;
-the compatibility `aw-package` executable keeps its legacy diagnostic channel.
+package operations place notices inside JSON without separate stderr warnings.
 
 Syntax errors remain text on stderr with exit code 1 and empty stdout, even
 when `--json` was among the rejected arguments. Default human diagnostics and
@@ -204,8 +203,8 @@ aw uninstall --prefix "$AW_PREFIX" --yes --color never
 
 `--quiet` and `--verbose` conflict. `--json` conflicts with all three options;
 it is never silently suppressed. They are not global options and do not apply
-to native connection, service/protocol commands, `config show`, legacy `aw validate`
-or `aw-package`. Arguments after the forwarding `--` remain literal.
+to native connection, service/protocol commands, `config show` or legacy `aw validate`.
+Arguments after the forwarding `--` remain literal.
 
 Auto color is disabled by nonempty `NO_COLOR` or `TERM=dumb`; explicit `always`
 overrides those settings. Success summaries use stdout, operation errors use
@@ -215,10 +214,8 @@ the command-local consent rule described below; quiet does not bypass it.
 
 CLI-owned management summaries and operation errors escape control and bidi
 characters in metadata so paths cannot inject terminal instructions or lines.
-The shared `aw-package` success formatter also escapes such metadata but stays
-uncolored. Canonical install/removal notices use the same escaping; legacy
-cleanup warnings and other command diagnostics remain outside this formatting
-boundary. It is not global private-data redaction.
+Install/removal notices use the same escaping. Other commands retain their
+existing diagnostic formats. It is not global private-data redaction.
 JSON values and native/protocol streams retain their existing formats.
 
 An output-stream failure can return nonzero after files were already published.
@@ -255,14 +252,20 @@ Preview release identifier or native Agent version.
 
 Before upgrading, exit Agents, stop the service using the old AW binary and original configuration,
 and back up configuration and state. Install the new package into a new prefix and generate
-configuration with its paths. Keep the old package and backups for rollback. Preview has no
+configuration with its paths. Keep the old installation directory and backups for rollback. Preview has no
 cross-version data migration, so use a new state directory when upgrading.
+
+To roll back, switch back to the preserved old installation and its configuration.
+New core packages install only `bin/aw`; the old standalone installer expects
+`bin/aw-package` too, so copying that installer into a new installation does not
+make it compatible. If you need to remove the new installation, use that version's
+`aw uninstall --yes` before deciding whether to install an older package.
 
 Uninstall with the prefix used during installation. Use the command below for a system install;
 omit `sudo` for a personal install.
 
 ```bash
-sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --yes
 ```
 
 Uninstall preserves external configuration, audit history and native Agent data. Modified or missing
@@ -293,8 +296,7 @@ ownership, integrity, path and permission checks still apply, and it does not
 run sudo. It is local to removal, not accepted by installation, configuration,
 service or native Agent commands.
 
-The compatibility `aw-package uninstall --prefix ...` command preserves its
-original non-interactive behavior and does not accept `--yes`. Existing
+Use `aw uninstall --prefix ... --yes` in scripts. Existing
 cooperative cancellation during package work remains distinct from cancelling
 the prompt, using the typed management result and exit 1 described above.
 

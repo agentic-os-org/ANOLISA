@@ -64,8 +64,9 @@ Agent 入口、原生调度、服务路径、审计、观测和元数据必须�
 原有 `aw validate --config FILE` 继续打印 `configuration valid`。
 
 `aw config validate` 与 `aw validate` 等价，支持 `--against` 和相对文件路径，
-不执行编辑器的所有权检查。旧的 `aw-package config validate` 保留更严格的编辑器
-检查和原输出；其他 `aw-package config` 命令及 `aw-package configure` 也继续兼容。
+不执行编辑器的所有权检查。独立 `aw-package` 命令及其更严格的编辑器验证已删除。
+初始化、查看和编辑继续使用 `aw config init`、`aw config show` 与编辑命令；
+这些动作的文件安全检查并不意味着 `aw config validate` 替代了已删除的严格验证器。
 
 ## 注册原生 Hook
 

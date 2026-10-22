@@ -465,22 +465,22 @@ fn legacy(result: MutationResult) -> Result<()> {
             .unwrap_or_default();
         match notice.code {
             NoticeCode::RollbackRemoveFailed => {
-                eprintln!("aw-package: rollback could not remove {path}: {kind}");
+                eprintln!("aw: rollback could not remove {path}: {kind}");
             }
             NoticeCode::RollbackRestoreFailed => {
-                eprintln!("aw-package: rollback could not restore {path}: {kind}");
+                eprintln!("aw: rollback could not restore {path}: {kind}");
             }
             NoticeCode::RollbackRetireFailed => {
-                eprintln!("aw-package: rollback could not retire {path}: {kind}");
+                eprintln!("aw: rollback could not retire {path}: {kind}");
             }
             NoticeCode::BackupRetained => {
-                eprintln!("aw-package: retained uninstall backup at {path}");
+                eprintln!("aw: retained uninstall backup at {path}");
             }
             NoticeCode::BackupCleanupFailed if report.committed => {
-                eprintln!("aw-package: uninstall completed; backup cleanup failed at {path}: {kind}; remove this backup manually");
+                eprintln!("aw: uninstall completed; backup cleanup failed at {path}: {kind}; remove this backup manually");
             }
             NoticeCode::BackupCleanupFailed => {
-                eprintln!("aw-package: backup cleanup failed at {path}: {kind}; retained resources may require manual cleanup");
+                eprintln!("aw: backup cleanup failed at {path}: {kind}; retained resources may require manual cleanup");
             }
         }
     }

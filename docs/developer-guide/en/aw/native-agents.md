@@ -432,7 +432,7 @@ generate the full YAML instead of assembling Provider and step objects by hand.
 Supply only the Agent entrypoints you need; this example declares both:
 
 ```bash
-"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+"$AW_PREVIEW_PREFIX/bin/aw" config init --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
   --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
   --provider command --check /usr/bin/python3 --effect block \
@@ -493,7 +493,7 @@ matched effects and optional reason code on the step. Stop the old service and
 Agent sessions before switching configurations. Older AW binaries do not accept
 the new default form; retain the earlier configuration for rollback.
 
-`configure` creates a new private file and never overwrites an existing one.
+`aw config init` creates a new private file and never overwrites an existing one.
 To remove a policy, generate a new base document without `--provider` (or with
 `--provider none`), then exit the old Agents, stop their service and explicitly
 switch to the new configuration. Provider definitions and associated steps are

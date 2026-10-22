@@ -1,4 +1,4 @@
-//! Compatibility entrypoint's offline editing and failure-preserving CLI contracts.
+//! Unified offline editing and failure-preserving CLI contracts.
 
 use aw_package::{Policy, Settings};
 use serde_json::{json, Value};
@@ -39,7 +39,7 @@ impl Fixture {
     }
 
     fn run(&self, action: &str, arguments: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_aw-package"))
+        Command::new(env!("CARGO_BIN_EXE_aw"))
             .current_dir(self.directory.path())
             .args(["config", action, "--config"])
             .arg(&self.config)
@@ -66,7 +66,7 @@ impl Fixture {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let diagnostic = String::from_utf8(output.stderr).unwrap();
-        assert!(diagnostic.contains("aw-package:"));
+        assert!(diagnostic.contains("aw:"));
         assert!(!diagnostic.contains("private-value"));
         assert_eq!(fs::read(&self.config).unwrap(), before);
         assert_eq!(fs::metadata(&self.config).unwrap().ino(), inode);
@@ -168,7 +168,7 @@ fn configure_empty_events_support_explicit_structured_and_native_hook_lifecycles
     );
     assert_eq!(
         fixture.success("validate", &[]).trim(),
-        "Valid configuration"
+        "configuration valid"
     );
     let saved: Value = serde_json::from_str(&fixture.success("show", &[])).unwrap();
     for field in ["daemon", "execution", "audit", "agents"] {
@@ -256,7 +256,7 @@ fn show_and_validate_are_readonly_and_show_explicitly_returns_private_values() {
     assert_eq!(step, hook(false));
     assert_eq!(
         fixture.success("validate", &[]).trim(),
-        "Valid configuration"
+        "configuration valid"
     );
     for arguments in [
         vec!["--provider", "missing"],
@@ -439,7 +439,7 @@ fn malformed_options_fail_before_accessing_the_configuration() {
         vec!["remove-hook", "--id", "first"],
     ];
     for arguments in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+        let output = Command::new(env!("CARGO_BIN_EXE_aw"))
             .current_dir(fixture.directory.path())
             .arg("config")
             .args(arguments)
@@ -449,14 +449,14 @@ fn malformed_options_fail_before_accessing_the_configuration() {
             .unwrap();
         assert!(!output.status.success());
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("aw-package:"));
+        assert!(stderr.contains("aw:"));
         assert!(
             !stderr.contains("No such file"),
             "accessed config before validating options: {stderr}"
         );
         assert!(!absent.exists());
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
         .args(["config", "validate"])
         .output()
         .unwrap();
@@ -468,27 +468,31 @@ fn malformed_options_fail_before_accessing_the_configuration() {
 
 #[test]
 fn help_exposes_config_actions_and_the_private_value_display_boundary() {
-    for arguments in [vec!["--help"], vec!["config", "--help"]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let text = String::from_utf8(output.stdout).unwrap();
-        for action in [
-            "show",
-            "validate",
-            "add-provider",
-            "remove-provider",
-            "add-event",
-            "add-hook",
-            "remove-hook",
-        ] {
-            assert!(
-                text.contains(&format!("config {action}")),
-                "missing config {action}"
-            );
-        }
-        assert!(text.contains("private"));
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+        .args(["config", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for action in [
+        "init",
+        "show",
+        "validate",
+        "add-provider",
+        "remove-provider",
+        "add-event",
+        "add-hook",
+        "remove-hook",
+    ] {
+        assert!(text.contains(action), "missing config {action}");
     }
+    assert!(!text.contains("aw-package"));
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+        .args(["config", "show", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("private"));
 }

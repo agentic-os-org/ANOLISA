@@ -1,4 +1,4 @@
-//! Compatibility CLI generates configurations without a Provider package.
+//! Unified CLI generates configurations without a Provider package.
 
 use aw_package::{Component, Manifest, Payload};
 use serde_json::{json, Value};
@@ -23,18 +23,17 @@ impl Fixture {
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
         let mut files = BTreeMap::new();
-        for name in ["bin/aw", "bin/aw-package"] {
-            let path = bundle.join("payload").join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::copy("/bin/true", &path).unwrap();
-            files.insert(
-                name.to_string(),
-                Payload {
-                    sha256: aw_package::digest(&path).unwrap(),
-                    mode: 0o755,
-                },
-            );
-        }
+        let name = "bin/aw";
+        let path = bundle.join("payload").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy("/bin/true", &path).unwrap();
+        files.insert(
+            name.to_string(),
+            Payload {
+                sha256: aw_package::digest(&path).unwrap(),
+                mode: 0o755,
+            },
+        );
         fs::write(
             bundle.join("manifest.json"),
             serde_json::to_vec(&Manifest {
@@ -60,9 +59,9 @@ impl Fixture {
     }
     fn command(&self) -> Command {
         let root = self.directory.path().canonicalize().unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_aw-package"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aw"));
         command
-            .arg("configure")
+            .args(["config", "init"])
             .arg("--prefix")
             .arg(&self.prefix)
             .arg("--config")
@@ -98,7 +97,7 @@ fn core_configuration_defaults_to_no_policy_and_refuses_overwrite() {
         vec!["validate"],
         vec!["remove-provider", "--name", "absent"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+        let output = Command::new(env!("CARGO_BIN_EXE_aw"))
             .arg("config")
             .args(arguments)
             .arg("--config")

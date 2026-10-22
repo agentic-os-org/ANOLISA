@@ -237,7 +237,6 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
     for split in [false, true] {
         for name in [
             "bin/aw",
-            "bin/aw-package",
             "libexec/aw/providers/sec-core/aw-provider-sec-core",
             "libexec/aw/providers/sec-core/agent-sec-cli",
             "libexec/aw/providers/sec-core/agent-sec-daemon",

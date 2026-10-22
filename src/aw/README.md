@@ -16,16 +16,17 @@ and run it.
 
 An existing AW installation can install an unpacked local Preview bundle with
 `aw install --prefix ABS_DIR --bundle ABS_DIR`, edit it with `aw config`, and
-remove its owned files with `aw uninstall --prefix ABS_DIR`. Native Hook
+remove its owned files with `aw uninstall --prefix ABS_DIR --yes`. Native Hook
 registration uses `aw agent connect --config FILE --agent TARGET`. The legacy
-native `aw install --config ... --agent ...` and `aw-package` commands remain
-compatible. Named components, direct URLs and system package backends are not
+native `aw install --config ... --agent ...` remains compatible. The standalone
+`aw-package` executable has been removed; the Rust library remains. Every bundle
+includes `aw` at its root for first installation, using an explicit absolute
+`--bundle` path. Named components, direct URLs and system package backends are not
 supported by this Preview installer.
 
 Canonical removal asks for confirmation only with interactive stdin and stderr.
 Scripts and JSON output must use `aw uninstall --prefix ABS_DIR --yes` (or `-y`).
-Confirmation never overrides package checks or system permissions;
-the compatibility `aw-package` executable retains its original behavior.
+Confirmation never overrides package checks or system permissions.
 
 Use `aw list --installed --prefix ABS_DIR` to list packages recorded in an
 installation and `aw doctor --prefix ABS_DIR` to check their files. Both commands

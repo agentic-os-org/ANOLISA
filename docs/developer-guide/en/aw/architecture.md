@@ -24,7 +24,7 @@ maintained separately under `providers/`.
 
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
-| `aw-cli` | `aw` and compatibility `aw-package` frontends, launch and command orchestration | adapter, config, exec, host, package, provider, service |
+| `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, exec, host, package, provider, service |
 | `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
 | `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
 | `aw-host` | Prepare Providers and execute admitted Hook steps | config, exec, provider |
@@ -37,13 +37,15 @@ maintained separately under `providers/`.
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
 on `aw-service`; CLI integration tests also use `aw-contracts`. Libraries do not
-depend on `aw-cli`. Both command frontends call the same package APIs in-process.
+depend on `aw-cli`. The `aw` frontend calls package APIs in-process. The standalone
+`aw-package` executable has been removed; the crate and `aw-build` remain.
 
 The public `aw` tree uses one typed Clap declaration for parsing and help.
 Admitted options call existing handlers without reparsing argv. Internal Hook
-and lifecycle callbacks retain their protocol parser and failure replies;
-`aw-package` retains its compatibility parser. Neither path changes service
-messages, Provider effects or package ownership.
+and lifecycle callbacks retain their protocol parser and failure replies.
+Software installation, configuration and removal all use this `aw` tree;
+the removal of the other executable does not change service messages,
+Provider effects or existing file ownership records.
 
 ### Independent Providers
 

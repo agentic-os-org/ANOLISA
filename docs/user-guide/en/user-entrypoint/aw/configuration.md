@@ -70,9 +70,11 @@ otherwise use the stop/edit/run workflow above.
 Plain `aw validate --config FILE` still prints `configuration valid`.
 
 `aw config validate` is equivalent to `aw validate`, including `--against` and
-relative file paths; it does not enforce the editor's ownership checks. The old
-`aw-package config validate` retains its stricter editor checks and original output.
-Other legacy `aw-package config` commands and `aw-package configure` remain compatible.
+relative file paths; it does not enforce the editor's ownership checks. The
+standalone `aw-package` command, including its stricter editor validator, has
+been removed. Continue using `aw config init`, `aw config show` and the editing
+commands; their file-safety checks do not make `aw config validate` a replacement
+for that removed validator.
 
 ## Register native Hooks
 

@@ -46,7 +46,6 @@ pub(crate) enum Outcome {
     ConfigurationEdited {
         changed: bool,
     },
-    ConfigurationValidated,
     ConfigurationChecked {
         policy_update_scope: bool,
     },
@@ -204,16 +203,6 @@ pub(crate) fn unconfirmed(
     Ok(crate::cli::Exit::Code(exit))
 }
 
-pub(crate) fn human(outcome: &Outcome) -> std::io::Result<()> {
-    human_with(
-        outcome,
-        &Options {
-            color: Some(Color::Never),
-            ..Options::default()
-        },
-    )
-}
-
 fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     if matches!(
         outcome,
@@ -243,7 +232,6 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
         }
         Outcome::ConfigurationEdited { changed: true } => "Updated configuration".into(),
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
-        Outcome::ConfigurationValidated => "Valid configuration".into(),
         Outcome::ConfigurationChecked {
             policy_update_scope: false,
         } => "configuration valid".into(),
@@ -273,7 +261,6 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             Outcome::ConfigurationEdited { changed: false } => {
                 "Configuration bytes and inode were retained; no runtime reload was requested."
             }
-            Outcome::ConfigurationValidated => "Configuration validation completed offline.",
             Outcome::ConfigurationChecked { .. } => {
                 "Configuration validation completed offline; no runtime activation was checked."
             }

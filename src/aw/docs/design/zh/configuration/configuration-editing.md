@@ -3,7 +3,7 @@
 [English](../../en/configuration/configuration-editing.md)
 
 `aw_package::config_edit::ConfigurationEditor` 编辑已有的期望 YAML 或 JSON
-配置。打包 CLI 通过 `aw-package config` 开放同一边界。它不安装 Agent、不执行命令、
+配置。统一 CLI 通过 `aw config show` 和编辑命令开放查看与修改。它不安装 Agent、不执行命令、
 不发现 Provider 能力，也不证明原生效果支持。
 
 ## 编辑合同
@@ -87,7 +87,7 @@ CIFS 的 DACL、owner+DACL 及完整安全描述符同时检查 `system.cifs_*` 
 
 ## CLI 边界
 
-`aw-package config` 提供 `show`、`validate`、`add-provider`、`remove-provider`、
+`aw config` 提供编辑器的 `show`、`add-provider`、`remove-provider`、
 `add-event`、`add-hook` 和 `remove-hook`。每次修改命令只暂存一个操作并保存一次，
 多次调用不是批量事务；library 调用方可先暂存多个已校验操作再保存。必填、未知、
 重复及互相冲突的选择器选项，都在打开配置或定义文件前检查。
@@ -97,9 +97,12 @@ CIFS 的 DACL、owner+DACL 及完整安全描述符同时检查 `system.cifs_*` 
 深度 32 的解析器，保留重复键、alias 展开及 JSON 兼容类型检查，再由编辑器校验
 修改后的完整配置。不接收 stdin，不执行命令。`show` 打印格式化 JSON，包括
 Provider 私有值；选择器可选 Provider、事件或事件下的步骤，指定对象不存在时
-报错。`show` 和 `validate` 不发布文件。
+报错。`show` 不发布文件。
 
-修改操作打印 `Updated configuration` 或 `Configuration unchanged`；`validate`
-打印 `Valid configuration`。CLI 编辑不修改 Schema、Registry 或 Service 合同，
+修改操作打印 `Updated configuration` 或 `Configuration unchanged`。
+`aw config validate` 是单独的静态验证，接受相对路径和 `--against`，普通校验成功时
+打印 `configuration valid`，不执行编辑器的所有权检查。独立 `aw-package` 可执行文件
+及其编辑器专用验证已删除，Rust 的 `ConfigurationEditor::validate` API 保留。
+CLI 编辑不修改 Schema、Registry 或 Service 合同，
 也不重载当前服务。选项、回滚及使用新 revision 重启的说明见
 [CLI 参考](../../../../../../docs/developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。

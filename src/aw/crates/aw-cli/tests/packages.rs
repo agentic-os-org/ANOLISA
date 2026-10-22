@@ -71,15 +71,13 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
 }
 
 #[test]
-fn only_legacy_package_entrypoint_infers_an_adjacent_bundle() {
+fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command() {
     let f = Fixture::new();
-    let unified = f.bundle.join("aw");
-    let legacy = f.bundle.join("aw-package");
-    fs::copy(env!("CARGO_BIN_EXE_aw"), &unified).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_aw-package"), &legacy).unwrap();
+    let bootstrap = f.bundle.join("aw");
+    fs::copy(env!("CARGO_BIN_EXE_aw"), &bootstrap).unwrap();
 
     let diagnostic = failure(
-        Command::new(&unified)
+        Command::new(&bootstrap)
             .args(["install", "--prefix"])
             .arg(&f.prefix)
             .output()
@@ -89,13 +87,88 @@ fn only_legacy_package_entrypoint_infers_an_adjacent_bundle() {
     assert!(diagnostic.contains("required"));
     assert!(!f.prefix.exists());
     success(
-        Command::new(&legacy)
-            .args(["install", "--prefix"])
+        Command::new(&bootstrap)
+            .args(["install", "--bundle"])
+            .arg(&f.bundle)
+            .arg("--prefix")
             .arg(&f.prefix)
+            .current_dir(&f.root)
             .output()
             .unwrap(),
     );
     assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert!(!f.prefix.join("bin/aw-package").exists());
+    assert!(!f.bundle.join("aw-package").exists());
+}
+
+#[test]
+fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
+    use aw_package::{Component, Manifest, Payload};
+    use std::collections::BTreeMap;
+
+    let f = Fixture::new();
+    success(f.install().output().unwrap());
+    let bundle = f.root.join("provider bundle");
+    let mut files = BTreeMap::new();
+    for binary in ["aw-provider-tokenless", "tokenless", "rtk"] {
+        let relative = format!("libexec/aw/providers/tokenless/{binary}");
+        let path = bundle.join("payload").join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy("/bin/true", &path).unwrap();
+        files.insert(
+            relative,
+            Payload {
+                sha256: aw_package::digest(&path).unwrap(),
+                mode: 0o755,
+            },
+        );
+    }
+    let component = Component {
+        format: 1,
+        component: "aw-provider-tokenless".into(),
+        version: "0.1.0-preview.1".into(),
+        source_commit: "a".repeat(40),
+        os: "linux".into(),
+        arch: std::env::consts::ARCH.into(),
+        provider_protocol: "aw-provider/v1alpha1".into(),
+        requires: BTreeMap::from([("aw-core".into(), "0.1.0-preview.1".into())]),
+        files,
+    };
+    fs::write(
+        bundle.join("manifest.json"),
+        serde_json::to_vec(&Manifest {
+            format: 1,
+            components: vec![component],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let bootstrap = bundle.join("aw");
+    fs::copy(env!("CARGO_BIN_EXE_aw"), &bootstrap).unwrap();
+    assert!(!bundle.join("payload/bin/aw").exists());
+    success(
+        Command::new(&bootstrap)
+            .args(["install", "--bundle"])
+            .arg(&bundle)
+            .arg("--prefix")
+            .arg(&f.prefix)
+            .output()
+            .unwrap(),
+    );
+    assert!(f
+        .prefix
+        .join(".aw-packages/aw-provider-tokenless.json")
+        .is_file());
+    assert!(!f.prefix.join("bin/aw-package").exists());
+    success(
+        f.command()
+            .args(["uninstall", "--yes", "--prefix"])
+            .arg(&f.prefix)
+            .output()
+            .unwrap(),
+    );
+    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("libexec/aw/providers/tokenless/rtk").exists());
 }
 
 #[test]
@@ -195,13 +268,13 @@ fn package_and_native_install_options_cannot_mix_or_write_on_invalid_arguments()
             .unwrap(),
     );
     assert!(!f.config.exists());
-    let legacy = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
         .args(["install", "--prefix"])
         .output()
         .unwrap();
-    assert_eq!(legacy.status.code(), Some(1));
-    assert!(legacy.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&legacy.stderr).starts_with("aw-package:"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("aw:"));
 }
 
 #[test]
@@ -225,7 +298,7 @@ fn unified_config_validate_keeps_relative_paths_and_policy_update_validation() {
 }
 
 #[test]
-fn package_help_uses_the_selected_frontend_name() {
+fn package_help_uses_the_unified_frontend_name() {
     for (args, usage) in [
         (vec!["install", "--help"], "Usage: aw install"),
         (vec!["config", "init", "--help"], "Usage: aw config init"),
@@ -246,16 +319,6 @@ fn package_help_uses_the_selected_frontend_name() {
         }
         assert!(!output.contains("aw-package"));
     }
-    let output = success(
-        Command::new(env!("CARGO_BIN_EXE_aw-package"))
-            .arg("--help")
-            .output()
-            .unwrap(),
-    );
-    assert!(output.contains("aw-package configure --prefix"));
-    assert!(output.contains("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]"));
-    assert!(!output.contains("aw config init"));
-    assert!(!output.contains("--against"));
     let output = success(
         Command::new(env!("CARGO_BIN_EXE_aw"))
             .args(["config", "--help"])

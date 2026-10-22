@@ -14,14 +14,15 @@ AW 使用 Preview 包分发，尚未接入 `anolisa install` 或 RPM。
 或 all-in-one，用 `aw config init` 生成配置后运行。
 
 已有 AW 后，可用 `aw install --prefix ABS_DIR --bundle ABS_DIR` 安装解压后的本地
-Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR` 移除其拥有的文件。
+Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR --yes` 移除其拥有的文件。
 原生 Hook 注册使用 `aw agent connect --config FILE --agent TARGET`。
-旧的原生 `aw install --config ... --agent ...` 和 `aw-package` 命令保持兼容。
+旧的原生 `aw install --config ... --agent ...` 保持兼容。独立 `aw-package` 命令已删除，
+Rust 库保留。每个 bundle 根目录携带 `aw` 用于首次安装，必须显式提供绝对 `--bundle` 路径。
 此 Preview 安装器尚不支持按组件名、直接 URL 或系统包后端安装。
 
 新卸载入口仅在 stdin 和 stderr 都是交互终端时询问确认。
 脚本或 JSON 输出必须使用 `aw uninstall --prefix ABS_DIR --yes`（或 `-y`）。
-确认不覆盖包检查或系统权限；兼容入口 `aw-package` 保留原行为。
+确认不覆盖包检查或系统权限。
 
 使用 `aw list --installed --prefix ABS_DIR` 列出安装记录中的包，使用
 `aw doctor --prefix ABS_DIR` 检查这些包的文件。两个命令只读，都支持 `--json`。

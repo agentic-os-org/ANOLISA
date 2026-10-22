@@ -30,11 +30,6 @@ pub fn main() {
     }
 }
 
-/// Run the legacy package frontend using the same implementation as `aw`.
-pub fn package_main() {
-    package::compatibility_main();
-}
-
 fn run() -> cli::Result<cli::Exit> {
     let arguments = package::arguments::decode_all(std::env::args_os().skip(1))?;
     command::run(arguments)

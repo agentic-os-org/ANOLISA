@@ -1,4 +1,4 @@
-//! Shared package presentation for the unified and compatibility entrypoints.
+//! Package installation and configuration actions for the unified AW frontend.
 
 use crate::output::Outcome;
 use aw_package::{Error, Policy, Result, Settings};
@@ -8,87 +8,7 @@ pub(crate) mod arguments;
 pub(crate) mod config;
 pub(crate) mod signals;
 
-pub(crate) fn compatibility_main() {
-    if let Err(error) = arguments::decode_all(std::env::args_os().skip(1))
-        .and_then(|arguments| run(arguments.into_iter(), "aw-package"))
-    {
-        eprintln!("aw-package: {error}");
-        std::process::exit(1);
-    }
-}
-
-fn configuration_usage(program: &str) -> String {
-    let configure = if program == "aw" {
-        "config init"
-    } else {
-        "configure"
-    };
-    format!("{program} {configure} --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core|sec-core+tokenless --socket ABS_FILE | --provider tokenless | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]")
-}
-
-fn print_help(program: &str) {
-    let configure = configuration_usage(program);
-    let bundle = if program == "aw" {
-        "--bundle ABS_DIR"
-    } else {
-        "[--bundle ABS_DIR]"
-    };
-    println!("{program} install --prefix ABS_DIR {bundle}\n{configure}\n{program} uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
-    println!("{}", config::help(program));
-}
-
-fn run(mut arguments: impl Iterator<Item = String>, program: &str) -> Result<()> {
-    let command = arguments.next().unwrap_or_else(|| "--help".into());
-    if command == "--help" {
-        print_help(program);
-        return Ok(());
-    }
-    if command == "config" {
-        return config::run(arguments, program);
-    }
-    let allowed: &[&str] = match command.as_str() {
-        "install" => &["--prefix", "--bundle"],
-        "configure" => &[
-            "--prefix",
-            "--config",
-            "--state-dir",
-            "--socket",
-            "--qoder",
-            "--node",
-            "--openclaw",
-            "--provider",
-            "--check",
-            "--effect",
-            "--reason-code",
-        ],
-        "uninstall" => &["--prefix"],
-        _ => return Err(Error::Invalid(format!("unknown command: {command}"))),
-    };
-    let mut flags = BTreeMap::new();
-    let mut check_args = Vec::new();
-    while let Some(flag) = arguments.next() {
-        if flag == "--" && command == "configure" {
-            check_args.extend(arguments);
-            break;
-        }
-        if !allowed.contains(&flag.as_str()) || flags.contains_key(&flag) {
-            return Err(Error::Invalid(format!("unknown or duplicate flag: {flag}")));
-        }
-        let value = arguments
-            .next()
-            .ok_or_else(|| Error::Invalid(format!("missing value for {flag}")))?;
-        flags.insert(flag, value);
-    }
-    crate::output::human(&execute(&command, &flags, check_args, program)?)?;
-    Ok(())
-}
-
-pub(crate) fn execute(
-    command: &str,
-    flags: &BTreeMap<String, String>,
-    check_args: Vec<String>,
-    program: &str,
-) -> Result<Outcome> {
+fn configure(flags: &BTreeMap<String, String>, check_args: Vec<String>) -> Result<Outcome> {
     let required = |name: &str| -> Result<&Path> {
         flags
             .get(name)
@@ -96,88 +16,61 @@ pub(crate) fn execute(
             .ok_or_else(|| Error::Invalid(format!("missing {name}")))
     };
     let prefix = required("--prefix")?;
-    if command == "install" && program == "aw" {
-        // The installed unified CLI is not colocated with an unpacked bundle.
-        required("--bundle")?;
+    let optional = |name: &str| flags.get(name).map(Path::new);
+    let selection = flags
+        .get("--provider")
+        .map(String::as_str)
+        .unwrap_or("none");
+    let command_flags = ["--check", "--effect", "--reason-code"];
+    if (flags.contains_key("--socket") && !matches!(selection, "sec-core" | "sec-core+tokenless"))
+        || ((command_flags.iter().any(|name| flags.contains_key(*name)) || !check_args.is_empty())
+            && selection != "command")
+    {
+        return Err(Error::Invalid("Provider options require an explicit matching --provider; use --provider sec-core with --socket".into()));
     }
-    match command {
-        "install" => {
-            let executable = std::env::current_exe()?;
-            let bundle = flags
-                .get("--bundle")
-                .map(Path::new)
-                .or(executable.parent())
-                .ok_or_else(|| Error::Invalid("missing package directory".into()))?;
-            signals::register()?;
-            aw_package::install_cancellable(bundle, prefix, &signals::CANCEL)?;
-            Ok(Outcome::Installed {
-                prefix: prefix.into(),
-            })
-        }
-        "configure" => {
-            let optional = |name: &str| flags.get(name).map(Path::new);
-            let selection = flags
-                .get("--provider")
-                .map(String::as_str)
-                .unwrap_or("none");
-            let command_flags = ["--check", "--effect", "--reason-code"];
-            if (flags.contains_key("--socket")
-                && !matches!(selection, "sec-core" | "sec-core+tokenless"))
-                || ((command_flags.iter().any(|name| flags.contains_key(*name))
-                    || !check_args.is_empty())
-                    && selection != "command")
-            {
-                return Err(Error::Invalid("Provider options require an explicit matching --provider; use --provider sec-core with --socket".into()));
+    let mut argv = Vec::new();
+    let policy = match selection {
+        "none" => Policy::None,
+        "tokenless" => Policy::Tokenless,
+        "sec-core+tokenless" => Policy::SecCoreTokenless {
+            socket: required("--socket")?,
+        },
+        "sec-core" => Policy::SecCore {
+            socket: required("--socket")?,
+        },
+        "command" => {
+            argv.push(required("--check")?.to_string_lossy().into_owned());
+            argv.extend(check_args);
+            Policy::Command {
+                argv: &argv,
+                effect: flags
+                    .get("--effect")
+                    .ok_or_else(|| Error::Invalid("missing --effect".into()))?,
+                reason_code: flags
+                    .get("--reason-code")
+                    .ok_or_else(|| Error::Invalid("missing --reason-code".into()))?,
             }
-            let mut argv = Vec::new();
-            let policy = match selection {
-                "none" => Policy::None,
-                "tokenless" => Policy::Tokenless,
-                "sec-core+tokenless" => Policy::SecCoreTokenless {
-                    socket: required("--socket")?,
-                },
-                "sec-core" => Policy::SecCore {
-                    socket: required("--socket")?,
-                },
-                "command" => {
-                    argv.push(required("--check")?.to_string_lossy().into_owned());
-                    argv.extend(check_args);
-                    Policy::Command {
-                        argv: &argv,
-                        effect: flags
-                            .get("--effect")
-                            .ok_or_else(|| Error::Invalid("missing --effect".into()))?,
-                        reason_code: flags
-                            .get("--reason-code")
-                            .ok_or_else(|| Error::Invalid("missing --reason-code".into()))?,
-                    }
-                }
-                _ => return Err(Error::Invalid(
-                    "--provider must be none, sec-core, tokenless, sec-core+tokenless or command"
-                        .into(),
-                )),
-            };
-            aw_package::configure(&Settings {
-                prefix,
-                config: required("--config")?,
-                state: required("--state-dir")?,
-                policy,
-                qoder: optional("--qoder"),
-                node: optional("--node"),
-                openclaw: optional("--openclaw"),
-            })?;
-            Ok(Outcome::Configured {
-                config: required("--config")?.into(),
-                provider_template: selection.into(),
-            })
         }
-        "uninstall" => {
-            signals::register()?;
-            aw_package::uninstall_cancellable(prefix, &signals::CANCEL)?;
-            Ok(Outcome::Uninstalled)
+        _ => {
+            return Err(Error::Invalid(
+                "--provider must be none, sec-core, tokenless, sec-core+tokenless or command"
+                    .into(),
+            ))
         }
-        _ => unreachable!("command was validated before parsing flags"),
-    }
+    };
+    aw_package::configure(&Settings {
+        prefix,
+        config: required("--config")?,
+        state: required("--state-dir")?,
+        policy,
+        qoder: optional("--qoder"),
+        node: optional("--node"),
+        openclaw: optional("--openclaw"),
+    })?;
+    Ok(Outcome::Configured {
+        config: required("--config")?.into(),
+        provider_template: selection.into(),
+    })
 }
 
 pub(crate) fn managed(
@@ -188,7 +81,7 @@ pub(crate) fn managed(
     options: crate::output::Options,
 ) -> crate::cli::Result<crate::cli::Exit> {
     if !matches!(command, "install" | "uninstall") {
-        return crate::output::complete(label, options, execute(command, flags, arguments, "aw"));
+        return crate::output::complete(label, options, configure(flags, arguments));
     }
     let prefix = Path::new(flags.get("--prefix").ok_or("missing --prefix")?);
     let outcome = if command == "install" {

@@ -27,10 +27,8 @@ cd src/aw
 cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples
 export AW_SOURCE="$PWD"
 export AW_BIN="$AW_SOURCE/target/debug/aw"
-export AW_PACKAGE="$AW_SOURCE/target/debug/aw-package"
 export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 "$AW_BIN" --help
-"$AW_PACKAGE" --help
 ```
 
 This builds debug binaries in `src/aw/target/debug`; it installs no system
@@ -41,18 +39,18 @@ packages from different source commits or package versions.
 
 ## 2. Prepare one configuration for four frameworks
 
-An initial `aw.yaml` must exist before any `aw-package config add-*` command.
-For an installed core with Qoder/OpenClaw, use `aw-package configure` to create
+An initial `aw.yaml` must exist before any `aw config add-*` command.
+For an installed core with Qoder/OpenClaw, use `aw config init` to create
 it; omitting `--provider` creates an empty policy configuration. Follow the
 [initialization and editing flow](packages.md#edit-existing-provider-and-hook-configuration)
-for `configure` → `add-provider` → `add-event` → `add-hook` → `validate`.
-`configure` verifies an installed package prefix; source binaries alone do not
+for `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`.
+`aw config init` verifies an installed package prefix; source binaries alone do not
 supply it. It creates a new file and refuses to overwrite an existing one.
 
 For this source walkthrough and for QwenPaw/Hermes, start from the complete
 four-framework sample below. The generator currently supports Qoder/OpenClaw
 only; the editor does not add Agent entries. The sample already declares both
-tool events, so only an absent event needs `add-event` before `add-hook`.
+tool events, so only an absent event needs `aw config add-event` before `aw config add-hook`.
 
 Keep these variables in the same terminal. In another terminal, export the
 printed absolute paths again; do not create another demo directory by accident.
@@ -91,15 +89,15 @@ step. The sample requests a block when a before-tool input contains
 `AW_DENY_TEST`, and an observation after a tool completes. It demonstrates wiring, not a production security rule.
 
 The [configuration reference](configuration.md) explains all fields. The
-generator `aw-package configure` currently creates Qoder/OpenClaw entries only;
+generator `aw config init` currently creates Qoder/OpenClaw entries only;
 copying this YAML is the path for a four-framework configuration. The
 [configuration editor](packages.md#edit-existing-provider-and-hook-configuration)
 can add/remove Providers and Hook steps; it does not edit Agent entries.
 
 ```bash
 "$AW_BIN" validate --config "$AW_CONFIG"
-"$AW_PACKAGE" config show --config "$AW_CONFIG" --event tool.before
-"$AW_PACKAGE" config validate --config "$AW_CONFIG"
+"$AW_BIN" config show --config "$AW_CONFIG" --event tool.before
+"$AW_BIN" config validate --config "$AW_CONFIG"
 ```
 
 Validation checks document structure and references. It does not run the policy,
@@ -217,7 +215,7 @@ are all owned by this demo directory. Preserve needed audit evidence, then:
 cd "$AW_SOURCE"
 rm -r -- "$AW_DEMO"
 test ! -e "$AW_DEMO"
-unset AW_CONFIG AW_DEMO AW_HOST AW_PACKAGE AW_BIN AW_SOURCE
+unset AW_CONFIG AW_DEMO AW_HOST AW_BIN AW_SOURCE
 ```
 
 The framework installations and profiles remain untouched by this cleanup;

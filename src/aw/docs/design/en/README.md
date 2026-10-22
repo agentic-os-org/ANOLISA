@@ -8,7 +8,8 @@ for crate dependencies and source entry points. The current Hook path is:
 Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
 internal interfaces and release work deferred from this migration.
 
-`aw-cli` owns the `aw` and compatibility `aw-package` frontends. Software
+`aw-cli` owns the unified `aw` frontend. The standalone `aw-package` executable
+has been removed; its Rust library remains. Software
 installation and offline edits call `aw-package` APIs directly; runtime commands
 call `aw-service`. The extraction preserves the Hook path and protocol versions.
 

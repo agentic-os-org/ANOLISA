@@ -37,7 +37,7 @@ export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
 export AW_PREFIX="/opt/aw-preview/$AW_VERSION"
 tar -xzf "$AW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
-sudo "./$AW_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
+sudo "./$AW_BUNDLE/aw" install --bundle "$PWD/$AW_BUNDLE" --prefix "$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
 aw --help
 ```
@@ -70,7 +70,8 @@ aw install --prefix "$AW_PREFIX" --bundle "/absolute/path/to/unpacked-bundle"
 
 此入口接受解压后的 Preview 包，不接受组件名、下载 URL 或 RPM/DEB 包。
 Provider 包仍要求先安装同一次构建的 core。安装不启动服务、不注册 Agent Hook、
-不启用 Provider。独立的 `aw-package` 安装器继续用于首次引导安装和兼容。
+不启用 Provider。独立 `aw-package` 命令已删除；首次安装使用 bundle 根目录的 `aw`，
+并显式传入绝对 `--bundle` 路径，后续操作使用已安装的 `aw`。
 
 以普通用户创建配置，数据保存在安装目录之外。
 

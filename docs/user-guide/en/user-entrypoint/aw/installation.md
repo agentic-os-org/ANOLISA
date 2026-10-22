@@ -39,7 +39,7 @@ export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
 export AW_PREFIX="/opt/aw-preview/$AW_VERSION"
 tar -xzf "$AW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
-sudo "./$AW_BUNDLE/aw-package" install --prefix "$AW_PREFIX"
+sudo "./$AW_BUNDLE/aw" install --bundle "$PWD/$AW_BUNDLE" --prefix "$AW_PREFIX"
 export PATH="$AW_PREFIX/bin:$PATH"
 aw --help
 ```
@@ -75,7 +75,9 @@ aw install --prefix "$AW_PREFIX" --bundle "/absolute/path/to/unpacked-bundle"
 This accepts unpacked Preview bundles, not component names, download URLs or
 RPM/DEB packages. Provider packages still require core from the same build.
 It does not start services, register Agent Hooks or enable Providers.
-The standalone `aw-package` installer remains available for bootstrap and compatibility.
+The standalone `aw-package` command has been removed. Use the `aw` at each
+bundle's root for first installation, with an explicit absolute `--bundle` path,
+and the installed `aw` for later operations.
 
 Create configuration as your ordinary user, keeping data outside the installation prefix.
 
