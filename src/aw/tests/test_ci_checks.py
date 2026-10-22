@@ -243,7 +243,7 @@ class GateTests(GateFixture):
             (
                 "aw-cli", self.root / "crates/aw-cli",
                 ["aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
-                 "aw-provider", "aw-service", "clap", "libc", "serde", "serde_json",
+                 "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
                  "serde_yaml_ng", "sha2", "tempfile"],
             ),
         ):
@@ -298,6 +298,7 @@ class GateTests(GateFixture):
             (7, "asc-daemon-client"), (7, "aw-core"),
             (10, "aw-service"), (10, "aw-host"), (10, "aw-provider-tokenless"),
             (11, "aw-provider-tokenless"), (11, "aw-provider-sec-core"),
+            (6, "clap_complete"), (10, "clap_complete"),
         ):
             invalid = deepcopy(metadata)
             invalid["packages"][package]["dependencies"].append({"name": dependency})

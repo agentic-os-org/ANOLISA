@@ -9,7 +9,7 @@ def structure(metadata: dict, root: Path) -> None:
     allowed = {
         "aw-cli": {
             "aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
-            "aw-provider", "aw-service", "clap", "libc", "serde", "serde_json",
+            "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
             "serde_yaml_ng", "sha2", "tempfile",
         },
         "aw-adapter": {

@@ -49,6 +49,8 @@ fn service(value: Service) -> Result<Exit> {
 
 pub(super) fn run(command: Command) -> Result<Exit> {
     match command {
+        Command::Completion { shell } => super::discovery::completion(shell),
+        Command::Commands { json } => super::discovery::commands(json),
         Command::Run(value) => {
             let mut args = native(value.native);
             args.flags.extend(

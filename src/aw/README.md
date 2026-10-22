@@ -55,6 +55,11 @@ discover the implemented command tree. Public commands also accept `-h`;
 or repeated options fail before work starts. Options such as `--json` remain
 command-local. See [command help](../../docs/user-guide/en/user-entrypoint/aw/operations.md#command-help-and-arguments).
 
+Use `aw commands` to list implemented public syntax, or `aw commands --json`
+for versioned command metadata. `aw completion bash` prints a completion script;
+Zsh, Fish, PowerShell and Elvish are also supported. Scripts are not installed
+automatically. See [command discovery](../../docs/user-guide/en/user-entrypoint/aw/operations.md#command-discovery-and-completion).
+
 Local package install/uninstall, `config init`, and offline configuration edits
 accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See

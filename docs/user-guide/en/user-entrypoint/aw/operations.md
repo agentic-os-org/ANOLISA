@@ -38,6 +38,36 @@ Internal Hook and lifecycle callbacks retain their protocol-specific replies
 and error codes. The compatibility `aw-package` executable keeps its original
 parser, including optional adjacent-bundle discovery for installation.
 
+## Command discovery and completion
+
+List public commands without loading configuration, contacting a service or
+executing a Provider. The inventory and completion scripts use the same command
+declaration as parsing and help; hidden compatibility aliases and internal
+callbacks remain callable but are excluded from discovery.
+
+```bash
+aw commands
+aw commands --json
+aw completion bash
+aw completion zsh
+aw completion fish
+aw completion powershell
+aw completion elvish
+```
+
+`completion` writes a script to stdout; it does not install it or modify shell
+startup files. Review and load it using your shell's usual completion setup.
+The shell name is required and unsupported names fail before any work.
+
+`commands --json` returns one object with `format: 1`, the CLI `name`, its crate
+`version`, and a `commands` array. Each entry has a full command path,
+description and visible arguments, including names, value labels and fixed
+choices. `required` reports only unconditional requirements; conditional
+requirements, conflicts and argument forwarding remain authoritative in the
+parser and action help. This is a syntax inventory, not a complete validation
+schema, installed-package inventory or runtime/Provider capability report.
+Success returns 0; invalid syntax or an output-stream failure returns 1.
+
 ## Management reports
 
 Use command-local `--json` with local-bundle `install`, `uninstall`, `config init`,

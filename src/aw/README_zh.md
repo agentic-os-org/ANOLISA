@@ -49,6 +49,10 @@ aw stop --config "$HOME/aw/aw.yaml"
 帮助选项须放在最后；未知或重复参数会在开始操作前报错。
 `--json` 等参数只在对应命令有效，详见[命令帮助](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#命令帮助与参数)。
 
+使用 `aw commands` 查看已实现的公开命令，`aw commands --json` 获取带版本的
+命令元数据。`aw completion bash` 输出补全脚本，也支持 Zsh、Fish、PowerShell
+和 Elvish；不会自动安装脚本。详见[命令发现与补全](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#命令发现与补全)。
+
 本地包安装/卸载、`config init` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
 默认仍为人类摘要，已有服务和协议 JSON 保持不变。
 

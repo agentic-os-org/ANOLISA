@@ -1,5 +1,6 @@
 //! One typed declaration defines the public command tree, options and help.
 
+mod discovery;
 mod dispatch;
 mod package;
 #[cfg(test)]
@@ -24,6 +25,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Command {
+    /// Print a shell completion script; does not install it
+    Completion {
+        /// Shell receiving the generated script
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// List implemented public commands, not runtime or Provider capabilities
+    Commands {
+        /// Emit versioned metadata from the same declaration as parsing and help
+        #[arg(long)]
+        json: bool,
+    },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
     /// Install a local Preview bundle, or retain legacy native Hook connection

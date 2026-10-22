@@ -14,7 +14,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive", "string"] }
+clap_complete = "4.6.0"
 aw-package = { path = "crates/aw-package" }
 aw-adapter = { path = "crates/aw-adapter" }
 flate2 = "1"

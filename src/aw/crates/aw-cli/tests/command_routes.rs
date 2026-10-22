@@ -118,6 +118,8 @@ fn every_public_level_has_help_without_accessing_files_or_services() {
     for command in [
         "",
         "run",
+        "commands",
+        "completion",
         "install",
         "uninstall",
         "agent",

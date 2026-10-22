@@ -33,6 +33,30 @@ aw -V
 内部 Hook 与生命周期回调保留协议特定的回复和错误码。兼容入口 `aw-package`
 保留原解析器，包括安装时可自动查找二进制旁的 bundle。
 
+## 命令发现与补全
+
+无需加载配置、访问服务或执行 Provider 即可列出公开命令。清单和补全脚本与
+解析及帮助共用同一份命令声明；隐藏的兼容别名与内部回调仍能调用，但不进入发现结果。
+
+```bash
+aw commands
+aw commands --json
+aw completion bash
+aw completion zsh
+aw completion fish
+aw completion powershell
+aw completion elvish
+```
+
+`completion` 向 stdout 输出脚本，不自动安装或修改 shell 启动文件。
+检查后按对应 shell 的常规补全方式加载。必须提供 shell 名称，不支持的名称会在操作前报错。
+
+`commands --json` 返回一个对象，包含 `format: 1`、CLI 的 `name`、crate `version`
+和 `commands` 数组。每项提供完整命令路径、说明及可见参数，包括名称、值标签与
+固定候选值。`required` 仅表示无条件必需；条件要求、冲突与参数透传仍以实际解析器
+和操作帮助为准。这是语法清单，不是完整验证 schema、已安装包清单或运行时／Provider
+能力报告。成功返回 0，语法错误或输出流失败返回 1。
+
 ## 管理结果
 
 本地 bundle 的 `install`、`uninstall`、`config init`，以及
