@@ -15,6 +15,7 @@ fn captured(fixture: &Fixture, mode: &str, options: &[&str]) -> Value {
         .args(["uninstall", "--prefix"])
         .arg(&fixture.prefix)
         .args(options)
+        .env("XDG_STATE_HOME", fixture.root.join("package-state"))
         .current_dir(&fixture.root);
     let output = invoke(&command);
     assert!(

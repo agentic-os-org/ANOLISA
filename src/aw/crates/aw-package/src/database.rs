@@ -5,10 +5,12 @@ mod json;
 mod legacy;
 mod paths;
 mod read;
+mod registration;
 mod validation;
 
 pub use doctor::{DoctorIssue, DoctorIssueCode, DoctorReport};
 pub use paths::{DatabasePaths, SYSTEM_DATABASE_ROOT};
+pub use registration::RegistrationPointer;
 
 use crate::{description::ProviderDeclaration, Payload, Result};
 use serde::{Deserialize, Serialize};
@@ -76,10 +78,10 @@ pub enum Registration {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEvidence {
-    /// SHA-256 of the supplied local bundle, when recorded at installation time.
+    /// SHA-256 of the supplied bundle description, whose file digests bind its payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_sha256: Option<String>,
-    /// Full source commit, only when the producer supplied one.
+    /// Producer-supplied source evidence; old build labels remain byte-for-byte facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
 }
@@ -136,7 +138,7 @@ pub struct Installation {
     /// Registration state; database snapshots must contain only registered records.
     #[serde(default)]
     pub registration: Registration,
-    /// Packages with disjoint file ownership.
+    /// Packages with disjoint file ownership; empty registrations retain the prefix locator.
     pub packages: Vec<InstalledPackage>,
 }
 
@@ -176,6 +178,14 @@ pub(crate) fn read_description(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub(crate) use json::decode;
+pub(crate) use legacy::validate as validate_legacy_component;
+pub(crate) use paths::{
+    absolute as absolute_path, bytes as safe_bytes, directory as safe_directory,
+    entries as safe_entries, lock as shared_file_lock, missing as is_missing, regular as safe_file,
+    same as same_file,
+};
+pub(crate) use registration::check_registered;
+pub(crate) use validation::database as validate_database;
 
 impl Inventory {
     /// Read a database, optionally restricting the view to one absolute prefix.

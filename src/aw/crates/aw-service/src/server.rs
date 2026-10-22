@@ -27,6 +27,7 @@ const MAX_CONNECTIONS: usize = 64;
 pub struct Server {
     endpoint: Endpoint,
     runtime: Arc<Runtime>,
+    _package_leases: aw_exec::PackageLeases,
 }
 
 impl Server {
@@ -41,6 +42,13 @@ impl Server {
     pub fn bind(bytes: Vec<u8>, state_dir: impl AsRef<Path>) -> Result<Self> {
         if !cfg!(target_os = "linux") {
             return Err(rejected("linux_required"));
+        }
+        let executable = std::env::current_exe()?;
+        let package_leases = aw_exec::PackageLeases::for_paths([executable.clone()])
+            .map_err(|_| rejected("package_reference_unavailable"))?;
+        // Removal may have completed before this process acquired its first lock.
+        if !std::fs::metadata(executable).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(rejected("package_reference_unavailable"));
         }
         let configuration = aw_config::Validator::new()?.parse(&bytes)?;
         let state_dir = state_dir.as_ref();
@@ -60,7 +68,11 @@ impl Server {
             &state_dir.join("journal"),
             Arc::new(AtomicBool::new(false)),
         )?;
-        Ok(Self { endpoint, runtime })
+        Ok(Self {
+            endpoint,
+            runtime,
+            _package_leases: package_leases,
+        })
     }
 
     /// Private socket retained until shutdown and removed only if its inode still matches.

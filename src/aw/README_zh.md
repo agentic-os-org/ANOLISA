@@ -14,11 +14,17 @@ AW 使用 Preview 包分发，尚未接入 `anolisa install` 或 RPM。
 或 all-in-one，用 `aw config init` 生成配置后运行。
 
 已有 AW 后，可用 `aw install --prefix ABS_DIR --bundle ABS_DIR` 安装解压后的本地
-Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR --yes` 移除其拥有的文件。
+软件包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR --yes` 移除其拥有的文件。
 原生 Hook 注册使用 `aw agent connect --config FILE --agent TARGET`。
 旧的原生 `aw install --config ... --agent ...` 保持兼容。独立 `aw-package` 命令已删除，
 Rust 库保留。每个 bundle 根目录携带 `aw` 用于首次安装，必须显式提供绝对 `--bundle` 路径。
 此 Preview 安装器尚不支持按组件名、直接 URL 或系统包后端安装。
+
+用 `--dry-run` 查看安装或卸载计划，不创建文件。
+`aw uninstall PACKAGE --prefix ABS_DIR --yes` 在检查依赖、文件归属和运行引用后，
+移除指定包。新操作会提交本地包数据库；`aw recover` 清理已提交但中断的操作，或回滚
+尚未提交的操作。默认使用当前用户的数据库。root 管理的 raw 安装必须显式使用
+`sudo aw install ... --scope system`，权限不会自动选择 system。RPM/DEB 暂未接入。
 
 新卸载入口仅在 stdin 和 stderr 都是交互终端时询问确认。
 脚本或 JSON 输出必须使用 `aw uninstall --prefix ABS_DIR --yes`（或 `-y`）。
@@ -26,8 +32,11 @@ Rust 库保留。每个 bundle 根目录携带 `aw` 用于首次安装，必须�
 
 使用 `aw list --installed --prefix ABS_DIR` 列出安装记录中的包，使用
 `aw doctor --prefix ABS_DIR` 检查这些包的文件。两个命令只读，都支持 `--json`。
-省略 `--prefix` 时读取当前用户的已安装包数据库。已有 Preview 安装仍需显式指定
-安装目录；查询不会把 `.aw-packages` 安装记录导入新数据库。详见
+省略 `--prefix` 时读取当前用户的已安装包数据库。显式指定安装目录时，查询会按该目录
+记录的位置读取数据库，普通用户也可查询可读的 system 安装。旧 Preview 安装仍需显式
+指定目录；查询不会导入 `.aw-packages` 安装记录。只有记录中的 AW 可执行文件与当前命令
+一致时，成功的软件包写入才会存档旧记录并登记目录；否则在写入前以 `runtime_unknown`
+阻断迁移，请把新 AW 安装到另一目录。详见
 [已安装包与文件检查](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#已安装包与文件检查)。
 
 ```bash

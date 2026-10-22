@@ -62,7 +62,7 @@ fn help_separates_software_installation_from_native_agent_connection() {
         "install",
         "agent",
         "config",
-        "local unpacked Preview bundles only",
+        "manifest.json or package.json",
         "Compatibility: aw install --config",
     ] {
         assert!(text.contains(expected), "missing {expected}");

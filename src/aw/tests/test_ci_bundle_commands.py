@@ -3,12 +3,50 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
 import textwrap
 
 from test_ci_checks import AW, GateFixture
+from compare_installed import main as compare_installed, packages as installed_packages
+
+
+class InstalledComparisonTests(GateFixture):
+    def report(self, name: str, identity: str) -> Path:
+        path = self.root / name
+        path.write_text(json.dumps({"format":1,"status":"succeeded","result":{"inventory":{
+            "source":"database","installations":[{"installation_id":identity,"prefix":"/" + identity,
+            "packages":[{"package_id":"tool","version":"1.2.3","os":"linux","arch":"x86_64",
+            "files":{"bin/tool":{"sha256":"a" * 64,"mode":493}},
+            "source":{"bundle_sha256":identity,"source_commit":"b" * 40},
+            "dependencies":[{"installation_id":identity,"package_id":"base","version":"2.0.0"}]}]}]}}}))
+        return path
+
+    def test_comparison_preserves_package_facts_without_comparing_prefix_identity(self) -> None:
+        first, second = self.report("first.json", "one"), self.report("second.json", "two")
+        self.assertEqual(compare_installed([str(first), str(second)]), 0)
+        value = json.loads(second.read_text())
+        value["result"]["inventory"]["installations"][0]["packages"][0]["files"]["bin/tool"]["mode"] = 420
+        second.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError, "contents differ"):
+            compare_installed([str(first), str(second)])
+
+    def test_comparison_rejects_failed_empty_legacy_and_duplicate_records(self) -> None:
+        path = self.report("report.json", "one")
+        original = json.loads(path.read_text())
+        import copy
+        for change in ("failed", "empty", "legacy", "duplicate"):
+            value = copy.deepcopy(original)
+            inventory = value["result"]["inventory"]
+            if change == "failed": value["status"] = "failed"
+            elif change == "empty": inventory["installations"][0]["packages"] = []
+            elif change == "legacy": inventory["source"] = "legacy"
+            else: inventory["installations"][0]["packages"] *= 2
+            path.write_text(json.dumps(value))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                installed_packages(path)
 
 
 class BundleCommandTests(GateFixture):
@@ -58,6 +96,10 @@ class BundleCommandTests(GateFixture):
                 Path(option("--state-dir")).mkdir()
             elif args[:2] == ["config", "validate"]:
                 assert Path(option("--config")).is_file()
+            elif args[:2] == ["list", "--installed"]:
+                prefix = Path(option("--prefix"))
+                packages = [{"package_id":path.stem,"version":"1.0.0","os":"linux","arch":"x86_64","files":{},"source":{"source_commit":"a" * 40},"dependencies":[]} for path in sorted((prefix / ".aw-packages").iterdir())]
+                print(json.dumps({"format":1,"status":"succeeded","result":{"inventory":{"source":"database","installations":[{"packages":packages}]}}}))
             elif args[0] == "uninstall":
                 assert "--yes" in args
                 shutil.rmtree(option("--prefix"))
@@ -99,6 +141,9 @@ class BundleCommandTests(GateFixture):
             "AW_PACKAGE_COMMANDS": str(capture),
             "GITHUB_WORKSPACE": str(self.root / "container workspace"),
         }
+        helper = Path(environment["GITHUB_WORKSPACE"]) / "src/aw/scripts/compare_installed.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copy2(AW / "scripts/compare_installed.py", helper)
         return script, environment, capture
 
     def test_package_acceptance_uses_each_bundles_aw_and_confirms_every_removal(self) -> None:
@@ -119,6 +164,7 @@ class BundleCommandTests(GateFixture):
         self.assertTrue(all("--yes" in call["args"] for call in removals))
         self.assertEqual(sum(call["args"][:2] == ["config", "init"] for call in calls), 2)
         self.assertEqual(sum(call["args"][:2] == ["config", "validate"] for call in calls), 2)
+        self.assertEqual(sum(call["args"][:2] == ["list", "--installed"] for call in calls), 3)
         self.assertTrue(all(Path(call["program"]).name == "aw" for call in calls))
 
     def test_missing_provider_bundle_launcher_fails_before_installation(self) -> None:

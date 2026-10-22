@@ -19,8 +19,9 @@ Python/JavaScript 摘要向量和 rustdoc。缺少工具，配置、Provider 协
 ignored、向量错误及命令失败均返回非零。每条命令都有超时限制，失败或中断时
 回收其子进程组。日志标明失败命令，可在 `src/aw` 单独运行对应命令定位问题。
 
-数据库和安装清单查询测试还分别以子进程 umask `0022`、`0002` 运行。
-测试样本应显式设置权限，不要修改并行测试进程的全局 umask。
+数据库、安装清单、事务、运行锁和包管理 CLI 测试还分别以子进程 umask
+`0022`、`0002` 运行。测试样本及复制的可执行文件应显式设置权限，
+不要修改并行测试进程的全局 umask。
 
 这些检查可由普通用户运行，无需启动 Agent 或登录服务。Cargo 会下载尚未缓存的
 依赖，Schema 校验只读取随包资源。检查入口、本地服务、Provider Host 执行、命令执行及 FileJournal 要求 Linux；
@@ -169,6 +170,21 @@ Hermes 私有工具/环境，避免为 runner 的 loader 覆盖或共享可写�
 全量失败改报为成功。
 
 ## Crate 边界
+
+本地软件包变更从 `aw-package::plan` 进入，先生成只读计划，再由 `plan::execute`
+调用同一持久事务实现。查询和预览不能创建记录或锁。在 Linux 上检查这些路径：
+
+```bash
+cargo test --locked -p aw-package --test management --test database
+cargo test --locked -p aw-package transaction::tests
+cargo test --locked -p aw-exec --test packages
+```
+
+包测试覆盖独立工具、同目录精确依赖、旧记录存档、冲突和恢复。CLI、服务与 Host
+共用 `aw-exec` 的包读锁，不让运行时依赖包数据库。修改包和发布配置时都保持先锁
+数据库、再锁安装目录的顺序。system scope 是显式 raw 管理，不是原生包后端。
+提交、恢复规则及运行引用发现范围见[本地包管理](docs/design/zh/packaging/package-management.md)。
+这些局部命令不能代替 AW 完整检查或原生验收。
 
 通用框架位于 `crates/<name>/`，具体 Provider 位于仓库根 `providers/<provider>/`，各自构建；
 根清单只组织 workspace。[Provider 协作约定](../../providers/README_zh.md)说明如何收录和分发。

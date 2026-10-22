@@ -15,8 +15,12 @@ artifact directory. Skip this step if all-in-one is installed.
 export AW_VERSION=0.1.0-preview.1
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
-sudo "./$AW_SEC_BUNDLE/aw" install --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
+sudo "./$AW_SEC_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
 ```
+
+This continues the installation page's system scope. For a user-owned core prefix,
+omit `sudo` and use `--scope user` for the extension too. Keep the same scope for
+core, every extension and uninstall; `sudo` does not select system scope.
 
 AW does not start sec-core automatically.
 Reuse an existing managed backend socket, such as `/run/agent-sec-core/daemon.sock`.

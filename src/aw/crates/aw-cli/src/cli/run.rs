@@ -5,7 +5,7 @@ use super::{
     read_file, readiness, Arguments, Exit, Result,
 };
 use aw_adapter::LaunchFiles;
-use aw_exec::CommandSpec;
+use aw_exec::{CommandSpec, PackageLeases};
 use aw_service::{launch_service, Binding, Operation, RunOutcome};
 use std::{
     collections::BTreeMap,
@@ -93,12 +93,18 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         .ok_or("non-UTF-8 working directory")?
         .to_owned();
     install_signals()?;
-    let command = CommandSpec {
+    let executable = std::env::current_exe()?;
+    let _core_package_leases = PackageLeases::for_paths([executable.clone()])?;
+    if !std::fs::metadata(&executable)?.is_file() {
+        return Err("current AW executable is no longer available".into());
+    }
+    let mut command = CommandSpec {
         program: argv[0].clone().into(),
         args: native.iter().map(OsString::from).collect(),
         cwd: cwd.clone(),
         environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
     };
+    let _agent_package_leases = PackageLeases::acquire([&mut command])?;
     let prepared = adapter.prepare(
         LaunchInput {
             document: config.as_value().clone(),
@@ -129,7 +135,6 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     }
     let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
-    let executable = std::env::current_exe()?;
     let service = launch_service::ensure_service(
         &bytes,
         &executable,
@@ -144,12 +149,13 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let mut observing = false;
     let mut started = false;
     let executed: Result<Exit> = (|| {
-        let plan = prepared.configure(&LaunchContext {
+        let mut plan = prepared.configure(&LaunchContext {
             files: &artifacts,
             binding_path: &binding_path,
             executable: &executable,
             steps: &steps,
         })?;
+        let _launch_package_leases = PackageLeases::acquire([&mut plan.command])?;
         let bound = service.client.call_cancellable(
             Operation::Bind {
                 target: target.into(),

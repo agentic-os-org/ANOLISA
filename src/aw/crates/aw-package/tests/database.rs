@@ -1,9 +1,12 @@
 //! Read-only package inventory, legacy compatibility and bounded file verification.
 
+#[path = "database/doctor_metadata.rs"]
+mod doctor_metadata;
+
 use aw_package::{
     database::{
         DatabasePaths, DoctorIssueCode, Inventory, InventorySource, Registration,
-        MAX_DATABASE_BYTES,
+        RegistrationPointer, MAX_DATABASE_BYTES,
     },
     description::PackageDescription,
     digest, Error,
@@ -83,6 +86,16 @@ impl Fixture {
         self.directory(path.parent().unwrap());
         fs::write(path, bytes).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn registration(&self, prefix: &Path, id: &str) {
+        self.record(&prefix.join(".aw-install.lock"), b"", 0o600);
+        let pointer = RegistrationPointer::new(&self.paths, id.into()).unwrap();
+        self.record(
+            &prefix.join(".aw-packages/aw-core.json"),
+            serde_json::to_vec(&pointer).unwrap(),
+            0o644,
+        );
     }
 
     fn legacy(&self, version: &str) {
@@ -180,6 +193,8 @@ fn registered_inventory_and_doctor_are_read_only_and_keep_packages_at_distinct_p
     second["installation_id"] = json!("install-2");
     second["prefix"] = json!(prefix2);
     fixture.database(vec![first, second]);
+    fixture.registration(&fixture.prefix, "install-1");
+    fixture.registration(&prefix2, "install-2");
     let before = snapshot(fixture.directory.path());
     let inventory = fixture.read().unwrap();
     assert_eq!(inventory.source, InventorySource::Database);
@@ -240,9 +255,7 @@ fn registered_prefix_rejects_live_legacy_records_instead_of_merging_or_hiding_th
     fixture.database(vec![fixture.installation()]);
     let before = snapshot(fixture.directory.path());
     let error = Inventory::read(&fixture.paths, Some(&fixture.prefix)).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("conflicting legacy package records"));
+    assert!(error.to_string().contains("older package records conflict"));
     assert_eq!(before, snapshot(fixture.directory.path()));
 }
 
@@ -542,4 +555,57 @@ fn native_manager_records_are_listed_but_never_claim_raw_verification() {
     assert!(!report.healthy());
     assert_eq!(report.files_checked, 0);
     assert_eq!(report.issues[0].code, DoctorIssueCode::NativeManager);
+}
+
+#[test]
+fn registered_prefix_locator_selects_its_database_and_rejects_conflicting_authority() {
+    let fixture = Fixture::new();
+    fixture.database(vec![fixture.installation()]);
+    let records = fixture.prefix.join(".aw-packages");
+    fixture.directory(&records);
+    fixture.record(&fixture.prefix.join(".aw-install.lock"), b"", 0o600);
+    let marker = records.join("aw-core.json");
+    let pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
+    fixture.record(&marker, serde_json::to_vec(&pointer).unwrap(), 0o644);
+    let other = DatabasePaths::user(
+        Some(&fixture.directory.path().join("different-state")),
+        None,
+    )
+    .unwrap();
+    let selected = other.for_prefix(&fixture.prefix).unwrap();
+    assert_eq!(selected.root, fixture.paths.root);
+    assert!(Inventory::read(&selected, Some(&fixture.prefix))
+        .unwrap()
+        .doctor()
+        .unwrap()
+        .healthy());
+    let mut wrong = pointer.clone();
+    wrong.installation_id = "different-installation".into();
+    fs::write(&marker, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    assert!(fixture
+        .read()
+        .unwrap_err()
+        .to_string()
+        .contains("does not match"));
+    fs::write(&marker, serde_json::to_vec(&pointer).unwrap()).unwrap();
+    fs::write(records.join("aw-provider-tokenless.json"), b"{}").unwrap();
+    assert!(RegistrationPointer::read(&fixture.prefix)
+        .unwrap_err()
+        .to_string()
+        .contains("conflicts"));
+}
+
+#[test]
+fn system_locator_cannot_redirect_ordinary_readers_to_an_arbitrary_database() {
+    let fixture = Fixture::new();
+    let mut pointer = RegistrationPointer::new(&fixture.paths, "install-1".into()).unwrap();
+    pointer.scope = aw_package::database::Scope::System;
+    assert!(pointer.database_paths().is_err());
+    pointer.database_root = DatabasePaths::system().root;
+    assert_eq!(
+        pointer.database_paths().unwrap().scope(),
+        aw_package::database::Scope::System
+    );
+    pointer.scope = aw_package::database::Scope::Unknown;
+    assert!(pointer.database_paths().is_err());
 }

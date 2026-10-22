@@ -59,7 +59,7 @@ aw completion elvish
 
 ## 管理结果
 
-本地 bundle 的 `aw install`、`aw uninstall`、`aw list --installed`、`aw doctor`、
+本地 bundle 的 `aw install`、`aw uninstall`、`aw list --installed`、`aw doctor`、`aw recover`、
 `aw config init`、`aw config validate`、
 `aw config add-provider`、`aw config remove-provider`、`aw config add-event`、
 `aw config add-hook` 和 `aw config remove-hook` 支持局部 `--json`。
@@ -82,17 +82,18 @@ aw config validate --config "$HOME/aw/aw.yaml" --json
 
 `changed: false` 表示语义未变，保留原文件。安装结果包含所选前缀；配置生成结果
 包含配置路径和模板名，不返回 Provider 配置值，也不代表运行时已生效。
-`uninstalled` 表示所属包文件已移除，外部配置与状态保留。安装验证沿用现有
-Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
+`uninstalled` 表示所属包文件已移除，外部配置与状态保留。安装检查本地说明文件和
+文件内容，不代表发布者可信或原生 Agent 验收通过。
 
 操作失败返回退出码 1 和 `failed` 对象，其中 `error` 包含 `code` 与固定摘要
 `message`。错误码为 `io`、`invalid_json`、`invalid_yaml`、`package_contract`、
-`invalid_configuration` 和 `cancelled`，不复制底层原始错误。
+`invalid_configuration`、`cancelled`、`needs_recovery`、`package_in_use` 和
+`plan_blocked`，不复制底层原始错误。
 验证仅在离线执行；`policy_update_scope: true` 表示 `--against` 仅检查允许的编辑
 范围，不代表运行时生效。原 `aw validate` 输出保持不变。
 
 本地安装与卸载另提供 `mutation.committed`、`mutation.recovery` 和必要的
-`warnings`。`committed` 表示包文件和安装记录已越过既有提交点，不是崩溃持久性保证。
+`warnings`。`committed` 表示包文件和安装记录已越过持久数据库提交点。
 恢复状态为 `not_attempted`、`complete` 或 `incomplete`，仅覆盖本次操作跟踪的资源。
 `not_attempted` 不表示没有写入；`complete` 不证明整机状态。
 警告包含固定 `code`、资源 `path` 与可选的粗粒度 `io_kind`，不复制 I/O 错误字符串。
@@ -124,31 +125,97 @@ aw doctor --prefix "$AW_PREFIX" --json
 检查通过返回 0。两个命令都离线、只读，不创建目录或锁文件，不启动服务、
 执行 Provider 或更新安装记录。
 
+对于已登记的 raw 安装，`doctor` 还检查数据库位置文件和已有的安装锁；所有包卸载后
+保留的空安装也需要它们。缺失时会报告具体路径；清单仍保留中央数据库中的包信息，
+便于继续诊断。
+
 ### 安装记录保存在哪里
 
-省略 `--prefix` 时，两个命令读取当前用户的包数据库：
+省略 `--prefix` 时，两个命令读取所选包数据库，默认使用当前用户的数据库：
 `$XDG_STATE_HOME/aw/packages`；`XDG_STATE_HOME` 未设置或为空时，使用
 `$HOME/.local/state/aw/packages`。非空的 `XDG_STATE_HOME` 必须为绝对路径。
 这个数据库与 `aw.yaml` 中运行时使用的 `state_dir` 分开。
+`--scope system` 选择 `/var/lib/aw/packages`，这是 root 管理的 raw AW 数据库，
+不是 RPM 或 DEB 数据库。`sudo` 不会自动选择 scope。显式指定安装目录时，查询按
+目录中记录的位置读取数据库，不搜索其他目录。普通用户可读取可读的 system 数据库，
+并按 system 安装生成自己的 AW 配置。
 
 数据库的 `installed.json` 保存格式版本、记录更新编号和已安装包记录，包括包版本、
 安装目录、依赖和所属文件。已有的 `lock` 用于协调访问，`transactions/` 保存未完成的
 包操作。查询不会创建这些文件。数据库不存在时返回空清单；数据库已经存在但不完整、
 格式错误或版本不支持时返回错误。发现未完成事务时返回 `needs_recovery`，不自动恢复。
 
-已有 Preview 安装器仍把记录写入 `<prefix>/.aw-packages/*.json`，查询这些记录时需要
-显式指定绝对路径 `--prefix`。如果用户数据库已经登记该目录，以数据库记录为准；
-否则读取这个目录内的 `.aw-packages`。省略 `--prefix` 不会搜索旧安装。
-已登记目录中又出现相冲突的旧记录时，命令报错，不合并或悄悄丢弃记录。
+新安装在 `<prefix>/.aw-packages/aw-core.json` 中只保存数据库位置、scope 和安装编号。
+软件包信息以集中数据库为准，该文件必须与数据库对应，不能与旧组件记录共存。
+旧安装器会拒绝这种文件格式，并在改变文件前退出。
+
+旧 Preview 安装在 `<prefix>/.aw-packages/*.json` 中保存组件记录，查询时需要显式
+指定绝对路径 `--prefix`。省略 `--prefix` 不会搜索旧安装。已登记目录又出现相冲突
+的旧记录时，命令报错，不合并或悄悄丢弃记录。
 旧记录没有保存原安装范围，因此文本显示 `not recorded`，JSON 使用 `scope: unknown`。
-查询既不导入旧记录，也不改变安装器写记录的位置。这些命令尚不提供系统级包数据库
-管理或记录迁移。
+查询不导入旧记录。每次迁移尝试将原始 JSON 字节分别存档到所选数据库的
+`legacy/<installation_id>/<transaction_id>/`，提交成功后才把旧记录替换成唯一的位置
+文件。回滚尝试的存档单独保留，不会阻止旧安装器修改记录后的再次迁移。
+
+第一次写入旧安装时还会检查记录中的 AW 可执行文件是否与当前命令一致。
+不一致时会在迁移写入前返回 `runtime_unknown`，因为旧运行时尚不能参与新的包锁。
+请保留旧安装，将此 Preview 安装到新目录；当前不支持 core 原地升级。
 
 自动化检查可使用管理 JSON 输出。`doctor` 发现文件问题时返回 `status: failed`、
 `error.code: integrity_check`，问题列表保留在 `result.report.issues` 中。
 JSON 只写入 stdout，不另向 stderr 输出诊断。数据库或记录错误同样返回 1，不能把它们
 当作空安装或文件检查通过。局部 `--quiet`、`--verbose` 和 `--color` 与其他管理命令遵循
 相同规则。
+
+## 安装计划与恢复
+
+执行前先查看本地软件包的变更计划：
+
+```bash
+aw install --bundle /tmp/example-base --prefix "$AW_PREFIX" --dry-run --json
+aw install --bundle /tmp/example-base --prefix "$AW_PREFIX"
+aw install --bundle /tmp/example-mant --prefix "$AW_PREFIX"
+aw uninstall example.mant --prefix "$AW_PREFIX" --dry-run
+aw uninstall example.mant --prefix "$AW_PREFIX" --yes
+```
+
+以上示例使用 user scope。对于 root 管理的目录，加上 `--scope system`，并用 `sudo`
+执行写操作；预览本身不授予权限。计划列出包名、精确版本、增加或删除的文件、依赖和
+观察到的阻碍。无法执行的计划返回 1，带 `--dry-run` 时也一样。预览不创建安装目录、
+数据库、锁或恢复目录。执行时持有写锁并重新检查输入，过期计划不能授权改变后的文件。
+JSON 把这些信息保存在 `result.plan` 中，包括 `problems[].code` 和
+`problems[].message`。受阻计划使用 `error.code: plan_blocked`，同时保留计划；
+成功预览没有 mutation 报告。
+
+独立 bundle 包含 `package.json` 和 `payload/` 文件树。说明文件保存包名、SemVer
+版本、Linux 架构、每个文件的 SHA-256 和模式，以及精确依赖。普通工具无需声明
+Provider，也无需依赖 `aw-core`。例如 `example.mant` 可以使用自己的 `7.4.2` 版本，
+精确依赖 `example.base` 的 `2.1.0`。依赖必须位于所选安装目录中；命令不下载缺失包，
+也不从另一个安装目录选取依赖。Preview 包保留原有的同构建要求。暂不支持替换已安装
+的包或原地升级。
+每个包文件最多 1 GiB。安装或追加计划按实际校验过的已有文件与新文件字节计算，
+将同一安装目录中有记录的文件总量限制为 4 GiB。超限追加在任何写入前即被阻止，
+避免装入之后超出后续卸载所需的校验范围。
+同一目录最多保存 32767 个包属文件。计划还会核算恢复记录大小，
+超过其容量的操作会在改变包文件前被拒绝。
+
+卸载会检查所选数据库内的反向依赖，不删除没有记录归属的文件。文件被修改、缺失，
+或协作的 AW 运行时仍持有该目录时，卸载会拒绝执行。移除最后一个包后，空登记、
+数据库位置文件和目录锁仍保留，清单显示零个包。后续安装复用该目录，旧安装器仍不能写入。
+
+中断的操作会留下持久恢复记录。停止包写入操作后，选择对应的 scope 执行：
+
+```bash
+aw recover --json
+sudo aw recover --scope system --json
+```
+
+数据库已提交时，恢复会完成清理；未提交时则恢复之前的文件和记录。改变过或无法识别
+的文件会被保留并报告冲突，解决前请保留报告中的备份。存在未完成事务时，普通查询
+和包写操作返回 `needs_recovery`。恢复不执行 Provider，也不修复任意文件损坏。
+如果无法确认数据库发布已持久化，操作会报告恢复不完整并保留事务记录。
+恢复时会重新检查持久化条件，成功后才删除这些恢复依据。
+包数据库不代表运行中的实例清单。
 
 ## 终端输出
 
@@ -215,23 +282,28 @@ aw --version
 新包安装到新目录，再用新路径生成配置。保留旧安装目录和备份，便于回退；
 Preview 尚无跨版本数据迁移，升级时使用新的状态目录。
 
-回退时切回保留的旧安装目录与配置。新 core 只安装 `bin/aw`，旧独立安装器还要求
-`bin/aw-package`，不能把旧安装器复制到新目录继续管理。需要移除新安装时，
-使用该版本的 `aw uninstall --yes`，再决定是否安装旧包。
+回退时切回保留的旧安装目录与配置。新 core 只安装 `bin/aw`。已登记目录保存的数据库
+位置文件会被旧安装器拒绝，复制旧安装器不能让它继续管理新目录。请把该文件和数据库
+一并保留。
 
 卸载使用安装时的前缀。系统安装执行下列命令，个人安装去掉 `sudo`。
 
 ```bash
-sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --yes
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --scope system --yes
 ```
 
 卸载保留外部配置、审计和原生 Agent 数据。包文件被修改或缺失时会先报错，
 按提示处理，不要直接删除仍在使用的目录。
+当前运行时在使用已安装 CLI、Provider 及其进程期间持有包读锁，卸载会拒绝仍被持有的
+目录。如果记录中的 AW 可执行文件与执行卸载的命令不同，AW 无法确认旧运行时是否
+支持这些锁，即使文件完整也会在计划中报告 `runtime_unknown`。请保留该目录，等待受支持的
+迁移方式。这不会列举任意外部启动的程序，也不代表后续实例管理命令已经实现。
 
 ### 卸载确认
 
 `aw uninstall` 仅在 stdin 和 stderr 都连接终端、且未选 JSON 时，在 stderr
-显示 `Remove package-owned files from ...? [y/N]`。直接回车、回答 no 或 EOF
+显示 `Remove package-owned files from ...? [y/N]`。`--dry-run` 不询问确认，也不执行
+卸载。直接回车、回答 no 或 EOF
 都会拒绝卸载并退出 1；仅 `y` 或 `yes` 确认，不区分大小写并忽略首尾空白。
 等待提示时尚未开始包操作；此阶段 SIGINT 和 SIGTERM 分别返回 130、143，不开始卸载。
 

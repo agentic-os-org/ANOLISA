@@ -15,8 +15,12 @@ Tokenless 压缩工具返回给模型的文本，减少后续上下文占用。
 export AW_VERSION=0.1.0-preview.1
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
-sudo "./$AW_TOKENLESS_BUNDLE/aw" install --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
+sudo "./$AW_TOKENLESS_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
 ```
+
+这里沿用安装页的 system scope。若 core 安装在普通用户自己的前缀中，扩展包也应
+去掉 `sudo` 并使用 `--scope user`。core、每个扩展包和卸载都须使用同一个 scope；
+`sudo` 不会自动选择 system scope。
 
 已安装 all-in-one 时跳过这一步。包内包含 Tokenless CLI 和所需 RTK，
 无需另外安装 RTK、TOON、Python wheel 或 Tokenless 原生插件。

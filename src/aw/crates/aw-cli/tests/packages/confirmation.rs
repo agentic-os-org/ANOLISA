@@ -53,11 +53,16 @@ fn explicit_consent_preserves_integrity_checks() {
     );
     assert_eq!(output.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["error"]["code"], "package_contract");
+    assert_eq!(report["error"]["code"], "plan_blocked");
+    assert!(!report["result"]["plan"]["problems"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
     let f = Fixture::new();
     success(f.install().output().unwrap());
-    let output = Command::new(env!("CARGO_BIN_EXE_aw"))
+    let output = f
+        .command()
         .args(["uninstall", "--yes", "--prefix"])
         .arg(&f.prefix)
         .current_dir(&f.root)

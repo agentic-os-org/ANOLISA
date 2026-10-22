@@ -32,7 +32,8 @@ impl Fixture {
         let name = "bin/aw";
         let path = bundle.join("payload").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::copy("/bin/true", &path).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_aw"), &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         files.insert(
             name.into(),
             Payload {
@@ -72,6 +73,7 @@ impl Fixture {
     pub(super) fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aw"));
         command.current_dir(&self.root);
+        command.env("XDG_STATE_HOME", self.root.join("package-state"));
         command
     }
 
@@ -140,7 +142,7 @@ pub(super) fn invoke(command: &Command) -> aw_exec::Output {
             stdout_bytes: 65536,
             stderr_bytes: 65536,
         },
-        Instant::now() + Duration::from_secs(5),
+        Instant::now() + Duration::from_secs(30),
         &AtomicBool::new(false),
     )
     .unwrap()

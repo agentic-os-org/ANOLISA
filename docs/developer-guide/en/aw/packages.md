@@ -49,10 +49,17 @@ AW_PREVIEW_BUNDLE="aw-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_PREVIEW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
-sudo "./$AW_PREVIEW_BUNDLE/aw" install --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-The default build produces core only; `--component all` produces four packages. `aw-core` installs `bin/aw`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge, Tokenless CLI and pinned patched RTK; `aw-all-in-one` contains exactly the same three components. Every archive also carries a root-level `aw` for bootstrap, including Provider-only archives. For split installation, extract core and Provider and run each bundle's `aw install --bundle ABS_BUNDLE --prefix ABS_PREFIX` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
+These commands use system scope and record packages in `/var/lib/aw/packages`.
+Keep `--scope system` on every extension install and uninstall. For a prefix in a
+directory you own, omit `sudo` and use `--scope user` throughout instead. The
+default is user scope, even under `sudo`; it otherwise writes to the invoking
+process's XDG/HOME database. Ordinary-user `aw config init` follows the prefix's
+registration and can read a system installation without using root's home.
+
+The default build produces core only; `--component all` produces four packages. `aw-core` installs `bin/aw`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-provider-tokenless` contains its bridge, Tokenless CLI and pinned patched RTK; `aw-all-in-one` contains exactly the same three components. Every archive also carries a root-level `aw` for bootstrap, including Provider-only archives. For split installation, extract core and Provider and run each bundle's `aw install --scope system --bundle ABS_BUNDLE --prefix ABS_PREFIX` with `sudo` against the same new prefix, **core first**. Use the same scope for both packages. Do not install all-in-one into that prefix afterward.
 
 The installer verifies hashes, modes, architecture, version and source commit, refuses replacements and records ownership in `.aw-packages`. Ctrl-C (SIGINT) or SIGTERM during installation rolls back this invocation’s writes so installation can be retried; forced termination (SIGKILL) is outside automatic rollback. Checksums detect corruption; they are not publisher signatures. Install parents must belong to the installer user and must not be writable by other users. Root owns the system backend installation; when connecting to an existing backend, a user-owned prefix is also supported.
 
@@ -238,7 +245,7 @@ AW_PREVIEW_VERSION=0.1.0-preview.1
 AW_PREVIEW_PROVIDER="aw-provider-sec-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 tar -xzf "$AW_PREVIEW_PROVIDER.tar.gz"
-sudo "./$AW_PREVIEW_PROVIDER/aw" install --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_PROVIDER/aw" install --scope system --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
 In a separate terminal, start the installed backend as root. Keep it in the foreground; Ctrl-C stops it. Configuration and data stay outside the immutable package prefix.
@@ -342,7 +349,7 @@ Exit Qoder and stop the foreground OpenClaw Gateway with Ctrl-C, then stop AW. S
 
 ```bash
 "$AW_PREVIEW_PREFIX/bin/aw" stop --config "$AW_DEMO/aw.yaml"
-sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --prefix "$AW_PREVIEW_PREFIX" --yes
+sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --scope system --prefix "$AW_PREVIEW_PREFIX" --yes
 ```
 
 Uninstall preflights all owned files and refuses modified or missing payloads before deleting anything. If deletion fails or SIGINT/SIGTERM arrives before completion, it restores the files and installation records already removed so you can retry. SIGKILL is outside automatic restoration. If restoration also fails, diagnostics identify the retained backup and unrestored paths. Once all payloads and installation records are removed, uninstall succeeds even if backup cleanup fails; a warning identifies the remaining backup for manual removal. Unknown files, the prefix/lock, external configuration, credentials and audit data remain. Remove those only after checking that you no longer need them.

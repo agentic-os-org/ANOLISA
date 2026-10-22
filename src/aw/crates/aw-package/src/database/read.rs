@@ -79,6 +79,10 @@ pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<
         }
     }
     if let Some(prefix) = prefix.filter(|_| inventory.installations.is_empty()) {
+        require(
+            super::RegistrationPointer::read(prefix)?.is_none(),
+            "prefix registration has no matching installation in the selected database",
+        )?;
         if let Some((installation, lock)) = legacy::installation(prefix)? {
             for package in &installation.packages {
                 inventory._dependency_targets.insert((
@@ -100,14 +104,9 @@ pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<
     }
     if inventory.source == InventorySource::Database {
         for installation in &inventory.installations {
-            let legacy = installation.prefix.join(".aw-packages");
             // Listing records must survive a missing or inaccessible payload root.
             // Doctor reports those directory failures separately.
-            match paths::entries(&legacy) {
-                Ok(entries) => require(entries.is_empty(), format!("conflicting legacy package records at {}; finish migration before querying this registered installation", legacy.display()))?,
-                Err(Error::Io(error)) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied) || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {},
-                Err(error) => return Err(error),
-            }
+            super::check_registered(paths, &installation.prefix, &installation.installation_id)?;
         }
     }
     Ok(inventory)

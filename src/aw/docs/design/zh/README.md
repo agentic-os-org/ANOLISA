@@ -46,6 +46,7 @@ flowchart LR
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](providers/sec-core/sec-core-provider.md)，再读 [sec-core 健康检查](providers/sec-core/sec-core-health.md) |
 | Tokenless Provider | [接入参考](../../../../../docs/developer-guide/zh/aw/tokenless.md) |
 | 打包和配置编辑 | [构建指南](../../../../../docs/developer-guide/zh/aw/building.md)，再读[配置编辑](configuration/configuration-editing.md) |
+| 本地包数据库、预览、卸载和中断恢复 | [本地包管理](packaging/package-management.md) |
 | 只读查看状态 | [Provider 视图](providers/provider-views.md)，独立于 Hook 准入 |
 
 ## 审计、证据与能力计划

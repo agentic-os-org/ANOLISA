@@ -38,3 +38,8 @@ serde_yaml_ng = "0.10"
 sha2 = "0.10"
 thiserror = "2"
 shlex = "1"
+
+# Package acceptance repeatedly hashes real executables; keep that bounded work
+# practical in debug builds while retaining development checks in AW code.
+[profile.dev.package.sha2]
+opt-level = 3

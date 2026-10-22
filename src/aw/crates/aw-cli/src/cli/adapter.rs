@@ -2,9 +2,10 @@
 
 use super::{read_file, Arguments, Exit, Result};
 pub(super) use aw_adapter::*;
+use aw_exec::{CommandSpec, PackageLeases};
 use aw_service::Binding;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +39,45 @@ pub(super) fn install(args: &Arguments) -> Result<Exit> {
         .ok_or("configured Agent target not found")?;
     let adapter = select(name)?;
     super::run::install_signals()?;
+    let executable = std::env::current_exe()?;
+    let _core_package_leases = PackageLeases::for_paths([executable.clone()])?;
+    if !std::fs::metadata(&executable)?.is_file() {
+        return Err("current AW executable is no longer available".into());
+    }
+    let argv = config.as_value()["spec"]["agents"][target]["argv"]
+        .as_array()
+        .ok_or("Agent argv missing")?;
+    let program = argv
+        .first()
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Agent executable missing")?;
+    let mut command = CommandSpec {
+        program: program.into(),
+        args: argv
+            .iter()
+            .skip(1)
+            .map(|argument| {
+                argument
+                    .as_str()
+                    .map(OsString::from)
+                    .ok_or("invalid Agent argument")
+            })
+            .collect::<std::result::Result<_, _>>()?,
+        cwd: std::env::current_dir()?.canonicalize()?,
+        environment: std::env::vars_os().collect(),
+    };
+    // Persistent registration can invoke the configured Agent repeatedly; keep its files
+    // and the current AW executable protected until the Adapter has finished or cancelled.
+    let _agent_package_leases = PackageLeases::acquire([&mut command])?;
+    // The Adapter reads argv from its snapshot. Pin the same resolved program so a newly
+    // installed earlier PATH candidate cannot redirect execution outside the held leases.
+    let mut document = config.as_value().clone();
+    let program = command
+        .program
+        .to_str()
+        .ok_or("Agent executable path must be UTF-8 for persistent registration")?;
+    document["spec"]["agents"][target]["argv"][0] = program.into();
+    let config = aw_config::Validator::new()?.parse(&serde_json::to_vec(&document)?)?;
     let options = InstallOptions {
         target: target.into(),
         profile: args.flags.get("--native-profile").cloned(),

@@ -2,7 +2,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-pub(super) static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Cancellation shared by confirmation and package transaction handlers.
+pub(crate) static CANCEL: AtomicBool = AtomicBool::new(false);
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn interrupt(signal: libc::c_int) {

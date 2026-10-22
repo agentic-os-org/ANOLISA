@@ -1,4 +1,4 @@
-//! Package installation and configuration actions for the unified AW frontend.
+//! Offline configuration actions for the unified AW frontend.
 
 use crate::output::Outcome;
 use aw_package::{Error, Policy, Result, Settings};
@@ -73,40 +73,11 @@ fn configure(flags: &BTreeMap<String, String>, check_args: Vec<String>) -> Resul
     })
 }
 
-pub(crate) fn managed(
+pub(crate) fn configure_output(
     label: &'static str,
-    command: &str,
     flags: &BTreeMap<String, String>,
     arguments: Vec<String>,
     options: crate::output::Options,
 ) -> crate::cli::Result<crate::cli::Exit> {
-    if !matches!(command, "install" | "uninstall") {
-        return crate::output::complete(label, options, configure(flags, arguments));
-    }
-    let prefix = Path::new(flags.get("--prefix").ok_or("missing --prefix")?);
-    let outcome = if command == "install" {
-        Outcome::Installed {
-            prefix: prefix.into(),
-        }
-    } else {
-        Outcome::Uninstalled
-    };
-    let result = (|| -> aw_package::MutationResult {
-        signals::register().map_err(|error| aw_package::MutationFailure {
-            error: Error::Io(error),
-            report: aw_package::MutationReport::default(),
-        })?;
-        if command == "install" {
-            let bundle = flags
-                .get("--bundle")
-                .ok_or_else(|| aw_package::MutationFailure {
-                    error: Error::Invalid("missing --bundle".into()),
-                    report: aw_package::MutationReport::default(),
-                })?;
-            aw_package::install_reported(Path::new(bundle), prefix, &signals::CANCEL)
-        } else {
-            aw_package::uninstall_reported(prefix, &signals::CANCEL)
-        }
-    })();
-    crate::output::complete_mutation(label, options, outcome, result)
+    crate::output::complete(label, options, configure(flags, arguments))
 }

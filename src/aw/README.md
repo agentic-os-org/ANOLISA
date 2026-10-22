@@ -14,7 +14,7 @@ RPM. Follow the [installation guide](../../docs/user-guide/en/user-entrypoint/aw
 to install core or all-in-one, generate a configuration with `aw config init`,
 and run it.
 
-An existing AW installation can install an unpacked local Preview bundle with
+An existing AW installation can install an unpacked local bundle with
 `aw install --prefix ABS_DIR --bundle ABS_DIR`, edit it with `aw config`, and
 remove its owned files with `aw uninstall --prefix ABS_DIR --yes`. Native Hook
 registration uses `aw agent connect --config FILE --agent TARGET`. The legacy
@@ -24,6 +24,14 @@ includes `aw` at its root for first installation, using an explicit absolute
 `--bundle` path. Named components, direct URLs and system package backends are not
 supported by this Preview installer.
 
+Use `--dry-run` to inspect install or removal plans without creating files.
+`aw uninstall PACKAGE --prefix ABS_DIR --yes` removes selected packages after
+checking dependencies, file ownership and running references. New operations
+commit a local package database; `aw recover` resumes cleanup or rolls back an
+interrupted operation. User scope is the default. Root-managed raw installs
+require `sudo aw install ... --scope system`; privileges never select that scope
+implicitly. RPM/DEB support remains separate.
+
 Canonical removal asks for confirmation only with interactive stdin and stderr.
 Scripts and JSON output must use `aw uninstall --prefix ABS_DIR --yes` (or `-y`).
 Confirmation never overrides package checks or system permissions.
@@ -31,8 +39,13 @@ Confirmation never overrides package checks or system permissions.
 Use `aw list --installed --prefix ABS_DIR` to list packages recorded in an
 installation and `aw doctor --prefix ABS_DIR` to check their files. Both commands
 are read-only and accept `--json`. Without `--prefix`, they read the current
-user's installed-package database. Existing Preview installations still need an
-explicit prefix; queries do not import their `.aw-packages` records. See
+user's installed-package database. An explicit prefix follows its recorded
+database, including a system installation readable by an ordinary user. Old
+Preview installations still need an explicit prefix; queries do not import their
+`.aw-packages` records. A successful package write archives those old records
+and registers the prefix only when the recorded AW executable matches the
+current command. Otherwise, `runtime_unknown` blocks migration before writes;
+install the new AW build in a separate prefix. See
 [installed packages and file checks](../../docs/user-guide/en/user-entrypoint/aw/operations.md#installed-packages-and-file-checks).
 
 ```bash

@@ -72,7 +72,7 @@ Success returns 0; invalid syntax or an output-stream failure returns 1.
 ## Management reports
 
 Use command-local `--json` with local-bundle `aw install`, `aw uninstall`,
-`aw list --installed`, `aw doctor`,
+`aw list --installed`, `aw doctor`, `aw recover`,
 `aw config init`, `aw config validate`, `aw config add-provider`,
 `aw config remove-provider`, `aw config add-event`, `aw config add-hook` or
 `aw config remove-hook`. It does not apply to legacy native installation,
@@ -97,19 +97,20 @@ Success returns a typed `result`, for example:
 include the selected prefix; configuration generation includes its path and
 template name. Neither reports Provider configuration values or runtime
 activation. `uninstalled` means owned package removal succeeded; external
-configuration and state remain. Installation verification is the existing
-Preview package check, not publisher trust or native Agent acceptance.
+configuration and state remain. Installation verifies local descriptions and
+files; it does not establish publisher trust or native Agent acceptance.
 
 An operation failure returns exit code 1 and a `failed` object with an `error`
 containing `code` and a fixed summary `message`. Codes are `io`, `invalid_json`,
-`invalid_yaml`, `package_contract`, `invalid_configuration` and `cancelled`;
+`invalid_yaml`, `package_contract`, `invalid_configuration`, `cancelled`,
+`needs_recovery`, `package_in_use` and `plan_blocked`;
 raw library errors are not copied into this report. Validation is offline;
 `policy_update_scope: true` means `--against` checked only the permitted edit
 scope, not runtime activation. The original `aw validate` output remains unchanged.
 
 Local installation and removal also report `mutation.committed`,
-`mutation.recovery` and any `warnings`. `committed` identifies the existing
-commit point for package files and installation records, not crash durability. Recovery values are
+`mutation.recovery` and any `warnings`. `committed` identifies the
+durable database commit for package files and installation records. Recovery values are
 `not_attempted`, `complete` and `incomplete`, covering only this invocation's
 tracked resources. `not_attempted` does not mean zero writes; `complete` does
 not certify machine-wide state. Warning entries have a stable `code`, resource
@@ -149,12 +150,23 @@ does not repair them. A clean check returns 0. Both commands are offline and
 read-only: they do not create directories or lock files, start services, execute
 Providers or update installation records.
 
+For registered raw installations, `doctor` also requires the database locator
+and the existing installation lock, including after all packages have been
+removed. Missing management metadata is reported with its path; listing retains
+the central package facts so they remain available for diagnosis.
+
 ### Where records are stored
 
-Without `--prefix`, both commands read the current user's package database at
+Without `--prefix`, both commands read the selected package database. User scope
+is the default, at
 `$XDG_STATE_HOME/aw/packages`, or `$HOME/.local/state/aw/packages` when
 `XDG_STATE_HOME` is unset or empty. A nonempty `XDG_STATE_HOME` must be absolute.
 This database is separate from the runtime `state_dir` in `aw.yaml`.
+`--scope system` selects `/var/lib/aw/packages`. It is a root-managed raw AW
+database, not the RPM or DEB database. Scope is never inferred from `sudo`.
+With an explicit prefix, queries follow its recorded database locator instead;
+they do not search other directories. Ordinary users can read a system database
+and create their own AW configuration from a readable system prefix.
 
 The database's `installed.json` contains the schema version, database generation
 and installed-package records, including package versions, installation paths,
@@ -164,17 +176,29 @@ of these files. A missing database returns an empty list; an existing but
 incomplete, malformed or unsupported database returns an error. Unfinished
 transactions return `needs_recovery` rather than triggering automatic recovery.
 
-Existing Preview installers still write `<prefix>/.aw-packages/*.json`.
-Specify an absolute `--prefix` to query those records. If the user's database
-already records that prefix, its records are authoritative; otherwise the query
-reads `.aw-packages` in that directory. Competing old records at a registered
-prefix cause an error; the command does not merge or silently discard them.
+New installations store one locator at `<prefix>/.aw-packages/aw-core.json`.
+The central database owns the package facts; the locator only identifies its
+database, scope and installation ID. It must match the central record and cannot
+coexist with old component records. Historical installers reject this locator
+before changing their files.
+
+Older Preview installs have component records in `<prefix>/.aw-packages/*.json`.
+Specify an absolute `--prefix` to query them. Competing old records at a registered
+prefix cause an error; queries do not merge or silently discard them.
 Older records do not identify the original installation scope, so the text
 output shows `not recorded` and JSON uses `scope: unknown`.
 Omitting `--prefix` does not search for
-old installations. Queries neither import old records nor change which records
-the installer writes. System package database management and record migration
-are not available through these commands yet.
+old installations. Queries never import old records. Each migration attempt
+archives exact old JSON bytes under `legacy/<installation_id>/<transaction_id>/`
+in the selected database. A committed transaction replaces the old records with
+the sole locator; rolled-back attempts keep separate archives, so later changes
+made by an older installer do not block another migration attempt.
+
+The first write to an old installation also checks that its recorded AW
+executable matches the current command. A mismatch returns `runtime_unknown`
+before migration writes anything: that old runtime cannot yet participate in
+the new package locks. Keep the old installation and install this Preview in
+a new prefix. In-place core upgrades are not supported.
 
 For machine-readable checks, both commands use the management JSON envelope.
 A `doctor` file problem returns `status: failed`, `error.code: integrity_check`
@@ -182,6 +206,71 @@ and the findings in `result.report.issues`. The JSON remains on stdout with no
 separate stderr diagnostics. Database and record errors also return 1; do not
 treat them as an empty installation or a clean file check. The same local
 `--quiet`, `--verbose` and `--color` rules apply as to other management commands.
+
+## Package plans and recovery
+
+Inspect local package changes before executing them:
+
+```bash
+aw install --bundle /tmp/example-base --prefix "$AW_PREFIX" --dry-run --json
+aw install --bundle /tmp/example-base --prefix "$AW_PREFIX"
+aw install --bundle /tmp/example-mant --prefix "$AW_PREFIX"
+aw uninstall example.mant --prefix "$AW_PREFIX" --dry-run
+aw uninstall example.mant --prefix "$AW_PREFIX" --yes
+```
+
+These are user-scope examples. For a root-managed prefix, add `--scope system`
+and run writes with `sudo`; dry-run itself grants no privileges. Plans show
+package names and exact versions, added or removed files, dependencies and every
+observed blocker. A blocked plan returns 1, including with `--dry-run`. A dry run
+does not create a prefix, database, lock or recovery directory. Execution reads
+the inputs again while holding write locks, so a stale plan cannot authorize
+changed files.
+JSON keeps this information in `result.plan`, including `problems[].code` and
+`problems[].message`; a blocked plan uses `error.code: plan_blocked` while
+retaining the plan. A successful preview has no mutation report.
+
+Each independent bundle contains `package.json` and a `payload/` tree. The
+description records its package ID, SemVer version, Linux architecture, each
+file's SHA-256 and mode, and exact package requirements. A normal tool need not
+declare a Provider or depend on `aw-core`. For example, `example.mant` may require
+exactly `example.base` version `2.1.0`, while keeping its own version `7.4.2`.
+Requirements must exist in the selected prefix; the command neither downloads
+missing packages nor selects dependencies in another prefix. Preview bundles
+keep their existing same-build requirements. Package replacement and in-place
+upgrade are not supported.
+Each payload file is limited to 1 GiB. Installation and append plans limit the
+combined recorded payload in one prefix to 4 GiB, using bytes actually verified
+from existing and incoming files. An append beyond that limit is blocked before
+any write, so the resulting installation remains within the verification bound
+needed for later removal.
+One prefix may contain at most 32,767 package-owned files. Plans also budget
+the size of recovery records and reject operations beyond their capacity before
+changing package files.
+
+Removal checks reverse dependencies throughout the selected database and never
+deletes unrecorded files. It refuses modified or missing owned files and prefixes
+held by a cooperating AW runtime. After the last package is removed, the empty
+registration, locator and prefix lock remain. The list contains zero packages;
+a later install reuses that prefix without permitting an old installer to write it.
+
+An interrupted operation keeps durable recovery records. Stop package writers
+and run the matching scope:
+
+```bash
+aw recover --json
+sudo aw recover --scope system --json
+```
+
+Recovery finishes cleanup when the database already committed, otherwise it
+restores the previous files and records. Changed or unrecognized files are
+preserved and reported as conflicts; keep the reported backups until resolved.
+If database publication cannot be confirmed durable, the operation reports
+incomplete recovery and retains its journal. Recovery retries the required
+durability checks before removing that evidence.
+Normal package queries and writes report `needs_recovery` while unfinished
+transactions remain. Recovery does not execute a Provider or repair arbitrary
+file damage. The package database is not a runtime instance inventory.
 
 ## Terminal output
 
@@ -256,25 +345,32 @@ configuration with its paths. Keep the old installation directory and backups fo
 cross-version data migration, so use a new state directory when upgrading.
 
 To roll back, switch back to the preserved old installation and its configuration.
-New core packages install only `bin/aw`; the old standalone installer expects
-`bin/aw-package` too, so copying that installer into a new installation does not
-make it compatible. If you need to remove the new installation, use that version's
-`aw uninstall --yes` before deciding whether to install an older package.
+New core packages install only `bin/aw`. Registered prefixes contain a locator
+that old installers reject; copying an older installer there does not make it
+compatible. Keep the locator and its database together.
 
 Uninstall with the prefix used during installation. Use the command below for a system install;
 omit `sudo` for a personal install.
 
 ```bash
-sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --yes
+sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX" --scope system --yes
 ```
 
 Uninstall preserves external configuration, audit history and native Agent data. Modified or missing
 package files cause an error first. Follow the diagnostic instead of deleting a directory still in use.
+The current runtime holds package read locks while it uses the installed CLI,
+Providers and their processes. Removal refuses a held prefix. If the recorded
+AW executable differs from the command performing removal, AW cannot verify
+that older runtime's lock support and reports the plan problem `runtime_unknown`, even if its
+files are intact. Preserve that prefix until a supported migration is available.
+This does not enumerate arbitrary externally launched programs or implement the
+later instance-management commands.
 
 ### Confirm removal
 
 `aw uninstall` asks `Remove package-owned files from ...? [y/N]` on stderr only
-when stdin and stderr are both terminals and JSON is not selected. Pressing
+when stdin and stderr are both terminals and JSON is not selected. `--dry-run`
+does not ask for consent and never executes removal. Pressing
 Enter, answering no, or EOF declines removal with exit 1. Only `y` or `yes`
 (case-insensitive, ignoring surrounding whitespace) confirms it. The package
 operation has not started while the prompt is waiting. SIGINT and SIGTERM in

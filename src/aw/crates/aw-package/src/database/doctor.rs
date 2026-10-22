@@ -5,6 +5,7 @@ use crate::{Error, Payload, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    fs::File,
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -29,7 +30,7 @@ pub enum DoctorIssueCode {
     Nonregular,
     /// A read or metadata operation failed.
     Io,
-    /// The installation root is unsafe or has unexpected ownership.
+    /// An installation directory or management lock has unsafe ownership or permissions.
     Directory,
     /// An exact dependency target is absent from the recorded inventory.
     Dependency,
@@ -114,28 +115,13 @@ pub(super) fn check(inventory: &Inventory) -> Result<DoctorReport> {
                 message,
             );
         }
-        if installation.registration == Registration::Registered {
-            let legacy = installation.prefix.join(".aw-packages");
-            match paths::entries(&legacy) {
-                Ok(entries) if !entries.is_empty() => issue(
-                    &mut report,
-                    installation,
-                    None,
-                    &legacy,
-                    DoctorIssueCode::Directory,
-                    "legacy package records conflict with the central database".into(),
-                ),
-                Err(error) if !paths::missing(&error) => issue(
-                    &mut report,
-                    installation,
-                    None,
-                    &legacy,
-                    DoctorIssueCode::Directory,
-                    error.to_string(),
-                ),
-                _ => {}
-            }
-        }
+        let _prefix_lock = if installation.registration == Registration::Registered
+            && installation.manager == Manager::Raw
+        {
+            metadata(inventory, installation, &mut report)
+        } else {
+            None
+        };
         for package in &installation.packages {
             report.packages_checked += 1;
             for dependency in &package.dependencies {
@@ -192,6 +178,79 @@ pub(super) fn check(inventory: &Inventory) -> Result<DoctorReport> {
     }
     read::recheck(inventory)?;
     Ok(report)
+}
+
+fn metadata(
+    inventory: &Inventory,
+    installation: &Installation,
+    report: &mut DoctorReport,
+) -> Option<File> {
+    let paths = super::DatabasePaths {
+        root: inventory
+            .database_path
+            .parent()
+            .unwrap_or(Path::new("/"))
+            .into(),
+        scope: installation.scope,
+    };
+    let marker = installation.prefix.join(".aw-packages/aw-core.json");
+    if let Err(error) = super::registration::require_registered(
+        &paths,
+        &installation.prefix,
+        &installation.installation_id,
+    ) {
+        let code = if matches!(&error, Error::Invalid(_)) {
+            DoctorIssueCode::Directory
+        } else {
+            category(&error)
+        };
+        issue(report, installation, None, &marker, code, error.to_string());
+    }
+    // Listing may retain central facts after metadata loss. A raw installation cannot be
+    // called healthy without the locator and lock that make future mutations safe.
+    let lock_path = installation.prefix.join(".aw-install.lock");
+    match paths::lock(&lock_path) {
+        Ok(lock) => match lock.metadata() {
+            Ok(metadata)
+                if metadata.uid() == installation.owner_uid && metadata.mode() & 0o022 == 0 =>
+            {
+                Some(lock)
+            }
+            Ok(_) => {
+                issue(
+                    report,
+                    installation,
+                    None,
+                    &lock_path,
+                    DoctorIssueCode::Directory,
+                    "installation lock ownership or permissions changed".into(),
+                );
+                None
+            }
+            Err(error) => {
+                issue(
+                    report,
+                    installation,
+                    None,
+                    &lock_path,
+                    DoctorIssueCode::Io,
+                    error.to_string(),
+                );
+                None
+            }
+        },
+        Err(error) => {
+            issue(
+                report,
+                installation,
+                None,
+                &lock_path,
+                category(&error),
+                error.to_string(),
+            );
+            None
+        }
+    }
 }
 
 fn issue(

@@ -167,6 +167,7 @@ jobs:
           root="$(dirname "$PWD")"
           chmod 700 "$root"
           runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
+          export XDG_STATE_HOME="$runtime/package-state"
           trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
           bundle_dir() {
             local matches=( "$PWD/$1-"*/ )
@@ -195,7 +196,9 @@ jobs:
           "$security_bundle/aw" install --bundle "$security_bundle" --prefix "$root/split"
           "$tokenless_bundle/aw" install --bundle "$tokenless_bundle" --prefix "$root/split"
           "$combined_bundle/aw" install --bundle "$combined_bundle" --prefix "$root/combined"
-          diff -r "$root/split/.aw-packages" "$root/combined/.aw-packages"
+          "$combined_bundle/aw" list --installed --prefix "$root/split" --json > "$runtime/split.json"
+          "$combined_bundle/aw" list --installed --prefix "$root/combined" --json > "$runtime/combined.json"
+          python3 "$GITHUB_WORKSPACE/src/aw/scripts/compare_installed.py" "$runtime/split.json" "$runtime/combined.json"
           AW_TOKENLESS_TEST_CLI="$root/combined/libexec/aw/providers/tokenless/tokenless" \
           AW_TOKENLESS_TEST_RTK="$root/combined/libexec/aw/providers/tokenless/rtk" \
           TOKENLESS_STATS_ENABLED=0 TOKENLESS_SLS_ENABLED=0 \
@@ -207,7 +210,8 @@ jobs:
             -p aw-package --test installed -- --ignored
           # Preview upgrades use a new prefix; retain the old one for rollback.
           "$combined_bundle/aw" install --bundle "$combined_bundle" --prefix "$root/next"
-          diff -r "$root/combined/.aw-packages" "$root/next/.aw-packages"
+          "$combined_bundle/aw" list --installed --prefix "$root/next" --json > "$runtime/next.json"
+          python3 "$GITHUB_WORKSPACE/src/aw/scripts/compare_installed.py" "$runtime/combined.json" "$runtime/next.json"
           "$root/next/bin/aw" config init --prefix "$root/next" \
             --config "$runtime/next.yaml" --state-dir "$runtime/next-state" --qoder /bin/true
           "$root/next/bin/aw" config validate --config "$runtime/next.yaml"

@@ -125,6 +125,17 @@ impl Fixture {
             serde_json::to_vec(&value).unwrap(),
             0o644,
         );
+        let paths = aw_package::database::DatabasePaths::user(Some(&self.root.join("state")), None)
+            .unwrap();
+        let pointer =
+            aw_package::database::RegistrationPointer::new(&paths, "standalone-fixture".into())
+                .unwrap();
+        self.record(&self.prefix.join(".aw-install.lock"), b"", 0o600);
+        self.record(
+            &self.prefix.join(".aw-packages/aw-core.json"),
+            serde_json::to_vec(&pointer).unwrap(),
+            0o644,
+        );
         database
     }
 }
@@ -159,7 +170,9 @@ fn legacy_queries_preserve_every_file_and_do_not_create_a_database() {
     let before = snapshot(&fixture.root);
     for arguments in [
         vec!["list", "--installed", "--json"],
+        vec!["list", "--installed", "--scope", "user", "--json"],
         vec!["doctor", "--json"],
+        vec!["doctor", "--scope", "user", "--json"],
     ] {
         let output = fixture.run(&arguments, true);
         assert!(output.status.success(), "{:?}", output);
@@ -225,7 +238,7 @@ fn syntax_errors_never_create_state_or_claim_structured_results() {
         vec!["list", "--installed", "--installed"],
         vec!["doctor", "--repair", "--json"],
         vec!["doctor", "--json", "--quiet"],
-        vec!["doctor", "--scope", "system"],
+        vec!["doctor", "--scope", "machine"],
     ] {
         let output = fixture.run(&arguments, false);
         assert_eq!(output.status.code(), Some(1), "{:?}", output);

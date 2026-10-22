@@ -4,7 +4,9 @@ mod confirmation;
 mod discovery;
 mod dispatch;
 mod inventory;
+mod management;
 mod package;
+mod scope;
 #[cfg(test)]
 mod tests;
 mod validation;
@@ -19,7 +21,7 @@ use package::{Configure, Edit, Install, Show};
     about = "Run native Agents and manage local AW software and configuration",
     disable_help_subcommand = true,
     arg_required_else_help = true,
-    after_help = "Install accepts local unpacked Preview bundles only.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
+    after_help = "Install accepts local unpacked bundles with manifest.json or package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,14 +44,16 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local Preview bundle, or retain legacy native Hook connection
+    /// Install a local software bundle, or retain legacy native Hook connection
     Install(Install),
-    /// Remove owned files from one Preview installation prefix
+    /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),
     /// List recorded software installations without checking or changing their files
     List(inventory::List),
     /// Check installed software files without repairing or starting anything
     Doctor(inventory::Query),
+    /// Recover interrupted package operations from their durable local records
+    Recover(management::Recover),
     /// Connect a configured Agent's persistent native Hooks
     #[command(subcommand)]
     Agent(Agent),

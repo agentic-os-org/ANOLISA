@@ -8,6 +8,9 @@ use std::{
 
 #[cfg(target_os = "linux")]
 mod linux;
+mod packages;
+
+pub use packages::{LeaseError, PackageLeases};
 
 /// Explicit process context; arguments are literal and the environment is not inherited.
 ///

@@ -2,8 +2,16 @@
 
 #[path = "packages/confirmation.rs"]
 mod confirmation;
+#[path = "packages/management.rs"]
+mod management;
+#[path = "packages/metadata.rs"]
+mod metadata;
 #[path = "packages/output.rs"]
 mod output;
+#[path = "packages/registered.rs"]
+mod registered;
+#[path = "packages/scope.rs"]
+mod scope;
 #[path = "packages/support.rs"]
 mod support;
 #[path = "packages/terminal.rs"]
@@ -21,7 +29,9 @@ use support::{success, Fixture};
 
 fn failure(output: Output) -> String {
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    if !output.stdout.is_empty() {
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("Install plan for "));
+    }
     let diagnostic = String::from_utf8(output.stderr).unwrap();
     assert!(diagnostic.starts_with("aw:"), "{diagnostic}");
     assert!(!diagnostic.contains("panicked"));
@@ -31,7 +41,7 @@ fn failure(output: Output) -> String {
 #[test]
 fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     let f = Fixture::new();
-    assert!(success(f.install().output().unwrap()).contains("Installed verified AW components"));
+    assert!(success(f.install().output().unwrap()).contains("Installed verified packages"));
     let receipt = f.prefix.join(".aw-packages/aw-core.json");
     let original_receipt = fs::read(&receipt).unwrap();
     failure(f.install().output().unwrap());
@@ -61,7 +71,8 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
             .unwrap(),
     );
     assert!(!f.prefix.join("bin/aw").exists());
-    assert!(!receipt.exists());
+    let pointer: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    assert_eq!(pointer["schema_version"], 1);
     assert_eq!(fs::read(&f.config).unwrap(), original_config);
     assert_eq!(fs::read(f.state.join("retained")).unwrap(), b"runtime data");
     assert_eq!(
@@ -78,6 +89,7 @@ fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command
 
     let diagnostic = failure(
         Command::new(&bootstrap)
+            .env("XDG_STATE_HOME", f.root.join("package-state"))
             .args(["install", "--prefix"])
             .arg(&f.prefix)
             .output()
@@ -88,6 +100,7 @@ fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command
     assert!(!f.prefix.exists());
     success(
         Command::new(&bootstrap)
+            .env("XDG_STATE_HOME", f.root.join("package-state"))
             .args(["install", "--bundle"])
             .arg(&f.bundle)
             .arg("--prefix")
@@ -148,6 +161,7 @@ fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
     assert!(!bundle.join("payload/bin/aw").exists());
     success(
         Command::new(&bootstrap)
+            .env("XDG_STATE_HOME", f.root.join("package-state"))
             .args(["install", "--bundle"])
             .arg(&bundle)
             .arg("--prefix")
@@ -155,10 +169,18 @@ fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
             .output()
             .unwrap(),
     );
-    assert!(f
-        .prefix
-        .join(".aw-packages/aw-provider-tokenless.json")
-        .is_file());
+    assert_eq!(
+        fs::read_dir(f.prefix.join(".aw-packages")).unwrap().count(),
+        1
+    );
+    let installed = aw_package::database::Inventory::read(
+        &aw_package::database::DatabasePaths::user(Some(&f.root.join("package-state")), None)
+            .unwrap(),
+        Some(&f.prefix),
+    )
+    .unwrap();
+    assert_eq!(installed.installations[0].packages.len(), 2);
+    drop(installed);
     assert!(!f.prefix.join("bin/aw-package").exists());
     success(
         f.command()
@@ -343,6 +365,6 @@ fn package_help_uses_the_unified_frontend_name() {
             .output()
             .unwrap(),
     );
-    assert!(output.contains("Install a local Preview bundle"));
-    assert!(output.contains("local unpacked Preview bundles only"));
+    assert!(output.contains("Install a local software bundle"));
+    assert!(output.contains("manifest.json or package.json"));
 }

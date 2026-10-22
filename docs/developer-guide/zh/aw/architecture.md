@@ -25,11 +25,11 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
 | `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
 | `aw-provider` | 校验 Provider 消息和能力准入 | config |
-| `aw-exec` | 管理进程期限、输出上限和退出清理 | 无 |
+| `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
 | `aw-core` | 能力计划执行器、Host/Journal 接口和 FileJournal | contracts |
 | `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
-| `aw-package` | 可复用的安装与配置 API，以及 `aw-build` 构建工具 | config、exec |
+| `aw-package` | 本地包数据库、计划、持久事务和配置 API，以及 `aw-build` | config、exec |
 
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
 `aw-contracts`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
@@ -39,6 +39,28 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
 和失败回复。软件安装、配置和卸载全部使用同一棵 `aw` 命令树；
 移除另一个可执行文件不改变服务消息、Provider 效果或已有文件归属记录。
+
+### 本地软件包操作
+
+`aw-cli` 调用 `aw-package::plan` 检查本地 bundle 或所选卸载内容。计划保存包与版本
+决定、精确文件变更和阻碍；生成计划不创建安装目录、锁或数据库。`plan::execute`
+按数据库、安装目录的顺序重新获取写锁，复查记录并调用同一事务实现。
+持久替换 `installed.json` 表示提交。中断的操作需要显式执行 `aw recover`，完成
+已提交操作的清理，或恢复之前的文件，不覆盖发生冲突的字节。
+
+新软件包信息保存在 `$XDG_STATE_HOME/aw/packages`（有 HOME 回退路径），或显式的
+root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
+`.aw-packages/aw-core.json` 标明数据库位置，查询和生成配置按此读取，无需猜测另一个
+用户的 XDG 目录。首次成功写入软件包时存档旧组件 JSON，再替换成旧安装器会拒绝的
+位置文件。移除最后一个包后保留空登记和位置文件，便于安全重装。RPM/DEB 后端和
+跨安装目录选择依赖不属于本次实现。
+
+`aw-exec::PackageLeases` 为已知可执行文件和参数中的字面绝对路径持有已有的安装目录
+读锁。CLI 保留自身 core 与 Agent 的锁，服务保留自身可执行文件的锁，Host 在其生命
+周期及所属进程清理期间持有 Provider 的锁。这个共用库不依赖 `aw-package`，不读取
+集中清单，也不创建记录。它不能发现任意外部进程或 shell 动态生成的路径。包含无法
+核验读锁支持的旧 AW 可执行文件的目录仍拒绝卸载。见
+[本地包管理](../../../../src/aw/docs/design/zh/packaging/package-management.md)。
 
 ### 独立 Provider
 
@@ -97,6 +119,8 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
 | `crates/aw-core/src/journal.rs` | 持久审计实现 |
+| `crates/aw-package/src/{database,open_bundle,plan,transaction}.rs` | 包记录、本地包检查、预览和持久文件变更 |
+| `crates/aw-exec/src/packages.rs` | 运行时对已知安装文件持有读锁 |
 | `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
 | `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |
 | `crates/aw-adapter/src/` | 启动器与服务共用的原生方言、能力目录 |

@@ -48,6 +48,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Security Provider and backend readiness | [sec-core Provider](providers/sec-core/sec-core-provider.md), then [sec-core health](providers/sec-core/sec-core-health.md) |
 | Tokenless Provider | [Integration reference](../../../../../docs/developer-guide/en/aw/tokenless.md) |
 | Packaging and configuration editing | [Build guide](../../../../../docs/developer-guide/en/aw/building.md), then [Configuration editing](configuration/configuration-editing.md) |
+| Local package database, preview, removal and crash recovery | [Local package management](packaging/package-management.md) |
 | Read-only inspection | [Provider views](providers/provider-views.md); independent of Hook admission |
 
 ## Audit, evidence, and capability plans

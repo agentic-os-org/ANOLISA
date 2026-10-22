@@ -15,8 +15,12 @@ sec-core 在工具执行前检查命令。发现风险或必需检查失败时�
 export AW_VERSION=0.1.0-preview.1
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
-sudo "./$AW_SEC_BUNDLE/aw" install --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
+sudo "./$AW_SEC_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_SEC_BUNDLE" --prefix "$AW_PREFIX"
 ```
+
+这里沿用安装页的 system scope。若 core 安装在普通用户自己的前缀中，扩展包也应
+去掉 `sudo` 并使用 `--scope user`。core、每个扩展包和卸载都须使用同一个 scope；
+`sudo` 不会自动选择 system scope。
 
 AW 不会自动启动 sec-core。
 已有受管理后台时复用其 socket，例如 `/run/agent-sec-core/daemon.sock`。

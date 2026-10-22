@@ -5,12 +5,18 @@ use clap::Args;
 #[derive(Args, Debug, PartialEq)]
 #[group(multiple = true)]
 pub(super) struct Install {
-    /// Absolute destination for a local Preview bundle
+    /// Absolute installation directory for a local bundle
     #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile"])]
     pub prefix: Option<String>,
-    /// Absolute unpacked Preview bundle directory; no URL or RPM/DEB backend
+    /// Absolute unpacked bundle directory; no URL or RPM/DEB backend
     #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile"])]
     pub bundle: Option<String>,
+    /// Show packages, files and conflicts without creating or changing anything
+    #[arg(long, requires = "prefix", conflicts_with = "config")]
+    pub dry_run: bool,
+    /// Package database scope (default: user); system writes require root
+    #[arg(long, value_enum, requires = "prefix", conflicts_with = "config")]
+    pub scope: Option<super::scope::Scope>,
     /// Legacy native Hook connection; prefer aw agent connect
     #[arg(long, value_name = "FILE", requires = "agent", conflicts_with_all = ["json", "quiet", "verbose", "color"])]
     pub config: Option<String>,
@@ -26,7 +32,7 @@ pub(super) struct Install {
 
 #[derive(Args, Debug, PartialEq)]
 pub(super) struct Prefix {
-    /// Absolute immutable Preview installation prefix
+    /// Absolute software installation directory
     #[arg(long, value_name = "ABS_DIR")]
     pub prefix: String,
     #[command(flatten)]
@@ -35,8 +41,17 @@ pub(super) struct Prefix {
 
 #[derive(Args, Debug, PartialEq)]
 pub(super) struct Uninstall {
+    /// Package IDs to remove; omit to remove the entire installation
+    #[arg(value_name = "PACKAGE")]
+    pub packages: Vec<String>,
     #[command(flatten)]
     pub prefix: Prefix,
+    /// Show removal and blockers without changing files or asking for confirmation
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Package database scope (default: user); system writes require root
+    #[arg(long, value_enum)]
+    pub scope: Option<super::scope::Scope>,
     /// Confirm this removal; does not override ownership, integrity or permissions
     #[arg(short = 'y', long)]
     pub yes: bool,

@@ -22,8 +22,9 @@ invalid vectors and command failures return nonzero. Each command has a timeout 
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
-The database and inventory query targets also run under child umasks `0022` and
-`0002`. Give fixtures explicit permissions; do not change a parallel test process's umask.
+The database, inventory, transaction, runtime-lease and package CLI tests also
+run under child umasks `0022` and `0002`. Give fixtures and copied executables
+explicit permissions; do not change a parallel test process's umask.
 
 These checks run as a regular user without an Agent or service login. Cargo
 downloads uncached dependencies; schema validation reads only bundled resources.
@@ -205,6 +206,25 @@ caches do not require weaker native admission. A full run failure is not convert
 success by retrying or omitting a framework.
 
 ## Crate boundaries
+
+Local package changes enter `aw-package::plan`, which derives a read-only plan,
+then `plan::execute` uses the shared durable transaction backend. Queries and
+dry runs must not create records or locks. Exercise these paths on Linux:
+
+```bash
+cargo test --locked -p aw-package --test management --test database
+cargo test --locked -p aw-package transaction::tests
+cargo test --locked -p aw-exec --test packages
+```
+
+The package tests cover independent tools, exact same-prefix dependencies,
+legacy record archival, conflicts and replay. Package leases in `aw-exec` are
+reused by the CLI, service and Host without adding a runtime dependency on the
+package database. Keep database-before-prefix lock ordering in mutation and
+configuration publication. System scope is explicit raw management, not a native
+package backend. See [local package management](docs/design/en/packaging/package-management.md)
+for commit/recovery rules and remaining runtime discovery limits. The focused
+commands do not replace the full AW gate or native acceptance.
 
 Framework crates live in `src/aw/crates/<name>/`, concrete Providers in
 the repository-root `providers/<provider>/` with independent workspaces; the root manifest only organizes the workspace. See

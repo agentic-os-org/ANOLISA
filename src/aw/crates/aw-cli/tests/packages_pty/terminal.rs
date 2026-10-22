@@ -16,6 +16,13 @@ fn captured(command: &Command, mode: &str, no_color: bool, term: &str) -> Value 
         .current_dir(command.get_current_dir().unwrap())
         .env("TERM", term)
         .env_remove("NO_COLOR");
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            wrapper.env(name, value);
+        } else {
+            wrapper.env_remove(name);
+        }
+    }
     if no_color {
         wrapper.env("NO_COLOR", "1");
     }

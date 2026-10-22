@@ -80,14 +80,18 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let bundle = root.join("bundle");
     let mut files = std::collections::BTreeMap::new();
-    // Enough small owned files to observe an actual deletion before signalling.
+    // Per-file journal fsyncs leave a bounded window to observe deletion before signalling.
     for name in ["bin/aw".to_string()]
         .into_iter()
-        .chain((0..4096).map(|index| format!("share/doc/file-{index:04}")))
+        .chain((0..64).map(|index| format!("share/doc/file-{index:04}")))
     {
         let path = bundle.join("payload").join(&name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, &name).unwrap();
+        if name == "bin/aw" {
+            fs::copy(env!("CARGO_BIN_EXE_aw"), &path).unwrap();
+        } else {
+            fs::write(&path, &name).unwrap();
+        }
         files.insert(
             name,
             aw_package::Payload {
@@ -124,6 +128,10 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
         let log = root.join(format!("stderr-{signal}"));
         let mut child = Installer(
             Command::new(env!("CARGO_BIN_EXE_aw"))
+                .env(
+                    "XDG_STATE_HOME",
+                    root.join(format!("package-state-{signal}")),
+                )
                 .args(["uninstall", "--yes"])
                 .arg("--prefix")
                 .arg(&prefix)
@@ -149,13 +157,15 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
         }
         // SAFETY: this is the unreaped child owned by the test.
         assert_eq!(unsafe { libc::kill(child.0.id() as i32, signal) }, 0);
+        let rollback_deadline = Instant::now() + Duration::from_secs(45);
         let status = loop {
             if let Some(status) = child.0.try_wait().unwrap() {
                 break status;
             }
             assert!(
-                Instant::now() < deadline,
-                "uninstaller did not restore files"
+                Instant::now() < rollback_deadline,
+                "uninstaller did not restore files: {}",
+                fs::read_to_string(&log).unwrap()
             );
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -179,8 +189,23 @@ fn termination_signals_restore_cli_uninstall_and_allow_retry() {
             .file_name()
             .to_string_lossy()
             .starts_with("uninstall-")));
-        aw_package::uninstall(&prefix).unwrap();
-        assert!(!receipt.exists());
+        let retried = Command::new(env!("CARGO_BIN_EXE_aw"))
+            .env(
+                "XDG_STATE_HOME",
+                root.join(format!("package-state-{signal}")),
+            )
+            .args(["uninstall", "--yes", "--prefix"])
+            .arg(&prefix)
+            .output()
+            .unwrap();
+        assert!(
+            retried.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retried.stderr)
+        );
+        let pointer: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(pointer["schema_version"], 1);
         assert!(component
             .files
             .keys()
@@ -206,12 +231,13 @@ fn termination_signals_roll_back_cli_install_and_allow_retry() {
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let bundle = root.join("bundle");
     fs::create_dir_all(bundle.join("payload/bin")).unwrap();
-    // A large first payload leaves time to deliver a real signal after creation.
+    // A large payload leaves time to signal after the registration gate is published.
     let source = bundle.join("payload/bin/aw");
     fs::File::create(&source)
         .unwrap()
         .set_len(128 * 1024 * 1024)
         .unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
     let files: std::collections::BTreeMap<_, _> = ["bin/aw"]
         .into_iter()
         .map(|name| {
@@ -248,6 +274,10 @@ fn termination_signals_roll_back_cli_install_and_allow_retry() {
         let log = root.join(format!("stderr-{signal}"));
         let mut child = Installer(
             Command::new(env!("CARGO_BIN_EXE_aw"))
+                .env(
+                    "XDG_STATE_HOME",
+                    root.join(format!("package-state-{signal}")),
+                )
                 .arg("install")
                 .arg("--bundle")
                 .arg(&bundle)
@@ -264,13 +294,17 @@ fn termination_signals_roll_back_cli_install_and_allow_retry() {
             signal
         );
         let deadline = Instant::now() + Duration::from_secs(60);
-        let destination = prefix.join("bin/aw");
-        while !destination.metadata().is_ok_and(|m| m.len() > 0) {
+        let gate = prefix.join(".aw-packages/aw-core.json");
+        while !gate.is_file() {
             assert!(
                 child.0.try_wait().unwrap().is_none(),
-                "installer exited before signal"
+                "installer exited before signal: {}",
+                fs::read_to_string(&log).unwrap()
             );
-            assert!(Instant::now() < deadline, "installer did not start copying");
+            assert!(
+                Instant::now() < deadline,
+                "installer did not publish its registration gate"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         // SAFETY: this is the live child we own; no process-group or pattern targeting.

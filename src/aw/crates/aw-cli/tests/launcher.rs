@@ -9,6 +9,8 @@ mod hermes_trust;
 mod policy_update;
 #[path = "launcher/qoder_version.rs"]
 mod qoder_version;
+#[path = "launcher/registration_packages.rs"]
+mod registration_packages;
 #[path = "launcher/runtime_policy.rs"]
 mod runtime_policy;
 #[path = "launcher/support.rs"]

@@ -1,4 +1,4 @@
-"""The gate must run both query suites under isolated child umasks."""
+"""The gate must run package readers, transactions and leases under child umasks."""
 
 import importlib.util
 import json
@@ -42,20 +42,24 @@ class QueryPermissionTests(unittest.TestCase):
         executable.chmod(0o700)
         return root, root / "calls.jsonl"
 
-    def test_both_targets_run_under_both_masks_without_changing_the_parent(self) -> None:
+    def test_package_targets_run_under_both_masks_without_changing_the_parent(self) -> None:
         root, capture = self.fixture()
         before = root / "parent-before"
         before.write_text("parent mode")
         with patch.object(gate, "AW", root), patch.dict(os.environ, {"PATH": str(root)}):
-            gate.query_permissions()
+            gate.package_permissions()
         after = root / "parent-after"
         after.write_text("parent mode")
         self.assertEqual(stat.S_IMODE(before.stat().st_mode), stat.S_IMODE(after.stat().st_mode))
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
         self.assertEqual(calls, [
-            [["test", "--locked", "-p", package, "--test", target], mode]
+            [["test", "--locked", "-p", package, selector, target], mode]
             for mode in (0o644, 0o664)
-            for package, target in (("aw-package", "database"), ("aw-cli", "inventory"))
+            for package, selector, target in (
+                ("aw-package", "--test", "database"), ("aw-cli", "--test", "inventory"),
+                ("aw-package", "--lib", "transaction::tests"),
+                ("aw-exec", "--test", "packages"), ("aw-cli", "--test", "packages"),
+            )
         ])
 
     def test_a_failure_in_the_group_writable_mask_fails_the_gate(self) -> None:
@@ -63,10 +67,10 @@ class QueryPermissionTests(unittest.TestCase):
         with patch.object(gate, "AW", root), patch.dict(
             os.environ, {"PATH": str(root), "FAIL_GROUP_WRITABLE": "1"}
         ), self.assertRaises(subprocess.CalledProcessError) as failure:
-            gate.query_permissions()
+            gate.package_permissions()
         self.assertEqual(failure.exception.returncode, 7)
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 6)
         self.assertEqual(calls[-1][1], 0o664)
 
 

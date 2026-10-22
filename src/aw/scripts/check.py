@@ -174,14 +174,18 @@ sys.exit(not result.wasSuccessful())
     )
 
 
-def query_permissions() -> None:
-    """Exercise both query targets under child-local deployment umasks."""
+def package_permissions() -> None:
+    """Exercise package readers, transactions and leases under child-local umasks."""
+    commands = [
+        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "database"],
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "inventory"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--lib", "transaction::tests"],
+        ["cargo", "test", "--locked", "-p", "aw-exec", "--test", "packages"],
+        ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "packages"],
+    ]
     for mask in (0o022, 0o002):
-        for package, target in (("aw-package", "database"), ("aw-cli", "inventory")):
-            run(
-                ["cargo", "test", "--locked", "-p", package, "--test", target],
-                AW, timeout=120, umask=mask,
-            )
+        for command in commands:
+            run(command, AW, timeout=120, umask=mask)
 
 
 def check() -> None:
@@ -210,10 +214,13 @@ def check() -> None:
     structure(metadata, AW)
     for root in [AW, *provider_roots]:
         run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
+    from check_legacy_cli import prepare_legacy_cli
+
+    os.environ["AW_LEGACY_PACKAGE_CLI"] = str(prepare_legacy_cli(AW, REPO, run))
     check_inventory(metadata)
     for root in [AW, *provider_roots]:
-        run(["cargo", "test", "--workspace", "--locked"], root)
-    query_permissions()
+        run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)
+    package_permissions()
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
     for root in [AW, *provider_roots]:
         run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)

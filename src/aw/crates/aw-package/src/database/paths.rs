@@ -61,9 +61,25 @@ impl DatabasePaths {
     pub fn installed(&self) -> PathBuf {
         self.root.join("installed.json")
     }
+
+    /// Explicit privilege boundary selected for this database.
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    /// Resolve an existing prefix's explicit registration without searching other databases.
+    ///
+    /// # Errors
+    /// Rejects malformed, conflicting or unsafe registration pointers.
+    pub fn for_prefix(&self, prefix: &Path) -> Result<Self> {
+        match super::RegistrationPointer::read(prefix)? {
+            Some(pointer) => pointer.database_paths(),
+            None => Ok(self.clone()),
+        }
+    }
 }
 
-pub(super) fn absolute(path: &Path) -> Result<()> {
+pub(crate) fn absolute(path: &Path) -> Result<()> {
     require(
         path.is_absolute()
             && path
@@ -94,7 +110,7 @@ fn open_at(parent: &File, name: &std::ffi::OsStr, directory: bool) -> Result<Fil
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-pub(super) fn directory(path: &Path) -> Result<File> {
+pub(crate) fn directory(path: &Path) -> Result<File> {
     absolute(path)?;
     let mut held = File::open("/")?;
     for part in path.components() {
@@ -105,7 +121,7 @@ pub(super) fn directory(path: &Path) -> Result<File> {
     Ok(held)
 }
 
-pub(super) fn opened(path: &Path) -> Result<File> {
+pub(crate) fn opened(path: &Path) -> Result<File> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::Invalid("package file has no parent".into()))?;
@@ -115,7 +131,7 @@ pub(super) fn opened(path: &Path) -> Result<File> {
     open_at(&directory(parent)?, name, false)
 }
 
-pub(super) fn regular(path: &Path) -> Result<File> {
+pub(crate) fn regular(path: &Path) -> Result<File> {
     let file = opened(path)?;
     require(
         file.metadata()?.is_file(),
@@ -124,7 +140,7 @@ pub(super) fn regular(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-pub(super) fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
+pub(crate) fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut file = regular(path)?;
     let before = file.metadata()?;
     require(
@@ -150,7 +166,7 @@ pub(super) fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn lock(path: &Path) -> Result<File> {
+pub(crate) fn lock(path: &Path) -> Result<File> {
     let file = regular(path)?;
     require(
         file.metadata()?.nlink() == 1,
@@ -164,7 +180,7 @@ pub(super) fn lock(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-pub(super) fn same(path: &Path, held: &Metadata) -> Result<()> {
+pub(crate) fn same(path: &Path, held: &Metadata) -> Result<()> {
     let current = regular(path)?.metadata()?;
     require(
         current.ino() == held.ino() && current.dev() == held.dev(),
@@ -175,7 +191,7 @@ pub(super) fn same(path: &Path, held: &Metadata) -> Result<()> {
     )
 }
 
-pub(super) fn entries(path: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn entries(path: &Path) -> Result<Vec<PathBuf>> {
     let held = directory(path)?;
     let before = held.metadata()?;
     let entries = fs::read_dir(path)?
@@ -197,6 +213,6 @@ pub(super) fn entries(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
-pub(super) fn missing(error: &Error) -> bool {
+pub(crate) fn missing(error: &Error) -> bool {
     matches!(error, Error::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
 }

@@ -52,8 +52,10 @@ out-of-tree Provider builds against pinned public AW libraries. Third parties
 need only the public process protocol and YAML, not a Rust SDK or OS checkout.
 The bundled implementations still use local SDK paths. Preview delivers one
 build set and checks matching versions and source commits for common origin.
-Independent SDK publication and installation compatibility changes are a later
-stage, including installation-record migration tests. Preserve existing package and binary
+Independent SDK publication and native RPM/DEB delivery remain later work.
+Local package changes use the central database, read-only plans and durable
+recovery in `aw-package`; the Linux gate builds a pinned historical installer
+to verify record migration. Preserve existing package and binary
 names when moving source directories. New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.

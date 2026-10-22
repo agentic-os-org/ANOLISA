@@ -75,23 +75,16 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                     ]),
                 )
             } else {
-                package(
-                    "install",
-                    options([("prefix", value.prefix), ("bundle", value.bundle)]),
-                    value.output,
-                )
+                super::management::install(value)
             }
         }
         Command::Uninstall(value) => match super::confirmation::check(&value)? {
             Some(reason) => crate::output::unconfirmed(value.prefix.output, reason),
-            None => package(
-                "uninstall",
-                options([("prefix", Some(value.prefix.prefix))]),
-                value.prefix.output,
-            ),
+            None => super::management::uninstall(value),
         },
         Command::List(value) => super::inventory::run("list", value.query),
         Command::Doctor(value) => super::inventory::run("doctor", value),
+        Command::Recover(value) => super::management::recover(value),
         Command::Agent(Agent::Connect(value)) => crate::runtime("install", &native(value)),
         Command::Config(value) => config(value),
         Command::Service(value) => service(value),
@@ -151,18 +144,8 @@ pub(super) fn run(command: Command) -> Result<Exit> {
     }
 }
 
-fn package(action: &'static str, args: Arguments, output: crate::output::Options) -> Result<Exit> {
-    crate::package::managed(
-        if action == "configure" {
-            "config init"
-        } else {
-            action
-        },
-        action,
-        &args.flags,
-        args.native,
-        output,
-    )
+fn configure(args: Arguments, output: crate::output::Options) -> Result<Exit> {
+    crate::package::configure_output("config init", &args.flags, args.native, output)
 }
 
 fn config(command: Config) -> Result<Exit> {
@@ -183,7 +166,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("reason-code", value.reason_code),
             ]);
             args.native = value.arguments;
-            return package("configure", args, value.prefix.output);
+            return configure(args, value.prefix.output);
         }
         Config::Show(value) => (
             "show",

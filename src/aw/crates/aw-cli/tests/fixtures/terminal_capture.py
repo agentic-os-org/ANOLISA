@@ -28,7 +28,8 @@ def capture() -> dict:
     finally:
         os.close(writer)
     try:
-        pipe_stdout, pipe_stderr = process.communicate(timeout=3)
+        # Installation verifies the real CLI payload and fsyncs its transaction.
+        pipe_stdout, pipe_stderr = process.communicate(timeout=20)
         stdout = bytearray(pipe_stdout or b"")
         stderr = pipe_stderr or b""
         if reader is not None:

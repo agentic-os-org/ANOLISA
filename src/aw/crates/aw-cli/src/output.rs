@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+mod plans;
 mod queries;
 mod terminal;
 
@@ -55,6 +56,13 @@ pub(crate) enum Outcome {
     PackageFilesChecked {
         report: aw_package::database::DoctorReport,
     },
+    PackagePlanned {
+        plan: Box<aw_package::plan::PackagePlan>,
+    },
+    PackageRecovered {
+        database_path: PathBuf,
+        report: aw_package::transaction::RecoveryReport,
+    },
 }
 
 #[derive(Serialize)]
@@ -70,6 +78,8 @@ enum ErrorCode {
     ConfirmationDeclined,
     NeedsRecovery,
     IntegrityCheck,
+    PlanBlocked,
+    PackageInUse,
 }
 
 #[derive(Serialize)]
@@ -86,7 +96,13 @@ impl From<&aw_package::Error> for Diagnostic {
         // Library details can contain a schema value or private configuration.
         // This deliberately coarse public mapping does not inspect error text.
         let (code, message) = match error {
-            Error::Io(_) => (ErrorCode::Io, "A filesystem or process operation failed"),
+            Error::InUse(_) => (
+                ErrorCode::PackageInUse,
+                "The installation is still in use by AW or another package operation",
+            ),
+            Error::Io(_) | Error::Filesystem { .. } => {
+                (ErrorCode::Io, "A filesystem or process operation failed")
+            }
             Error::Json(_) => (ErrorCode::InvalidJson, "Package JSON processing failed"),
             Error::Yaml(_) => (
                 ErrorCode::InvalidYaml,
@@ -99,7 +115,7 @@ impl From<&aw_package::Error> for Diagnostic {
             Error::Cancelled => (ErrorCode::Cancelled, "The package operation was cancelled"),
             Error::NeedsRecovery(_) => (
                 ErrorCode::NeedsRecovery,
-                "A package operation needs recovery before this query can continue",
+                "A package operation needs recovery before another package operation can continue",
             ),
         };
         Self {
@@ -142,6 +158,11 @@ enum ResultView<'a> {
     },
     #[serde(rename = "failed")]
     CheckFailed {
+        error: Diagnostic,
+        result: &'a Outcome,
+    },
+    #[serde(rename = "partial")]
+    RecoveryPartial {
         error: Diagnostic,
         result: &'a Outcome,
     },
@@ -206,6 +227,12 @@ pub(crate) fn unconfirmed(
 fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     if matches!(
         outcome,
+        Outcome::PackagePlanned { .. } | Outcome::PackageRecovered { .. }
+    ) {
+        return plans::human(outcome, options);
+    }
+    if matches!(
+        outcome,
         Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. }
     ) {
         return queries::human(outcome, options);
@@ -216,7 +243,7 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     let mut stdout = std::io::stdout().lock();
     let summary = match outcome {
         Outcome::Installed { prefix } => format!(
-            "Installed verified AW components in {}",
+            "Installed verified packages in {}",
             terminal::escape(&prefix.to_string_lossy())
         ),
         Outcome::Configured {
@@ -228,7 +255,7 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             terminal::escape(provider_template)
         ),
         Outcome::Uninstalled => {
-            "Removed AW package files; external configuration and state retained".into()
+            "Removed package files; external configuration and state retained".into()
         }
         Outcome::ConfigurationEdited { changed: true } => "Updated configuration".into(),
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
@@ -241,13 +268,16 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
         Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
             return queries::human(outcome, options);
         }
+        Outcome::PackagePlanned { .. } | Outcome::PackageRecovered { .. } => {
+            return plans::human(outcome, options)
+        }
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
     if options.verbose {
         let detail = match outcome {
             Outcome::Installed { .. } => {
-                "Package files and receipts were published; no runtime activation was requested."
+                "Package files and database records were published; no runtime activation was requested."
             }
             Outcome::Configured { .. } => {
                 "Configuration was created offline; no service reload was requested."
@@ -266,6 +296,9 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             }
             Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
                 "Installed-package records were read without changing files."
+            }
+            Outcome::PackagePlanned { .. } | Outcome::PackageRecovered { .. } => {
+                unreachable!("package plans and recovery use their own presentation above")
             }
         };
         writeln!(std::io::stderr().lock(), "{detail}")?;
@@ -371,18 +404,40 @@ fn complete_result(
     }
     match result {
         Ok(outcome) => {
-            let unhealthy =
-                matches!(&outcome, Outcome::PackageFilesChecked { report } if !report.healthy());
+            let problem = match &outcome {
+                Outcome::PackageFilesChecked { report } if !report.healthy() => Some(Diagnostic {
+                    code: ErrorCode::IntegrityCheck,
+                    message: "Installed software checks found problems or could not be completed",
+                    recovery_path: None,
+                }),
+                Outcome::PackagePlanned { plan } if !plan.ready() => Some(Diagnostic {
+                    code: ErrorCode::PlanBlocked,
+                    message: "Package changes are blocked; inspect the plan problems",
+                    recovery_path: None,
+                }),
+                Outcome::PackageRecovered {
+                    database_path,
+                    report,
+                } if !report.conflicts.is_empty() => Some(Diagnostic {
+                    code: ErrorCode::NeedsRecovery,
+                    message: "Recovery retained conflicting files for explicit inspection",
+                    recovery_path: database_path.parent().map(|path| path.join("transactions")),
+                }),
+                _ => None,
+            };
+            let unhealthy = problem.is_some();
             if options.json {
-                let result = if unhealthy {
-                    ResultView::CheckFailed {
-                        error: Diagnostic {
-                            code: ErrorCode::IntegrityCheck,
-                            message:
-                                "Installed software checks found problems or could not be completed",
-                            recovery_path: None,
-                        },
-                        result: &outcome,
+                let result = if let Some(error) = problem {
+                    if matches!(outcome, Outcome::PackageRecovered { .. }) {
+                        ResultView::RecoveryPartial {
+                            error,
+                            result: &outcome,
+                        }
+                    } else {
+                        ResultView::CheckFailed {
+                            error,
+                            result: &outcome,
+                        }
                     }
                 } else {
                     ResultView::Succeeded { result: &outcome }
@@ -434,6 +489,11 @@ mod tests {
         for error in [
             aw_package::Error::Invalid("private-api-key\u{1b}[2J".into()),
             aw_package::Error::Io(std::io::Error::other("private-api-key")),
+            aw_package::Error::Filesystem {
+                operation: "openat(O_TMPFILE)",
+                path: PathBuf::from("/private-api-key"),
+                source: std::io::Error::other("private-api-key"),
+            },
             aw_package::Error::Json(serde_json::from_str::<u8>("\"private-api-key\"").unwrap_err()),
             aw_package::Error::Yaml(serde_yaml_ng::from_str::<u8>("private-api-key").unwrap_err()),
         ] {

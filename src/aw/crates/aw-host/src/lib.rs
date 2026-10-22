@@ -14,7 +14,7 @@ pub use report::{
 };
 
 use aw_config::{Configuration, Validator};
-use aw_exec::{CommandSpec, Limits};
+use aw_exec::{CommandSpec, Limits, PackageLeases};
 use aw_provider::{
     admission::{self, AdapterCapabilities, AdmittedStep, ProviderEvidence},
     Protocol, Reply, MAX_MESSAGE_BYTES, VERSION,
@@ -65,6 +65,9 @@ pub enum Error {
     /// Preparation or event creation exceeded its limit or was cancelled.
     #[error(transparent)]
     Execution(#[from] aw_exec::Error),
+    /// A referenced installed package cannot be protected from concurrent mutation.
+    #[error(transparent)]
+    PackageLease(#[from] aw_exec::LeaseError),
     /// A preparation exchange failed; includes exact call correlation and status.
     #[error(transparent)]
     Call(Box<CallFailure>),
@@ -88,7 +91,8 @@ struct Provider {
 /// Immutable configuration, process context and admitted steps for one Agent target.
 ///
 /// Construct a new Host when configuration, Adapter evidence or process context
-/// changes. This binding pins values, not executable files or imported code.
+/// changes. Managed package locks live until the last owner releases this Host;
+/// unmanaged executables and imported code remain the caller's responsibility.
 /// The Host starts only Provider children, never an Agent, daemon or audit writer.
 pub struct Host {
     configuration: Configuration,
@@ -99,6 +103,7 @@ pub struct Host {
     providers: BTreeMap<String, Provider>,
     steps: Vec<AdmittedStep>,
     preparation: Vec<CallRecord>,
+    _package_leases: PackageLeases,
 }
 
 impl Host {
@@ -135,23 +140,27 @@ impl Host {
         let protocol = Protocol::new()?;
         let revision = format!("{:x}", Sha256::digest(bytes));
         check(deadline, cancelled)?;
+        let mut providers = BTreeMap::new();
+        for step in &requirements {
+            if !providers.contains_key(&step.provider) {
+                let value = &configuration.as_value()["spec"]["providers"][&step.provider];
+                providers.insert(step.provider.clone(), provider(value, &context)?);
+            }
+        }
+        let package_leases =
+            PackageLeases::acquire(providers.values_mut().map(|provider| &mut provider.command))?;
+        check(deadline, cancelled)?;
         let mut host = Self {
             configuration,
             revision,
             target: target.into(),
             capabilities,
             protocol,
-            providers: BTreeMap::new(),
+            providers,
             steps: Vec::new(),
             preparation: Vec::new(),
+            _package_leases: package_leases,
         };
-        for step in &requirements {
-            if !host.providers.contains_key(&step.provider) {
-                let value = &host.configuration.as_value()["spec"]["providers"][&step.provider];
-                host.providers
-                    .insert(step.provider.clone(), provider(value, &context)?);
-            }
-        }
         if let Err(cause) = host.prepare_providers(deadline, cancelled) {
             return Err(Error::Preparation(Box::new(PreparationFailure {
                 completed: host.preparation,

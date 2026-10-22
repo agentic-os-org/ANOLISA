@@ -16,8 +16,12 @@ For split packages, add Tokenless from the extracted artifact directory.
 export AW_VERSION=0.1.0-preview.1
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
-sudo "./$AW_TOKENLESS_BUNDLE/aw" install --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
+sudo "./$AW_TOKENLESS_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_TOKENLESS_BUNDLE" --prefix "$AW_PREFIX"
 ```
+
+This continues the installation page's system scope. For a user-owned core prefix,
+omit `sudo` and use `--scope user` for the extension too. Keep the same scope for
+core, every extension and uninstall; `sudo` does not select system scope.
 
 Skip this step if all-in-one is installed. The package includes Tokenless CLI and the required RTK.
 There is no separate RTK, TOON, Python wheel or native Tokenless plugin to install.

@@ -40,10 +40,16 @@ AW_PREVIEW_BUNDLE="aw-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_PREVIEW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
-sudo "./$AW_PREVIEW_BUNDLE/aw" install --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_BUNDLE/aw" install --scope system --bundle "$PWD/$AW_PREVIEW_BUNDLE" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-默认构建只生成 core；`--component all` 生成四个包。`aw-core` 安装 `bin/aw`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。每个归档根目录另带 `aw` 用于引导，Provider-only 归档也包含它。分包安装时，分别解压 core 和 Provider，依次用包内 `aw install --bundle ABS_BUNDLE --prefix ABS_PREFIX` 安装到同一个新前缀，**先装 core**，之后不要再往该前缀安装 all-in-one。
+这些命令使用 system scope，在 `/var/lib/aw/packages` 保存包记录。每次安装扩展包和
+卸载时都须保留 `--scope system`。若安装到自己拥有的目录，应全程去掉 `sudo` 并
+改用 `--scope user`。即使用了 `sudo`，默认 scope 仍是 user，否则会写入调用进程
+XDG/HOME 下的数据库。普通用户执行 `aw config init` 会跟随前缀中的登记信息，
+可以读取 system 安装，无需访问 root 的 home。
+
+默认构建只生成 core；`--component all` 生成四个包。`aw-core` 安装 `bin/aw`；`aw-provider-sec-core` 包含 Provider 和 Rust V2 sec-core CLI/daemon；`aw-provider-tokenless` 包含桥接、Tokenless CLI 和固定版本带补丁的 RTK；`aw-all-in-one` 包含完全相同的三个组件。每个归档根目录另带 `aw` 用于引导，Provider-only 归档也包含它。分包安装时，分别解压 core 和 Provider，依次用 `sudo` 和包内 `aw install --scope system --bundle ABS_BUNDLE --prefix ABS_PREFIX` 安装到同一个新前缀，**先装 core**。两包须使用同一个 scope，之后不要再往该前缀安装 all-in-one。
 
 安装器校验哈希、权限、架构、版本及源码提交，拒绝覆盖，并在 `.aw-packages` 记录文件归属。安装过程中收到 Ctrl-C（SIGINT）或 SIGTERM 会回滚本次写入，随后可重试；强制终止（SIGKILL）不在自动回滚范围内。校验和用于发现损坏，不是发布者签名。安装父目录须归安装用户所有，且不可被其他用户写入。系统后端的安装由 root 管理；若连接已有后端，也支持普通用户安装到自己的目录。
 
@@ -205,7 +211,7 @@ AW_PREVIEW_VERSION=0.1.0-preview.1
 AW_PREVIEW_PROVIDER="aw-provider-sec-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 tar -xzf "$AW_PREVIEW_PROVIDER.tar.gz"
-sudo "./$AW_PREVIEW_PROVIDER/aw" install --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
+sudo "./$AW_PREVIEW_PROVIDER/aw" install --scope system --bundle "$PWD/$AW_PREVIEW_PROVIDER" --prefix "$AW_PREVIEW_PREFIX"
 ```
 
 在独立终端以 root 启动包内后端，保持前台运行，Ctrl-C 停止。配置和数据放在安装前缀之外。
@@ -305,7 +311,7 @@ test ! -e "$AW_DEMO/workspace/openclaw-blocked.marker"
 
 ```bash
 "$AW_PREVIEW_PREFIX/bin/aw" stop --config "$AW_DEMO/aw.yaml"
-sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --prefix "$AW_PREVIEW_PREFIX" --yes
+sudo "$AW_PREVIEW_PREFIX/bin/aw" uninstall --scope system --prefix "$AW_PREVIEW_PREFIX" --yes
 ```
 
 卸载先检查所有包属文件，遇到被修改或缺失的文件，会在删除任何文件之前报错。删除失败或完成前收到 SIGINT/SIGTERM 时，恢复已删除的文件和安装记录，随后可重试；SIGKILL 不在自动恢复范围内。若恢复也失败，诊断会列出保留的备份和未恢复路径。所有 payload 和安装记录删除后，卸载即成功；若备份清理失败，警告会列出残留备份路径，供手动删除。未知文件、前缀和锁、外部配置、凭据及审计数据均保留，确认不再需要后再自行删除。

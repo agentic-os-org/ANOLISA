@@ -7,7 +7,7 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
-pub(super) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()> {
+pub(crate) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()> {
     require(
         database.schema_version == 1,
         "unsupported installed-package schema_version",
@@ -41,7 +41,7 @@ pub(super) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()>
             "installation owner does not match database scope",
         )?;
         require(
-            !installation.packages.is_empty() && installation.packages.len() <= MAX_PACKAGES,
+            installation.packages.len() <= MAX_PACKAGES,
             "invalid installed package count",
         )?;
         let mut packages = BTreeSet::new();
@@ -52,17 +52,21 @@ pub(super) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()>
             )?;
             description::package_fields(
                 &package.package_id,
-                &package.version,
+                "0.0.0",
                 &package.os,
                 &package.arch,
                 &package.files,
                 package.provider.as_ref(),
             )?;
+            require(
+                !package.version.is_empty() && package.version.len() <= 128,
+                "invalid stored package version",
+            )?;
             if let Some(value) = &package.source.bundle_sha256 {
                 description::sha256(value)?;
             }
             if let Some(value) = &package.source.source_commit {
-                description::commit_sha(value)?;
+                require(value.len() <= 1024, "stored source evidence exceeds limit")?;
             }
             let mut dependencies = BTreeSet::new();
             require(
@@ -72,7 +76,10 @@ pub(super) fn database(database: &InstalledDatabase, scope: Scope) -> Result<()>
             for dependency in &package.dependencies {
                 identifier(&dependency.installation_id)?;
                 identifier(&dependency.package_id)?;
-                description::version(&dependency.version)?;
+                require(
+                    !dependency.version.is_empty() && dependency.version.len() <= 128,
+                    "invalid stored dependency version",
+                )?;
                 require(
                     dependencies.insert((&dependency.installation_id, &dependency.package_id)),
                     "duplicate installed dependency",

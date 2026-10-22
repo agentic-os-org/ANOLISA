@@ -100,7 +100,7 @@ pub(super) fn installation(prefix: &Path) -> Result<Option<(Installation, File)>
     )))
 }
 
-fn validate(value: &Component) -> Result<()> {
+pub(crate) fn validate(value: &Component) -> Result<()> {
     require(
         value.format == 1,
         "unsupported legacy package record format",
