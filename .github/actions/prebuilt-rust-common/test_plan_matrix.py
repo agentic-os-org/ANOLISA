@@ -62,6 +62,7 @@ class PlanMatrixTests(unittest.TestCase):
                 ("linux", "x86_64", "gnu2.17-x86_64"),
                 ("linux", "aarch64", "gnu2.17-aarch64"),
                 ("macos", "aarch64", "darwin11-aarch64"),
+                ("macos", "x86_64", "darwin11-x86_64"),
             ],
         )
         self.assertTrue(all(row["component"] == "tokenless" for row in matrix["include"]))
@@ -72,6 +73,69 @@ class PlanMatrixTests(unittest.TestCase):
             [(row["target-os"], row["target-arch"]) for row in rows],
             [("linux", "x86_64"), ("linux", "aarch64"), ("macos", "aarch64")],
         )
+
+    def test_tokenless_preview_uses_source_targets(self) -> None:
+        current = plan_matrix.build_matrix("tokenless")["include"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "src/tokenless/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.touch()
+            self.assertEqual(plan_matrix.build_matrix("tokenless", root)["include"], current[:-1])
+            source_matrix = root / ".github/actions/prebuilt-rust-common/targets.py"
+            source_matrix.parent.mkdir(parents=True)
+            for rows in (current[:-1], current):
+                targets = [
+                    {key: value for key, value in row.items() if key != "component"} for row in rows
+                ]
+                source_matrix.write_text(f"TARGETS = {{'tokenless': {targets!r}}}\n")
+                self.assertEqual(plan_matrix.build_matrix("tokenless", root)["include"], rows)
+
+    def test_tokenless_preview_requires_source_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ValueError):
+            plan_matrix.build_matrix("tokenless", Path(temporary))
+
+    def test_historical_tokenless_artifact_set(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "verify_artifacts", Path(__file__).with_name("verify-artifacts.py")
+        )
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            manifest = source / "src/tokenless/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.touch()
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            for row in plan_matrix.build_matrix("tokenless", source)["include"]:
+                (
+                    artifacts / f"tokenless-prebuilt-0.7.7-{row['target-os']}-{row['target-arch']}"
+                ).mkdir()
+            args = [
+                "verify-artifacts.py",
+                "--component",
+                "tokenless",
+                "--version",
+                "0.7.7",
+                "--directory",
+                str(artifacts),
+                "--layout",
+                "actions",
+                "--tokenless-source-root",
+                str(source),
+            ]
+            with (
+                mock.patch("sys.argv", args),
+                mock.patch.object(verifier, "validate_directory") as validate,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(verifier.main(), 0)
+                self.assertEqual(validate.call_count, 3)
+                (artifacts / "tokenless-prebuilt-0.7.7-macos-x86_64").mkdir()
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    verifier.main()
 
     def test_component_without_prebuilt_targets(self) -> None:
         self.assertEqual(plan_matrix.build_matrix("blaze"), {"include": []})
@@ -188,6 +252,9 @@ class PlanMatrixTests(unittest.TestCase):
 
     def test_anolisa_artifact_set_requires_intel_mac(self) -> None:
         self.assert_intel_artifact_set("anolisa", "0.3.15")
+
+    def test_tokenless_artifact_set_requires_intel_mac(self) -> None:
+        self.assert_intel_artifact_set("tokenless", "0.8.8")
 
     def assert_intel_artifact_set(self, component: str, version: str) -> None:
         spec = importlib.util.spec_from_file_location(

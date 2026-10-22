@@ -1073,14 +1073,22 @@ make package-raw \
   OUTPUT_DIR="$PWD/dist"
 ```
 
-Supported raw targets are `linux-x86_64`, `linux-aarch64`, and
-`macos-aarch64`. `darwin`/`arm64` and `amd64`/`x64` are accepted as input
+Supported raw targets are `linux-x86_64`, `linux-aarch64`, `macos-aarch64`, and
+`macos-x86_64`. `darwin`/`arm64` and `amd64`/`x64` are accepted as input
 aliases, while artifact names always use the canonical ANOLISA labels. The
 packer verifies the ELF or Mach-O architecture without executing cross-target
 binaries, embeds the component-owned `.anolisa/component.toml`, materializes
 adapter hook symlinks, and emits a reproducible
 `tokenless-<version>-<os>-<arch>.tar.gz` archive. Set `SOURCE_DATE_EPOCH` when
 the caller needs an epoch other than the source commit time.
+
+Release and preview builds cross-compile both macOS architectures on Linux,
+targeting macOS 11.0 or later. Intel Mac builds use the prepared
+`darwin11-x86_64` profile and also produce a
+`cp311-abi3-macosx_11_0_x86_64` Python wheel with RTK bundled. This build
+support does not add Intel artifacts to previously published versions.
+Previews of historical source tags retain the target matrix from that source;
+tags predating the shared matrix keep the original three targets.
 
 npm packaging also accepts prebuilt `linux-x64`, `linux-arm64`, `darwin-x64`,
 and `darwin-arm64` binary directories under `target/npm-prebuilt`. The packer

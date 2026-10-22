@@ -417,7 +417,7 @@ fi
 # `qwenpaw plugin install` used to surface that as a bare pip HTTP error. The
 # installer now probes the asset for this host first and names the missing tag.
 case "$(uname -s)/$(uname -m)" in
-    Linux/x86_64 | Linux/aarch64 | Darwin/arm64) PREFLIGHT_PLATFORM=1 ;;
+    Linux/x86_64 | Linux/aarch64 | Darwin/arm64 | Darwin/x86_64) PREFLIGHT_PLATFORM=1 ;;
     *) PREFLIGHT_PLATFORM=0 ;;
 esac
 
@@ -507,6 +507,44 @@ PYSTUBEOF
         env PATH="$FAKE_HOME/.qwenpaw/bin:$SHADOW_BIN:/usr/local/bin:$MIN_BIN" \
             bash -c "$probe"
     }
+
+    # Exercise both Mac hosts on Linux CI, including a CLI whose Python
+    # interpreter cannot be verified after it copies the bundle.
+    MACOS_PROBE_BIN="$SANDBOX/macos-probebin"
+    mkdir -p "$MACOS_PROBE_BIN"
+    cp "$PROBE_BIN/curl" "$MACOS_PROBE_BIN/curl"
+    cat > "$MACOS_PROBE_BIN/uname" <<'UNAMEEOF'
+#!/usr/bin/env bash
+case "$1" in
+    -s) printf '%s\n' Darwin ;;
+    -m) printf '%s\n' "$PROBE_ARCH" ;;
+    *) exit 2 ;;
+esac
+UNAMEEOF
+    chmod +x "$MACOS_PROBE_BIN/uname"
+    for architecture in arm64 x86_64; do
+        wheel_url="https://github.com/alibaba/anolisa/releases/download/tokenless/v0.0.0-test/"
+        wheel_url+="anolisa_tokenless-0.0.0-test-cp311-abi3-macosx_11_0_${architecture}.whl"
+        status="$(PROBE_ARCH="$architecture" probe_case 404 "$MACOS_PROBE_BIN")"
+        if [ "$status" -eq 1 ] && used_tool curl &&
+            [ "$(grep -Fc " $wheel_url" "$PROBE_LOG")" -eq 2 ] &&
+            grep -Fq "$wheel_url" "$SANDBOX/preflight.out" &&
+            [ ! -d "$PLUGIN_DST" ] && ! grep -q '^plugin install ' "$STUB_LOG"; then
+            pass "Darwin/$architecture confirms a missing wheel before copying the bundle"
+        else
+            fail "Darwin/$architecture did not reject its missing wheel before installation (rc=$status)"
+        fi
+
+        status="$(PROBE_ARCH="$architecture" probe_case 200 "$MACOS_PROBE_BIN")"
+        if [ "$status" -eq 0 ] && used_tool curl &&
+            [ "$(grep -Fc " $wheel_url" "$PROBE_LOG")" -eq 1 ] &&
+            [ -f "$PLUGIN_DST/plugin.json" ] &&
+            grep -q '^plugin install ' "$STUB_LOG"; then
+            pass "Darwin/$architecture installs after probing its available wheel"
+        else
+            fail "Darwin/$architecture did not probe its available wheel before installation (rc=$status)"
+        fi
+    done
 
     status="$(probe_case 404 "$PROBE_BIN")"
     if [ "$status" -ne 0 ] && used_tool curl &&

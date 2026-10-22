@@ -11,7 +11,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-
 VERSION = "1.2.3"
 ACTION_DIR = Path(__file__).resolve().parent
 VERIFIER = ACTION_DIR / "verify-wheels.py"
@@ -19,6 +18,7 @@ PLATFORMS = {
     ("linux", "x86_64"): "manylinux_2_17_x86_64.manylinux2014_x86_64",
     ("linux", "aarch64"): "manylinux_2_17_aarch64.manylinux2014_aarch64",
     ("macos", "aarch64"): "macosx_11_0_arm64",
+    ("macos", "x86_64"): "macosx_11_0_x86_64",
 }
 
 
@@ -200,27 +200,64 @@ def main() -> int:
         next(missing.glob("*aarch64*.whl")).unlink()
         run_verifier(missing, "--layout", "aggregate", expect_success=False)
 
+        missing_intel = root / "missing-intel"
+        shutil.copytree(aggregate, missing_intel)
+        next(missing_intel.glob("*macosx_11_0_x86_64.whl")).unlink()
+        run_verifier(missing_intel, "--layout", "aggregate", expect_success=False)
+
+        historical_source = root / "historical-source"
+        source_manifest = historical_source / "src/tokenless/Cargo.toml"
+        source_manifest.parent.mkdir(parents=True)
+        source_manifest.touch()
+        run_verifier(
+            missing_intel,
+            "--layout",
+            "aggregate",
+            "--tokenless-source-root",
+            str(historical_source),
+        )
+        run_verifier(
+            aggregate,
+            "--layout",
+            "aggregate",
+            "--tokenless-source-root",
+            str(historical_source),
+            expect_success=False,
+        )
+
         duplicate = root / "duplicate"
         duplicate.mkdir()
-        create_runtime(duplicate, "linux", "x86_64")
+        populate_aggregate(duplicate)
+        next(duplicate.glob("*aarch64*.whl")).unlink()
         create_runtime(duplicate, "linux", "x86_64", platform="manylinux2014_x86_64")
-        create_runtime(duplicate, "macos", "aarch64")
-        create_agentscope(duplicate)
         run_verifier(duplicate, "--layout", "aggregate", expect_success=False)
 
         macos_x86 = root / "macos-x86"
         macos_x86.mkdir()
-        create_runtime(macos_x86, "linux", "x86_64")
+        populate_aggregate(macos_x86)
+        next(macos_x86.glob("*macosx_11_0_x86_64.whl")).unlink()
         create_runtime(
             macos_x86,
             "macos",
-            "aarch64",
+            "x86_64",
             platform="macosx_10_9_x86_64",
-            binary_architecture="x86_64",
         )
-        create_runtime(macos_x86, "macos", "aarch64")
-        create_agentscope(macos_x86)
         run_verifier(macos_x86, "--layout", "aggregate", expect_success=False)
+
+        for architecture, wrong_architecture in (("x86_64", "aarch64"), ("aarch64", "x86_64")):
+            bad_macos = root / f"bad-macos-{architecture}"
+            bad_macos.mkdir()
+            create_runtime(bad_macos, "macos", architecture, binary_architecture=wrong_architecture)
+            run_verifier(
+                bad_macos,
+                "--layout",
+                "flat",
+                "--os",
+                "macos",
+                "--arch",
+                architecture,
+                expect_success=False,
+            )
 
         bad_architecture = root / "bad-architecture"
         bad_architecture.mkdir()

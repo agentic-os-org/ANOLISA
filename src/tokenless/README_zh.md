@@ -540,13 +540,20 @@ make package-raw \
   OUTPUT_DIR="$PWD/dist"
 ```
 
-Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64` 和 `macos-aarch64`。
+Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64`、`macos-aarch64` 和 `macos-x86_64`。
 输入可使用 `darwin`/`arm64`、`amd64`/`x64` 别名，产物名始终采用 ANOLISA
 规范名称。脚本不会执行跨平台二进制，而是直接检查 ELF 或 Mach-O 架构，
 并负责嵌入组件自维护的 `.anolisa/component.toml`、展开适配器 Hook 符号链接、
 统一权限以及生成可复现的
 `tokenless-<version>-<os>-<arch>.tar.gz`。需要固定其他时间戳时可传入
 `SOURCE_DATE_EPOCH`。
+
+Release 和 Preview 构建均在 Linux 上交叉编译两种 macOS 架构，最低支持
+macOS 11.0。Intel Mac 使用已准备好的 `darwin11-x86_64` profile，同时生成
+内置 RTK 的 `cp311-abi3-macosx_11_0_x86_64` Python wheel。新增构建支持
+不会为此前已发布的版本补充 Intel 制品。
+历史源码 tag 的 Preview 保留该源码的目标矩阵；共享矩阵引入前的 tag
+继续构建原有的三个目标。
 
 npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
 `linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：

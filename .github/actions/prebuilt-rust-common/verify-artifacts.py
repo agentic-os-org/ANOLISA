@@ -12,7 +12,7 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-from targets import TARGETS
+from targets import component_targets
 
 
 def die(message: str) -> None:
@@ -237,6 +237,7 @@ def main() -> int:
     parser.add_argument("--layout", choices=("flat", "actions"), required=True)
     parser.add_argument("--os", dest="target_os")
     parser.add_argument("--arch", dest="target_arch")
+    parser.add_argument("--tokenless-source-root", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.component):
         parser.error("component must be a lowercase release component name")
@@ -255,13 +256,13 @@ def main() -> int:
     if args.target_os or args.target_arch:
         parser.error("actions layout does not accept --os or --arch")
 
-    component_targets = TARGETS.get(args.component)
-    if component_targets is None:
+    selected_targets = component_targets(args.component, args.tokenless_source_root)
+    if not selected_targets:
         parser.error(f"component has no prebuilt target matrix: {args.component}")
     expected_directories = {
         f"{args.component}-prebuilt-{args.version}-"
         f"{target['target-os']}-{target['target-arch']}"
-        for target in component_targets
+        for target in selected_targets
     }
     try:
         entries = list(root.iterdir())
@@ -276,7 +277,7 @@ def main() -> int:
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
     artifact_component = "sec-core" if args.component == "agent-sec-core" else args.component
-    for target in component_targets:
+    for target in selected_targets:
         target_os = target["target-os"]
         target_arch = target["target-arch"]
         directory = (
@@ -286,7 +287,9 @@ def main() -> int:
         validate_directory(
             directory, artifact_component, args.version, target_os, target_arch
         )
-    print(f"Verified {4 * len(component_targets)} {args.component} prebuilt release assets under {root}")
+    print(
+        f"Verified {4 * len(selected_targets)} {args.component} prebuilt release assets under {root}"
+    )
     return 0
 
 
