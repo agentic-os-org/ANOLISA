@@ -420,6 +420,8 @@ fn raw_cli_project_hook_in_place_rewrite_does_not_execute_new_content() {
     let _ = fs::remove_dir_all(&home);
 }
 
+// Only referenced by the Linux-gated rewrite test above.
+#[cfg(target_os = "linux")]
 fn nanos_since_epoch() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -429,6 +431,7 @@ fn nanos_since_epoch() -> u128 {
 
 /// Waits until `log` holds at least `lines` lines, so a caller can act at a point
 /// the session has demonstrably reached rather than after a guessed delay.
+#[cfg(target_os = "linux")]
 fn wait_for_hook_runs(log: &Path, lines: usize, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
