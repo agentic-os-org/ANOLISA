@@ -66,6 +66,40 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 包含 `--json`。默认人类诊断与显式 `config show` 保留原有契约；这不是全局
 私有数据脱敏功能。服务 JSON、stdin/stdout 协议和原生 Agent 输出不套管理报告。
 
+## 终端输出
+
+上节列出的管理写操作也支持以下局部人类输出选项：
+
+| 选项 | 效果 |
+| --- | --- |
+| `--quiet` | 隐藏成功摘要，保留错误和安装器清理警告。 |
+| `--verbose` | 在 stderr 补充固定的操作范围说明，不包含配置值。 |
+| `--color auto` | 仅在对应输出流连接终端时为摘要着色，默认使用此模式。 |
+| `--color always` | 即使输出到管道或环境变量禁用颜色，也为摘要着色。 |
+| `--color never` | 禁用摘要颜色。 |
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --quiet
+aw config remove-provider --config "$HOME/aw/aw.yaml" --name unused --verbose
+aw uninstall --prefix "$AW_PREFIX" --color never
+```
+
+`--quiet` 与 `--verbose` 互斥。`--json` 与这三种选项都冲突，不会被静默隐藏。
+它们不是全局参数，不用于原生连接、服务或协议命令、`config show`、
+`config validate` 或 `aw-package`。转发分隔符 `--` 后的参数仍按原样传递。
+
+非空 `NO_COLOR` 或 `TERM=dumb` 会禁用自动着色；显式 `always` 覆盖这些设置。
+成功摘要使用 stdout，操作错误使用 stderr，分别检查各自是否连接终端。
+不会增加确认提示或权限授予，在管道中或使用 `--quiet` 时也一样。
+
+CLI 自己生成的管理摘要和操作错误，会转义元数据中的控制字符与双向文本控制符，
+避免路径注入终端指令或额外行。`aw-package` 共用的成功摘要也转义这些元数据，
+但不着色。已有库清理警告与其他命令诊断不在此格式化范围内，这不是全局私有数据脱敏。
+JSON 值和原生输出、协议流保留原格式。
+
+输出流失败时，文件可能已经发布，命令仍返回非零；这不代表操作已回滚。
+重试前先检查文件，CLI 不会为了补发输出而重试操作。
+
 ## 查看状态与停止
 
 ```bash

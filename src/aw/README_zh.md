@@ -51,6 +51,10 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 本地包安装/卸载、`config init` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
 默认仍为人类摘要，已有服务和协议 JSON 保持不变。
+
+同一组管理写操作支持局部 `--quiet`、`--verbose` 和 `--color auto|always|never`，
+用于人类输出，不能与 `--json` 同用；原生输出与协议流保持不变。
+详见[终端输出](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#终端输出)。
 支持范围与失败语义见[管理结果](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#管理结果)。
 
 core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需要启动 sec-core

@@ -76,14 +76,14 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 package(
                     "install",
                     options([("prefix", value.prefix), ("bundle", value.bundle)]),
-                    value.json,
+                    value.output,
                 )
             }
         }
         Command::Uninstall(value) => package(
             "uninstall",
             options([("prefix", Some(value.prefix))]),
-            value.json,
+            value.output,
         ),
         Command::Agent(Agent::Connect(value)) => crate::runtime("install", &native(value)),
         Command::Config(value) => config(value),
@@ -144,20 +144,20 @@ pub(super) fn run(command: Command) -> Result<Exit> {
     }
 }
 
-fn package(action: &'static str, args: Arguments, as_json: bool) -> Result<Exit> {
+fn package(action: &'static str, args: Arguments, output: crate::output::Options) -> Result<Exit> {
     crate::output::complete(
         if action == "configure" {
             "config init"
         } else {
             action
         },
-        as_json,
+        output,
         crate::package::execute(action, &args.flags, args.native, "aw"),
     )
 }
 
 fn config(command: Config) -> Result<Exit> {
-    let (action, flags, as_json): (_, BTreeMap<_, _>, _) = match command {
+    let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
         Config::Validate(value) => return validate(value),
         Config::Init(value) => {
             let mut args = options([
@@ -174,7 +174,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("reason-code", value.reason_code),
             ]);
             args.native = value.arguments;
-            return package("configure", args, value.prefix.json);
+            return package("configure", args, value.prefix.output);
         }
         Config::Show(value) => (
             "show",
@@ -185,7 +185,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("id", value.id),
             ])
             .flags,
-            false,
+            crate::output::Options::default(),
         ),
         Config::AddProvider(value) => (
             "add-provider",
@@ -195,7 +195,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("definition", Some(value.definition)),
             ])
             .flags,
-            value.provider.json,
+            value.provider.output,
         ),
         Config::RemoveProvider(value) => (
             "remove-provider",
@@ -204,7 +204,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("name", Some(value.name)),
             ])
             .flags,
-            value.json,
+            value.output,
         ),
         Config::AddEvent(value) => (
             "add-event",
@@ -214,7 +214,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("definition", Some(value.definition)),
             ])
             .flags,
-            value.json,
+            value.output,
         ),
         Config::AddHook(value) => (
             "add-hook",
@@ -224,7 +224,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("definition", Some(value.definition)),
             ])
             .flags,
-            value.json,
+            value.output,
         ),
         Config::RemoveHook(value) => (
             "remove-hook",
@@ -234,7 +234,7 @@ fn config(command: Config) -> Result<Exit> {
                 ("id", Some(value.id)),
             ])
             .flags,
-            value.json,
+            value.output,
         ),
     };
     let result = match crate::package::config::execute(action, &flags) {
@@ -253,7 +253,7 @@ fn config(command: Config) -> Result<Exit> {
             "remove-hook" => "config remove-hook",
             _ => unreachable!("the typed command selects an existing config action"),
         },
-        as_json,
+        output,
         result,
     )
 }

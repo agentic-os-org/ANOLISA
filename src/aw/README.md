@@ -60,6 +60,11 @@ accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See
 [management reports](../../docs/user-guide/en/user-entrypoint/aw/operations.md#management-reports) for supported commands and failure semantics.
 
+The same management writes accept local `--quiet`, `--verbose` and
+`--color auto|always|never` for human output. They cannot accompany `--json`;
+native output and protocol streams remain unchanged. See
+[terminal output](../../docs/user-guide/en/user-entrypoint/aw/operations.md#terminal-output).
+
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.

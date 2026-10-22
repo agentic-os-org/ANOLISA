@@ -1,30 +1,7 @@
 //! Management reports expose outcomes, not private configuration or runtime claims.
 
+pub(super) use super::support::invoke;
 use super::*;
-use std::{
-    sync::atomic::AtomicBool,
-    time::{Duration, Instant},
-};
-
-fn invoke(command: &Command) -> aw_exec::Output {
-    aw_exec::run(
-        &aw_exec::CommandSpec {
-            program: command.get_program().into(),
-            args: command.get_args().map(Into::into).collect(),
-            cwd: command.get_current_dir().unwrap().into(),
-            environment: std::env::vars_os().collect(),
-        },
-        b"",
-        aw_exec::Limits {
-            input_bytes: 0,
-            stdout_bytes: 65536,
-            stderr_bytes: 65536,
-        },
-        Instant::now() + Duration::from_secs(5),
-        &AtomicBool::new(false),
-    )
-    .unwrap()
-}
 
 fn report(command: &Command, code: i32, action: &str) -> Value {
     let output = invoke(command);

@@ -141,11 +141,23 @@ fn option_values_do_not_select_another_installation_mode() {
 #[test]
 fn run_forwards_native_arguments_without_reinterpreting_them() {
     let Command::Run(run) =
-        parse("run --config aw.yaml --agent qoder -- --prefix --bundle --help --json").unwrap()
+        parse("run --config aw.yaml --agent qoder -- --prefix --bundle --help --json --quiet --verbose --color always").unwrap()
     else {
         panic!("expected launch")
     };
-    assert_eq!(run.arguments, ["--prefix", "--bundle", "--help", "--json"]);
+    assert_eq!(
+        run.arguments,
+        [
+            "--prefix",
+            "--bundle",
+            "--help",
+            "--json",
+            "--quiet",
+            "--verbose",
+            "--color",
+            "always"
+        ]
+    );
     assert!(!run.reloadable);
     let Command::Run(run) = parse("run --config aw.yaml --agent qoder --reloadable").unwrap()
     else {
@@ -166,6 +178,10 @@ fn run_forwards_native_arguments_without_reinterpreting_them() {
         "",
         "a b",
         "$aw.dispatch",
+        "--quiet",
+        "--verbose",
+        "--color",
+        "always",
     ])
     .unwrap()
     .command
@@ -174,7 +190,18 @@ fn run_forwards_native_arguments_without_reinterpreting_them() {
     };
     assert_eq!(
         run.arguments,
-        ["--help", "--prefix", "x", "", "a b", "$aw.dispatch"]
+        [
+            "--help",
+            "--prefix",
+            "x",
+            "",
+            "a b",
+            "$aw.dispatch",
+            "--quiet",
+            "--verbose",
+            "--color",
+            "always"
+        ]
     );
 }
 
@@ -205,13 +232,29 @@ fn command_template_preserves_literal_arguments_without_execution() {
         "",
         "a b",
         "$aw.dispatch",
+        "--quiet",
+        "--verbose",
+        "--color",
+        "always",
     ])
     .unwrap()
     .command
     else {
         panic!("expected command template")
     };
-    assert_eq!(config.arguments, ["--help", "", "a b", "$aw.dispatch"]);
+    assert_eq!(
+        config.arguments,
+        [
+            "--help",
+            "",
+            "a b",
+            "$aw.dispatch",
+            "--quiet",
+            "--verbose",
+            "--color",
+            "always"
+        ]
+    );
 }
 
 #[test]

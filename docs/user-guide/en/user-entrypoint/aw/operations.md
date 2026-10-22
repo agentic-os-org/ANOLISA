@@ -78,6 +78,45 @@ explicit `config show` output retain their existing contracts; this is not a
 global private-data redaction feature. Service JSON, stdin/stdout protocols and
 native Agent output do not receive this management envelope.
 
+## Terminal output
+
+The management writes listed above also accept local human-output options:
+
+| Option | Effect |
+| --- | --- |
+| `--quiet` | Suppress success summaries; retain errors and installer cleanup warnings. |
+| `--verbose` | Add fixed operation-scope details on stderr, without configuration values. |
+| `--color auto` | Color a summary only when its output stream is a terminal (the default). |
+| `--color always` | Color summaries even through a pipe or with color-disabling environment variables. |
+| `--color never` | Disable summary colors. |
+
+```bash
+aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --quiet
+aw config remove-provider --config "$HOME/aw/aw.yaml" --name unused --verbose
+aw uninstall --prefix "$AW_PREFIX" --color never
+```
+
+`--quiet` and `--verbose` conflict. `--json` conflicts with all three options;
+it is never silently suppressed. They are not global options and do not apply
+to native connection, service/protocol commands, `config show`, `config validate`
+or `aw-package`. Arguments after the forwarding `--` remain literal.
+
+Auto color is disabled by nonempty `NO_COLOR` or `TERM=dumb`; explicit `always`
+overrides those settings. Success summaries use stdout, operation errors use
+stderr, and each stream's terminal status is checked independently. No prompt
+or permission grant is added, including in a pipe or with `--quiet`.
+
+CLI-owned management summaries and operation errors escape control and bidi
+characters in metadata so paths cannot inject terminal instructions or lines.
+The shared `aw-package` success formatter also escapes such metadata but stays
+uncolored. Existing library cleanup warnings and other command diagnostics are
+outside this formatting boundary; it is not global private-data redaction.
+JSON values and native/protocol streams retain their existing formats.
+
+An output-stream failure can return nonzero after files were already published.
+That does not imply rollback. Inspect the files before retrying; the CLI does
+not retry an operation to repair its output.
+
 ## Check status and stop
 
 ```bash

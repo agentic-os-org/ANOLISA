@@ -7,7 +7,7 @@ mod package;
 
 use aw_service::{Operation, Server};
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -23,7 +23,8 @@ pub fn main() {
     match run() {
         Ok(exit) => cli::finish(exit),
         Err(error) => {
-            eprintln!("aw: {error}");
+            // A closed diagnostic stream must not replace exit 1 with a panic.
+            let _ = writeln!(std::io::stderr().lock(), "aw: {error}");
             std::process::exit(1);
         }
     }

@@ -2,124 +2,18 @@
 
 #[path = "packages/output.rs"]
 mod output;
+#[path = "packages/support.rs"]
+mod support;
+#[path = "packages/terminal.rs"]
+mod terminal;
 
-use aw_package::{Component, Manifest, Payload};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::PathBuf,
+    os::unix::fs::MetadataExt,
     process::{Command, Output},
 };
-
-struct Fixture {
-    _directory: tempfile::TempDir,
-    root: PathBuf,
-    bundle: PathBuf,
-    prefix: PathBuf,
-    config: PathBuf,
-    state: PathBuf,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
-        fs::create_dir_all(&target).unwrap();
-        let directory = tempfile::tempdir_in(target).unwrap();
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let bundle = root.join("bundle");
-        let mut files = BTreeMap::new();
-        for name in ["bin/aw", "bin/aw-package"] {
-            let path = bundle.join("payload").join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::copy("/bin/true", &path).unwrap();
-            files.insert(
-                name.into(),
-                Payload {
-                    sha256: aw_package::digest(&path).unwrap(),
-                    mode: 0o755,
-                },
-            );
-        }
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&Manifest {
-                format: 1,
-                components: vec![Component {
-                    format: 1,
-                    component: "aw-core".into(),
-                    version: "0.1.0-preview.1".into(),
-                    source_commit: "a".repeat(40),
-                    os: "linux".into(),
-                    arch: std::env::consts::ARCH.into(),
-                    provider_protocol: "aw-provider/v1alpha1".into(),
-                    requires: BTreeMap::new(),
-                    files,
-                }],
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        Self {
-            prefix: root.join("prefix"),
-            config: root.join("aw.yaml"),
-            state: root.join("state"),
-            _directory: directory,
-            root,
-            bundle,
-        }
-    }
-
-    fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_aw"));
-        command.current_dir(&self.root);
-        command
-    }
-
-    fn install(&self) -> Command {
-        let mut command = self.command();
-        command
-            .args(["install", "--prefix"])
-            .arg(&self.prefix)
-            .arg("--bundle")
-            .arg(&self.bundle);
-        command
-    }
-
-    fn init(&self) -> Command {
-        let mut command = self.command();
-        command
-            .args(["config", "init", "--prefix"])
-            .arg(&self.prefix)
-            .arg("--config")
-            .arg(&self.config)
-            .arg("--state-dir")
-            .arg(&self.state)
-            .args(["--qoder", "/bin/true"]);
-        command
-    }
-
-    fn edit(&self, action: &str, arguments: &[&str]) -> Command {
-        let mut command = self.command();
-        command
-            .args(["config", action, "--config"])
-            .arg(&self.config)
-            .args(arguments);
-        command
-    }
-}
-
-fn success(output: Output) -> String {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.stderr.is_empty());
-    String::from_utf8(output.stdout).unwrap()
-}
+use support::{success, Fixture};
 
 fn failure(output: Output) -> String {
     assert_eq!(output.status.code(), Some(1));
