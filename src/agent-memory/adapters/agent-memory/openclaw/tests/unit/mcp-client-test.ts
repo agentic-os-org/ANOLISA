@@ -6,10 +6,12 @@
  * - `buildChildEnv` allowlist behaviour
  * - `McpStdioClient.stop()` safety on an unstarted client
  * - `callTool` rejection when the binary can't spawn
+ * - Request-timer release on responses, write failures, exit and shutdown
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,6 +157,77 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         assert.equal(await readFile(eofPath, "utf8"), "eof");
       }
       await client.stop();
+    });
+  }
+
+  for (const resultMode of ["success", "error", "exit", "stop", "write-error"] as const) {
+    it(`releases request timers after worker ${resultMode}`, { timeout: 10_000 }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-mcp-timers-"));
+      const binaryPath = join(directory, "worker.cjs");
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+      const realTimeout = globalThis.setTimeout;
+      const realClear = globalThis.clearTimeout;
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      context.after(async () => {
+        try { await client.stop(); } finally {
+          for (const timer of timers) realClear(timer);
+          context.mock.restoreAll();
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
+      await writeFile(binaryPath, `#!${process.execPath}
+const readline = require("node:readline");
+const mode = ${JSON.stringify(resultMode)};
+process.stderr.write("fixture diagnostic\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method !== "initialize" && mode === "exit") process.exit(9);
+  if (mode === "stop" && request.params?.arguments?.wait) return;
+  const reply = request.method === "initialize" ? { result: {} }
+    : mode === "error" ? { error: { code: -32000, message: "test failure" } }
+    : { result: { content: [{ type: "text", text: "memory result" }] } };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...reply }) + "\\n");
+});
+`, { mode: 0o700 });
+      context.mock.method(globalThis, "setTimeout", (
+        callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]
+      ) => {
+        const timer = realTimeout(callback, delay, ...args);
+        // Only initialize and memory_get_context deadlines, not stderr or
+        // shutdown watchdog timers (the fixture intentionally emits stderr).
+        if (delay === 10_000 || delay === 120_000) timers.add(timer);
+        return timer;
+      });
+      context.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout>) => {
+        timers.delete(timer);
+        realClear(timer);
+      });
+      if (resultMode === "error" || resultMode === "exit") {
+        await assert.rejects(client.callTool("memory_get_context", {}),
+          resultMode === "error" ? /test failure/ : /code=9/);
+      } else {
+        for (let index = 0; index < 10; index++) {
+          assert.equal(await client.callTool("memory_get_context", {}), "memory result");
+          assert.equal(timers.size, 0, "completed calls release request timers");
+        }
+        if (resultMode === "stop") {
+          const rejected = assert.rejects(client.callTool("memory_get_context", { wait: true }), Error);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          assert.equal(timers.size, 1, "one call is outstanding before stop");
+          await client.stop();
+          await rejected;
+        } else if (resultMode === "write-error") {
+          const child = Reflect.get(client, "proc") as ChildProcess;
+          assert.ok(child.stdin);
+          context.mock.method(child.stdin, "write", (_payload: string, callback: (error: Error) => void) => {
+            queueMicrotask(() => callback(new Error("fixture write failure")));
+            return false;
+          });
+          await assert.rejects(client.callTool("memory_get_context", {}), /Failed to write.*fixture write failure/);
+        }
+      }
+      assert.equal(timers.size, 0, "terminal paths release request timers");
     });
   }
 
