@@ -10,6 +10,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,6 +158,48 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       await client.stop();
     });
   }
+
+  it("stop rejects a forced-termination failure without an uncaught exception", {
+    timeout: 10_000,
+  }, async (context) => {
+    const directory = await mkdtemp(join(tmpdir(), "memory-kill-error-"));
+    const binaryPath = join(directory, "worker.cjs");
+    const client = new McpStdioClient({ ...cfg, binaryPath });
+    let child: ChildProcess | undefined;
+    context.after(async () => {
+      context.mock.restoreAll();
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise<void>((resolve) => child!.once("exit", () => resolve()));
+        child.kill("SIGKILL");
+        await exited;
+      }
+      await rm(directory, { recursive: true, force: true });
+    });
+    await writeFile(binaryPath, `#!${process.execPath}
+const readline = require("node:readline");
+setInterval(() => {}, 1000);
+process.on("SIGTERM", () => {});
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === "initialize" ? {} : {
+    content: [{ type: "text", text: String(process.pid) }],
+  };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o700 });
+    const pid = Number(await client.callTool("memory_get_context", {}));
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+    child = Reflect.get(client, "proc") as ChildProcess;
+    const kill = child.kill.bind(child);
+    const failure = new Error("fixture SIGKILL failure");
+    context.mock.method(child, "kill", (signal?: NodeJS.Signals | number) => {
+      if (signal === "SIGKILL") throw failure;
+      return kill(signal);
+    });
+    await assert.rejects(client.stop(), (error) => error === failure);
+    assert.doesNotThrow(() => process.kill(pid, 0), "a failed kill is not reported as successful exit");
+  });
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);

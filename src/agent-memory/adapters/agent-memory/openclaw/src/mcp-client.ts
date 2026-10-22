@@ -476,7 +476,12 @@ export class McpStdioClient {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL");
+          try {
+            child.kill("SIGKILL");
+          } catch (error) {
+            // A timer callback must reject shutdown, not crash the host.
+            onError(error instanceof Error ? error : new Error(String(error)));
+          }
         }
       }, 2000);
       timeout.unref();
