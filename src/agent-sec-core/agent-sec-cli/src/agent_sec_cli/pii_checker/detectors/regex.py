@@ -197,9 +197,15 @@ _PRIVATE_KEY_RE = re.compile(
 )
 _ALIYUN_ACCESS_KEY_ID_RE = re.compile(r"\bLTAI[A-Za-z0-9]{12,30}\b")
 _SECRET_FIELD_RE = re.compile(
-    r"(?i)(?<![\w\u4e00-\u9fff])(?P<name>password|passwd|secret|token|"
+    r"(?i)(?<![\w\u4e00-\u9fff])(?P<full_name>"
+    r"(?P<name>password|passwd|secret|token|"
     r"api[_-]?key|apikey|access[_-]?key[_-]?secret|accessKeySecret|"
-    r"client[_-]?secret|authorization|密码|口令|密钥|令牌|授权|访问密钥)"
+    r"client[_-]?secret|authorization|secret[_-]?key|private[_-]?key|"
+    r"auth[_-]?token|access[_-]?token|密码|口令|密钥|令牌|授权|访问密钥)|"
+    r"(?P<compound_prefix>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+){0,8}[-_])"
+    r"(?P<keyword>password|passwd|secret|token|api[_-]?key|apikey|"
+    r"access[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token|"
+    r"access[_-]?token|client[_-]?secret))"
     r"\s*[:=：]\s*(?P<quoted_value>\"(?P<double_value>[^\s\"',;，；：]{8,})\"|"
     r"'(?P<single_value>[^\s\"',;，；：]{8,})'|"
     r"(?P<bare_value>[^\s\"',;，；：]{8,}))"
@@ -442,7 +448,10 @@ class RegexPiiDetector:
 
     def _detect_secret_fields(self, text: str, candidates: list[PiiCandidate]) -> None:
         for match in _SECRET_FIELD_RE.finditer(text):
-            field_name = match.group("name")
+            # `full_name` covers both alternatives: the bare keyword names and
+            # the compound `prefix_keyword` names (e.g. `db_password`), keeping
+            # V1 aligned with the V2 Rust detector's compound-prefix branch.
+            field_name = match.group("full_name")
             value = (
                 match.group("double_value")
                 or match.group("single_value")
