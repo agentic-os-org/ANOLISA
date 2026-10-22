@@ -1,9 +1,10 @@
 //! Integration coverage for schema-only compression.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokenless_ccr::{InMemoryStore, StashStore};
+use tokenless_ccr::{InMemoryStore, RecoveryMethod, StashStore, recovery_hashes};
 use tokenless_schema::SchemaCompressor;
 
 const FIXTURES: &[&str] = &[
@@ -166,5 +167,102 @@ fn stash_backed_description_is_retrievable() {
     assert_eq!(
         store.retrieve(hash).unwrap().as_deref(),
         Some(description.as_str())
+    );
+}
+
+#[test]
+fn referenced_keys_do_not_grant_rollback_ownership() {
+    let store = Arc::new(InMemoryStore::default());
+    let original = "Preserve this original description for existing callers. ".repeat(100);
+    let existing = store.stash(&original).unwrap();
+    let compressor = SchemaCompressor::new().with_stash_store(store.clone());
+    let schema = json!({"function":{"name":"read","description":original}});
+    let first = compressor.compress(&schema);
+    assert_eq!(first, compressor.compress(&schema));
+    assert_eq!(
+        compressor.referenced_stash_keys(),
+        vec![existing.key.clone()]
+    );
+    assert!(compressor.stash_keys().is_empty());
+    assert_eq!(compressor.rollback_stash_writes(), 0);
+    assert!(compressor.referenced_stash_keys().is_empty());
+    assert_eq!(store.retrieve(&existing.key).unwrap(), Some(original));
+}
+
+#[test]
+fn references_reset_independently_of_stored_rows() {
+    let store = Arc::new(InMemoryStore::default());
+    let description = "Long source content used by the schema compressor. ".repeat(100);
+    let schema = json!({"function":{"name":"read","description":description}});
+    let compressor = SchemaCompressor::new().with_stash_store(store.clone());
+    compressor.compress(&schema);
+    let keys = compressor.referenced_stash_keys();
+    assert_eq!(keys.len(), 1);
+    let mut owned_keys = compressor.stash_keys();
+    owned_keys.sort();
+    assert_eq!(owned_keys, keys);
+    compressor.clear_stash_session();
+    assert!(compressor.referenced_stash_keys().is_empty());
+    assert_eq!(store.retrieve(&keys[0]).unwrap(), Some(description));
+    compressor.compress(&schema);
+    assert_eq!(compressor.referenced_stash_keys(), keys);
+    assert!(compressor.stash_keys().is_empty());
+    assert_eq!(compressor.rollback_stash_writes(), 0);
+}
+
+#[test]
+fn mixed_foreign_refresh_references_do_not_transfer_rollback_ownership() {
+    let store = Arc::new(InMemoryStore::default());
+    let first = SchemaCompressor::new().with_stash_store(store.clone());
+    let other = SchemaCompressor::new().with_stash_store(store.clone());
+    let original = "Existing source description with enough detail. ".repeat(100);
+    let fresh = "Different source created during this candidate session. ".repeat(100);
+    let schema = json!({"function": {"name": "read", "description": original}});
+
+    let initial_output = first.compress(&schema);
+    other.compress(&schema);
+    let refreshed_output = first.compress(&schema);
+    assert_eq!(initial_output, refreshed_output);
+    assert!(
+        first.stash_keys().is_empty(),
+        "foreign refresh ends ownership"
+    );
+    let fresh_output = first.compress(&json!({
+        "function": {"name": "write", "description": fresh}
+    }));
+    let output = serde_json::to_string(&json!([refreshed_output, fresh_output])).unwrap();
+    let visible = recovery_hashes(&output, &RecoveryMethod::Shell)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let references = first.referenced_stash_keys();
+    assert_eq!(
+        references, visible,
+        "references match the candidate markers"
+    );
+    assert_eq!(references.len(), 2);
+    let owned = first.stash_keys();
+    assert_eq!(owned.len(), 1);
+    assert_eq!(
+        store.retrieve(&owned[0]).unwrap().as_deref(),
+        Some(fresh.as_str())
+    );
+    let foreign_key = references.iter().find(|key| !owned.contains(key)).unwrap();
+
+    assert_eq!(first.rollback_stash_writes(), 1);
+    assert!(first.referenced_stash_keys().is_empty());
+    assert_eq!(references, visible, "the saved snapshot survives clearing");
+    assert_eq!(store.retrieve(&owned[0]).unwrap(), None);
+    assert_eq!(
+        store.retrieve(foreign_key).unwrap().as_deref(),
+        Some(original.as_str())
+    );
+    assert_eq!(other.rollback_stash_writes(), 0);
+    assert!(other.referenced_stash_keys().is_empty());
+    assert_eq!(
+        store.retrieve(foreign_key).unwrap().as_deref(),
+        Some(original.as_str())
     );
 }
