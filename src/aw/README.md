@@ -39,6 +39,7 @@ capabilities in the configuration. AW does not install Agents or configure model
 
 | Task | Guide |
 | --- | --- |
+| Call sec-core and Tokenless from Rust | [Rust SDK](../../docs/developer-guide/en/aw/sdk.md) |
 | Choose capabilities and get started | [AW user guide](../../docs/user-guide/en/user-entrypoint/aw/README.md) |
 | Install packages, generate configuration, and run for the first time | [Install AW](../../docs/user-guide/en/user-entrypoint/aw/installation.md) |
 | Select an Agent, enable Providers, and edit configuration | [Configure AW](../../docs/user-guide/en/user-entrypoint/aw/configuration.md) |

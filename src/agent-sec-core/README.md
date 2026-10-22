@@ -15,6 +15,12 @@ listed below.
 
 AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
 
+Rust applications can call `asc_daemon_client::code_scan::Client::scan_code`
+through the [typed client](v2/crates/asc-daemon-client/src/code_scan.rs). It keeps
+scanner verdicts, daemon rejections and transport errors separate, preserves the
+server request ID, and authenticates the daemon before sending source code.
+Construction does not start a service; a timeout does not imply server cancellation.
+
 ## Background
 
 As AI Agents gradually gain OS-level execution capabilities (file I/O, network access, process management, etc.), traditional application security boundaries no longer apply. Agent Sec Core builds a **defense-in-depth** system at the OS layer, ensuring Agents run in a controlled, auditable, least-privilege environment.

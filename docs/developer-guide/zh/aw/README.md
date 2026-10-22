@@ -8,6 +8,7 @@
 | 任务 | 文档 |
 | --- | --- |
 | 看懂 crate 关系和请求流转 | [架构总览](architecture.md) |
+| 在 Rust 应用中调用安全与压缩 | [Rust SDK](sdk.md) |
 | 本地编译并交付安装包 | [从源码构建 AW](building.md) |
 | 开发、收录和分发 Provider | [Provider 协作](providers.md) |
 | 接入自己的检查脚本或 Provider | [组件接入教程](integration.md) |

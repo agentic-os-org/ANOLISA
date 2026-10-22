@@ -6,11 +6,31 @@ on:
     paths:
       - 'src/aw/**'
       - 'providers/**'
+      - 'src/agent-sec-core/v2/Cargo.*'
+      - 'src/agent-sec-core/v2/crates/asc-daemon-client/**'
+      - 'src/agent-sec-core/v2/crates/asc-daemon-protocol/**'
+      - 'src/agent-sec-core/v2/crates/asc-observability/**'
+      - 'src/agent-sec-core/v2/crates/asc-foundation-types/**'
+      - 'src/agent-sec-core/v2/crates/asc-policy-types/**'
+      - 'src/agent-sec-core/v2/crates/asc-security-events/**'
+      - 'src/tokenless/Cargo.*'
+      - 'src/tokenless/crates/**'
+      - 'src/tokenless/adapters/tokenless/common/hooks/tool_categories.json'
       - '.github/workflows/aw-ci.yml'
   pull_request:
     paths:
       - 'src/aw/**'
       - 'providers/**'
+      - 'src/agent-sec-core/v2/Cargo.*'
+      - 'src/agent-sec-core/v2/crates/asc-daemon-client/**'
+      - 'src/agent-sec-core/v2/crates/asc-daemon-protocol/**'
+      - 'src/agent-sec-core/v2/crates/asc-observability/**'
+      - 'src/agent-sec-core/v2/crates/asc-foundation-types/**'
+      - 'src/agent-sec-core/v2/crates/asc-policy-types/**'
+      - 'src/agent-sec-core/v2/crates/asc-security-events/**'
+      - 'src/tokenless/Cargo.*'
+      - 'src/tokenless/crates/**'
+      - 'src/tokenless/adapters/tokenless/common/hooks/tool_categories.json'
   merge_group:
   workflow_dispatch:
     inputs:
@@ -80,6 +100,7 @@ jobs:
         with:
           workspaces: |
             src/aw
+            src/aw/sdk/rust -> ../../target/sdk
             providers/agent-sec-core
             providers/tokenless
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
@@ -88,6 +109,17 @@ jobs:
         if: steps.scope.outputs.selected == 'true'
         id: checks
         run: python3 src/aw/scripts/check.py
+
+      - name: Retain the verified public SDK sources
+        if: steps.scope.outputs.selected == 'true' && steps.checks.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-sdk-source-${{ github.sha }}
+          path: |
+            src/aw/target/sdk-source/aw-sdk-source.tar.gz
+            src/aw/target/sdk-source/result.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Require the expected result
         if: always()

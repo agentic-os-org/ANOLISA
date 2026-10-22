@@ -37,6 +37,14 @@ maintained separately under `providers/`.
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
 on `aw-service`.
 
+### Application SDK
+
+`src/aw/sdk/rust/` owns the separate `aw-sdk` workspace. Applications consume one
+package; its optional component features depend on the sec-core daemon client and
+Tokenless Runtime. The nine framework crates do not depend on this SDK, and the
+SDK does not import AW Service, Host or concrete Providers. See the
+[Rust SDK guide](sdk.md).
+
 ### Independent Providers
 
 | Cargo package and binary | Directory | Responsibility | Framework dependencies |

@@ -97,8 +97,9 @@ JSON/stdio 协议，不承诺 Rust 二进制 ABI 稳定。
 AW 库，Tokenless 组合测试仍引用 sec-core Provider，尚未达到仓库外独立发布的目标。
 
 当前 Preview 将 core 和 Provider 作为同一批构建产物交付，因此安装校验要求版本和
-源码提交一致，以确认组合来源。后续以已发布 SDK 和 Provider 产物建立兼容矩阵，
-再调整安装规则，并补齐旧安装回执迁移测试。本次不要求用户迁移配置或回执。
+源码提交一致，以确认组合来源。下一阶段以公共 SDK、独立产物和组合验证建立新发行，
+从全新安装开始，覆盖新发行自身的升级与回退，不承接旧 Preview 安装或回执迁移。
+具体职责和验收见 [Provider 独立分发契约](provider-distribution_zh.md)。
 
 ## 回归边界
 

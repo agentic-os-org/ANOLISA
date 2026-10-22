@@ -113,9 +113,12 @@ are not yet supported for these implementations.
 
 Preview currently delivers core and Providers as one build set. Installation
 therefore checks matching versions and source commits to establish their common
-origin. Published SDKs and Provider artifacts will underpin a compatibility matrix
-before installation rules change, with migration tests for old receipts. This
-migration requires no user configuration or receipt changes.
+origin. The next stage establishes a new distribution through public SDKs,
+independent artifacts and composition validation. It starts with fresh installs
+and covers upgrades and rollback within that distribution, excluding old Preview
+installation or receipt migration. See the
+[independent Provider distribution contract](provider-distribution.md) for
+ownership and acceptance.
 
 ## Regression boundary
 

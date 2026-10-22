@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -26,6 +27,13 @@ class BeforeLaunch(Exception):
 
 
 class NativePathTests(GateFixture):
+    def setUp(self) -> None:
+        # The native entrypoint validates sockaddr_un before process launch.
+        # Keep this fixture short even when the checkout path itself is long.
+        temporary = tempfile.TemporaryDirectory(prefix="aw-native-", dir="/tmp")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
     def executables(self) -> dict[str, Path]:
         paths = {
             "aw": self.root / "framework/aw",

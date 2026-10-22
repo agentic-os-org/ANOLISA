@@ -155,6 +155,16 @@ class ScopeTests(GateFixture):
         removed = self.git("rev-parse", "HEAD")
         self.assertTrue(gate.scope("push", {"before": head, "after": removed}, removed, self.root))
 
+    def test_sdk_component_changes_select_the_gate(self) -> None:
+        event = {"pull_request": {"base": {"sha": "a" * 40}, "head": {"sha": "b" * 40}}}
+        for prefix in gate.SDK_INPUTS:
+            path = prefix + ("lib.rs" if prefix.endswith("/") else "")
+            with self.subTest(path=path), patch.object(gate, "git", return_value=path + "\0"):
+                self.assertTrue(gate.scope("pull_request", event, "c" * 40, self.root))
+        for path in ("src/tokenless/README.md", "src/agent-sec-core/v2/apps/asc-daemon/src/main.rs"):
+            with self.subTest(path=path), patch.object(gate, "git", return_value=path + "\0"):
+                self.assertFalse(gate.scope("pull_request", event, "c" * 40, self.root))
+
     def test_merge_group_selects_only_aw_changes(self) -> None:
         base = self.init_git()
         head = self.commit("src/tokenless/unrelated.txt", "unrelated")

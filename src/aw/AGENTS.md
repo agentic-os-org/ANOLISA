@@ -52,9 +52,12 @@ out-of-tree Provider builds against pinned public AW libraries. Third parties
 need only the public process protocol and YAML, not a Rust SDK or OS checkout.
 The bundled implementations still use local SDK paths. Preview delivers one
 build set and checks matching versions and source commits for common origin.
-Independent SDK publication and installation compatibility changes are a later
-stage, including receipt migration tests. Preserve existing package and binary
-names when moving source directories. New Provider directories
+Independent SDK publication and artifact composition must satisfy the
+[distribution contract](docs/design/provider-distribution.md). It covers fresh
+installations and upgrades and rollback within the new distribution; legacy
+Preview installation and receipt migration are out of scope.
+Preserve existing package and binary names when moving source directories.
+New Provider directories
 do not automatically join the installer: inclusion requires explicit packaging
 and lifecycle validation.
 
@@ -69,6 +72,13 @@ crates separately from concrete Providers:
 | Hook execution | `aw-host`, `aw-exec` | Prepare Providers and execute steps; bound process lifetime and cleanup |
 | Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
 | Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
+
+The application package `aw-sdk` has a separate workspace under `sdk/rust/`.
+It composes typed component APIs; sec-core owns daemon calls and Tokenless owns
+its Runtime. Framework crates must not depend on it, and it must not import
+Service, Host or concrete Providers. Keep component-only SDK builds independent,
+explicit state and endpoints, daemon identity checks, and marker-authorized
+recovery. Direct SDK calls do not create AW receipts or native authorization.
 
 The Hook path is Adapter -> service -> Host -> executor -> Provider process.
 Results return to the Adapter for native adoption. The service uses
@@ -142,8 +152,9 @@ named sibling modules, preserve test entrypoints and assertions, and avoid
 compressing code or adding size exemptions. Never add `mod.rs` except the
 repository-approved `tests/common/mod.rs` convention.
 
-Only PRs changing `src/aw/**` or `providers/**` automatically run AW CI. Component internals belong
-in component CI; explicitly validate public contract changes consumed by AW.
+PRs changing `src/aw/**`, `providers/**`, or public component libraries consumed
+by the SDK run AW CI. Keep `SDK_INPUTS` and workflow filters aligned when the
+dependency closure changes. Other component internals belong in component CI.
 Keep daily checks credential-free. The nightly integration workflow builds all
 Preview packages once and reuses checksummed candidate-SHA binaries for pinned
 native acceptance. Preserve exact version evidence, bounded processes, complete

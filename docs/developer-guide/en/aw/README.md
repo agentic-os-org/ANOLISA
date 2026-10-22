@@ -9,6 +9,7 @@ Providers. For installation and daily use, start with the
 | Task | Guide |
 | --- | --- |
 | Understand crate relationships and request flow | [Architecture](architecture.md) |
+| Call security and compression from Rust | [Rust SDK](sdk.md) |
 | Build locally and deliver packages | [Build AW from source](building.md) |
 | Develop, contribute, and distribute Providers | [Provider collaboration](providers.md) |
 | Connect a check script or Provider | [Component integration tutorial](integration.md) |
