@@ -213,7 +213,8 @@ pub(crate) fn before_model_with_store(
                 .collect(),
         );
         let candidate_text = serde_json::to_string(&candidate).map_err(RuntimeError::Serialize)?;
-        pending_keys = compressor.stash_keys();
+        // The finalizer clears the session on both acceptance and rollback.
+        pending_keys = compressor.referenced_stash_keys();
         finish_schema_compression(
             &input,
             candidate_text,
