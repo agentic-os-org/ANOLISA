@@ -5,9 +5,9 @@ use ws_ckpt_common::{
     default_auto_cleanup_keep, delete_workspace_policy, load_config_file, save_workspace_policy,
     ConfigReport, DaemonConfig, EffectivePolicy, ErrorCode, FileConfig, GlobalPolicySnapshot,
     PolicyFieldOp, Request, Response, StatusReport, WorkspaceInfo, WorkspacePolicy,
-    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, MAX_LIST_PAGE_ITEMS,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
+    MAX_LIST_PAGE_ITEMS,
 };
 
 /// Kernel-derived connection identity available to guarded requests.
@@ -479,6 +479,7 @@ async fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             // (or wake them from a disabled state) so the new config takes
             // effect immediately instead of on the next polling boundary.
             state.config_notify.notify_waiters();
+            state.advisory_notify.notify_one();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
                 file: Some(file_config),
@@ -512,6 +513,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
         Ok(file_config) => {
             apply_global_config(state, &file_config);
             state.config_notify.notify_waiters();
+            state.advisory_notify.notify_one();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
                 file: Some(file_config),
@@ -525,7 +527,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
 }
 
 /// Apply a freshly-loaded `file_config` to the daemon's in-memory state.
-/// Caller is responsible for `config_notify.notify_waiters()` afterwards.
+/// Caller notifies the scheduler loops after applying the configuration.
 fn apply_global_config(state: &Arc<DaemonState>, file_config: &FileConfig) {
     let mut cfg = match state.config.write() {
         Ok(g) => g,
@@ -813,23 +815,18 @@ async fn handle_patch_workspace_policy(
     }
 }
 
-/// Aggregate advisory metrics. Never triggers bootstrap; backend-query failure
-/// yields zero bytes so the CLI silently skips the fs warning.
+/// Return the most recent complete daemon-side sample without waiting on workspace locks.
 async fn handle_health_advisory(state: &Arc<DaemonState>) -> Response {
-    let over_limit_workspace_count: u32 = state
-        .get_all_workspace_info()
-        .await
-        .iter()
-        .filter(|w| w.snapshot_count > ADVISORY_SNAPSHOT_LIMIT)
-        .count() as u32;
-    let (fs_total_bytes, fs_used_bytes) = match state.backend.get_usage().await {
-        Ok((total, used)) => (total, used),
-        Err(_) => (0, 0),
-    };
-    Response::HealthAdvisoryOk {
-        over_limit_workspace_count,
-        fs_total_bytes,
-        fs_used_bytes,
+    match state.health_advisory_snapshot() {
+        Some(sample) => Response::HealthAdvisoryOk {
+            over_limit_workspace_count: sample.over_limit_workspace_count,
+            fs_total_bytes: sample.fs_total_bytes,
+            fs_used_bytes: sample.fs_used_bytes,
+        },
+        None => Response::Error {
+            code: ErrorCode::InternalError,
+            message: "health advisory sample is unavailable or stale".to_string(),
+        },
     }
 }
 
@@ -2078,8 +2075,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_health_advisory_returns_health_advisory_ok() {
-        // Empty workspace set -> counter must be 0; fs bytes vary by OS.
+    async fn dispatch_health_advisory_reports_unavailable_until_first_refresh() {
         let state = Arc::new(DaemonState::new(
             test_config(),
             test_backend(),
@@ -2088,13 +2084,95 @@ mod tests {
         let req = Request::HealthAdvisory;
         let resp = dispatch(&state, req).await;
         match resp {
-            Response::HealthAdvisoryOk {
-                over_limit_workspace_count,
-                ..
-            } => {
-                assert_eq!(over_limit_workspace_count, 0);
+            Response::Error { message, .. } => {
+                assert_eq!(message, "health advisory sample is unavailable or stale");
             }
-            _ => panic!("expected HealthAdvisoryOk, got {:?}", resp),
+            _ => panic!("expected unavailable advisory error, got {:?}", resp),
         }
+    }
+
+    #[tokio::test]
+    async fn health_advisory_uses_cache_when_periodic_diagnostics_are_disabled() {
+        let mut config = test_config();
+        config.health_check_interval_secs = 0;
+        let state = Arc::new(DaemonState::new(
+            config,
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state.seed_health_advisory_snapshot(2, 1_000, 750, std::time::Duration::ZERO);
+
+        assert!(matches!(
+            dispatch(&state, Request::HealthAdvisory).await,
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count: 2,
+                fs_total_bytes: 1_000,
+                fs_used_bytes: 750,
+            }
+        ));
+        state.seed_health_advisory_snapshot(
+            2,
+            1_000,
+            750,
+            std::time::Duration::from_secs(
+                ws_ckpt_common::DEFAULT_HEALTH_CHECK_INTERVAL_SECS * 2 + 1,
+            ),
+        );
+        assert!(matches!(
+            dispatch(&state, Request::HealthAdvisory).await,
+            Response::Error { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_advisory_keeps_fresh_sample_after_busy_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state
+            .register_workspace(
+                "locked-ws".to_string(),
+                temp.path().to_path_buf(),
+                ws_ckpt_common::SnapshotIndex::new(temp.path().to_path_buf()),
+            )
+            .unwrap();
+        state.seed_health_advisory_snapshot(2, 1_000, 750, std::time::Duration::ZERO);
+        let workspace = state.all_workspaces().pop().unwrap();
+        let _write_guard = workspace.write().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(20))
+            .await
+            .is_err());
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            dispatch(&state, Request::HealthAdvisory),
+        )
+        .await
+        .expect("advisory must not wait for workspace locks");
+        assert!(matches!(
+            response,
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count: 2,
+                fs_total_bytes: 1_000,
+                fs_used_bytes: 750,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_advisory_rejects_stale_samples() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state.seed_health_advisory_snapshot(0, 1_000, 750, std::time::Duration::from_secs(601));
+
+        let response = dispatch(&state, Request::HealthAdvisory).await;
+        assert!(matches!(response, Response::Error { .. }));
     }
 }

@@ -405,6 +405,13 @@ nor plugin configuration. OpenClaw's list tool is unchanged.
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.
 
+Setting `ws-ckpt config -g --health-check-interval 0` disables periodic health
+diagnostics. The daemon still refreshes the advisory cache at the default
+300-second interval and after workspace or global configuration changes. CLI
+warnings are best effort: they are omitted until a
+complete sample is available and if the last successful sample is over 600
+seconds old.
+
 ```bash
 # Enable auto-cleanup, keep checkpoints for 7 days
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d

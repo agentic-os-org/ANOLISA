@@ -17,6 +17,9 @@
 - **TOML 配置热重载** — 以 `/etc/ws-ckpt/config.toml` 为唯一入口，`ws-ckpt reload` 即时生效
 - **容量与数量阈值告警** — 任一工作区快照数超 1000 或文件系统使用率超 90% 时统一告警
 
+将健康检查间隔设为零会关闭周期诊断；daemon 仍会刷新 advisory 缓存。参见
+[CLI 配置](../../docs/user-guide/zh/ws-ckpt/index.md#cli-配置)。
+
 通过 OpenClaw 或 Hermes 插件成功回滚后，仅跳过被恢复工作区在本轮结束时的自动检查点，
 无论回滚使用工作区 ID 还是注册路径。
 其他工作区仍正常创建自动检查点；预览和失败的回滚不会抑制检查点。
