@@ -17,7 +17,8 @@
 # auto_cleanup_keep = 20              # integer = count mode (keep N unpinned); 
                                       # string = age mode (delete older than duration, e.g. auto_cleanup_keep = "30d"; units s/m/h/d/w).
 # auto_cleanup_interval_secs = 86400  # Auto-cleanup interval (seconds, default 24h)
-# health_check_interval_secs = 300    # Health check interval (seconds)
+# health_check_interval_secs = 300    # Periodic health diagnostics interval (seconds)
+                                      # 0 disables diagnostics; advisory cache still refreshes every 300 seconds.
 
 # ── Backend selection ──
 # Section headers below are always active so that uncommenting a single

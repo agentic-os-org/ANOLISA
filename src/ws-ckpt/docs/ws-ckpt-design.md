@@ -616,9 +616,10 @@ pub struct DaemonState {
 | 任务 | 触发 | 行为 |
 |------|------|------|
 | **Auto-cleanup** | 每 `auto_cleanup_interval_secs` 或 config reload 唤醒 | 遍历所有 ws，按各自 effective policy 的 `Count(N)` 或 `Age(duration)` 删除过期快照。任一 ws 有局部 override 启用 cleanup 即运行，全部 disabled 时 park |
-| **Health-check** | 每 `health_check_interval_secs` 或 config reload 唤醒 | 上报 fs 使用率 + 快照超限告警（>1000 / >90%），结果缓存供 CLI `HealthAdvisory` 拉取 |
+| **Health-check** | 启动时、每 `health_check_interval_secs` 或 config reload 唤醒；刷新失败后短间隔重试 | 缓存完整的 fs 使用率与快照超限计数供 CLI `HealthAdvisory` 拉取，并按配置周期运行诊断。间隔为 0 时停止周期诊断，缓存仍按默认 300 秒刷新 |
 
-config reload（`notify_waiters()`）会立即打断 sleep，让 loop 重读配置。`Notified` 在读 config 之前就 `enable()` 注册，避免 notify 丢失。
+config reload 使用 `notify_waiters()` 唤醒诊断和清理循环。advisory 循环使用独立的
+`notify_one()`，保留采样期间或循环尚未等待时发生的变更通知。
 
 ### Rollback 崩溃恢复
 

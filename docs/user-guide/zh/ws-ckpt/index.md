@@ -357,6 +357,10 @@ CLI 缺失、不支持参数、游标无效或跨工作区、daemon 故障、超
 
 配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。
 
+设置 `ws-ckpt config -g --health-check-interval 0` 会关闭周期健康诊断。daemon 仍以
+默认的 300 秒间隔刷新 advisory 缓存，并在工作区或全局配置变更后刷新。CLI 告警为尽力而为：在尚无完整样本或上次成功
+样本超过 600 秒时，CLI 会跳过告警。
+
 ```bash
 # 启用自动清理，保留 7 天内的检查点
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d

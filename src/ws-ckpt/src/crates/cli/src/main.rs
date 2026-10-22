@@ -79,7 +79,8 @@ struct ConfigArgs {
     #[arg(long, conflicts_with_all = ["enable_auto_cleanup", "disable_auto_cleanup", "auto_cleanup_keep", "auto_cleanup_interval", "health_check_interval", "img_size", "img_max_percent"])]
     reset: bool,
 
-    /// Set health check interval in seconds (0 disables the scheduler loop).
+    /// Set periodic health diagnostic interval in seconds (0 disables diagnostics).
+    /// The advisory cache still refreshes at the default interval when set to 0.
     /// Global-only.
     #[arg(long)]
     health_check_interval: Option<u64>,
