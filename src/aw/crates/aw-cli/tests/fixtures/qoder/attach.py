@@ -1,6 +1,7 @@
 """Require native Qoder TUI attach, first-tool denial and detach without restarting."""
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -43,6 +44,7 @@ def execute(args):
         (root / "other-home/.qoder").mkdir(parents=True, mode=0o700)
         unrelated = root / "other-home/.qoder/settings.json"
         unrelated.write_text('{"theme":"other"}')
+        unrelated.chmod(0o600)
         settings = home / ".qoder/settings.json"
         settings.write_text('{"general":{"enableAutoUpdate":false}}')
         settings.chmod(0o600)
@@ -66,7 +68,7 @@ def execute(args):
                    "-m", "Performance", "--max-output-tokens", "256", "--max-model-request-retries", "0",
                    "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
         record = {"command": command, "cwd": str(root), "ports": [], "log": None,
-                  "output_policy": "discard native terminal bytes", "deadline_seconds": 180,
+                  "output_policy": "discard native terminal bytes", "deadline_seconds": 300,
                   "container_stop": f"docker rm -f {name}"}
         (output / "process.json").write_text(json.dumps(record, indent=2))
         master, slave = pty.openpty()
@@ -84,8 +86,11 @@ def execute(args):
                 if child.poll() is not None:
                     break
         def docker(*argv):
-            return subprocess.run(["docker", *map(str, argv)], env=controls, capture_output=True,
-                                  text=True, timeout=40, check=True).stdout
+            result = subprocess.run(["docker", *map(str, argv)], env=controls, capture_output=True,
+                                    text=True, timeout=40)
+            if result.returncode:
+                raise RuntimeError(f"Docker control failed ({result.returncode}): {result.stderr.strip()}")
+            return result.stdout
         def control(*argv):
             return json.loads(docker("exec", "--user", f"{os.getuid()}:{os.getgid()}", name, "/aw", *argv))
         def status():
@@ -113,19 +118,31 @@ def execute(args):
             other_master, other_slave = pty.openpty()
             fcntl.ioctl(other_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
             other_command = ["docker", "exec", "-it", "--env", "HOME=/probe/other-home",
-                             "--workdir", "/probe/other-work", name, "/qodercli",
+                             "--workdir", "/probe/other-work", name, "/qodercli", "--dangerously-skip-permissions",
                              "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
             other_child = subprocess.Popen(other_command, env=controls, stdin=other_slave,
                                            stdout=other_slave, stderr=other_slave, start_new_session=True)
             os.close(other_slave)
             (output / "other-process.json").write_text(json.dumps({"command": other_command,
                 "cwd": str(root), "pid": other_child.pid, "pgid": other_child.pid,
-                "ports": [], "log": None, "deadline_seconds": 180,
+                "ports": [], "log": None, "deadline_seconds": 300,
                 "stop": f"docker rm -f {name}", "output_policy": "discard native terminal bytes"}, indent=2))
-            other_deadline = time.monotonic() + 8
-            while time.monotonic() < other_deadline:
-                if select.select([other_master], [], [], .1)[0]:
-                    os.read(other_master, 65536)
+            other_screen = bytearray()
+            def drain_other(seconds):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if select.select([other_master], [], [], .1)[0]:
+                        other_screen.extend(os.read(other_master, 65536))
+                        del other_screen[:-65536]
+            drain_other(8)
+            for _ in range(4):
+                rendered = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(other_screen)).decode(errors="replace")
+                if re.search(r"(Do you trust|Trust (this|the) (folder|directory)|trust the files)", rendered, re.I):
+                    os.write(other_master, b"\r")
+                    other_screen.clear()
+                    drain_other(3)
+                else:
+                    break
             assert other_child.poll() is None
             other_pid = next(int(line.split()[0]) for line in docker("top", name, "-eo", "pid,comm").splitlines()[1:]
                              if "qoder" in line and int(line.split()[0]) != host_pid)
@@ -162,6 +179,36 @@ def execute(args):
                 raise TimeoutError("first native tool turn did not reach the attached Hook and finish")
             assert not (root / "work/tool-marker").exists()
             report["cases"].append({"case": "first-native-tool-denied", "passed": True})
+            other_native_pid = int(next(line for line in Path(f"/proc/{other_pid}/status").read_text().splitlines()
+                                        if line.startswith("NSpid:")).split()[-1])
+            control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", other_native_pid)
+            before_update = status()["instances"]
+            assert len(before_update) == 2
+            other_instance = next(row for row in before_update if row["process"]["pid"] == other_native_pid)
+            other_registered = unrelated.read_bytes()
+            candidate = copy.deepcopy(document)
+            candidate["spec"]["events"] = {}
+            (root / "next.json").write_text(json.dumps(candidate))
+            activated = control("update", "--config", "/probe/aw.json", "--pid", native_pid,
+                                "--policy", "/probe/next.json")
+            current = status()["instances"]
+            assert other_instance in current
+            selected = next(row for row in current if row["process"]["pid"] == native_pid)
+            assert selected["instance_id"] == activated["instance_id"]
+            assert selected["policy_revision"] == activated["policy_revision"] != other_instance["policy_revision"]
+            assert selected["process"]["start_ticks"] == identity
+            os.write(master, b"The policy now permits this operation. Use Bash exactly once to run: printf attached > /probe/work/tool-marker.\r")
+            deadline = time.monotonic() + 80
+            while time.monotonic() < deadline:
+                drain(.2)
+                if (root / "work/tool-marker").exists() and next(
+                    row for row in status()["instances"] if row["process"]["pid"] == native_pid)["requests"] == 0:
+                    break
+            else:
+                raise TimeoutError("updated native tool turn did not execute and finish")
+            assert other_instance in status()["instances"] and unrelated.read_bytes() == other_registered
+            control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", other_native_pid, "--remove")
+            report["cases"].append({"case": "pid-update-same-target-isolation", "passed": True})
             original = json.loads(settings.read_text())
             original["userAttachTest"] = "preserve"
             temporary = settings.with_suffix(".next")
@@ -174,7 +221,9 @@ def execute(args):
             assert not list((root / "state").glob("attach-*"))
             final = json.loads(settings.read_text())
             assert final["userAttachTest"] == "preserve" and not final.get("hooks")
-            assert unrelated.read_bytes() == other_settings
+            other_final = json.loads(unrelated.read_text())
+            assert not other_final.pop("hooks", {})
+            assert other_final == json.loads(other_settings)
             assert other_child.poll() is None
             assert Path(f"/proc/{other_pid}/stat").read_text().rsplit(")", 1)[1].split()[19] == other_identity
             report["other_profile_process_unchanged"] = True

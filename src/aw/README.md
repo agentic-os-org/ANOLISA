@@ -39,7 +39,9 @@ this does not update a running instance.
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
 Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 / AgentScope 2.0.9 App.
 `aw update --config current.yaml --agent TARGET --policy next.yaml` selects the
-unique target instance, retains its process and rejects busy instances; see
+unique target instance. Use `--pid "$PID"` instead of `--agent TARGET` when several
+instances share a target; optional `--agent` constrains the PID selection. Updates
+retain the process and reject busy instances; see
 [prewarmed instances](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#update-a-prewarmed-instance).
 
 The local service remains available after the Agent exits. Query it and stop it

@@ -46,13 +46,13 @@ fn arguments(pid: u32) -> Result<Vec<OsString>> {
         .collect())
 }
 
-fn namespaces(target: &Path, caller: &Path, adapter: &str) -> Result<()> {
-    for namespace in ["pid", "mnt", "net"] {
+pub(in crate::cli) fn namespaces(target: &Path, caller: &Path, adapter: &str) -> Result<()> {
+    for namespace in ["user", "pid", "mnt", "net"] {
         if namespace == "net" && adapter != "qwenpaw" {
             continue;
         }
         if fs::read_link(target.join(namespace))? != fs::read_link(caller.join(namespace))? {
-            return Err(format!("attach requires the same {namespace} namespace").into());
+            return Err(format!("operation requires the same {namespace} namespace").into());
         }
     }
     Ok(())
@@ -242,7 +242,7 @@ mod tests {
         let target = root.path().join("target");
         fs::create_dir(&caller).unwrap();
         fs::create_dir(&target).unwrap();
-        for namespace in ["pid", "mnt", "net"] {
+        for namespace in ["user", "pid", "mnt", "net"] {
             let identity = format!("{namespace}:[1]");
             symlink(&identity, caller.join(namespace)).unwrap();
             symlink(&identity, target.join(namespace)).unwrap();
@@ -257,5 +257,12 @@ mod tests {
         namespaces(&target, &caller, "qoder").unwrap();
         fs::remove_file(target.join("net")).unwrap();
         assert!(namespaces(&target, &caller, "qwenpaw").is_err());
+        for namespace in ["user", "pid", "mnt"] {
+            fs::remove_file(target.join(namespace)).unwrap();
+            symlink(format!("{namespace}:[2]"), target.join(namespace)).unwrap();
+            assert!(namespaces(&target, &caller, "qoder").is_err());
+            fs::remove_file(target.join(namespace)).unwrap();
+            symlink(format!("{namespace}:[1]"), target.join(namespace)).unwrap();
+        }
     }
 }

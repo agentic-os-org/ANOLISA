@@ -88,7 +88,7 @@ class AppReloadTests(unittest.TestCase):
                         save(tool_request, {"name": tool, "arguments": {"file_path": str(path)}})
                     candidate = root / "next.json"
                     save(candidate, policy)
-                    changed = json.loads(checked([aw, "update", "--config", config, "--agent", "native", "--policy", candidate], env=environment).stdout)
+                    changed = json.loads(checked([aw, "update", "--config", config, "--pid", str(identity["pid"]), "--policy", candidate], env=environment).stdout)
                     payload = {"session_id": f"reload-{index}", "user_id": "aw-test", "input": [
                         {"role": "user", "content": [{"type": "text", "text": f"Use {tool} once then stop."}]},
                     ]}

@@ -223,6 +223,18 @@
     "attach-network": {
       "target": "aw-cli/lib/aw_cli",
       "test": "cli::attachment::process::tests::qwenpaw_requires_the_callers_network_namespace"
+    },
+    "pid-update": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::pid_update_isolates_same_target_attachments_and_rejects_invalid_selection"
+    },
+    "pid-identity": {
+      "target": "aw-cli/lib/aw_cli",
+      "test": "cli::update::tests::pid_selection_requires_one_complete_live_identity_and_intersects_target"
+    },
+    "pid-dead": {
+      "target": "aw-cli/test/launcher",
+      "test": "attachment::pid_update_rejects_a_dead_associated_process_without_changing_policy"
     }
   },
   "agents": {
@@ -408,7 +420,10 @@
         "attach-cancel",
         "detach-idle",
         "attach-settings",
-        "attach-default-settings"
+        "attach-default-settings",
+        "pid-update",
+        "pid-identity",
+        "pid-dead"
       ],
       "security": [
         "security-retry"
@@ -446,7 +461,9 @@
         "reload-cancel",
         "detach-idle",
         "attach-qwenpaw",
-        "attach-network"
+        "attach-network",
+        "pid-update",
+        "pid-identity"
       ],
       "security": [
         "security-retry"

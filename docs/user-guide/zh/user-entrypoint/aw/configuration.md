@@ -94,7 +94,23 @@ aw update --config "$AW_HOME/aw.yaml" --agent qoder --policy next.yaml
 
 命令选择该目标唯一的存活实例，并读取当前策略版本。这个版本仍用于乐观并发校验：
 若另一个更新先完成，本次返回冲突，不会自动重试。没有匹配实例时报错；多个匹配实例时
-要求补充 `--instance ID`。通过 `aw status --config "$AW_HOME/aw.yaml"` 查询实例 ID 和版本。
+用 `--instance ID` 或 `--pid PID` 消除歧义。对于已经附加或通过 `aw run --reloadable` 启动的进程：
+
+```bash
+aw update --config "$AW_HOME/aw.yaml" --pid "$PID" --policy next.yaml
+```
+
+`--pid` 要求恰好一个已记录的存活进程绑定，并匹配 PID、启动 ticks、UID 和 PID namespace。
+死亡、复用、未知或尚未绑定的 PID 均失败，不激活策略。CLI、进程和服务须处于相同 user、
+PID、mount namespace；QwenPaw 还要求相同 network namespace。先选择本地容器执行上下文，
+再调用 AW；PID 不是全局地址。
+`--pid` 与 `--instance` 互斥；可选的 `--agent TARGET` 对两种 selector 都只增加目标约束。
+更新不会附加进程，也不会为普通启动启用热更新。`--config` 仍定位现有服务，`--policy`
+只提供候选策略。
+
+通过 `aw status --config "$AW_HOME/aw.yaml"` 的现有 JSON 输出，关联 `instances[].target`、
+`process.pid`、`process.start_ticks`、`instance_id`、`ready`、`requests`、`tools` 和
+`policy_revision`。进程元数据不包含凭据或策略载荷。
 选择范围包括未就绪和未启用热更新的实例，不会在忙碌实例旁边默默选择一个空闲实例。
 
 需要显式选择实例或接入外部管控时：
@@ -193,7 +209,7 @@ AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生
 
 ```bash
 aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
-aw update --config current.yaml --agent TARGET --policy next.yaml
+aw update --config current.yaml --pid "$NATIVE_PID" --policy next.yaml
 aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
 ```
 

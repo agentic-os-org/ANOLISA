@@ -95,6 +95,167 @@ fn success(output: Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn update_pid(fixture: &Fixture, pid: u32, candidate: &Value, extra: &[&str]) -> Output {
+    let path = fixture.root.join("next.json");
+    fs::write(&path, candidate.to_string()).unwrap();
+    let mut command = fixture.command();
+    command
+        .args(["update", "--config"])
+        .arg(fixture.root.join("aw.json"))
+        .arg("--pid")
+        .arg(pid.to_string())
+        .arg("--policy")
+        .arg(path)
+        .args(extra);
+    fixture.run(command)
+}
+
+#[test]
+fn pid_update_isolates_same_target_attachments_and_rejects_invalid_selection() {
+    use aw_service::{Capabilities, Operation};
+    let fixture = Fixture::new();
+    let mut baseline = fixture.document();
+    baseline["spec"]["providers"]["deny"] = json!({"protocol":"native-hook/v1alpha1","transport":{"type":"stdio","location":"agent","argv":["/bin/sh","-c","exit 2"]},"timeout_ms":500,"max_output_bytes":4096,"config":{}});
+    baseline["spec"]["events"]["tool.before"] = json!({"enabled":true,"steps":[{"id":"deny","provider":"deny","native":{},"on_error":"block"}]});
+    let service = Service::start(&fixture, &baseline);
+    let (process, pid) = native(&fixture);
+    let identity = aw_service::ProcessIdentity::read(pid).unwrap();
+    let other = Fixture::new();
+    let (setup, _) = native(&other);
+    drop(setup);
+    fs::remove_file(other.root.join("native-pid.json")).unwrap();
+    let mut command = native_command(&fixture);
+    command
+        .current_dir(&other.root)
+        .env("HOME", other.root.join("home"))
+        .env("FAKE_ROOT", &other.root);
+    let _other_process = Process::spawn(&other, command);
+    let other_pid = wait(&other.root.join("native-pid.json")).as_u64().unwrap() as u32;
+    success(install(&fixture, pid, false));
+    success(install(&fixture, other_pid, false));
+    let original = service.status();
+    let selected = original["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|instance| instance["process"]["pid"] == pid)
+        .unwrap();
+    assert_eq!(selected["target"], "qoder");
+    assert_eq!(selected["requests"], 0);
+    assert_eq!(selected["tools"], 0);
+    assert_eq!(selected["process"], identity.metadata());
+    let mut candidate = baseline.clone();
+    candidate["spec"]["events"] = json!({});
+    for (bad_pid, extra, reason) in [
+        (pid, vec!["--agent", "wrong"], "no matching instance"),
+        (pid, vec!["--instance", "conflicting"], "cannot be used"),
+        (std::process::id(), vec![], "no matching instance"),
+        (u32::MAX, vec![], "No such file"),
+        (
+            pid,
+            vec!["--expected-revision", "stale"],
+            "policy_revision_conflict",
+        ),
+    ] {
+        let output = update_pid(&fixture, bad_pid, &candidate, &extra);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{:?}",
+            output
+        );
+        assert_eq!(service.status()["instances"], original["instances"]);
+    }
+    let mut redirected = candidate.clone();
+    redirected["spec"]["daemon"]["state_dir"] = json!(fixture.root.join("candidate-state"));
+    let rejected = update_pid(&fixture, pid, &redirected, &[]);
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("configuration_rejected"));
+    assert!(!fixture.root.join("candidate-state").exists());
+    assert_eq!(service.status()["instances"], original["instances"]);
+    action(&fixture, 0, "begin");
+    let busy = update_pid(&fixture, pid, &candidate, &[]);
+    assert!(String::from_utf8_lossy(&busy.stderr).contains("busy"));
+    action(&fixture, 1, "end");
+    assert_eq!(service.status()["instances"], original["instances"]);
+    // A second binding of the same live identity must remain ambiguous even if unready.
+    let duplicate = service
+        .client
+        .call(
+            Operation::Bind {
+                target: "qoder".into(),
+                capabilities: Capabilities {
+                    adapter: "qoder".into(),
+                    version: "1.1.73".into(),
+                    entrypoint: "tui".into(),
+                    events: [
+                        (
+                            "tool.before".into(),
+                            ["observe".into(), "block".into()].into(),
+                        ),
+                        (
+                            "tool.after".into(),
+                            ["observe".into(), "replace_result".into()].into(),
+                        ),
+                    ]
+                    .into(),
+                },
+                cwd: fixture.root.to_str().unwrap().into(),
+                environment: Default::default(),
+            },
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+    let id = duplicate["instance_id"].as_str().unwrap().to_owned();
+    for operation in [
+        Operation::EnableReload {
+            instance_id: id.clone(),
+        },
+        Operation::AssociateProcess {
+            instance_id: id.clone(),
+            pid,
+        },
+    ] {
+        service
+            .client
+            .call(operation, Instant::now() + TIMEOUT)
+            .unwrap();
+    }
+    let ambiguous = update_pid(&fixture, pid, &candidate, &[]);
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple matching instances"));
+    service
+        .client
+        .call(
+            Operation::ReleaseInstance { instance_id: id },
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+    let updated = success(update_pid(&fixture, pid, &candidate, &["--agent", "qoder"]));
+    assert_eq!(updated["instance_id"], selected["instance_id"]);
+    assert_ne!(updated["policy_revision"], selected["policy_revision"]);
+    let after = service.status();
+    for instance in after["instances"].as_array().unwrap() {
+        if instance["process"]["pid"] == other_pid {
+            assert_eq!(instance["policy_revision"], selected["policy_revision"]);
+        }
+    }
+    assert!(action(&fixture, 2, "turn")
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["code"] == 0));
+    assert!(action(&other, 0, "turn")
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["code"] == 2));
+    identity.check().unwrap();
+    success(install(&fixture, pid, true));
+    success(install(&fixture, other_pid, true));
+    drop(process);
+    assert!(!update_pid(&fixture, pid, &candidate, &[]).status.success());
+    assert_eq!(service.status()["bindings"], 0);
+}
+
 #[test]
 fn external_install_first_hook_busy_detach_isolation_and_owned_cleanup() {
     let fixture = Fixture::new();
@@ -325,6 +486,15 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
         .unwrap()
         .error_for_status()
         .unwrap();
+    let mut candidate = document.clone();
+    candidate["spec"]["execution"]["default_event_budget_ms"] = json!(4000);
+    let original = service.status()["instances"][0]["policy_revision"].clone();
+    let busy_update = update_pid(&fixture, pid, &candidate, &[]);
+    assert!(String::from_utf8_lossy(&busy_update.stderr).contains("busy"));
+    assert_eq!(
+        service.status()["instances"][0]["policy_revision"],
+        original
+    );
     let busy = install(&fixture, pid, true);
     assert!(!busy.status.success());
     assert!(String::from_utf8_lossy(&busy.stderr).contains("busy"));
@@ -334,6 +504,11 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
         .unwrap()
         .error_for_status()
         .unwrap();
+    success(update_pid(&fixture, pid, &candidate, &[]));
+    assert_ne!(
+        service.status()["instances"][0]["policy_revision"],
+        original
+    );
     let plugin = profile.join("plugins/aw-native");
     let moved = profile.join("plugins/moved-aw-native");
     fs::rename(&plugin, &moved).unwrap();
@@ -368,4 +543,34 @@ fn native_fixture_starts_while_a_script_writer_is_open() {
         .check()
         .unwrap();
     drop(writer);
+}
+
+#[test]
+fn pid_update_rejects_a_dead_associated_process_without_changing_policy() {
+    let fixture = Fixture::new();
+    let document = fixture.document();
+    let service = Service::start(&fixture, &document);
+    let (process, pid) = native(&fixture);
+    success(install(&fixture, pid, false));
+    let original = service.status()["instances"][0]["policy_revision"].clone();
+    drop(process);
+    let mut candidate = document;
+    candidate["spec"]["execution"]["default_event_budget_ms"] = json!(4000);
+    assert!(!update_pid(&fixture, pid, &candidate, &[]).status.success());
+    let state = service.status();
+    assert_eq!(state["instances"][0]["policy_revision"], original);
+    assert_eq!(state["instances"][0]["process"]["alive"], false);
+    service
+        .client
+        .call(
+            aw_service::Operation::ReleaseInstance {
+                instance_id: state["instances"][0]["instance_id"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            },
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(service.status()["bindings"], 0);
 }

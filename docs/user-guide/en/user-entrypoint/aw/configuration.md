@@ -107,8 +107,27 @@ aw update --config "$AW_HOME/aw.yaml" --agent qoder --policy next.yaml
 The command selects the target's unique live instance and reads its current
 policy revision. That revision remains an optimistic concurrency check: if a
 concurrent update wins, the command fails with a conflict rather than retrying.
-No matching instance fails; multiple matching instances require `--instance ID`.
-Use `aw status --config "$AW_HOME/aw.yaml"` to inspect instance IDs and revisions.
+No matching instance fails; disambiguate multiple instances with `--instance ID`
+or `--pid PID`. For a process already attached or launched with `aw run --reloadable`:
+
+```bash
+aw update --config "$AW_HOME/aw.yaml" --pid "$PID" --policy next.yaml
+```
+
+`--pid` requires exactly one recorded live process association, including its PID,
+startup ticks, UID and PID namespace. Dead, reused, unknown or unassociated PIDs
+fail without activation. The CLI, process and service must share user, PID and mount
+namespaces; QwenPaw also requires the same network namespace. Select the local
+container context before invoking AW; PIDs are not global addresses.
+`--pid` conflicts with `--instance`; optional `--agent TARGET` constrains either
+selector to that target. It never attaches a process or enables reload on an
+ordinary launch. `--config` still locates the existing service and `--policy` supplies
+only the candidate policy.
+
+Use `aw status --config "$AW_HOME/aw.yaml"` to correlate `instances[].target`,
+`process.pid`, `process.start_ticks`, `instance_id`, `ready`, `requests`, `tools` and
+`policy_revision` in the existing JSON output. Process metadata contains no
+credentials or policy payloads.
 Selection includes unready and nonreloadable instances; it never silently chooses
 an idle instance over a busy one.
 
@@ -225,7 +244,7 @@ when starting it and keep request dispatch paused until installation succeeds.
 
 ```bash
 aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
-aw update --config current.yaml --agent TARGET --policy next.yaml
+aw update --config current.yaml --pid "$NATIVE_PID" --policy next.yaml
 aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
 ```
 

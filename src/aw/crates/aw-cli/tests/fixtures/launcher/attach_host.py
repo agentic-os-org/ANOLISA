@@ -28,6 +28,8 @@ def event(name):
     payload = {"hook_event_name": name, "cwd": str(root), "session_id": "session",
                "tool_use_id": f"call-{index}", "tool_name": "Bash", "tool_input": {"command": "true"},
                "notification_type": "idle_prompt", "file_path": str(settings)}
+    if name == "PostToolUse":
+        payload["tool_response"] = "native result"
     results = []
     for group in loaded.get("hooks", {}).get(name, []):
         if group.get("matcher", "") not in ("", "*", "Bash", "user_settings", "idle_prompt"):
@@ -57,7 +59,11 @@ while time.monotonic() < deadline:
         elif action == "end":
             result = event("Notification")
         elif action == "turn":
-            result = event("UserPromptSubmit") + event("PreToolUse")
+            result = event("UserPromptSubmit")
+            before = event("PreToolUse")
+            result += before
+            if all(item["code"] == 0 for item in before):
+                result += event("PostToolUse")
             event("Notification")
         else:
             raise ValueError(action)

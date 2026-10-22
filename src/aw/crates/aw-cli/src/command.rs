@@ -214,12 +214,15 @@ struct ManagedValidate {
 struct Update {
     #[command(flatten)]
     endpoint: Endpoint,
-    /// Select a configured target; combine with --instance to disambiguate
-    #[arg(long, value_name = "TARGET", required_unless_present = "instance")]
+    /// Select a unique target, or constrain --instance or --pid to this target
+    #[arg(long, value_name = "TARGET", required_unless_present_any = ["instance", "pid"])]
     agent: Option<String>,
     /// Select an instance, optionally intersecting --agent
-    #[arg(long, value_name = "ID", required_unless_present = "agent")]
+    #[arg(long, value_name = "ID", conflicts_with = "pid")]
     instance: Option<String>,
+    /// Select an existing verified local process association; never attach it
+    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "instance")]
+    pid: Option<u32>,
     /// Candidate policy document; does not replace the launch configuration
     #[arg(long, value_name = "FILE")]
     policy: String,

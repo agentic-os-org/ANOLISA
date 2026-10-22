@@ -52,6 +52,8 @@ class NativeAttachTests(unittest.TestCase):
                     await_condition(listening, 45, "native App startup")
                     with urllib.request.urlopen(f"http://127.0.0.1:{native_ports[0]}/api/plugins", timeout=5) as response:
                         response.read()
+                    await_condition(lambda: "Background startup completed" in (output / "native-app.log").read_text(),
+                                    45, "native plugin loader startup")
                 case, processes, environment, child, native_ports, argv = cases[0]
                 other = cases[1][0]
                 unchanged = (other / "home/config.json").read_bytes()
@@ -74,8 +76,10 @@ class NativeAttachTests(unittest.TestCase):
                 await_condition(lambda: (case / "state/aw.sock").exists() or processes.exited(daemon), 5, "AW startup")
                 def status():
                     return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
-                def install(remove=False, success=True):
-                    command = [aw, "install", "--config", config, "--agent", "native", "--pid", str(child.pid)]
+                def selected_status():
+                    return next(row for row in status()["instances"] if row["process"]["pid"] == child.pid)
+                def install(remove=False, success=True, index=0):
+                    command = [aw, "install", "--config", config, "--agent", "native", "--pid", str(cases[index][3].pid)]
                     if remove:
                         command.append("--remove")
                     result = __import__("subprocess").run(list(map(str, command)), env=environment, capture_output=True, timeout=45)
@@ -105,21 +109,35 @@ class NativeAttachTests(unittest.TestCase):
                 self.assertTrue((other / "work/marker").exists())
                 self.assertEqual((other / "home/config.json").read_bytes(), unchanged)
                 install(success=False)
+                install(index=1)
+                self.assertEqual(turn(1, "other-attached"), "denied")
+                before_update = status()["instances"]
+                self.assertEqual(len(before_update), 2)
                 report["checks"].extend(["first-request-denied", "other-profile-unaffected", "duplicate-rejected"])
                 allowed = copy.deepcopy(document)
                 allowed["spec"]["events"] = {}
                 candidate = case / "next.json"
                 save(candidate, allowed)
-                checked([aw, "update", "--config", config, "--agent", "native", "--policy", candidate], env=environment)
+                checked([aw, "update", "--config", config, "--pid", str(child.pid), "--policy", candidate], env=environment)
+                other_instance = next(row for row in before_update if row["process"]["pid"] != child.pid)
+                self.assertIn(other_instance, status()["instances"])
+                self.assertEqual(turn(0, "updated-session"), "success")
+                self.assertEqual(turn(1, "other-still-denied"), "denied")
+                self.assertEqual(selected_status()["process"]["start_ticks"], identity)
+                report["checks"].extend(["pid-update-same-target-isolation", "next-request-updated-policy"])
                 (case / "tool-command.txt").write_text("sleep 2; printf attached > " + shlex.quote(str(case / "work/marker")))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(turn, 0, "busy-session")
-                    await_condition(lambda: status()["instances"][0]["tools"] > 0, 10, "active native tool")
+                    await_condition(lambda: selected_status()["tools"] > 0, 10, "active native tool")
+                    rejected_update = __import__("subprocess").run(list(map(str, [aw, "update", "--config", config,
+                        "--pid", child.pid, "--policy", config])), env=environment, capture_output=True, timeout=30)
+                    self.assertNotEqual(rejected_update.returncode, 0)
+                    self.assertIn(b"busy", rejected_update.stderr)
                     rejected = install(remove=True, success=False)
                     self.assertIn(b"busy", rejected.stderr)
                     self.assertTrue((case / "home/plugins/aw-native").is_dir())
                     self.assertEqual(future.result(timeout=45), "success")
-                await_condition(lambda: status()["instances"][0]["requests"] == 0, 5, "request cleanup")
+                await_condition(lambda: selected_status()["requests"] == 0, 5, "request cleanup")
                 plugin_tree = case / "home/plugins/aw-native"
                 moved_tree = case / "home/plugins/moved-aw-native"
                 plugin_tree.rename(moved_tree)
@@ -130,15 +148,20 @@ class NativeAttachTests(unittest.TestCase):
                 self.assertTrue(Path(ownership["artifacts"]).is_dir())
                 moved_tree.rename(plugin_tree)
                 self.assertTrue(json.loads(install(remove=True).stdout)["detached"])
-                self.assertEqual(status()["bindings"], 0)
+                self.assertEqual(status()["bindings"], 1)
                 self.assertFalse((case / "home/plugins/aw-native").exists())
                 self.assertFalse((case / "home/.aw-attachment.json").exists())
-                self.assertFalse(list((case / "state").glob("attach-*")))
                 self.assertEqual(turn(0, "existing-session"), "success")
                 report["checks"].extend(["busy-detach-rejected", "native-cleanup", "existing-session-after-detach"])
                 install()
                 self.assertEqual(turn(0, "reattached-session"), "denied")
                 install(remove=True)
+                install(remove=True, index=1)
+                self.assertEqual(status()["bindings"], 0)
+                self.assertFalse(list((case / "state").glob("attach-*")))
+                self.assertEqual((other / "home/config.json").read_bytes(), unchanged)
+                self.assertFalse(processes.exited(child))
+                self.assertFalse(cases[1][1].exited(cases[1][3]))
                 self.assertEqual(Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[19], identity)
                 self.assertFalse(processes.exited(child))
                 report["checks"].extend(["reattach", "pid-start-ticks-unchanged"])

@@ -268,7 +268,26 @@ fn invalid_utf8_returns_an_error_without_panicking() {
 #[test]
 fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
     assert!(matches!(parse("update --config boot.yaml --agent qoder --instance one --policy next.yaml --expected-revision abc").unwrap(), Command::Update(_)));
+    for selector in [
+        "--pid 123",
+        "--pid 123 --agent qoder",
+        "--agent qoder",
+        "--instance one",
+    ] {
+        assert!(matches!(
+            parse(&format!(
+                "update --config boot.yaml {selector} --policy next.yaml"
+            ))
+            .unwrap(),
+            Command::Update(_)
+        ));
+    }
     for input in [
+        "update --config boot.yaml --pid 123 --instance one --policy next.yaml",
+        "update --config boot.yaml --pid 123 --instance one --agent qoder --policy next.yaml",
+        "update --config boot.yaml --pid 0 --policy next.yaml",
+        "update --config boot.yaml --pid -1 --policy next.yaml",
+        "update --config boot.yaml --pid abc --policy next.yaml",
         "update --config boot.yaml --policy next.yaml",
         "update --config boot.yaml --socket /socket --agent qoder --policy next.yaml",
         "update --config boot.yaml --agent qoder --policy next.yaml --json",
