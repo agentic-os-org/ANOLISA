@@ -288,6 +288,13 @@ fn invalid_source_configuration_fails_before_starting_the_service() {
     let source = Source::new(&fixture, trajectory(0));
     for (field, value) in [
         ("max_items", json!(0)),
+        ("max_items", json!(1.5)),
+        ("max_items", json!("32")),
+        ("max_items", json!(true)),
+        ("max_items", Value::Null),
+        ("query_bytes", json!(4194305.0)),
+        ("max_bytes", json!(4095.0)),
+        ("query_timeout_ms", json!(-1.0)),
         ("max_bytes", json!(2097153)),
         ("query_timeout_ms", json!(60001)),
         ("endpoint", json!("http://remote.invalid")),
