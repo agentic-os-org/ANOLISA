@@ -29,7 +29,7 @@
 /src/agent-sec-core/Makefile             @yangdao479                 # auto-label: component:sec-core
 /src/agent-sec-core/*.spec.in           @yangdao479                 # auto-label: component:sec-core
 /src/os-skills/                         @Ziqi002                    # auto-label: component:skill
-/src/ws-ckpt/                           @yummypeng                  # auto-label: component:ckpt
+/src/ws-ckpt/                           @yummypeng @Ziqi002         # auto-label: component:ckpt
 /src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
 /src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
 /src/agent-memory/                      @ikunkun-sys                # auto-label: component:memory
