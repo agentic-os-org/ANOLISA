@@ -897,6 +897,7 @@ class OpenClawExternalAgent(BaseAgent):
         last_output_time = time.monotonic()
         total_stdout_bytes = 0
         total_stderr_bytes = 0
+        open_streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
 
         try:
             start = time.monotonic()
@@ -936,45 +937,23 @@ class OpenClawExternalAgent(BaseAgent):
                     )
                     break
 
-                ready, _, _ = select.select(
-                    [proc.stdout, proc.stderr], [], [], 0.5,
-                )
-                if proc.stdout in ready:
-                    chunk = (
-                        proc.stdout.read1(8192)
-                        if hasattr(proc.stdout, "read1")
-                        else proc.stdout.read(8192)
-                    )
-                    if chunk:
+                ready, _, _ = select.select(open_streams, [], [], 0.5)
+                for stream in ready:
+                    # Read only available bytes, including after the direct
+                    # child exits: descendants may still hold either pipe open.
+                    chunk = os.read(stream.fileno(), 8192)
+                    if not chunk:
+                        open_streams.remove(stream)
+                        continue
+                    if stream is proc.stdout:
                         stdout_chunks.append(chunk)
                         total_stdout_bytes += len(chunk)
                         last_output_time = time.monotonic()
-                if proc.stderr in ready:
-                    chunk = (
-                        proc.stderr.read1(8192)
-                        if hasattr(proc.stderr, "read1")
-                        else proc.stderr.read(8192)
-                    )
-                    if chunk:
+                    else:
                         stderr_chunks.append(chunk)
                         total_stderr_bytes += len(chunk)
 
-                if proc.poll() is not None:
-                    # Drain remaining output.
-                    for _ in range(10):
-                        chunk = proc.stdout.read(65536) if proc.stdout else None
-                        if chunk:
-                            stdout_chunks.append(chunk)
-                            total_stdout_bytes += len(chunk)
-                        else:
-                            break
-                    for _ in range(10):
-                        chunk = proc.stderr.read(65536) if proc.stderr else None
-                        if chunk:
-                            stderr_chunks.append(chunk)
-                            total_stderr_bytes += len(chunk)
-                        else:
-                            break
+                if proc.poll() is not None and not open_streams:
                     break
 
                 now = time.monotonic()
@@ -1000,6 +979,10 @@ class OpenClawExternalAgent(BaseAgent):
                 proc.kill()
             except Exception:
                 pass
+        finally:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
 
         returncode = proc.returncode if proc.returncode is not None else -1
         stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
