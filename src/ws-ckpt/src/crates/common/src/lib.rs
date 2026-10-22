@@ -814,7 +814,16 @@ impl SnapshotIndex {
                 if !walked.insert(pid.clone()) {
                     // A parent cycle inside the deleted set has no surviving
                     // ancestor: following it never ends, and a load that walks
-                    // it would never finish. No ancestor is the answer.
+                    // it would never finish. No ancestor is the answer, and the
+                    // recovery is reported rather than silent: a corrupt index
+                    // otherwise surfaces later as "no head set" with no clue.
+                    tracing::warn!(
+                        "prune_chain: parent cycle in the snapshot index of workspace {:?} at \
+                         snapshot {} (reparenting a surviving child): the deleted set has no \
+                         surviving ancestor, so the child is reparented onto none",
+                        self.workspace_path,
+                        pid
+                    );
                     sp = None;
                     break;
                 }
@@ -841,7 +850,17 @@ impl SnapshotIndex {
                         break;
                     }
                     if !walked.insert(pid.clone()) {
-                        // The same cycle guard as the reparenting walk above.
+                        // The same cycle guard as the reparenting walk above,
+                        // reported for the same reason: the head fix-up is a
+                        // repair, and a repair nobody can see becomes a mystery
+                        // "no head set" later.
+                        tracing::warn!(
+                            "prune_chain: parent cycle in the snapshot index of workspace {:?} \
+                             at snapshot {} (repairing the head): the head lies inside the \
+                             deleted set's cycle and is cleared",
+                            self.workspace_path,
+                            pid
+                        );
                         p = None;
                         break;
                     }
@@ -3801,6 +3820,58 @@ mod tests {
         );
     }
 
+    /// Captures `tracing` events for the cycle tests. `tracing` without a
+    /// subscriber drops events, and this crate does not depend on
+    /// `tracing-subscriber`; a minimal recorder keeps that dependency out while
+    /// still proving the repair is reported.
+    #[derive(Clone, Default)]
+    struct EventRecorder {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl EventRecorder {
+        fn warnings(&self) -> Vec<String> {
+            self.messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(level, _)| level == "WARN")
+                .map(|(_, message)| message.clone())
+                .collect()
+        }
+    }
+
+    impl tracing::Subscriber for EventRecorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            let level = event.metadata().level().to_string();
+            self.messages.lock().unwrap().push((level, message.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     #[test]
     fn prune_chain_terminates_on_a_parent_cycle_below_the_head() {
         // a ↔ b form a cycle entirely inside the deleted set, and c hangs off b.
@@ -3814,9 +3885,11 @@ mod tests {
         idx.head = Some("c".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let recorder = EventRecorder::default();
+        let thread_recorder = recorder.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            idx.prune_chain(&ids);
+            tracing::subscriber::with_default(thread_recorder, || idx.prune_chain(&ids));
             let _ = tx.send(idx);
         });
         let idx = rx
@@ -3828,6 +3901,17 @@ mod tests {
             "with no surviving ancestor the child becomes a root"
         );
         assert_eq!(idx.head.as_deref(), Some("c"));
+        let warnings = recorder.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("parent cycle") && w.contains("reparenting a surviving child")),
+            "the silent repair must be reported: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("/ws")),
+            "the warning must name the workspace: {warnings:?}"
+        );
     }
 
     #[test]
@@ -3841,9 +3925,11 @@ mod tests {
         idx.head = Some("b".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let recorder = EventRecorder::default();
+        let thread_recorder = recorder.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            idx.prune_chain(&ids);
+            tracing::subscriber::with_default(thread_recorder, || idx.prune_chain(&ids));
             let _ = tx.send(idx);
         });
         let idx = rx
@@ -3851,6 +3937,13 @@ mod tests {
             .expect("prune_chain must terminate when the head sits in a parent cycle");
 
         assert_eq!(idx.head, None, "no surviving ancestor means no head");
+        let warnings = recorder.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("parent cycle") && w.contains("repairing the head")),
+            "the silent repair must be reported: {warnings:?}"
+        );
     }
 
     #[test]
