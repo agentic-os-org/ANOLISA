@@ -200,20 +200,44 @@ fn parse_arguments(value: Value) -> Value {
 
 fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
     let result_id = message.tool_call_id.clone();
-    let target = steps.iter_mut().rev().find(|step| {
-        step.source == StepSource::Agent
-            && step.tool_calls.as_ref().is_some_and(|calls| {
-                calls.iter().any(|call| {
-                    result_id
-                        .as_deref()
-                        .is_some_and(|id| call.tool_call_id == id)
-                        || message
-                            .tool_name
-                            .as_deref()
-                            .is_some_and(|name| call.function_name == name)
-                })
-            })
-    });
+    // First pass: search ALL candidate steps for exact call identity before
+    // falling back to tool names. This prevents a late result for an older
+    // explicit call from attaching to a newer step with the same tool name.
+    let mut target_idx: Option<usize> = None;
+    if let Some(ref rid) = result_id {
+        if !rid.is_empty() {
+            for (idx, step) in steps.iter().enumerate() {
+                if step.source == StepSource::Agent {
+                    if let Some(calls) = step.tool_calls.as_ref() {
+                        if calls.iter().any(|call| call.tool_call_id == *rid) {
+                            target_idx = Some(idx);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if target_idx.is_none() {
+        // Second pass: fall back to tool-name matching, searching most recent
+        // steps first for backward compatibility with Hermes records that have
+        // generated IDs.
+        if let Some(ref tname) = message.tool_name {
+            if !tname.is_empty() {
+                for (idx, step) in steps.iter().enumerate().rev() {
+                    if step.source == StepSource::Agent {
+                        if let Some(calls) = step.tool_calls.as_ref() {
+                            if calls.iter().any(|call| call.function_name == *tname) {
+                                target_idx = Some(idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let target = target_idx.map(|idx| &mut steps[idx]);
     let result = ObservationResult {
         source_call_id: result_id.clone(),
         content: decode_content(message.content.as_deref()),
@@ -251,16 +275,40 @@ fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
 }
 
 fn align_result_id(step: &mut Step, message: &HermesMessage, result_id: Option<&str>) {
-    let (Some(id), Some(calls)) = (result_id, step.tool_calls.as_mut()) else {
+    let Some(calls) = step.tool_calls.as_mut() else {
         return;
     };
-    let Some(call) = calls.iter_mut().find(|call| {
-        call.tool_call_id == id
-            || message
+    // Within the chosen step, prefer the exact call before applying name-based
+    // alignment (important for parallel calls and records with generated IDs).
+    if let Some(id) = result_id.filter(|id| !id.is_empty()) {
+        if let Some(call) = calls.iter_mut().find(|call| call.tool_call_id == id) {
+            // Ensure the call keeps its explicit ID; only attach result timestamp
+            // if we didn't already have it.
+            let mut extra = call.extra.take().unwrap_or_default();
+            if !extra.contains_key("result_timestamp") {
+                if let Some(timestamp) = format_timestamp(message.timestamp) {
+                    extra.insert("result_timestamp".into(), Value::String(timestamp));
+                }
+            }
+            if extra.is_empty() {
+                call.extra = None;
+            } else {
+                call.extra = Some(extra);
+            }
+            return;
+        }
+        // ID provided but not found on this call array; fall through to
+        // name-based alignment for generated-ID compatibility.
+    }
+    let (Some(id), Some(call)) = (
+        result_id.filter(|id| !id.is_empty()),
+        calls.iter_mut().find(|call| {
+            message
                 .tool_name
                 .as_deref()
                 .is_some_and(|name| call.function_name == name)
-    }) else {
+        }),
+    ) else {
         return;
     };
     call.tool_call_id = id.to_string();
