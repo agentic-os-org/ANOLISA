@@ -22,6 +22,11 @@ native `aw install --config ... --agent ...` and `aw-package` commands remain
 compatible. Named components, direct URLs and system package backends are not
 supported by this Preview installer.
 
+Canonical removal asks for confirmation only with interactive stdin and stderr.
+Scripts and JSON output must use `aw uninstall --prefix ABS_DIR --yes` (or `-y`).
+Confirmation never overrides package checks or system permissions;
+the compatibility `aw-package` executable retains its original behavior.
+
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
@@ -65,7 +70,7 @@ accept `--json` for a versioned management result. Human summaries remain the
 default; existing service and protocol JSON is unchanged. See
 [management reports](../../docs/user-guide/en/user-entrypoint/aw/operations.md#management-reports) for supported commands and failure semantics.
 
-The same management writes accept local `--quiet`, `--verbose` and
+These management commands accept local `--quiet`, `--verbose` and
 `--color auto|always|never` for human output. They cannot accompany `--json`;
 native output and protocol streams remain unchanged. Package reports distinguish
 commit, cancellation, incomplete recovery and cleanup warnings without inferring

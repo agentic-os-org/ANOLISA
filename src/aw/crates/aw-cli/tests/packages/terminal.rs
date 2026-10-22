@@ -42,7 +42,7 @@ fn quiet_keeps_work_and_errors_while_verbose_separates_scope_details() {
     }
     let output = invoke(
         f.command()
-            .args(["uninstall", "--prefix"])
+            .args(["uninstall", "--yes", "--prefix"])
             .arg(&f.prefix)
             .arg("--quiet"),
     );
@@ -119,7 +119,11 @@ fn piped_management_metadata_escapes_terminal_and_bidi_controls() {
     assert_eq!(stdout.lines().count(), 1);
     assert!(!stdout.contains('\u{1b}') && !stdout.contains('\u{202e}'));
     fs::write(f.prefix.join("bin/aw"), b"modified").unwrap();
-    let output = invoke(f.command().args(["uninstall", "--prefix"]).arg(&f.prefix));
+    let output = invoke(
+        f.command()
+            .args(["uninstall", "--yes", "--prefix"])
+            .arg(&f.prefix),
+    );
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("prefix\\n\\r\\u{1b}[2J\\u{85}\\u{202e}"));

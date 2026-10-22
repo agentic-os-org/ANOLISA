@@ -82,11 +82,14 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 )
             }
         }
-        Command::Uninstall(value) => package(
-            "uninstall",
-            options([("prefix", Some(value.prefix))]),
-            value.output,
-        ),
+        Command::Uninstall(value) => match super::confirmation::check(&value)? {
+            Some(reason) => crate::output::unconfirmed(value.prefix.output, reason),
+            None => package(
+                "uninstall",
+                options([("prefix", Some(value.prefix.prefix))]),
+                value.prefix.output,
+            ),
+        },
         Command::Agent(Agent::Connect(value)) => crate::runtime("install", &native(value)),
         Command::Config(value) => config(value),
         Command::Service(value) => service(value),

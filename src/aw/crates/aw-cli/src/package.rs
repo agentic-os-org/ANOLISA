@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, path::Path};
 
 pub(crate) mod arguments;
 pub(crate) mod config;
-mod signals;
+pub(crate) mod signals;
 
 pub(crate) fn compatibility_main() {
     if let Err(error) = arguments::decode_all(std::env::args_os().skip(1))

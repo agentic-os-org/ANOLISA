@@ -1,5 +1,7 @@
 //! Unified package commands share ownership and offline configuration contracts.
 
+#[path = "packages/confirmation.rs"]
+mod confirmation;
 #[path = "packages/output.rs"]
 mod output;
 #[path = "packages/support.rs"]
@@ -53,7 +55,7 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
     fs::write(f.prefix.join("unowned.txt"), b"user data").unwrap();
     success(
         f.command()
-            .args(["uninstall", "--prefix"])
+            .args(["uninstall", "--yes", "--prefix"])
             .arg(&f.prefix)
             .output()
             .unwrap(),

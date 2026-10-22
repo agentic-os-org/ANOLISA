@@ -60,6 +60,8 @@ enum ErrorCode {
     PackageContract,
     InvalidConfiguration,
     Cancelled,
+    ConfirmationRequired,
+    ConfirmationDeclined,
 }
 
 #[derive(Serialize)]
@@ -121,6 +123,46 @@ pub(crate) enum ValidationError {
 struct Failure {
     human: String,
     diagnostic: Diagnostic,
+}
+
+pub(crate) enum NotConfirmed {
+    Required,
+    Declined,
+    Interrupted(i32),
+}
+
+pub(crate) fn removal_prompt(prefix: &str) -> std::io::Result<()> {
+    let mut stderr = std::io::stderr().lock();
+    write!(
+        stderr,
+        "Remove package-owned files from {}? [y/N] ",
+        terminal::escape(prefix)
+    )?;
+    stderr.flush()
+}
+
+pub(crate) fn unconfirmed(
+    options: Options,
+    reason: NotConfirmed,
+) -> crate::cli::Result<crate::cli::Exit> {
+    let (code, message, exit) = match reason {
+        NotConfirmed::Required => (ErrorCode::ConfirmationRequired,
+            "Uninstall requires --yes for JSON or non-interactive input; no package operation was started", 1),
+        NotConfirmed::Declined => (ErrorCode::ConfirmationDeclined,
+            "Removal declined; no package operation was started", 1),
+        NotConfirmed::Interrupted(signal) => (ErrorCode::Cancelled,
+            "Removal confirmation interrupted; no package operation was started", 128 + signal),
+    };
+    complete_result(
+        "uninstall",
+        options,
+        Err(Failure {
+            human: message.into(),
+            diagnostic: Diagnostic { code, message },
+        }),
+        None,
+    )?;
+    Ok(crate::cli::Exit::Code(exit))
 }
 
 pub(crate) fn human(outcome: &Outcome) -> std::io::Result<()> {
@@ -320,7 +362,10 @@ fn failure_view(
 ) -> ResultView<'static> {
     if mutation.is_some_and(|report| report.recovery == aw_package::RecoveryState::Incomplete) {
         ResultView::Partial { error: diagnostic }
-    } else if matches!(diagnostic.code, ErrorCode::Cancelled) {
+    } else if matches!(
+        diagnostic.code,
+        ErrorCode::Cancelled | ErrorCode::ConfirmationDeclined
+    ) {
         ResultView::Cancelled { error: diagnostic }
     } else {
         ResultView::Failed { error: diagnostic }

@@ -1,5 +1,6 @@
 //! One typed declaration defines the public command tree, options and help.
 
+mod confirmation;
 mod discovery;
 mod dispatch;
 mod package;
@@ -8,7 +9,7 @@ mod tests;
 mod validation;
 
 use clap::{Args, Parser, Subcommand};
-use package::{Configure, Edit, Install, Prefix, Show};
+use package::{Configure, Edit, Install, Show};
 
 #[derive(Parser, Debug, PartialEq)]
 #[command(
@@ -43,7 +44,7 @@ enum Command {
     /// Install a local Preview bundle, or retain legacy native Hook connection
     Install(Install),
     /// Remove owned files from one Preview installation prefix
-    Uninstall(Prefix),
+    Uninstall(package::Uninstall),
     /// Connect a configured Agent's persistent native Hooks
     #[command(subcommand)]
     Agent(Agent),

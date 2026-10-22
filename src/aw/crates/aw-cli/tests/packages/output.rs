@@ -47,7 +47,7 @@ fn install_init_and_uninstall_report_local_outcomes_without_starting_a_runtime()
     let bytes = fs::read(&f.config).unwrap();
     let removed = report(
         f.command()
-            .args(["uninstall", "--json", "--prefix"])
+            .args(["uninstall", "--yes", "--json", "--prefix"])
             .arg(&f.prefix),
         0,
         "uninstall",

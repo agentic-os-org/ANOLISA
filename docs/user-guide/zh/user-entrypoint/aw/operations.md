@@ -108,7 +108,7 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 
 ## 终端输出
 
-上节列出的管理写操作也支持以下局部人类输出选项：
+上节列出的管理命令也支持以下局部人类输出选项：
 
 | 选项 | 效果 |
 | --- | --- |
@@ -121,7 +121,7 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 ```bash
 aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --quiet
 aw config remove-provider --config "$HOME/aw/aw.yaml" --name unused --verbose
-aw uninstall --prefix "$AW_PREFIX" --color never
+aw uninstall --prefix "$AW_PREFIX" --yes --color never
 ```
 
 `--quiet` 与 `--verbose` 互斥。`--json` 与这三种选项都冲突，不会被静默隐藏。
@@ -130,7 +130,7 @@ aw uninstall --prefix "$AW_PREFIX" --color never
 
 非空 `NO_COLOR` 或 `TERM=dumb` 会禁用自动着色；显式 `always` 覆盖这些设置。
 成功摘要使用 stdout，操作错误使用 stderr，分别检查各自是否连接终端。
-不会增加确认提示或权限授予，在管道中或使用 `--quiet` 时也一样。
+呈现选项不授予权限，也不代替确认。新卸载入口使用下文的命令局部确认规则；quiet 不会跳过确认。
 
 CLI 自己生成的管理摘要和操作错误，会转义元数据中的控制字符与双向文本控制符，
 避免路径注入终端指令或额外行。`aw-package` 共用的成功摘要也转义这些元数据，
@@ -180,6 +180,29 @@ sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
 
 卸载保留外部配置、审计和原生 Agent 数据。包文件被修改或缺失时会先报错，
 按提示处理，不要直接删除仍在使用的目录。
+
+### 卸载确认
+
+`aw uninstall` 仅在 stdin 和 stderr 都连接终端、且未选 JSON 时，在 stderr
+显示 `Remove package-owned files from ...? [y/N]`。直接回车、回答 no 或 EOF
+都会拒绝卸载并退出 1；仅 `y` 或 `yes` 确认，不区分大小写并忽略首尾空白。
+等待提示时尚未开始包操作；此阶段 SIGINT 和 SIGTERM 分别返回 130、143，不开始卸载。
+
+自动化、重定向、无终端容器或 JSON 使用显式确认：
+
+```bash
+aw uninstall --prefix "$AW_PREFIX" --yes
+aw uninstall --prefix "$AW_PREFIX" -y --json
+```
+
+非交互或 JSON 未带 `--yes` 时，在包操作前失败；JSON 返回 `failed`、
+`error.code: confirmation_required`，没有 mutation 报告。向 stdin 管道输入 `yes`
+不算确认。`--quiet` 仅隐藏成功摘要，仍需要确认。`--yes` 仅跳过本次提示，不绕过
+归属、完整性、路径和权限检查，也不会执行 sudo。它仅用于卸载，不适用于安装、配置、
+服务或原生 Agent 命令。
+
+兼容命令 `aw-package uninstall --prefix ...` 保留原非交互行为，不接受 `--yes`。
+包操作中的既有协作取消与取消提示阶段不同，仍按上文返回 typed 管理结果和退出码 1。
 
 ## 保存数据
 

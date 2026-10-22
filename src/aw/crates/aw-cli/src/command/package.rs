@@ -34,6 +34,15 @@ pub(super) struct Prefix {
 }
 
 #[derive(Args, Debug, PartialEq)]
+pub(super) struct Uninstall {
+    #[command(flatten)]
+    pub prefix: Prefix,
+    /// Confirm this removal; does not override ownership, integrity or permissions
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug, PartialEq)]
 pub(super) struct Configure {
     #[command(flatten)]
     pub prefix: Prefix,

@@ -19,6 +19,10 @@ Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR`
 旧的原生 `aw install --config ... --agent ...` 和 `aw-package` 命令保持兼容。
 此 Preview 安装器尚不支持按组件名、直接 URL 或系统包后端安装。
 
+新卸载入口仅在 stdin 和 stderr 都是交互终端时询问确认。
+脚本或 JSON 输出必须使用 `aw uninstall --prefix ABS_DIR --yes`（或 `-y`）。
+确认不覆盖包检查或系统权限；兼容入口 `aw-package` 保留原行为。
+
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
@@ -56,7 +60,7 @@ aw stop --config "$HOME/aw/aw.yaml"
 本地包安装/卸载、`config init`、`config validate` 和离线配置编辑支持 `--json`，返回带版本的管理结果。
 默认仍为人类摘要，已有服务和协议 JSON 保持不变。
 
-同一组管理写操作支持局部 `--quiet`、`--verbose` 和 `--color auto|always|never`，
+这些管理命令支持局部 `--quiet`、`--verbose` 和 `--color auto|always|never`，
 用于人类输出，不能与 `--json` 同用；原生输出与协议流保持不变。
 包报告区分提交、取消、恢复不完整和清理警告，不从退出码推断回滚。
 详见[终端输出](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#终端输出)。

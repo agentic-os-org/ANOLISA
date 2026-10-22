@@ -132,7 +132,7 @@ native Agent output do not receive this management envelope.
 
 ## Terminal output
 
-The management writes listed above also accept local human-output options:
+The management commands listed above also accept local human-output options:
 
 | Option | Effect |
 | --- | --- |
@@ -145,7 +145,7 @@ The management writes listed above also accept local human-output options:
 ```bash
 aw install --prefix "$AW_PREFIX" --bundle "$PWD/bundle" --quiet
 aw config remove-provider --config "$HOME/aw/aw.yaml" --name unused --verbose
-aw uninstall --prefix "$AW_PREFIX" --color never
+aw uninstall --prefix "$AW_PREFIX" --yes --color never
 ```
 
 `--quiet` and `--verbose` conflict. `--json` conflicts with all three options;
@@ -155,8 +155,9 @@ or `aw-package`. Arguments after the forwarding `--` remain literal.
 
 Auto color is disabled by nonempty `NO_COLOR` or `TERM=dumb`; explicit `always`
 overrides those settings. Success summaries use stdout, operation errors use
-stderr, and each stream's terminal status is checked independently. No prompt
-or permission grant is added, including in a pipe or with `--quiet`.
+stderr, and each stream's terminal status is checked independently. Presentation
+options do not grant permission or supply confirmation. Canonical removal has
+the command-local consent rule described below; quiet does not bypass it.
 
 CLI-owned management summaries and operation errors escape control and bidi
 characters in metadata so paths cannot inject terminal instructions or lines.
@@ -212,6 +213,36 @@ sudo "$AW_PREFIX/bin/aw" uninstall --prefix "$AW_PREFIX"
 
 Uninstall preserves external configuration, audit history and native Agent data. Modified or missing
 package files cause an error first. Follow the diagnostic instead of deleting a directory still in use.
+
+### Confirm removal
+
+`aw uninstall` asks `Remove package-owned files from ...? [y/N]` on stderr only
+when stdin and stderr are both terminals and JSON is not selected. Pressing
+Enter, answering no, or EOF declines removal with exit 1. Only `y` or `yes`
+(case-insensitive, ignoring surrounding whitespace) confirms it. The package
+operation has not started while the prompt is waiting. SIGINT and SIGTERM in
+that phase return 130 and 143 without starting removal.
+
+For automation, redirected streams, containers without a terminal or JSON,
+confirm explicitly:
+
+```bash
+aw uninstall --prefix "$AW_PREFIX" --yes
+aw uninstall --prefix "$AW_PREFIX" -y --json
+```
+
+Non-interactive or JSON removal without `--yes` fails before package work;
+JSON returns `failed` with `error.code: confirmation_required` and no mutation
+report. Piping `yes` into stdin is not consent. `--quiet` only suppresses the
+success summary; it still requires consent. `--yes` skips this prompt only:
+ownership, integrity, path and permission checks still apply, and it does not
+run sudo. It is local to removal, not accepted by installation, configuration,
+service or native Agent commands.
+
+The compatibility `aw-package uninstall --prefix ...` command preserves its
+original non-interactive behavior and does not accept `--yes`. Existing
+cooperative cancellation during package work remains distinct from cancelling
+the prompt, using the typed management result and exit 1 described above.
 
 ## Keep data
 
