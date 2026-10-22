@@ -170,30 +170,42 @@ export class McpStdioClient {
   private async doStart(): Promise<void> {
     this.spawnProcess();
 
-    // Send MCP initialize handshake.
-    const initResult = await this.sendRaw("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "openclaw-agent-memory-plugin",
-        version: PLUGIN_VERSION,
-      },
-    });
+    try {
+      // Send MCP initialize handshake.
+      const initResult = await this.sendRaw("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: {
+          name: "openclaw-agent-memory-plugin",
+          version: PLUGIN_VERSION,
+        },
+      });
 
-    if (!initResult) {
-      throw new Error("agent-memory initialize handshake returned no result");
+      if (!initResult) {
+        throw new Error("agent-memory initialize handshake returned no result");
+      }
+
+      // Send initialized notification (no response expected).
+      this.sendNotification("notifications/initialized");
+
+      this.initialized = true;
+      // Successful init: reset the respawn counter so the next crash
+      // gets a full quota of retries again.
+      this.respawnAttempts = 0;
+    } catch (error) {
+      // A retry must not replace the only reference to a live failed worker.
+      try {
+        await this.stop();
+      } catch {
+        // Cleanup failure must not mask the original handshake error.
+      }
+      throw error;
     }
-
-    // Send initialized notification (no response expected).
-    this.sendNotification("notifications/initialized");
-
-    this.initialized = true;
-    // Successful init: reset the respawn counter so the next crash
-    // gets a full quota of retries again.
-    this.respawnAttempts = 0;
   }
 
   private spawnProcess(): void {
+    // An incomplete frame from a previous worker cannot belong to this stream.
+    this.buffer = "";
     const pluginEnv: Record<string, string> = {
       MEMORY_PROFILE: this.config.profile,
       MEMORY_MAX_READ_BYTES: String(this.config.maxReadBytes),
@@ -220,7 +232,9 @@ export class McpStdioClient {
       detached: false,
     });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
+    const child = this.proc;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (this.proc !== child) return;
       this.handleData(chunk.toString("utf8"));
     });
 

@@ -6,6 +6,7 @@
  * - `buildChildEnv` allowlist behaviour
  * - `McpStdioClient.stop()` safety on an unstarted client
  * - `callTool` rejection when the binary can't spawn
+ * - Failed-handshake cleanup, retry framing and crash-loop accounting
  */
 
 import { describe, it } from "node:test";
@@ -155,6 +156,77 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         assert.equal(await readFile(eofPath, "utf8"), "eof");
       }
       await client.stop();
+    });
+  }
+
+  for (const firstResult of ["error", "empty", "fragment", "cleanup-error", "exit"] as const) {
+    it(`releases a failed initialize worker (${firstResult})`, { timeout: 20_000 }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-mcp-init-"));
+      const binaryPath = join(directory, "worker.cjs");
+      const marker = join(directory, "workers");
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      const stop = client.stop.bind(client);
+      context.after(async () => {
+        await stop().catch(() => {});
+        const workers = await readFile(marker, "utf8").catch(() => "");
+        for (const pid of workers.trim().split("\n").filter(Boolean).map(Number)) {
+          assert.ok(Number.isSafeInteger(pid) && pid > 0);
+          try { process.kill(pid, "SIGKILL"); } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
+      });
+      if (firstResult === "cleanup-error") {
+        context.mock.method(client, "stop", async () => {
+          await stop();
+          throw new Error("cleanup failed");
+        });
+      }
+      await writeFile(binaryPath, `#!${process.execPath}
+const fs = require("node:fs");
+const readline = require("node:readline");
+const marker = ${JSON.stringify(marker)};
+const first = !fs.existsSync(marker);
+const mode = ${JSON.stringify(firstResult)};
+fs.appendFileSync(marker, String(process.pid) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (mode === "exit") process.exit(1);
+  let response;
+  if (request.method === "initialize" && first) {
+    if (mode === "fragment") {
+      process.stdout.write('{"jsonrpc":"2.0","id":');
+      return;
+    }
+    response = mode === "empty" ? { result: null }
+      : { error: { code: -32001, message: "initialization failed" } };
+  } else {
+    response = { result: request.method === "initialize" ? {}
+      : { content: [{ type: "text", text: "reinitialized" }] } };
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...response }) + "\\n");
+});
+`, { mode: 0o700 });
+      if (firstResult === "exit") {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await assert.rejects(client.callTool("memory_get_context", {}), /code=1/);
+        }
+        await assert.rejects(client.callTool("memory_get_context", {}), /gave up after 3/);
+        assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, 3);
+        return;
+      }
+      const expected = firstResult === "empty" ? /initialize handshake returned no result/
+        : firstResult === "fragment" ? /initialize.*timed out/
+        : /JSON-RPC error -32001: initialization failed/;
+      await assert.rejects(client.callTool("memory_get_context", {}), expected);
+      const firstPid = Number((await readFile(marker, "utf8")).trim());
+      assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
+      assert.throws(() => process.kill(firstPid, 0), { code: "ESRCH" },
+        "failed worker must exit before startup rejects");
+      assert.equal(await client.callTool("memory_get_context", {}), "reinitialized");
+      assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, 2);
     });
   }
 
