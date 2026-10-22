@@ -16,14 +16,14 @@ resolve_codex() {
         fi
         return
     fi
-    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    for candidate in codex /usr/local/bin/codex /usr/bin/codex "${HOME:-}/.local/bin/codex"; do
         if command -v "$candidate" &>/dev/null; then
             echo "$candidate"
             return
         fi
     done
     # Last resort: direct path check
-    for candidate in /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    for candidate in /usr/local/bin/codex /usr/bin/codex "${HOME:-}/.local/bin/codex"; do
         if [[ -x "$candidate" ]]; then
             echo "$candidate"
             return

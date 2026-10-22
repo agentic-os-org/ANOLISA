@@ -51,9 +51,17 @@ PLUGIN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"   # codex/ directory
 # resolved before Phase 1: the dry-run preview needs them to name what it would
 # do, and a host without the tokenless binary must see the build it would run.
 CODEX_BIN="$(resolve_codex)"
-MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
-AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
-PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+# The marketplace layout lives under the user's home and is only consumed once
+# a codex CLI exists: the preview echoes it and Phase 2 writes it. Resolve it
+# lazily so a host without a codex CLI - and without HOME at all - reaches the
+# "codex CLI not found" exit instead of aborting on an unbound $HOME here.
+if [[ -n "$CODEX_BIN" ]]; then
+    MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+    AGENTS_DIR="$MARKETPLACE_DIR/.agents/plugins"
+    PLUGIN_LINK="$MARKETPLACE_DIR/tokenless"
+else
+    MARKETPLACE_DIR="" AGENTS_DIR="" PLUGIN_LINK=""
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Ensure tokenless binary is available
