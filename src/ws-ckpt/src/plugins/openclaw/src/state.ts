@@ -7,8 +7,9 @@
  */
 
 import path from "node:path";
+import fs from "node:fs";
 import type { BtrfsManager } from "./btrfs-manager.js";
-import type { OpenClawPluginApi } from "../types-shim.js";
+import type { OpenClawPluginApi, OpenClawSessionContext } from "../types-shim.js";
 import type { PluginConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -28,9 +29,46 @@ export const pluginState = {
   /** Resolved plugin config for inspection via ws-ckpt-config tool. */
   resolvedConfig: null as PluginConfig | null,
 
-  /** One-shot flag: skip the next turn-end auto-checkpoint (set after rollback). */
-  skipNextAutoCheckpoint: false,
+  /** Registrations restored by each session; only that session consumes them. */
+  rollbackWorkspacesBySession: new Map<string, Set<string>>(),
 };
+
+function rollbackOwner(context?: OpenClawSessionContext): string | undefined {
+  return context?.sessionKey
+    ? JSON.stringify([context.sessionKey, context.sessionId ?? null])
+    : undefined;
+}
+
+/** Record a rollback only when the host supplies a session owner. */
+export function rememberRollback(workspace: string, context?: OpenClawSessionContext): void {
+  const owner = rollbackOwner(context);
+  if (owner === undefined) return;
+  let workspaces = pluginState.rollbackWorkspacesBySession.get(owner);
+  if (!workspaces) {
+    workspaces = new Set();
+    pluginState.rollbackWorkspacesBySession.set(owner, workspaces);
+  }
+  workspaces.add(workspace);
+}
+
+/** Consume this session's state even when its turn cannot create a checkpoint. */
+export function takeRollbackWorkspaces(context?: OpenClawSessionContext): Set<string> | undefined {
+  const owner = rollbackOwner(context);
+  if (owner === undefined) return undefined;
+  const workspaces = pluginState.rollbackWorkspacesBySession.get(owner);
+  pluginState.rollbackWorkspacesBySession.delete(owner);
+  if (!context?.sessionId) return workspaces;
+
+  // The minimum supported SDK omits sessionId from tool factories, but
+  // supplies it to hooks. Only consume its sessionKey-only entry as fallback;
+  // never consume a different conversation's exact sessionId entry.
+  const legacyOwner = rollbackOwner({ sessionKey: context.sessionKey })!;
+  const legacy = pluginState.rollbackWorkspacesBySession.get(legacyOwner);
+  pluginState.rollbackWorkspacesBySession.delete(legacyOwner);
+  if (!workspaces) return legacy;
+  for (const workspace of legacy ?? []) workspaces.add(workspace);
+  return workspaces;
+}
 
 // ---------------------------------------------------------------------------
 // Shared constants
@@ -58,4 +96,20 @@ export function cwdInsideWorkspace(workspace: string): { inside: boolean; cwd: s
   }
   const ws = path.resolve(workspace);
   return { inside: cwd === ws || cwd.startsWith(ws + path.sep), cwd };
+}
+
+/** Resolve parent aliases without following the mutable workspace symlink. */
+export function workspaceRegistrationPath(workspace: string): string {
+  // Strip trailing separators and "." without collapsing ".." across a
+  // parent symlink. The daemon uses the registration anchor, not its target.
+  const spelling = workspace.replace(/(?:\/\.?)+$/, "") || "/";
+  try {
+    // The native resolver preserves symlink/.. filesystem semantics.
+    if (path.basename(spelling) === "..") return fs.realpathSync.native(spelling);
+    return path.join(fs.realpathSync.native(path.dirname(spelling)), path.basename(spelling));
+  } catch {
+    // Preserve an unavailable registration's spelling rather than inventing
+    // equivalence by cancelling unresolved ".." components.
+    return path.isAbsolute(spelling) ? spelling : process.cwd() + "/" + spelling;
+  }
 }

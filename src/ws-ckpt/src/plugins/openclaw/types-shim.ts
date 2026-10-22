@@ -60,6 +60,16 @@ export type PluginLogger = {
 // Plugin API
 // ---------------------------------------------------------------------------
 
+/** Session fields shared by tool-factory and agent hook contexts.
+ * sessionId is absent from tool factories in OpenClaw 2026.2.13.
+ */
+export type OpenClawSessionContext = {
+  sessionKey?: string;
+  sessionId?: string;
+};
+
+export type OpenClawPluginToolFactory = (ctx: OpenClawSessionContext) => AnyAgentTool;
+
 /** The OpenClaw Plugin API surface exposed to plugin register functions. */
 export type OpenClawPluginApi = {
   id: string;
@@ -79,7 +89,7 @@ export type OpenClawPluginApi = {
     };
     [key: string]: unknown;
   };
-  registerTool: (tool: AnyAgentTool | ((...args: unknown[]) => AnyAgentTool), opts?: OpenClawPluginToolOptions) => void;
+  registerTool: (tool: AnyAgentTool | OpenClawPluginToolFactory, opts?: OpenClawPluginToolOptions) => void;
   registerHook(event: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number; name?: string; description?: string }): void;
   resolvePath: (input: string) => string;
   on: <K extends string>(hookName: K, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }) => void;

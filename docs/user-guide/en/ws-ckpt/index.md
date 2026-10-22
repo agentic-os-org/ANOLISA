@@ -290,6 +290,46 @@ There is no user-side global config file. Auto-checkpoint and cleanup behavior a
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 ```
 
+### Automatic checkpoints after rollback
+
+A successful, non-preview plugin rollback suppresses the next turn-end
+checkpoint only for the workspace that was restored. For example, rolling
+back an explicit workspace B leaves the configured workspace A's automatic
+checkpoint enabled. If you change the workspace before the hook runs, the
+suppression applies only when the hook actually targets a restored workspace.
+Pending suppression is then cleared, even if automatic checkpoints
+are disabled or the plugin is unavailable. Later turns checkpoint normally.
+Preview and failed rollbacks do not arm suppression. Turns with no
+pending rollback do not resolve registration paths for this check.
+
+OpenClaw binds the rollback tool to the host's `sessionKey`, and also to
+`sessionId` when the tool factory supplies it. Another session's `agent_end`
+cannot consume that state. OpenClaw 2026.2.13 omits `sessionId` from tool factories,
+so its compatibility path uses `sessionKey` alone; it cannot distinguish resets
+that reuse that key. Newer contexts with `sessionId` distinguish those conversation
+instances. If the host supplies no `sessionKey`, rollback remains available but
+does not arm suppression, and an unidentified hook cannot clear another session's
+state. Tool factories do not supply `runId`, so this does not distinguish
+concurrent runs within one session. Pending state stays in memory until its
+matching turn ends or the plugin process exits. Hermes retains workspace-scoped state; this change does not add session
+ownership to its hooks.
+
+You can address a rollback by workspace ID or registered path. A bare selector
+(with no path separator, except `.` and `..`) is resolved through
+`ws-ckpt status -w <selector> --format json` before a non-preview rollback.
+If that lookup fails, no rollback is executed; check daemon status or use the
+registered absolute path. A bare configured workspace also needs this lookup
+when a turn-end hook has pending suppression. If that lookup fails, the hook
+logs the failure, consumes the pending state and attempts its normal checkpoint.
+Path-addressed operations and turns without pending suppression add no status
+query. These lookups are separate daemon requests, not an atomic transaction
+with concurrent workspace unregister/re-registration.
+
+For path addressing, use the workspace's registered path, including its final
+symlink, rather than the live snapshot directory behind that link.
+Parent-directory aliases and equivalent path spellings still identify the same
+registration.
+
 ### CLI-Based Configuration
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.

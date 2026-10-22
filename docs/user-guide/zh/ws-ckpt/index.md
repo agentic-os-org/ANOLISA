@@ -265,6 +265,32 @@ daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进�
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 ```
 
+### 回滚后的自动检查点
+
+插件成功执行非预览回滚后，仅跳过被恢复工作区在下一次轮次结束时的自动检查点。
+例如，显式回滚工作区 B 后，配置中的工作区 A 仍会正常创建自动检查点。
+如果在 hook 执行前切换工作区，仅当 hook 实际操作的是本轮已恢复的工作区时才会跳过。
+待消费的跳过记录随后清除，即使自动检查点已关闭或插件不可用，后续轮次仍正常创建检查点。
+预览和失败的回滚不会设置跳过记录。没有待消费的回滚跳过记录时，这项检查不会解析注册路径。
+
+OpenClaw 将回滚工具绑定到宿主提供的 `sessionKey`；工具工厂还提供 `sessionId` 时，
+会同时绑定该标识。其他会话的 `agent_end` 不会消费这份状态。OpenClaw 2026.2.13 的
+工具工厂不提供 `sessionId`，因此兼容路径仅使用 `sessionKey`，无法区分复用该 key 的重置。
+新版上下文带有 `sessionId` 时可区分这些会话实例。宿主没有提供 `sessionKey` 时，回滚仍可执行，
+但不会设置跳过记录；缺少会话身份的 hook 也不会清除其他会话的记录。工具工厂不提供 `runId`，
+所以本机制不区分同一会话内的并发运行。待消费状态保留在内存中，直到匹配的轮次结束或插件进程退出。
+Hermes 保留按工作区区分的状态；本次修改没有为其 hook 添加会话所有权。
+
+回滚可以使用工作区 ID 或注册路径。没有路径分隔符的参数（`.` 和 `..` 除外）会在非预览回滚前
+通过 `ws-ckpt status -w <selector> --format json` 解析。查询失败时不会执行回滚；
+请检查 daemon 状态，或改用注册的绝对路径。配置中的工作区如果也是这种参数，
+轮次结束时有待消费记录才会查询。此时查询失败会记录日志、消费待处理状态，并尝试正常创建检查点。
+使用路径的操作和没有待消费记录的轮次不会增加 status 查询。这些查询是独立的 daemon 请求，
+不与并发注销、重新注册工作区构成原子事务。
+
+使用路径时，请使用工作区的注册路径，包括路径末尾的符号链接，而不是链接所指向的当前快照目录。
+父目录别名和等价路径写法仍表示同一个注册路径。
+
 ### CLI 配置
 
 配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。

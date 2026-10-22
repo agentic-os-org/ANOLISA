@@ -112,7 +112,8 @@ class CheckpointManager:
     def __init__(self, config: HermesPluginConfig) -> None:
         self._config = config
         self._turn_count: int = 0
-        self.skip_next_auto_checkpoint: bool = False
+        # Registrations restored this turn; consumed together at turn end.
+        self.skip_auto_checkpoint_workspaces: set[str] = set()
 
     @property
     def config(self) -> HermesPluginConfig:
@@ -244,6 +245,48 @@ def get_manager() -> CheckpointManager:
         _manager = CheckpointManager(config)
         print("[ws-ckpt] Plugin initialized", flush=True)
     return _manager
+
+
+def resolve_workspace_path(workspace: str) -> str:
+    """Resolve bare selectors through the daemon, preserving its registered path."""
+    if workspace in (".", "..") or "/" in workspace or "\\" in workspace:
+        return workspace
+    try:
+        output = get_manager()._run(["status", "--workspace", workspace, "--format", "json"])
+        if output.exit_code:
+            raise ValueError(output.stderr or output.stdout)
+        report = json.loads(output.stdout)
+        entries = report.get("workspaces") if isinstance(report, dict) else None
+        if (
+            not isinstance(entries, list)
+            or len(entries) != 1
+            or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("path"), str)
+            or not Path(entries[0]["path"]).is_absolute()
+        ):
+            raise ValueError("expected one registered workspace with an absolute path")
+        return entries[0]["path"]
+    except (ValueError, TypeError) as error:
+        raise ValueError(
+            f"Cannot resolve workspace {workspace!r}: {error}. "
+            "Check daemon status or use the registered absolute path."
+        ) from error
+
+
+def workspace_registration_path(workspace: str) -> str:
+    """Resolve parent aliases while preserving the final workspace symlink."""
+    path = Path(workspace)
+    try:
+        # The daemon replaces the final symlink during rollback. Only its
+        # parent belongs in canonical identity; resolving the whole path
+        # would make that identity depend on the currently live snapshot.
+        if path.name == "..":
+            return str(path.resolve(strict=True))
+        return str(path.parent.resolve(strict=True) / path.name)
+    except (OSError, RuntimeError):
+        # Keep an unavailable registration addressable by its exact spelling;
+        # do not invent an alias by cancelling unresolved '..' components.
+        return str(path.absolute())
 
 
 def cwd_inside_workspace(workspace: str) -> tuple[bool, str]:

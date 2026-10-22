@@ -17,6 +17,13 @@ Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime 
 - **TOML config hot-reload** — single config entry at `/etc/ws-ckpt/config.toml`, `ws-ckpt reload` applies instantly
 - **Capacity alerting** — warns when any workspace exceeds 1000 snapshots or 90% filesystem usage
 
+After a successful rollback through the OpenClaw or Hermes plugin, the next
+turn-end checkpoint is skipped only for the restored workspace, whether the
+rollback uses its ID or registered path. Other
+workspaces keep their automatic checkpoints; preview and failed rollbacks do
+not suppress them. OpenClaw keeps this state within the originating session,
+so another session finishing first cannot consume it.
+
 ## Project Structure
 
 ```

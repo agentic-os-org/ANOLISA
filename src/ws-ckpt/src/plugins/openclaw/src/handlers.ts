@@ -7,8 +7,8 @@
 
 import { CommandExecutor, extractTiming } from "./commands.js";
 import { mapErrorToLLMMessage } from "./btrfs-manager.js";
-import type { AgentToolResult } from "../types-shim.js";
-import { pluginState, UNAVAILABLE_MSG, cwdInsideWorkspace, cwdInsideWorkspaceReason } from "./state.js";
+import type { AgentToolResult, OpenClawSessionContext } from "../types-shim.js";
+import { pluginState, UNAVAILABLE_MSG, cwdInsideWorkspace, cwdInsideWorkspaceReason, workspaceRegistrationPath, rememberRollback } from "./state.js";
 import { parseWorkspaceCleanupJson } from "./config.js";
 import { persistConfig } from "./persist.js";
 import { CrontabManager, parseSchedulesUpdate } from "./cron.js";
@@ -93,6 +93,7 @@ export async function handleRollback(
   workspace?: string,
   numAncestors?: number,
   preview: boolean = false,
+  context?: OpenClawSessionContext,
 ): Promise<{ text: string; isError: boolean }> {
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
@@ -117,24 +118,39 @@ export async function handleRollback(
     return { text: "No workspace configured", isError: true };
   }
 
+  const rollbackManager = pluginState.manager;
+  const managerWorkspace = rollbackManager.getWorkspacePath();
+  let registration: string | undefined;
   if (!preview) {
-    const cwdCheck = cwdInsideWorkspace(resolvedWs);
-    if (cwdCheck.inside) {
-      return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, resolvedWs), isError: true };
+    let registrationPath: string;
+    try {
+      registrationPath = await new CommandExecutor().resolveWorkspacePath(
+        workspace?.trim() ? resolvedWs : managerWorkspace ?? resolvedWs,
+      );
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error), isError: true };
     }
+    if (!workspace?.trim() && (pluginState.manager !== rollbackManager
+        || rollbackManager.getWorkspacePath() !== managerWorkspace)) {
+      return { text: "Workspace changed while resolving rollback. Retry with the intended workspace.", isError: true };
+    }
+    const cwdCheck = cwdInsideWorkspace(registrationPath);
+    if (cwdCheck.inside) {
+      return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, registrationPath), isError: true };
+    }
+    registration = workspaceRegistrationPath(registrationPath);
   }
-
   if (workspace?.trim()) {
     const execResult = await runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors, preview);
-    if (!execResult.isError && !preview) {
-      pluginState.skipNextAutoCheckpoint = true;
+    if (!execResult.isError && registration !== undefined) {
+      rememberRollback(registration, context);
     }
     return execResult;
   }
 
   const result = await pluginState.manager.rollback(trimmed || undefined, numAncestors, preview);
-  if (result.success && !preview) {
-    pluginState.skipNextAutoCheckpoint = true;
+  if (result.success && registration !== undefined) {
+    rememberRollback(registration, context);
   }
   return { text: result.message, isError: !result.success };
 }
