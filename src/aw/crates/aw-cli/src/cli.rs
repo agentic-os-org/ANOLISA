@@ -1,6 +1,7 @@
 //! Native launch commands share the daemon client; Agent arguments remain literal.
 
 mod adapter;
+mod attachment;
 mod bridge;
 mod dispatch;
 mod hook;
@@ -31,7 +32,7 @@ impl Arguments {
             if !flag.starts_with("--") {
                 return Err("expected a named option (Agent arguments follow --)".into());
             }
-            let value = if matches!(flag.as_str(), "--json" | "--reloadable") {
+            let value = if matches!(flag.as_str(), "--json" | "--reloadable" | "--remove") {
                 "true".into()
             } else {
                 args.next().ok_or("option requires a value")?

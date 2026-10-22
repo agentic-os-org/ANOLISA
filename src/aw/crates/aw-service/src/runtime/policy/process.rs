@@ -4,7 +4,8 @@ use crate::{rejected, Result};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::MetadataExt};
 
-pub(super) struct Process {
+/// Same-user process identity pinned to PID, start time and PID namespace.
+pub struct Process {
     pid: u32,
     start: String,
     uid: u32,
@@ -12,7 +13,8 @@ pub(super) struct Process {
 }
 
 impl Process {
-    pub(super) fn read(pid: u32) -> Result<Self> {
+    /// Read a live same-user process identity.
+    pub fn read(pid: u32) -> Result<Self> {
         if pid == 0 {
             return Err(rejected("process_identity"));
         }
@@ -47,7 +49,8 @@ impl Process {
         })
     }
 
-    pub(super) fn check(&self) -> Result<()> {
+    /// Reject exit, PID reuse or namespace changes.
+    pub fn check(&self) -> Result<()> {
         let current = Self::read(self.pid).map_err(|_| rejected("stale_process"))?;
         if (current.start, current.uid, current.namespace)
             != (self.start.clone(), self.uid, self.namespace.clone())
@@ -57,7 +60,8 @@ impl Process {
         Ok(())
     }
 
-    pub(super) fn corroborate(&self, mut pid: u32) -> Result<()> {
+    /// Require the callback process to descend from the selected native process.
+    pub fn corroborate(&self, mut pid: u32) -> Result<()> {
         self.check()?;
         for _ in 0..64 {
             let process = Self::read(pid).map_err(|_| rejected("bridge_process_mismatch"))?;
@@ -78,7 +82,8 @@ impl Process {
         Err(rejected("bridge_process_mismatch"))
     }
 
-    pub(super) fn metadata(&self) -> Value {
+    /// Metadata suitable for audit; contains no process environment or arguments.
+    pub fn metadata(&self) -> Value {
         json!({"pid":self.pid,"start_ticks":self.start,"uid":self.uid,"pid_namespace":self.namespace,"alive":self.check().is_ok()})
     }
 }

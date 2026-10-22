@@ -14,6 +14,8 @@ use std::{
     time::Instant,
 };
 
+#[path = "policy/detach.rs"]
+mod detach;
 #[path = "policy/preparation.rs"]
 mod preparation;
 

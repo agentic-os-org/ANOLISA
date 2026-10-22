@@ -240,7 +240,15 @@ class AwPlugin:
             raise RuntimeError("AW requires QwenPaw 2.2.2b4 and AgentScope 2.0.9")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
-        config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
+        descriptor = Path(__file__).with_name("aw-attachment.json")
+        if descriptor.exists():
+            # A hot-installed App cannot inherit environment added after startup.
+            metadata = descriptor.lstat()
+            if not descriptor.is_file() or descriptor.is_symlink() or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                raise RuntimeError("Unsafe AW attachment descriptor")
+            config = json.loads(descriptor.read_text())
+        else:
+            config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(config.get(key), str) or not config[key]:
                 raise ValueError(f"AW plugin configuration requires {key}")

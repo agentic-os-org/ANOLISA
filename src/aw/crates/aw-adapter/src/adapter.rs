@@ -145,6 +145,13 @@ pub trait PreparedLaunch {
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()>;
     /// Materialize bridge registration in the caller-owned directory.
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan>;
+    /// Prepare registration for an already running native process; never spawn it.
+    fn attachment(
+        &mut self,
+        _context: &LaunchContext<'_>,
+    ) -> Result<crate::attachment::Registration> {
+        Err("this adapter cannot attach to a running process".into())
+    }
     /// Release integration-owned files outside the common launch directory.
     fn finish(&mut self) -> Result<()> {
         Ok(())

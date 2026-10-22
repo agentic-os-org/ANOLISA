@@ -81,6 +81,12 @@ Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.
 
+For an independently started Qoder TUI or QwenPaw App, use
+`aw agent connect --config current.yaml --agent TARGET --pid PID` before its first request;
+add `--remove` to detach at idle. Native startup and process ownership stay with
+the caller. See [native attachment](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#attach-to-an-already-started-native-process)
+for exclusive profiles, confirmation and cleanup requirements.
+
 ## Documentation
 
 | Task | Guide |

@@ -84,7 +84,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder --reloadable
 
 运行时路径固定 Qoder 1.1.73 TUI，或 QwenPaw 2.2.2b4 / AgentScope 2.0.9 App。
 QwenPaw 按原生接入参考选择配置目标并设置已初始化的 `QWENPAW_WORKING_DIR`。
-普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级，外部 attach 后续提供。
+普通 `aw run` 保持现有行为；未预装稳定桥接的实例不能通过此命令升级。外部启动的原生进程可使用下方的安装流程。
 
 独立准备 `next.yaml`，在另一个终端通过原启动配置定位现有服务并更新目标：
 
@@ -184,3 +184,45 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 简单规则可以从 stdin 读取工具事件，向 stdout 输出 JSON `true` 或 `false`。
 配置决定命中时观察还是阻断。执行故障由 `on_error` 处理，安全检查通常选 `block`。
 按[布尔规则教程](../../../../developer-guide/zh/aw/integration.md)准备脚本并验证允许和阻断两种情况。
+
+## 接入已启动的原生进程
+
+容器控制器可以照常启动 Qoder 1.1.73 TUI 或 QwenPaw 2.2.2b4 /
+AgentScope 2.0.9 App，在派发首个请求前安装 AW。进程、终端和生命周期仍由控制器
+管理。启动时记录 PID，在安装成功前保持请求派发暂停。
+
+```bash
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
+aw update --config current.yaml --agent TARGET --policy next.yaml
+aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
+```
+
+`aw install --config ... --agent ... --pid ... [--remove]` 保留为相同操作的兼容入口。
+
+连接命令在获得原生确认后返回实例、当前策略版本和进程身份。后续策略
+变更复用 reloadable `aw run` 的 `update` 命令。`--remove` 检查完整的原生请求和
+工具执行边界；忙碌时返回错误，保留保护且不排队。移除保留原生进程、无关 Hook 和
+用户配置修改。移除期间也应暂停请求派发。普通 `aw run` 和 Hermes 安装保持现有行为。
+
+每个预热进程使用独占的原生配置作用域。AW 与 Agent 必须处于同一用户、PID 和
+mount namespace。所选原生配置目录必须是规范路径、归该用户所有且权限为 `0700`。
+已发现的共享进程和重复挂载会被拒绝；控制器也必须阻止其他进程后续进入同一作用域。
+
+- Qoder 使用 `HOME/.qoder/settings.json`，启动时不传 `--settings`、自定义配置目录
+  或禁用 Hook 的选项。AW 读取运行中进程的环境和参数，合并所属配置组，并在用户
+  输入前通过原生 `ConfigChange` 确认加载。已有 settings 必须是同用户的普通文件，
+  且不允许组或其他用户写入。文件原先不存在时由 AW 创建，移除后保留空的原生配置
+  文档。工作目录信任和原生权限仍由 Qoder 决定。
+- QwenPaw 使用运行中 App 已初始化的 `QWENPAW_WORKING_DIR`。App 应监听
+  `127.0.0.1`；AW 验证所选 PID 拥有该端口。原生插件 API 安装带私有描述文件的
+  现有 AW middleware，必须收到该 App 的确认；仅 HTTP 成功不足以表示接入成功。
+  首版不支持单独托管的 runtime。
+
+QwenPaw 还要求与 AW 处于相同的 network namespace。已安装插件目录缺失时，
+detach 无法证明内存中的 middleware 已卸载，会返回错误并保留所有权和桥接文件。
+请恢复原有插件目录并重试 detach，成功后再继续派发请求。
+
+首次挂载要求进程处于首请求前的空闲状态。桥接建立之前已经执行的工作无法由 AW
+重建。请先移除挂载，再停止外部进程；首版不监督该进程，也不运行自动挂载回收器。
+移除失败时保留所有权记录和桥接文件，可用相同命令显式重试。原生插件被替换或
+服务代次改变时拒绝操作并要求检查，避免删除其他所有者的资源。
