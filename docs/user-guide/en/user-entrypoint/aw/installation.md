@@ -52,6 +52,18 @@ For a personal installation that does not host a system backend, use an absolute
 you own and omit `sudo` from the install command. Other users must not be able to write to its
 parent directory. A root backend needs a root-managed installation.
 
+Inspect the installation without starting a service or Provider:
+
+```bash
+aw list --installed --prefix "$AW_PREFIX"
+aw doctor --prefix "$AW_PREFIX"
+```
+
+The list reads installation records; `doctor` checks the recorded files. Existing
+Preview installs keep their records under `$AW_PREFIX/.aw-packages`, so specify
+the prefix. These queries do not migrate records or create a database. See
+[package database and file checks](operations.md).
+
 ## Create configuration
 
 If AW is already installed, the same local installer is available through:

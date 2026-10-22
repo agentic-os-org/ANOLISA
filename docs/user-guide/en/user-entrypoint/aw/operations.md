@@ -71,6 +71,7 @@ Success returns 0; invalid syntax or an output-stream failure returns 1.
 ## Management reports
 
 Use command-local `--json` with local-bundle `aw install`, `aw uninstall`,
+`aw list --installed`, `aw doctor`,
 `aw config init`, `aw config validate`, `aw config add-provider`,
 `aw config remove-provider`, `aw config add-event`, `aw config add-hook` or
 `aw config remove-hook`. It does not apply to legacy native installation,
@@ -108,7 +109,7 @@ scope, not runtime activation. The original `aw validate` output remains unchang
 
 Local installation and removal also report `mutation.committed`,
 `mutation.recovery` and any `warnings`. `committed` identifies the existing
-payload/receipt commit point, not crash durability. Recovery values are
+commit point for package files and installation records, not crash durability. Recovery values are
 `not_attempted`, `complete` and `incomplete`, covering only this invocation's
 tracked resources. `not_attempted` does not mean zero writes; `complete` does
 not certify machine-wide state. Warning entries have a stable `code`, resource
@@ -129,6 +130,59 @@ when `--json` was among the rejected arguments. Default human diagnostics and
 explicit `config show` output retain their existing contracts; this is not a
 global private-data redaction feature. Service JSON, stdin/stdout protocols and
 native Agent output do not receive this management envelope.
+
+## Installed packages and file checks
+
+List the packages recorded for an installation, then check their files:
+
+```bash
+aw list --installed --prefix "$AW_PREFIX"
+aw doctor --prefix "$AW_PREFIX"
+aw list --installed --prefix "$AW_PREFIX" --json
+aw doctor --prefix "$AW_PREFIX" --json
+```
+
+`list --installed` reads package records without testing whether the installed
+files still exist or match. `doctor` checks each recorded file for missing or
+changed content, unexpected permissions, symbolic links and other invalid file
+types. It reports all detected file problems, returns 1 when any are found, and
+does not repair them. A clean check returns 0. Both commands are offline and
+read-only: they do not create directories or lock files, start services, execute
+Providers or update installation records.
+
+### Where records are stored
+
+Without `--prefix`, both commands read the current user's package database at
+`$XDG_STATE_HOME/aw/packages`, or `$HOME/.local/state/aw/packages` when
+`XDG_STATE_HOME` is unset or empty. A nonempty `XDG_STATE_HOME` must be absolute.
+This database is separate from the runtime `state_dir` in `aw.yaml`.
+
+The database's `installed.json` contains the schema version, database generation
+and installed-package records, including package versions, installation paths,
+dependencies and owned files. The existing `lock` coordinates access;
+`transactions/` holds unfinished package operations. Queries do not create any
+of these files. A missing database returns an empty list; an existing but
+incomplete, malformed or unsupported database returns an error. Unfinished
+transactions return `needs_recovery` rather than triggering automatic recovery.
+
+Existing Preview installers still write `<prefix>/.aw-packages/*.json`.
+Specify an absolute `--prefix` to query those records. If the user's database
+already records that prefix, its records are authoritative; otherwise the query
+reads `.aw-packages` in that directory. Competing old records at a registered
+prefix cause an error; the command does not merge or silently discard them.
+Older records do not identify the original installation scope, so the text
+output shows `not recorded` and JSON uses `scope: unknown`.
+Omitting `--prefix` does not search for
+old installations. Queries neither import old records nor change which records
+the installer writes. System package database management and record migration
+are not available through these commands yet.
+
+For machine-readable checks, both commands use the management JSON envelope.
+A `doctor` file problem returns `status: failed`, `error.code: integrity_check`
+and the findings in `result.report.issues`. The JSON remains on stdout with no
+separate stderr diagnostics. Database and record errors also return 1; do not
+treat them as an empty installation or a clean file check. The same local
+`--quiet`, `--verbose` and `--color` rules apply as to other management commands.
 
 ## Terminal output
 

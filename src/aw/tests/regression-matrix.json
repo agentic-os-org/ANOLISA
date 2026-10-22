@@ -4,6 +4,7 @@
     "aw-adapter/lib/aw_adapter",
     "aw-cli/lib/aw_cli",
     "aw-cli/test/config_edit_cli",
+    "aw-cli/test/inventory",
     "aw-cli/test/packages",
     "aw-cli/test/packages_pty",
     "aw-cli/test/standalone",
@@ -19,6 +20,7 @@
     "aw-host/test/host",
     "aw-cli/test/installation",
     "aw-package/test/build_cli",
+    "aw-package/test/database",
     "aw-provider-sec-core/test/provider",
     "aw-provider-tokenless/test/managed_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -40,6 +42,22 @@
     "aw-cli/test/service"
   ],
   "cases": {
+    "package-inventory-readonly": {
+      "target": "aw-cli/test/inventory",
+      "test": "legacy_queries_preserve_every_file_and_do_not_create_a_database"
+    },
+    "package-doctor-files": {
+      "target": "aw-cli/test/inventory",
+      "test": "list_keeps_recorded_packages_while_doctor_reports_missing_files"
+    },
+    "package-database-contract": {
+      "target": "aw-package/test/database",
+      "test": "malformed_records_reject_unknown_schema_fields_duplicates_and_escaping_paths"
+    },
+    "package-description": {
+      "target": "aw-package/test/database",
+      "test": "generic_package_descriptions_allow_external_names_stable_versions_and_no_provider"
+    },
     "package-pty-consent": {
       "target": "aw-cli/test/packages_pty",
       "test": "confirmation::tty_acceptance_runs_removal_and_quiet_does_not_bypass_the_prompt"

@@ -27,6 +27,13 @@ Scripts and JSON output must use `aw uninstall --prefix ABS_DIR --yes` (or `-y`)
 Confirmation never overrides package checks or system permissions;
 the compatibility `aw-package` executable retains its original behavior.
 
+Use `aw list --installed --prefix ABS_DIR` to list packages recorded in an
+installation and `aw doctor --prefix ABS_DIR` to check their files. Both commands
+are read-only and accept `--json`. Without `--prefix`, they read the current
+user's installed-package database. Existing Preview installations still need an
+explicit prefix; queries do not import their `.aw-packages` records. See
+[installed packages and file checks](../../docs/user-guide/en/user-entrypoint/aw/operations.md#installed-packages-and-file-checks).
+
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder

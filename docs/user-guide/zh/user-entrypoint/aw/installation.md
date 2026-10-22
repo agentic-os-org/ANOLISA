@@ -49,6 +49,17 @@ aw --help
 无需系统后台的个人安装，可把 `AW_PREFIX` 改成自己拥有的绝对路径，并去掉安装命令的
 `sudo`。安装目录的父目录不得被其他用户写入。root 后台应使用 root 管理的安装目录。
 
+不启动服务或 Provider 即可检查安装：
+
+```bash
+aw list --installed --prefix "$AW_PREFIX"
+aw doctor --prefix "$AW_PREFIX"
+```
+
+清单读取安装记录；`doctor` 检查记录中的文件。已有 Preview 安装把记录保存在
+`$AW_PREFIX/.aw-packages` 下，因此需要指定安装目录。这些查询不会迁移记录或创建
+数据库，详见[包数据库与文件检查](operations.md)。
+
 ## 创建配置
 
 已有 AW 时，可以使用同一个本地安装器：

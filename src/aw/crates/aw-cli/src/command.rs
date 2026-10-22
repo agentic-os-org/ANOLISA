@@ -3,6 +3,7 @@
 mod confirmation;
 mod discovery;
 mod dispatch;
+mod inventory;
 mod package;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,10 @@ enum Command {
     Install(Install),
     /// Remove owned files from one Preview installation prefix
     Uninstall(package::Uninstall),
+    /// List recorded software installations without checking or changing their files
+    List(inventory::List),
+    /// Check installed software files without repairing or starting anything
+    Doctor(inventory::Query),
     /// Connect a configured Agent's persistent native Hooks
     #[command(subcommand)]
     Agent(Agent),

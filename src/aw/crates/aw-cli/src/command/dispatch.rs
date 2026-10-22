@@ -90,6 +90,8 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 value.prefix.output,
             ),
         },
+        Command::List(value) => super::inventory::run("list", value.query),
+        Command::Doctor(value) => super::inventory::run("doctor", value),
         Command::Agent(Agent::Connect(value)) => crate::runtime("install", &native(value)),
         Command::Config(value) => config(value),
         Command::Service(value) => service(value),

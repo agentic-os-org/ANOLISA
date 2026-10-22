@@ -33,6 +33,8 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
         "aw commands",
         "aw config validate",
         "aw service stop",
+        "aw list",
+        "aw doctor",
     ] {
         assert!(names.contains(&public), "missing {public}");
     }

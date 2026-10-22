@@ -21,14 +21,19 @@ REPO = AW.parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def run(command: list[str], cwd: Path, timeout: float = 600, capture: bool = False) -> str:
+def run(
+    command: list[str], cwd: Path, timeout: float = 600, capture: bool = False,
+    umask: int = -1,
+) -> str:
     """Run a bounded command and reap its owned process group on interruption."""
-    print("+ " + " ".join(command), flush=True)
+    permissions = f"umask={umask:04o} " if umask >= 0 else ""
+    print("+ " + permissions + " ".join(command), flush=True)
     with subprocess.Popen(
         command,
         cwd=cwd,
         text=True,
         start_new_session=True,
+        umask=umask,
         stdout=subprocess.PIPE if capture else None,
     ) as process:
         try:
@@ -169,6 +174,16 @@ sys.exit(not result.wasSuccessful())
     )
 
 
+def query_permissions() -> None:
+    """Exercise both query targets under child-local deployment umasks."""
+    for mask in (0o022, 0o002):
+        for package, target in (("aw-package", "database"), ("aw-cli", "inventory")):
+            run(
+                ["cargo", "test", "--locked", "-p", package, "--test", target],
+                AW, timeout=120, umask=mask,
+            )
+
+
 def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
@@ -198,6 +213,7 @@ def check() -> None:
     check_inventory(metadata)
     for root in [AW, *provider_roots]:
         run(["cargo", "test", "--workspace", "--locked"], root)
+    query_permissions()
     run([sys.executable, "tests/check_canonical.py"], AW, timeout=30)
     for root in [AW, *provider_roots]:
         run(["cargo", "doc", "--workspace", "--no-deps", "--locked"], root)

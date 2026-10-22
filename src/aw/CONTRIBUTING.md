@@ -22,6 +22,9 @@ invalid vectors and command failures return nonzero. Each command has a timeout 
 failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
+The database and inventory query targets also run under child umasks `0022` and
+`0002`. Give fixtures explicit permissions; do not change a parallel test process's umask.
+
 These checks run as a regular user without an Agent or service login. Cargo
 downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;

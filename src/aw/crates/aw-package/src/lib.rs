@@ -3,6 +3,8 @@
 
 pub mod config_edit;
 mod configuration;
+pub mod database;
+pub mod description;
 mod filesystem;
 mod install;
 mod manifest;
@@ -19,6 +21,9 @@ pub use manifest::{digest, inspect, Component, Manifest, Payload};
 /// Packaging failure; cleanup diagnostics never replace the original error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// An unfinished database transaction requires an explicit recovery operation.
+    #[error("package database needs recovery: {}", .0.display())]
+    NeedsRecovery(std::path::PathBuf),
     /// The caller's cancellation was observed before the operation committed.
     #[error("package operation interrupted")]
     Cancelled,

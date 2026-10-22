@@ -23,6 +23,12 @@ Preview 包，用 `aw config` 编辑配置，用 `aw uninstall --prefix ABS_DIR`
 脚本或 JSON 输出必须使用 `aw uninstall --prefix ABS_DIR --yes`（或 `-y`）。
 确认不覆盖包检查或系统权限；兼容入口 `aw-package` 保留原行为。
 
+使用 `aw list --installed --prefix ABS_DIR` 列出安装记录中的包，使用
+`aw doctor --prefix ABS_DIR` 检查这些包的文件。两个命令只读，都支持 `--json`。
+省略 `--prefix` 时读取当前用户的已安装包数据库。已有 Preview 安装仍需显式指定
+安装目录；查询不会把 `.aw-packages` 安装记录导入新数据库。详见
+[已安装包与文件检查](../../docs/user-guide/zh/user-entrypoint/aw/operations.md#已安装包与文件检查)。
+
 ```bash
 aw validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder

@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+mod queries;
 mod terminal;
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -49,6 +50,12 @@ pub(crate) enum Outcome {
     ConfigurationChecked {
         policy_update_scope: bool,
     },
+    PackagesListed {
+        inventory: aw_package::database::Inventory,
+    },
+    PackageFilesChecked {
+        report: aw_package::database::DoctorReport,
+    },
 }
 
 #[derive(Serialize)]
@@ -62,12 +69,16 @@ enum ErrorCode {
     Cancelled,
     ConfirmationRequired,
     ConfirmationDeclined,
+    NeedsRecovery,
+    IntegrityCheck,
 }
 
 #[derive(Serialize)]
 struct Diagnostic {
     code: ErrorCode,
     message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_path: Option<PathBuf>,
 }
 
 impl From<&aw_package::Error> for Diagnostic {
@@ -87,8 +98,19 @@ impl From<&aw_package::Error> for Diagnostic {
                 "The operation violates the package or configuration contract",
             ),
             Error::Cancelled => (ErrorCode::Cancelled, "The package operation was cancelled"),
+            Error::NeedsRecovery(_) => (
+                ErrorCode::NeedsRecovery,
+                "A package operation needs recovery before this query can continue",
+            ),
         };
-        Self { code, message }
+        Self {
+            code,
+            message,
+            recovery_path: match error {
+                Error::NeedsRecovery(path) => Some(path.clone()),
+                _ => None,
+            },
+        }
     }
 }
 
@@ -107,10 +129,23 @@ struct Report<'a> {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ResultView<'a> {
-    Succeeded { result: &'a Outcome },
-    Failed { error: Diagnostic },
-    Cancelled { error: Diagnostic },
-    Partial { error: Diagnostic },
+    Succeeded {
+        result: &'a Outcome,
+    },
+    Failed {
+        error: Diagnostic,
+    },
+    Cancelled {
+        error: Diagnostic,
+    },
+    Partial {
+        error: Diagnostic,
+    },
+    #[serde(rename = "failed")]
+    CheckFailed {
+        error: Diagnostic,
+        result: &'a Outcome,
+    },
 }
 
 mod mutation;
@@ -158,7 +193,11 @@ pub(crate) fn unconfirmed(
         options,
         Err(Failure {
             human: message.into(),
-            diagnostic: Diagnostic { code, message },
+            diagnostic: Diagnostic {
+                code,
+                message,
+                recovery_path: None,
+            },
         }),
         None,
     )?;
@@ -176,6 +215,12 @@ pub(crate) fn human(outcome: &Outcome) -> std::io::Result<()> {
 }
 
 fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
+    if matches!(
+        outcome,
+        Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. }
+    ) {
+        return queries::human(outcome, options);
+    }
     if options.quiet {
         return Ok(());
     }
@@ -205,6 +250,9 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
         Outcome::ConfigurationChecked {
             policy_update_scope: true,
         } => "policy update scope valid; runtime activation is not checked".into(),
+        Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
+            return queries::human(outcome, options);
+        }
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
@@ -228,6 +276,9 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             Outcome::ConfigurationValidated => "Configuration validation completed offline.",
             Outcome::ConfigurationChecked { .. } => {
                 "Configuration validation completed offline; no runtime activation was checked."
+            }
+            Outcome::PackagesListed { .. } | Outcome::PackageFilesChecked { .. } => {
+                "Installed-package records were read without changing files."
             }
         };
         writeln!(std::io::stderr().lock(), "{detail}")?;
@@ -290,7 +341,11 @@ pub(crate) fn complete_validation(
         };
         Failure {
             human,
-            diagnostic: Diagnostic { code, message },
+            diagnostic: Diagnostic {
+                code,
+                message,
+                recovery_path: None,
+            },
         }
     });
     complete_result("config validate", options, result, None)
@@ -329,16 +384,27 @@ fn complete_result(
     }
     match result {
         Ok(outcome) => {
+            let unhealthy =
+                matches!(&outcome, Outcome::PackageFilesChecked { report } if !report.healthy());
             if options.json {
-                json(
-                    command,
-                    ResultView::Succeeded { result: &outcome },
-                    mutation,
-                )?;
+                let result = if unhealthy {
+                    ResultView::CheckFailed {
+                        error: Diagnostic {
+                            code: ErrorCode::IntegrityCheck,
+                            message:
+                                "Installed software checks found problems or could not be completed",
+                            recovery_path: None,
+                        },
+                        result: &outcome,
+                    }
+                } else {
+                    ResultView::Succeeded { result: &outcome }
+                };
+                json(command, result, mutation)?;
             } else {
                 human_with(&outcome, &options)?;
             }
-            Ok(crate::cli::Exit::Code(0))
+            Ok(crate::cli::Exit::Code(i32::from(unhealthy)))
         }
         Err(failure) if options.json => {
             // Failure describes the command, not rollback or runtime health.

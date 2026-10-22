@@ -59,7 +59,8 @@ aw completion elvish
 
 ## 管理结果
 
-本地 bundle 的 `aw install`、`aw uninstall`、`aw config init`、`aw config validate`、
+本地 bundle 的 `aw install`、`aw uninstall`、`aw list --installed`、`aw doctor`、
+`aw config init`、`aw config validate`、
 `aw config add-provider`、`aw config remove-provider`、`aw config add-event`、
 `aw config add-hook` 和 `aw config remove-hook` 支持局部 `--json`。
 旧原生连接、`aw agent connect`、旧 `aw validate` 和兼容入口 `aw-package`
@@ -91,7 +92,7 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 范围，不代表运行时生效。原 `aw validate` 输出保持不变。
 
 本地安装与卸载另提供 `mutation.committed`、`mutation.recovery` 和必要的
-`warnings`。`committed` 表示越过既有 payload／receipt 提交点，不是崩溃持久性保证。
+`warnings`。`committed` 表示包文件和安装记录已越过既有提交点，不是崩溃持久性保证。
 恢复状态为 `not_attempted`、`complete` 或 `incomplete`，仅覆盖本次操作跟踪的资源。
 `not_attempted` 不表示没有写入；`complete` 不证明整机状态。
 警告包含固定 `code`、资源 `path` 与可选的粗粒度 `io_kind`，不复制 I/O 错误字符串。
@@ -105,6 +106,49 @@ Preview 包检查，不代表发布者可信或原生 Agent 验收通过。
 语法错误仍在 stderr 输出文本，退出码为 1，stdout 为空，即使被拒绝的参数中
 包含 `--json`。默认人类诊断与显式 `config show` 保留原有契约；这不是全局
 私有数据脱敏功能。服务 JSON、stdin/stdout 协议和原生 Agent 输出不套管理报告。
+
+## 已安装包与文件检查
+
+先列出指定安装目录中的包，再检查它们的文件：
+
+```bash
+aw list --installed --prefix "$AW_PREFIX"
+aw doctor --prefix "$AW_PREFIX"
+aw list --installed --prefix "$AW_PREFIX" --json
+aw doctor --prefix "$AW_PREFIX" --json
+```
+
+`list --installed` 读取包记录，不检查已安装文件是否仍然存在或匹配。
+`doctor` 逐个检查记录中的文件，报告缺失、内容变化、权限不符、符号链接和其他
+文件类型异常。发现文件问题时返回 1，并列出所有检测到的问题，不自动修复；
+检查通过返回 0。两个命令都离线、只读，不创建目录或锁文件，不启动服务、
+执行 Provider 或更新安装记录。
+
+### 安装记录保存在哪里
+
+省略 `--prefix` 时，两个命令读取当前用户的包数据库：
+`$XDG_STATE_HOME/aw/packages`；`XDG_STATE_HOME` 未设置或为空时，使用
+`$HOME/.local/state/aw/packages`。非空的 `XDG_STATE_HOME` 必须为绝对路径。
+这个数据库与 `aw.yaml` 中运行时使用的 `state_dir` 分开。
+
+数据库的 `installed.json` 保存格式版本、记录更新编号和已安装包记录，包括包版本、
+安装目录、依赖和所属文件。已有的 `lock` 用于协调访问，`transactions/` 保存未完成的
+包操作。查询不会创建这些文件。数据库不存在时返回空清单；数据库已经存在但不完整、
+格式错误或版本不支持时返回错误。发现未完成事务时返回 `needs_recovery`，不自动恢复。
+
+已有 Preview 安装器仍把记录写入 `<prefix>/.aw-packages/*.json`，查询这些记录时需要
+显式指定绝对路径 `--prefix`。如果用户数据库已经登记该目录，以数据库记录为准；
+否则读取这个目录内的 `.aw-packages`。省略 `--prefix` 不会搜索旧安装。
+已登记目录中又出现相冲突的旧记录时，命令报错，不合并或悄悄丢弃记录。
+旧记录没有保存原安装范围，因此文本显示 `not recorded`，JSON 使用 `scope: unknown`。
+查询既不导入旧记录，也不改变安装器写记录的位置。这些命令尚不提供系统级包数据库
+管理或记录迁移。
+
+自动化检查可使用管理 JSON 输出。`doctor` 发现文件问题时返回 `status: failed`、
+`error.code: integrity_check`，问题列表保留在 `result.report.issues` 中。
+JSON 只写入 stdout，不另向 stderr 输出诊断。数据库或记录错误同样返回 1，不能把它们
+当作空安装或文件检查通过。局部 `--quiet`、`--verbose` 和 `--color` 与其他管理命令遵循
+相同规则。
 
 ## 终端输出
 
