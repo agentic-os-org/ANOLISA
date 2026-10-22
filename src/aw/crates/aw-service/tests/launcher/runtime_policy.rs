@@ -7,7 +7,7 @@ use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
-    process::Output,
+    process::{Command, Output},
     thread,
     time::{Duration, Instant},
 };
@@ -25,11 +25,10 @@ fn wait(path: &Path) {
 }
 
 fn command(fixture: &Fixture, index: usize, value: Value) {
-    fs::write(
-        fixture.root.join(format!("command-{index}.json")),
-        value.to_string(),
-    )
-    .unwrap();
+    let path = fixture.root.join(format!("command-{index}.json"));
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, value.to_string()).unwrap();
+    fs::rename(temporary, path).unwrap();
 }
 
 fn report(fixture: &Fixture, index: usize) -> Value {
@@ -56,6 +55,69 @@ fn update(fixture: &Fixture, candidate: &Value, extra: &[&str]) -> Output {
 
 fn active(service: &Service) -> Value {
     service.status()["instances"][0].clone()
+}
+
+#[test]
+fn reload_fixture_publishes_reports_only_after_writing_completes() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("settings.json"), br#"{"hooks":{}}"#).unwrap();
+    command(&fixture, 0, json!({"action":"turn"}));
+    command(&fixture, 1, json!({"action":"stop"}));
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launcher/reload_host.py");
+    let mut launch = Command::new(&fixture.python);
+    launch
+        .args([
+            "-c",
+            r#"
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+root = Path(os.environ["FAKE_ROOT"])
+write_text = Path.write_text
+
+def paused_write(path, text, *args, **kwargs):
+    if path.stem != "result-0":
+        return write_text(path, text, *args, **kwargs)
+    with path.open("w", encoding="utf-8") as output:
+        write_text(root / "writing-report", "ready")
+        deadline = time.monotonic() + 10
+        while not (root / "finish-report").exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("report writer was not released")
+            time.sleep(0.005)
+        return output.write(text)
+
+Path.write_text = paused_write
+source = sys.argv[1]
+sys.argv = [source, "--settings", str(root / "settings.json")]
+runpy.run_path(source, run_name="__main__")
+"#,
+        ])
+        .arg(source)
+        .current_dir(&fixture.root)
+        .env_clear()
+        .env("FAKE_ROOT", &fixture.root)
+        .env("FAKE_RELOAD_ADAPTER", "qoder");
+    let process = Process::spawn(&fixture, launch);
+    wait(&fixture.root.join("writing-report"));
+    assert!(
+        !fixture.root.join("result-0.json").exists(),
+        "an incomplete report became visible to its reader"
+    );
+    fs::write(fixture.root.join("finish-report"), b"continue").unwrap();
+    let result = report(&fixture, 0);
+    assert_eq!(result["executed"], true);
+    assert!(!fixture.root.join("result-0.tmp").exists());
+    let output = process.finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

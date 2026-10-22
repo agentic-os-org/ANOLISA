@@ -19,6 +19,13 @@ root = Path(os.environ["FAKE_ROOT"])
 deadline = time.monotonic() + 10
 
 
+def publish(path, text):
+    # Readers treat file existence as completion.
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(text)
+    temporary.replace(path)
+
+
 async def wait(path):
     while time.monotonic() < deadline:
         if path.exists():
@@ -93,10 +100,7 @@ async def main():
     else:
         for callback in startup:
             await callback()
-    # Publish the PID atomically; the reader proceeds as soon as the file exists.
-    ready = root / "native-ready"
-    ready.with_suffix(".tmp").write_text(str(os.getpid()))
-    ready.with_suffix(".tmp").replace(ready)
+    publish(root / "native-ready", str(os.getpid()))
     for index in range(12):
         path = root / f"command-{index}.json"
         await wait(path)
@@ -134,7 +138,7 @@ async def main():
 
             output = [item.model_dump(mode="json") async for item in middleware.on_reply(agent, {}, reply)]
             result = {"executed": executed, "output": output}
-        (root / f"result-{index}.json").write_text(json.dumps({**result, "pid": os.getpid()}))
+        publish(root / f"result-{index}.json", json.dumps({**result, "pid": os.getpid()}))
     raise RuntimeError("fixture command limit exceeded")
 
 
