@@ -191,6 +191,20 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(config) = self.root.join("aw.json").canonicalize() {
+            let key = format!("{:x}", Sha256::digest(config.as_os_str().as_bytes()));
+            let directory = std::path::PathBuf::from(format!("/tmp/aw-{}/connections", unsafe {
+                libc::geteuid()
+            }));
+            for suffix in ["json", "lock"] {
+                let path = directory.join(format!("{key}.{suffix}"));
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
         if let Some(profile) = &self.native_profile {
             fs::remove_dir_all(profile).unwrap();
         }

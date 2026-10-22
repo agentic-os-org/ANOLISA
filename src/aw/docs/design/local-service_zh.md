@@ -28,7 +28,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha4`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha5`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -259,3 +259,6 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 
 [策略热更新设计](policy-reload_zh.md) 说明生命周期、进程关联、固定入口、人工验收及
 后续 attach/steer 范围。
+
+`unbind` 对 reloadable 实例在同一准入锁下检查完整请求/工具空闲状态并关闭准入；
+忙碌时返回 `busy`。`release_instance` 仍是取消并回收的内部清理操作，不能替代 detach 的空闲检查。

@@ -6,10 +6,10 @@ use clap::Args;
 #[group(multiple = true)]
 pub(super) struct Install {
     /// Absolute destination for a local Preview bundle
-    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile"])]
+    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub prefix: Option<String>,
     /// Absolute unpacked Preview bundle directory; no URL or RPM/DEB backend
-    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile"])]
+    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub bundle: Option<String>,
     /// Legacy native Hook connection; prefer aw agent connect
     #[arg(long, value_name = "FILE", requires = "agent", conflicts_with_all = ["json", "quiet", "verbose", "color"])]
@@ -20,6 +20,8 @@ pub(super) struct Install {
     /// Native framework profile for legacy Hook connection
     #[arg(long, value_name = "NAME", requires_all = ["config", "agent"])]
     pub native_profile: Option<String>,
+    #[command(flatten)]
+    pub attachment: super::Attachment,
     #[command(flatten)]
     pub output: crate::output::Options,
 }

@@ -19,7 +19,13 @@ pub(super) fn update(args: &Arguments) -> Result<Exit> {
     if !args.flags.contains_key("--agent") && !args.flags.contains_key("--instance") {
         return Err("select --agent or --instance".into());
     }
-    let config = super::read_file(args.required("--policy")?, aw_config::MAX_DOCUMENT_BYTES)?;
+    let config = super::read_file(
+        args.flags
+            .get("--policy")
+            .or_else(|| args.flags.get("--config"))
+            .ok_or("select --config or provide --policy with --socket")?,
+        aw_config::MAX_DOCUMENT_BYTES,
+    )?;
     aw_config::Validator::new()?.parse(&config)?;
     super::run::install_signals()?;
     let deadline = Instant::now() + Duration::from_secs(30);

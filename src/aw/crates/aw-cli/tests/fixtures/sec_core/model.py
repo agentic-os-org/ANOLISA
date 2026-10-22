@@ -18,7 +18,11 @@ def model_server(case):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             tools = [item["function"]["name"] for item in body.get("tools", [])]
-            seen = any(item["role"] == "tool" for item in body["messages"])
+            # Tests reusing a Session assign each turn a distinct native call ID.
+            identity = case / "tool-call-id.txt"
+            call_id = identity.read_text() if identity.exists() else "call_aw_acceptance"
+            seen = any(item["role"] == "tool" and item.get("tool_call_id") == call_id
+                       for item in body["messages"])
             with (case / "model-requests.jsonl").open("a") as output:
                 output.write(
                     json.dumps(
@@ -45,7 +49,7 @@ def model_server(case):
                     "tool_calls": [
                         {
                             "index": 0,
-                            "id": "call_aw_acceptance",
+                            "id": call_id,
                             "type": "function",
                             "function": {
                                 "name": tool["name"],

@@ -138,6 +138,13 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
+    if args.flags.contains_key("--reloadable") {
+        super::connection::remember(
+            Path::new(args.required("--config")?),
+            &service.paths.socket,
+            &service.client,
+        )?;
+    }
     let artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");
     let mut instance = None;

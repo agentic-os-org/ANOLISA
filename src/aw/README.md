@@ -38,7 +38,8 @@ this does not update a running instance.
 
 Use `aw run --reloadable` to preinstall the experimental idle-update bridge for
 Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 / AgentScope 2.0.9 App.
-`aw update --config current.yaml --agent TARGET --policy next.yaml` selects the
+Edit the same configuration file, then explicitly apply it.
+`aw update --config aw.yaml --agent TARGET` selects the
 unique target instance, retains its process and rejects busy instances; see
 [prewarmed instances](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#update-a-prewarmed-instance).
 
@@ -80,6 +81,12 @@ rollback from an exit code. See
 Core works independently. The Tokenless package includes RTK and TOON encoding;
 security checks require a running sec-core backend. Enable these optional
 capabilities in the configuration. AW does not install Agents or configure model credentials.
+
+For an independently started Qoder TUI or QwenPaw App, use
+`aw agent connect --config current.yaml --agent TARGET --pid PID` before its first request;
+add `--remove` to detach at idle. Native startup and process ownership stay with
+the caller. See [native attachment](../../docs/user-guide/en/user-entrypoint/aw/configuration.md#attach-to-an-already-started-native-process)
+for exclusive profiles, confirmation and cleanup requirements.
 
 ## Documentation
 
