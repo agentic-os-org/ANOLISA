@@ -71,6 +71,9 @@ OpenClaw 自动记录通过 `memory_capture` 在写入前检查当前采集授�
 `auto-capture`。关闭自动采集后，显式调用 `memory_observe` 仍可记录记忆。
 请同时升级服务端和适配器；旧服务端会拒绝自动采集请求，不会回退为手动写入。
 
+对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
+往返后仍然可用，包括名称中含逗号的条目。导入时会将 frontmatter 中的换行等 ASCII 控制字符替换为空格。
+
 ## 架构
 
 单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 38 个 MCP 工具：

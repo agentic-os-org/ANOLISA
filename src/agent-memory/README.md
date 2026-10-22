@@ -111,6 +111,10 @@ capture consent before writing and marks the source as `auto-capture`. Explicit
 Upgrade the server and adapter together; an older server rejects automatic
 capture requests without falling back to a manual write.
 
+For single-line list entries, `memory_summary` concept and file rankings remain
+available after a `mem_export` / `mem_import` round trip, including literal commas.
+Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
+
 ## Architecture
 
 Single-process Tokio async runtime exposing 38 MCP tools over stdio JSON-RPC 2.0:

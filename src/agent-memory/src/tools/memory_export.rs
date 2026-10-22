@@ -79,8 +79,8 @@ impl Default for ExportFilter {
 }
 
 /// Parse YAML-like frontmatter from a markdown string.
-/// Returns (frontmatter_map, body).
-pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
+/// Normalizes block lists into JSON arrays; returns the map and borrowed body.
+pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, &str) {
     let mut fm = HashMap::new();
 
     // Shared fence rule: a closing fence that ends the file (no trailing
@@ -88,7 +88,7 @@ pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, Stri
     // an empty frontmatter map (GH-3580).
     let Some((fm_str, body)) = super::frontmatter::split(content) else {
         // No frontmatter found
-        return (fm, content.to_string());
+        return (fm, content);
     };
 
     let mut current_list_key: Option<String> = None;
@@ -120,7 +120,7 @@ pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, Stri
         fm.insert(key, json);
     }
 
-    (fm, body.to_string())
+    (fm, body)
 }
 
 /// Export the memory store to AMA JSON format.
@@ -182,7 +182,7 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
         let exported = ExportedMemory {
             path: rel_path.clone(),
             frontmatter: frontmatter.clone(),
-            content: body,
+            content: body.to_string(),
         };
 
         // Separate tasks from regular memories

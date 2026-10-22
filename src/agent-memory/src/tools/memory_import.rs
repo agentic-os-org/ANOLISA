@@ -510,7 +510,7 @@ mod tests {
         // list with a broken item re-renders as the item form once the
         // item is flattened), but from there on every further
         // reconstruct -> parse round trip is byte-stable.
-        let md2 = reconstruct_markdown(&parsed, &body1);
+        let md2 = reconstruct_markdown(&parsed, body1);
         let (parsed2, body2) = crate::tools::memory_export::parse_frontmatter(&md2);
         assert_eq!(
             parsed, parsed2,
@@ -525,7 +525,7 @@ mod tests {
         // reconstruct_markdown writes a blank line after the closing
         // marker while parse_frontmatter slices right after it; out of
         // scope for this PR and worth its own issue.)
-        let md3 = reconstruct_markdown(&parsed2, &body2);
+        let md3 = reconstruct_markdown(&parsed2, body2);
         let (parsed3, _) = crate::tools::memory_export::parse_frontmatter(&md3);
         assert_eq!(
             parsed2, parsed3,

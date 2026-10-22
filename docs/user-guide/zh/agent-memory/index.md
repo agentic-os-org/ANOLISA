@@ -293,6 +293,16 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 由钩子调用。服务端不支持此工具时，钩子记录失败，不会回退到 `memory_observe`。
 已经保存的记录不会被重新标记或删除。
 
+`memory_summary` 将 frontmatter 的 `concepts` 和 `files` 列表统计到
+`top_concepts` 和 `top_files`。它接受 JSON 字符串数组以及 `mem_import` 写出的块列表（block list），
+因此这些排名在 AMA 导出、导入往返后仍会保留。
+例如，`concepts: ["parser, writer", "rust"]` 包含两个概念，
+`files: ["src/a,b.rs"]` 包含一个文件引用。每个单行 JSON 字符串中的逗号、引号和反斜线
+仍属于该条目。
+
+导入会先将换行等 ASCII 控制字符替换为空格，再存储 frontmatter。
+摘要排名反映这些规范化后的条目；AMA 导入往返不会保留控制字符。
+
 ### 错误码语义
 
 | MCP 错误码 | 含义 |

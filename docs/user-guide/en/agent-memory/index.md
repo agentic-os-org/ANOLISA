@@ -313,6 +313,17 @@ agent remain unchanged; `memory_capture` is used by the hook. If the server lack
 this tool, the hook logs the failure and does not fall back to `memory_observe`.
 Previously stored observations are not relabeled or deleted.
 
+`memory_summary` counts the `concepts` and `files` frontmatter lists in
+`top_concepts` and `top_files`. It accepts JSON string arrays and the block lists
+written by `mem_import`, so these rankings survive an AMA export/import round trip.
+For example, `concepts: ["parser, writer", "rust"]` contains two concepts, and
+`files: ["src/a,b.rs"]` contains one file reference. Commas, quotes and backslashes
+inside each single-line JSON string remain part of that entry.
+
+Import replaces ASCII control characters, including newlines, with spaces
+before storing frontmatter. Summary rankings reflect those normalized entries;
+control characters are not preserved by an AMA import round trip.
+
 ### Error code semantics
 
 | MCP code | Meaning |
