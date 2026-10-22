@@ -121,6 +121,7 @@ impl OscParser {
             history_file_tracker: super::HistoryFileTracker::default(),
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
             pending_prompt_intercepts: Vec::new(),
+            pending_path_prompt_intercepts: Vec::new(),
             submission_boundary_observed: false,
             assistance_control: None,
             shell_prompt_cwd: crate::input::ShellPromptCwd::default(),

@@ -248,7 +248,11 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                 }
-                writeln!(output)?;
+                // Raw mode disables OPOST, so a bare `\n` moves down without
+                // resetting the column and the next frame (e.g. the intercept
+                // notice border, #8760) would start at the echoed input's end
+                // column instead of column zero.
+                output.write_all(b"\r\n")?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {
@@ -328,17 +332,30 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 input,
                 cwd,
                 sensitive,
+                hold_until_prompt_boundary,
             } => {
-                let session_id = parser.session_id.clone();
-                parser.push_intercept_event_with_routing(
-                    &session_id,
-                    input,
-                    Some(cwd),
-                    "path_prompt",
-                    None,
-                    false,
-                    sensitive,
-                )
+                // The bash replay path holds the notice for the next prompt
+                // boundary: the replayed submission's accept echo may still
+                // be in flight, and rendering before it displays would glue
+                // the notice onto the echoed input (#8760).
+                if hold_until_prompt_boundary {
+                    parser.hold_path_prompt_intercept_for_prompt_boundary(
+                        input,
+                        Some(cwd),
+                        sensitive,
+                    )
+                } else {
+                    let session_id = parser.session_id.clone();
+                    parser.push_intercept_event_with_routing(
+                        &session_id,
+                        input,
+                        Some(cwd),
+                        "path_prompt",
+                        None,
+                        false,
+                        sensitive,
+                    )
+                }
             }
             RawInputEvent::UserInterceptAtPrompt {
                 input,
