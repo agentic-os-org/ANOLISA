@@ -277,8 +277,9 @@ impl StatsRecorder {
     /// Acquire the connection guard, recovering from poison rather than failing.
     ///
     /// A poisoned mutex means a previous holder panicked while holding the
-    /// lock. For our single-statement workload (no multi-step transactions),
-    /// the SQLite connection itself remains usable — so we clear the poison
+    /// lock. Statements and read transactions release their guards during
+    /// unwinding; uncommitted transactions roll back on drop. The SQLite
+    /// connection remains usable — so we clear the poison
     /// and reuse the underlying guard rather than dropping the call. This
     /// keeps stats recording fail-soft after a transient panic instead of
     /// permanently breaking every subsequent query.
@@ -391,7 +392,38 @@ impl StatsRecorder {
     /// Query all records, newest first, with optional limit
     pub fn all_records(&self, limit: Option<usize>) -> StatsResult<Vec<StatsRecord>> {
         let conn = self.lock_conn();
+        Self::read_all_records(&conn, limit)
+    }
 
+    /// Read a summary window and its attribution from one SQLite snapshot.
+    ///
+    /// Retrieval costs have no reliable per-window allocation. They are queried
+    /// only when every stored row is represented, including dry-run rows.
+    /// A retrieval query error is retained separately so callers can preserve
+    /// their strict or best-effort reporting policy.
+    ///
+    /// # Errors
+    /// Returns an error if the snapshot, record query or count query fails.
+    pub fn summary_window(&self, limit: Option<usize>) -> StatsResult<SummaryWindow> {
+        let mut conn = self.lock_conn();
+        let transaction = conn.transaction()?;
+        let total_records: usize =
+            transaction.query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))?;
+        let records = Self::read_all_records(&transaction, limit)?;
+        let retrieve_totals = if records.len() == total_records {
+            Self::read_retrieve_totals(&transaction).map(Some)
+        } else {
+            Ok(None)
+        };
+        transaction.commit()?;
+        Ok(SummaryWindow {
+            records,
+            total_records,
+            retrieve_totals,
+        })
+    }
+
+    fn read_all_records(conn: &Connection, limit: Option<usize>) -> StatsResult<Vec<StatsRecord>> {
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
             // Newest-first by the instant a timestamp denotes, not its text:
@@ -718,6 +750,10 @@ impl StatsRecorder {
     /// Whole-table retrieve aggregates for the summary's attribution block.
     pub fn retrieve_totals(&self) -> StatsResult<RetrieveTotals> {
         let conn = self.lock_conn();
+        Self::read_retrieve_totals(&conn)
+    }
+
+    fn read_retrieve_totals(conn: &Connection) -> StatsResult<RetrieveTotals> {
         let mut stmt = conn.prepare(
             "SELECT outcome, COUNT(*), COALESCE(SUM(payload_tokens), 0)
              FROM retrieve_events GROUP BY outcome",
@@ -905,4 +941,24 @@ impl StatsSummary {
 mod tests {
     use super::*;
     include!("tests/recorder_tests.rs");
+}
+
+/// Windowed compression rows and compatible attribution from one read snapshot.
+#[derive(Debug)]
+pub struct SummaryWindow {
+    /// Successfully decoded rows selected by the requested or default limit,
+    /// before mode filtering. Rows that fail decoding are omitted.
+    pub records: Vec<StatsRecord>,
+    /// Number of stored rows in the same snapshot, including dry-run rows.
+    pub total_records: usize,
+    /// Whole-history costs only when all rows are represented. `Ok(None)` means
+    /// incomplete coverage; `Err` retains a complete window's retrieval failure.
+    pub retrieve_totals: StatsResult<Option<RetrieveTotals>>,
+}
+
+impl SummaryWindow {
+    /// Whether no stored compression rows were omitted by the limit or decoding.
+    pub fn is_complete(&self) -> bool {
+        self.records.len() == self.total_records
+    }
 }
