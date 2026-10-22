@@ -222,6 +222,11 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
 /// the query text never reached the log, so there is nothing to extract, and
 /// feeding the marker itself downstream persists `搜索: len=14` interest facts
 /// that `memory_search`/`memory_about` then serve back forever.
+///
+/// Everything else is split on the *first* colon, so a recorded query that
+/// itself contains colons survives intact: the legacy row `bm25:packet:len=14`
+/// recorded the query `packet:len=14`, and only a mode-prefixed marker (see
+/// `audit::is_sanitized_query_path`) is dropped.
 fn extract_search_query(path: &str) -> Option<String> {
     if crate::audit::is_sanitized_query_path(path) {
         return None;
@@ -696,5 +701,56 @@ mod tests {
         let facts = rule_interest(&entries, "sid");
         let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
         assert_eq!(titles, ["搜索: rust ownership", "搜索: notes/"]);
+    }
+
+    #[test]
+    fn extract_search_query_splits_on_the_first_colon_only() {
+        // Recorded queries may contain colons, and a query ending in
+        // `len=<digits>` is still a query: only a mode-prefixed marker is
+        // unrecoverable.
+        assert_eq!(
+            extract_search_query("bm25:packet:len=14").as_deref(),
+            Some("packet:len=14")
+        );
+        assert_eq!(
+            extract_search_query("hybrid:ns:net:len=9").as_deref(),
+            Some("ns:net:len=9")
+        );
+        assert_eq!(
+            extract_search_query("bm25:rust ownership").as_deref(),
+            Some("rust ownership")
+        );
+        assert_eq!(extract_search_query("bm25:len=14"), None);
+        assert_eq!(extract_search_query("embed:len=9"), None);
+        assert_eq!(
+            extract_search_query(&crate::audit::sanitized_query_path(
+                &crate::audit::fallback_query_mode("vector"),
+                "kernel config"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn interest_rule_keeps_legacy_queries_that_end_in_a_length_marker() {
+        // Regression: `bm25:packet:len=14` recorded the query `packet:len=14`.
+        // It used to be classified as a sanitized marker and dropped, losing
+        // the evidence; a real marker next to it must still be skipped.
+        let entries = vec![
+            make_entry("memory_search", "bm25:packet:len=14", true, None),
+            make_entry("memory_search", "bm25:len=14", true, None),
+            make_entry(
+                "memory_search",
+                &crate::audit::sanitized_query_path(
+                    &crate::audit::fallback_query_mode("hybrid"),
+                    "kernel",
+                ),
+                true,
+                None,
+            ),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        let titles: Vec<&str> = facts.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["搜索: packet:len=14"]);
     }
 }

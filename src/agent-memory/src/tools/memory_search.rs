@@ -1,4 +1,4 @@
-use crate::audit::{AuditEntry, sanitized_query_path};
+use crate::audit::{AuditEntry, fallback_query_mode, sanitized_query_path};
 use crate::error::{MemoryError, Result};
 use crate::index::SearchHit;
 use crate::service::MemoryService;
@@ -14,6 +14,10 @@ const TOOL: &str = "memory_search";
 ///
 /// `category` filters results to a specific fact category (e.g. "lesson",
 /// "interest"). When empty, all categories are included.
+///
+/// Every audit path this function writes is a [`sanitized_query_path`] marker
+/// whose mode must stay listed in `audit::SANITIZED_QUERY_MODES` — that list is
+/// how the readers tell a marker apart from a recorded query.
 ///
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
@@ -119,10 +123,7 @@ pub fn memory_search(
                     let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
-                            .path(sanitized_query_path(
-                                &format!("bm25(fallback from {mode})"),
-                                query,
-                            ))
+                            .path(sanitized_query_path(&fallback_query_mode(mode), query))
                             .bytes(hits.len() as u64),
                     );
                     return Ok(hits);
