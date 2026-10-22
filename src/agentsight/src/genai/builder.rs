@@ -1037,6 +1037,87 @@ mod tests {
         assert_eq!(enrichment.cache_read_tokens, Some(64));
     }
 
+    /// A drained stream whose only content is a provider-side call
+    /// (`server_tool_use` / `mcp_tool_use`) persisted no output at all: the
+    /// merger folded the block into its text accumulator, so the call and
+    /// every `input_json_delta` fragment aimed at it were dropped and
+    /// `output_messages` stayed `None` — and with it the `tool_call_ids` the
+    /// pending row derives from it. The same stream captured live kept the
+    /// call, so the two paths disagreed on one response.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_a_server_tool_call() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_srv","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":1}"#),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a drained server-tool turn must keep its calls");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+        let calls: Vec<(&str, &str, &serde_json::Value)> = parsed[0]
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => Some((
+                    id.as_deref().unwrap_or_default(),
+                    name.as_str(),
+                    arguments.as_ref().expect("the streamed input must parse"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "srvtoolu_1",
+                    "web_search",
+                    &serde_json::json!({"query": "rust"})
+                ),
+                (
+                    "mcptoolu_1",
+                    "github_search",
+                    &serde_json::json!({"q": "drain"})
+                ),
+            ],
+            "both provider-side calls must reach the pending row: {json}"
+        );
+        assert_eq!(
+            crate::genai::semantic::tool_call_ids_json(&parsed).as_deref(),
+            Some(r#"["srvtoolu_1","mcptoolu_1"]"#),
+            "the tool_call_ids column is derived from these parts"
+        );
+    }
+
     #[test]
     fn test_extract_sse_enrichment_captures_streamed_tool_calls() {
         // A pure tool-calling turn: the old walker only read delta.content,
