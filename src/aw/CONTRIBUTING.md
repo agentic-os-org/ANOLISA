@@ -23,8 +23,10 @@ failure or interruption. Logs identify the failing command; individual commands
 can be run from `src/aw` for diagnosis.
 
 The database, inventory, transaction, runtime-lease and package CLI tests also
-run under child umasks `0022` and `0002`. Give fixtures and copied executables
-explicit permissions; do not change a parallel test process's umask.
+run under child umasks `0022` and `0002`, including package planning, configuration,
+Host and service lease ownership. Deterministic subprocess barriers cover lock
+release while unrelated children are between fork and exec. Give fixtures and
+copied executables explicit permissions; do not change a parallel test process's umask.
 
 These checks run as a regular user without an Agent or service login. Cargo
 downloads uncached dependencies; schema validation reads only bundled resources.
@@ -120,6 +122,9 @@ and empty → added-hook → removed-hook policy activation before dispatch, ret
 the same PID/start ticks. It downloads a separately checksummed release and keeps
 the 1.1.64 print lane. Its named metadata report and cleanup are required by the
 native inventory. It does not certify hosted TUI tool turns or result replacement.
+The TUI fixture removes `CI` and `GITHUB_ACTIONS` only from its child environment
+and trusts only its disposable workspace through native `permissions.trustDirectories`.
+The runner and print lane keep their environment and permission checks.
 
 The normal case must write its marker. The risk case must match the builtin
 `shell-recursive-delete` rule (`warn`, mapped to block), preserve its disposable
