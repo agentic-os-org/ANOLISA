@@ -95,7 +95,7 @@ docker run --cap-add CAP_BPF --cap-add CAP_PERFMON \
   -p 7396:7396 <image>
 ```
 
-ANOLISA 的容器入口脚本（`docker/docker-entrypoint.sh`）已经按这个规则处理：先检查是否有
+ANOLISA 的容器入口脚本（`distribution/docker/docker-entrypoint.sh`）已经按这个规则处理：先检查是否有
 `cap_bpf`/`cap_sys_admin`，有就启动 `agentsight-start`，没有则打印需要补上的 `docker run` 参数，而不是
 静默失败。
 

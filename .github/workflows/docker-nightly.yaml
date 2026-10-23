@@ -563,7 +563,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./docker/Dockerfile.alinux
+          file: ./distribution/docker/Dockerfile.alinux
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'schedule' || inputs.dry-run != true }}
           tags: ${{ steps.meta.outputs.tags }}

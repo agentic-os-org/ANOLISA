@@ -99,7 +99,7 @@ docker run --cap-add CAP_BPF --cap-add CAP_PERFMON \
   -p 7396:7396 <image>
 ```
 
-The ANOLISA container entrypoint (`docker/docker-entrypoint.sh`) already follows this rule: it
+The ANOLISA container entrypoint (`distribution/docker/docker-entrypoint.sh`) already follows this rule: it
 checks for `cap_bpf`/`cap_sys_admin`, starts `agentsight-start` when they are present, and otherwise
 prints the exact `docker run` flags to add instead of failing silently.
 
