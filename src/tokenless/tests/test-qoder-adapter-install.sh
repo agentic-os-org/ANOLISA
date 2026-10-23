@@ -153,6 +153,8 @@ else
     fail "cached plugin does not use the native hook layout"
 fi
 
+# Qoder expands this placeholder when it loads the cached plugin.
+# shellcheck disable=SC2016
 if grep -Fq '${QODER_PLUGIN_ROOT}/hooks/run-hook.sh' "$CACHE/hooks/hooks.json" && \
         ! grep -Fq 'QODER_TOKENLESS_HOOKS' "$CACHE/hooks/hooks.json"; then
     pass "hook commands preserve the Qoder runtime plugin-root placeholder"
@@ -243,9 +245,9 @@ fi
 
 if run_hook_out="$(env -u HOME bash "$RUN_HOOK_SH" missing-hook.py 2>/dev/null)" && \
         [ "$run_hook_out" = "{}" ]; then
-    pass "hook wrapper fails open when HOME is unset"
+    pass "hook wrapper rejects non-allowlisted hooks with HOME unset"
 else
-    fail "hook wrapper did not fail open without HOME: ${run_hook_out:-<no output>}"
+    fail "hook wrapper accepted a non-allowlisted hook: ${run_hook_out:-<no output>}"
 fi
 
 if traversal_out="$(bash "$RUN_HOOK_SH" ../../../etc/passwd 2>/dev/null)" && \
@@ -253,6 +255,121 @@ if traversal_out="$(bash "$RUN_HOOK_SH" ../../../etc/passwd 2>/dev/null)" && \
     pass "hook wrapper rejects paths outside the hook allowlist"
 else
     fail "hook wrapper accepted a traversal path: ${traversal_out:-<no output>}"
+fi
+
+if RUN_HOOK_TEST_SOURCE="$RUN_HOOK_SH" python3 - <<'PYEOF'
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+class HookHomeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="tokenless-qoder-home-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.cwd = self.root / "work"
+        self.cwd.mkdir()
+        self.wrapper = self.root / "plugin/hooks/run-hook.sh"
+        self.wrapper.parent.mkdir(parents=True)
+        self.system_local = self.root / "system-local"
+        self.system_share = self.root / "system-share"
+        source = Path(os.environ["RUN_HOOK_TEST_SOURCE"]).read_text(encoding="utf-8")
+        # Keep host-installed FHS hooks out of this private dispatch namespace.
+        # Only the two fixed roots move; all wrapper logic stays unchanged.
+        for old, new in (
+            ("/usr/local/share/anolisa", self.system_local),
+            ("/usr/share/anolisa", self.system_share),
+        ):
+            self.assertEqual(source.count(old), 1)
+            source = source.replace(old, str(new))
+        self.wrapper.write_text(source, encoding="utf-8")
+        self.marker = self.root / "unexpected-hook-ran"
+
+    def seed_home(self, home: str) -> None:
+        base = Path(home)
+        if not base.is_absolute():
+            base = self.cwd / base
+        self.assertEqual(os.path.commonpath([str(base.resolve()), str(self.root)]), str(self.root))
+        hook = base / ".local/share/anolisa/adapters/tokenless/common/hooks/tool_ready_hook.sh"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(
+            '#!/usr/bin/env bash\n'
+            'printf executed >> "$QODER_HOME_TEST_MARKER"\n'
+            'printf "selected:%s:%s\\n" "$#" "${1:-}"\n',
+            encoding="utf-8",
+        )
+
+    def invoke(self, home):
+        env = dict(os.environ, QODER_HOME_TEST_MARKER=str(self.marker))
+        env.pop("HOME", None)
+        if home is not None:
+            env["HOME"] = home
+        return subprocess.run(
+            ["bash", str(self.wrapper), "tool_ready_hook.sh", "argument with spaces"],
+            cwd=self.cwd, env=env, capture_output=True, text=True, check=False,
+        )
+
+    def test_unset_and_empty_home_fail_open(self) -> None:
+        self.seed_home(".")
+        for home in (None, ""):
+            with self.subTest(home=home):
+                result = self.invoke(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "{}\n")
+                self.assertFalse(self.marker.exists())
+
+    def test_relative_home_cannot_execute_cwd_content(self) -> None:
+        for home in ("relative-home", "relative home", ".", "../parent-home"):
+            with self.subTest(home=home):
+                self.marker.unlink(missing_ok=True)
+                self.seed_home(home)
+                result = self.invoke(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "{}\n")
+                self.assertFalse(self.marker.exists())
+
+    def test_absolute_home_with_spaces_preserves_arguments(self) -> None:
+        home = str(self.root / "absolute home")
+        self.seed_home(home)
+        result = self.invoke(home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "selected:1:argument with spaces\n")
+        self.assertEqual(self.marker.read_text(), "executed")
+
+    def seed_system_hook(self) -> None:
+        hook = self.system_local / "adapters/tokenless/common/hooks/tool_ready_hook.sh"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("printf 'system-hook\\n'\n", encoding="utf-8")
+
+    def test_system_hook_remains_available_with_relative_home(self) -> None:
+        self.seed_home("relative-home")
+        self.seed_system_hook()
+        result = self.invoke("relative-home")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "system-hook\n")
+        self.assertFalse(self.marker.exists())
+
+    def test_bundled_hook_still_precedes_system_and_home(self) -> None:
+        self.seed_home("relative-home")
+        self.seed_system_hook()
+        hook = self.root / "common/hooks/tool_ready_hook.sh"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("printf 'bundled-hook\\n'\n", encoding="utf-8")
+        result = self.invoke("relative-home")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "bundled-hook\n")
+        self.assertFalse(self.marker.exists())
+
+
+unittest.main()
+PYEOF
+then
+    pass "hook dispatch trusts only absolute HOME without changing hook precedence"
+else
+    fail "hook dispatch HOME boundary or hook precedence is incorrect"
 fi
 
 # ANOLISA_DRY_RUN previews the two lifecycle actions and touches nothing.
