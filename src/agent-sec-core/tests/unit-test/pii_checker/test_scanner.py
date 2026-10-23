@@ -1,5 +1,6 @@
 """Unit tests for the PII scanner."""
 
+import base64
 import json
 import time
 from pathlib import Path
@@ -80,6 +81,37 @@ def test_cn_id_with_lowercase_x_is_detected():
     assert "cn_id" in _types(result)
 
 
+# Mirrors V2's unicode-id matrix (detection_quality.rs,
+# zero_placeholders_are_not_cards_and_unicode_ids_keep_validation): a Chinese
+# IME types fullwidth digits and may end the ID in fullwidth Ｘ (U+FF38) or ｘ
+# (U+FF58), which must fold to ASCII before the checksum runs.
+FULLWIDTH_CN_ID_CASES = [
+    ("1101051949１２31002X", True),  # mixed-width body, ASCII X check digit
+    ("１１０１０５１９４９１２３１００２Ｘ", True),  # fullwidth body, fullwidth X
+    ("１１０１０５１９４９１２３１００２ｘ", True),  # fullwidth body, fullwidth x
+    ("１１０１０５１９４９１２３１００１１", True),  # fullwidth body, fullwidth digit check
+    ("１１０１０５１９４９０２３１００２Ｘ", False),  # folds to an invalid birth date
+    ("１１０１０５１９４９１２３１００２１", False),  # checksum digit mismatch
+]
+
+
+@pytest.mark.parametrize("text,expected", FULLWIDTH_CN_ID_CASES)
+def test_fullwidth_cn_ids_match_v2_detection(text, expected):
+    result = _scan(text, raw_evidence=True, redact_output=True)
+
+    ids = [finding for finding in result["findings"] if finding["type"] == "cn_id"]
+    assert bool(ids) is expected, text
+    if not expected:
+        return
+    finding = ids[0]
+    assert result["verdict"] == "warn"
+    assert finding["severity"] == "warn"
+    # The raw span covers the whole 18-character ID in its original width.
+    assert finding["raw_evidence"] == text
+    assert finding["span"] == {"start": 0, "end": 18}
+    assert result["redacted_text"] == f"{text[:3]}***********{text[-4:]}"
+
+
 def test_credentials_are_deny():
     token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -117,6 +149,58 @@ def test_jwt_like_code_identifier_is_not_detected():
     result = _scan("Call resolved.auth_source.as_deref() before loading credentials.")
 
     assert "jwt" not in _types(result)
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _jwt_with_payload(payload: bytes) -> str:
+    header = _b64url(b'{"alg":"HS256"}')
+    return f"{header}.{_b64url(payload)}.{_b64url(bytes(32))}"
+
+
+def test_short_jwt_payload_is_detected_standalone():
+    # A standalone token: no Bearer prefix and no secret-field name, so the
+    # only way this line is caught is the jwt pattern itself. The payload
+    # "e30" is the 3-character base64url encoding of "{}" — below the old
+    # 8-character minimum of the middle segment.
+    token = _jwt_with_payload(b"{}")
+    result = _scan(token, raw_evidence=True, redact_output=True)
+
+    assert result["verdict"] == "deny"
+    jwts = [finding for finding in result["findings"] if finding["type"] == "jwt"]
+    assert len(jwts) == 1
+    finding = jwts[0]
+    assert finding["severity"] == "deny"
+    assert finding["raw_evidence"] == token
+    assert finding["span"] == {"start": 0, "end": len(token)}
+    assert result["redacted_text"] == f"{token[:4]}...[REDACTED]...{token[-4:]}"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"n":01}',  # invalid JSON (leading zero)
+        b'{"n":1e}',  # invalid JSON (bare exponent)
+        b'{"nested":[0}',  # unbalanced JSON
+        b"[]",  # valid JSON but not an object
+    ],
+)
+def test_short_jwt_invalid_json_or_non_object_payloads_are_not_detected(payload):
+    token = _jwt_with_payload(payload)
+
+    assert "jwt" not in _types(_scan(token))
+
+
+def test_short_jwt_noncanonical_base64url_payload_is_not_detected():
+    # "e31" decodes to the same "{}" bytes under permissive decoders but is
+    # not the canonical base64url encoding ("e30"), so the validator must
+    # reject it rather than fold the alias into a detection.
+    header = _b64url(b'{"alg":"HS256"}')
+    token = f"{header}.e31.{_b64url(bytes(32))}"
+
+    assert "jwt" not in _types(_scan(token))
 
 
 def test_chinese_secret_field_is_detected_with_high_confidence():
