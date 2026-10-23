@@ -306,6 +306,249 @@ else
     fail "uninstall left the marketplace directory or the binary behind"
 fi
 
+# HOME-derived discovery must never select a working-directory-relative CLI.
+# The fixture relocates only the two FHS probes into an owned temporary root;
+# separate controls exercise the unmodified helper with explicit/PATH pins.
+if python3 - "$ADAPTER_DIR/codex/scripts/_common.sh" <<'PY_CODEX_HOME'
+import os
+import json
+import pathlib
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+SOURCE = pathlib.Path(sys.argv.pop(1)).resolve()
+
+
+class CodexDiscoveryHomeTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="codex-home-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = pathlib.Path(self.temporary.name).resolve()
+        self.cwd = self.root / "cwd"
+        self.cwd.mkdir()
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        self.marker = self.root / "executed"
+        self.bash = shutil.which("bash")
+        self.assertTrue(self.bash, "bash is required for the discovery regression")
+        self.local_cli = self.root / "system-local" / "codex"
+        self.system_cli = self.root / "system-bin" / "codex"
+        source = SOURCE.read_text(encoding="utf-8")
+        # Both the command lookup and direct-path loop contain each FHS path.
+        for old, new in [("/usr/local/bin/codex", self.local_cli),
+                         ("/usr/bin/codex", self.system_cli)]:
+            self.assertEqual(source.count(old), 2)
+            source = source.replace(old, str(new))
+        self.helper = self.root / "common.sh"
+        self.helper.write_text(source, encoding="utf-8")
+        self.detector_source = SOURCE.parent / "detect.sh"
+        self.detector_local = self.root / "system-local" / "tokenless"
+        self.detector_system = self.root / "system-bin" / "tokenless"
+        detector = self.detector_source.read_text(encoding="utf-8")
+        for old, new in [("/usr/local/bin/tokenless", self.detector_local),
+                         ("/usr/bin/tokenless", self.detector_system)]:
+            probe = '        "' + old + '"'
+            self.assertEqual(detector.count(probe), 1)
+            detector = detector.replace(probe, '        "' + str(new) + '"')
+        self.detector = self.root / "detect.sh"
+        self.detector.write_text(detector, encoding="utf-8")
+        for name in ["cat", "grep", "head", "jq"]:
+            executable = shutil.which(name)
+            if executable:
+                (self.tools / name).symlink_to(executable)
+
+    def seed(self, path, identity):
+        path = path.resolve()
+        self.assertEqual(os.path.commonpath([str(self.root), str(path)]), str(self.root))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(identity)
+                        + " >> " + shlex.quote(str(self.marker))
+                        + "\nprintf 'canary:" + identity + ":%s\\n' \"$1\"\n",
+                        encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def seed_home(self, home):
+        base = pathlib.Path(home)
+        if not base.is_absolute():
+            base = self.cwd / base
+        return self.seed(base / ".local/bin/codex", "home")
+
+    def invoke(self, home, pin="", direct=False, raw=False):
+        self.clear_marker()
+        environment = dict(os.environ)
+        environment.update(PATH=str(self.tools), CODEX_BIN=pin)
+        if home is None:
+            environment.pop("HOME", None)
+        else:
+            environment["HOME"] = home
+        command = 'set -euo pipefail; source "$1"; '
+        if direct:
+            command += 'command() { if [[ "${1:-}" == "-v" ]]; then return 1; fi; builtin command "$@"; }; '
+        command += 'resolve_codex'
+        result = subprocess.run([self.bash, "-c", command, "codex-home-test", str(SOURCE if raw else self.helper)],
+                                cwd=str(self.cwd), env=environment, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = result.stdout.rstrip("\n")
+        canary = ""
+        if selected:
+            if "/" not in selected:
+                found = shutil.which(selected, path=environment["PATH"])
+                self.assertTrue(found, "selected command must resolve through the fixture PATH")
+                executable = pathlib.Path(found)
+            else:
+                executable = pathlib.Path(selected)
+            if not executable.is_absolute():
+                executable = self.cwd / executable
+            executable = executable.resolve()
+            # A baseline may name a real host binary: never execute it.
+            self.assertEqual(os.path.commonpath([str(self.root), str(executable)]),
+                             str(self.root), "refusing non-fixture executable: " + selected)
+            executed = subprocess.run([str(executable), "argument with spaces"], cwd=str(self.cwd),
+                                      env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      universal_newlines=True, check=False)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            canary = executed.stdout
+        return selected, canary
+
+    def clear_marker(self):
+        if self.marker.exists():
+            self.marker.unlink()
+
+    def seed_tokenless(self, path, identity):
+        path = self.seed(path, identity)
+        path.write_text("#!/bin/sh\n[ \"${1:-}\" = --version ] || exit 2\n"
+                        + "printf '%s\\n' " + shlex.quote(identity) + " >> " + shlex.quote(str(self.marker))
+                        + "\nprintf 'tokenless 1.2.3\\n'\n", encoding="utf-8")
+        return path
+
+    def invoke_detector(self, home, raw=False):
+        self.clear_marker()
+        environment = dict(os.environ, PATH=str(self.tools))
+        if home is None:
+            environment.pop("HOME", None)
+        else:
+            environment["HOME"] = home
+        if home == "":
+            for suffix in [".local/bin/tokenless", ".local/share/anolisa/tokenless/tokenless", ".local/lib/anolisa/tokenless/tokenless"]:
+                self.assertFalse((pathlib.Path("/") / suffix).exists(), "fixture refuses an existing root fallback")
+        result = subprocess.run([self.bash, str(self.detector_source if raw else self.detector)],
+                                cwd=str(self.cwd), env=environment, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_detection_ignores_each_relative_home_fallback(self):
+        for home in ["relative", "../sibling", "with spaces"]:
+            base = (self.cwd / home).resolve()
+            for suffix in [".local/bin/tokenless", ".local/share/anolisa/tokenless/tokenless", ".local/lib/anolisa/tokenless/tokenless"]:
+                with self.subTest(home=home, suffix=suffix):
+                    executable = self.seed_tokenless(base / suffix, "detector-home")
+                    try:
+                        self.assertEqual(self.invoke_detector(home), {"installed": False})
+                        self.assertFalse(self.marker.exists())
+                    finally:
+                        executable.unlink()
+
+    def test_detection_missing_home_is_read_only_and_fail_open(self):
+        for home in [None, ""]:
+            self.assertEqual(self.invoke_detector(home), {"installed": False})
+            self.assertFalse(self.marker.exists())
+
+    def test_detection_preserves_all_priorities_and_raw_path_lookup(self):
+        home = self.root / "absolute detector home"
+        user_bin = self.seed_tokenless(home / ".local/bin/tokenless", "user-bin")
+        user_share = self.seed_tokenless(home / ".local/share/anolisa/tokenless/tokenless", "user-share")
+        user_lib = self.seed_tokenless(home / ".local/lib/anolisa/tokenless/tokenless", "user-lib")
+        self.seed_tokenless(self.detector_local, "system-local")
+        self.seed_tokenless(self.detector_system, "system-bin")
+        path_cli = self.seed_tokenless(self.tools / "tokenless", "path")
+        for raw in [False, True]:
+            self.assertEqual(self.invoke_detector("relative", raw=raw),
+                             {"installed": True, "version": "1.2.3", "path": str(path_cli)})
+            self.assertEqual(self.marker.read_text(), "path\n")
+        path_cli.unlink()
+        for expected in [user_bin, self.detector_local, self.detector_system, user_share, user_lib]:
+            self.assertEqual(self.invoke_detector(str(home)),
+                             {"installed": True, "version": "1.2.3", "path": str(expected)})
+            expected.unlink()
+
+    def test_relative_home_never_executes_a_cwd_candidate(self):
+        for home in ["relative", "./relative", "relative/", "with spaces", "../sibling", "~/x", "C:\\fake", " /abs"]:
+            self.seed_home(home)
+            for direct in [False, True]:
+                with self.subTest(home=home, direct=direct):
+                    selected, canary = self.invoke(home, direct=direct)
+                    self.assertEqual((selected, canary), ("", ""), "selected executable: " + selected + " " + canary)
+                    self.assertFalse(self.marker.exists())
+
+    def test_unset_and_empty_home_do_not_crash(self):
+        for home in [None, ""]:
+            for direct in [False, True]:
+                with self.subTest(home=home, direct=direct):
+                    self.assertEqual(self.invoke(home, direct=direct), ("", ""))
+                    self.assertFalse(self.marker.exists())
+
+    def test_absolute_home_with_spaces_runs_the_cli(self):
+        home = str(self.root / "absolute home")
+        cli = self.seed_home(home)
+        for direct in [False, True]:
+            self.assertEqual(self.invoke(home, direct=direct),
+                             (str(cli), "canary:home:argument with spaces\n"))
+            self.assertEqual(self.marker.read_text(), "home\n")
+
+    def test_path_and_explicit_pin_remain_authoritative(self):
+        path_cli = self.seed(self.tools / "codex", "path")
+        pin = self.seed(self.root / "pinned cli", "pin")
+        home = str(self.root / "home")
+        self.seed_home(home)
+        for value in [None, "relative", home]:
+            self.assertEqual(self.invoke(value), ("codex", "canary:path:argument with spaces\n"))
+            self.assertEqual(self.invoke(value, pin="codex"), ("codex", "canary:path:argument with spaces\n"))
+            self.assertEqual(self.invoke(value, pin=str(pin)), (str(pin), "canary:pin:argument with spaces\n"))
+
+    def test_unusable_explicit_pin_does_not_fall_back(self):
+        self.seed(self.tools / "codex", "path")
+        home = str(self.root / "home")
+        self.seed_home(home)
+        for pin in ["missing-codex", str(self.root / "absent")]:
+            self.assertEqual(self.invoke(home, pin=pin), ("", ""))
+            self.assertFalse(self.marker.exists())
+
+    def test_system_precedence_is_preserved_in_both_loops(self):
+        home = str(self.root / "home")
+        home_cli = self.seed_home(home)
+        self.seed(self.local_cli, "local")
+        self.seed(self.system_cli, "system")
+        for expected, identity in [(self.local_cli, "local"), (self.system_cli, "system"), (home_cli, "home")]:
+            for direct in [False, True]:
+                self.assertEqual(self.invoke(home, direct=direct),
+                                 (str(expected), "canary:" + identity + ":argument with spaces\n"))
+            if expected != home_cli:
+                expected.unlink()
+
+    def test_unmodified_source_preserves_explicit_and_path_priority(self):
+        path_cli = self.seed(self.tools / "codex", "path")
+        pin = self.seed(self.root / "raw pinned cli", "pin")
+        self.assertEqual(self.invoke("relative", raw=True),
+                         ("codex", "canary:path:argument with spaces\n"))
+        self.assertEqual(self.invoke(None, pin=str(pin), raw=True),
+                         (str(pin), "canary:pin:argument with spaces\n"))
+
+
+unittest.main(verbosity=2)
+PY_CODEX_HOME
+then
+    pass "Codex discovery preserves HOME boundaries and resolution priority"
+else
+    fail "Codex discovery regression failed (requires python3; see diagnostics)"
+fi
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]
