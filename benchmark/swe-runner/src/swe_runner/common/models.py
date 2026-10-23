@@ -151,8 +151,13 @@ class DatasetConfig(BaseModel):
             return None
 
         start_str, end_str = parts
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else -1
+        try:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else -1
+        except ValueError:
+            raise ValueError(
+                f"Invalid slice range {self.slice_range!r}; expected 'start:end' with integers"
+            ) from None
 
         return (start, end)
 
