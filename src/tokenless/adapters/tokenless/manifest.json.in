@@ -170,6 +170,22 @@
         "install":   "qwenpaw/scripts/install.sh",
         "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
+    },
+    "cmd": {
+      "compatibleVersions": ">=1.0.0",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "cmd/scripts/detect.sh",
+        "install":   "cmd/scripts/install.sh",
+        "uninstall": "cmd/scripts/uninstall.sh"
+      }
     }
   }
 }
