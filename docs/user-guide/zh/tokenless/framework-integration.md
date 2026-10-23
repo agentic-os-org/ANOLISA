@@ -601,7 +601,8 @@ bash ~/.local/share/anolisa/adapters/tokenless/cmd/scripts/install.sh
 `mods.paths` 设置中列出的目录，并不读取这两个变量，因此覆盖变量只会改变链接的落点，不会让 Mod
 生效。当解析出的目录不是 `~/.commandcode/mods` 时，`install.sh` 与 `scripts/detect.sh` 都会打印
 告警。若确实需要使用覆盖变量，请同时把该目录加入 `~/.commandcode/settings.json` 的 `mods.paths`，
-或用 `cmd --mod <mods 目录>/tokenless.ts` 按会话加载。
+或用 `cmd --mod <mods 目录>/tokenless.ts` 按会话加载；路径含空格时要加引号，否则会被 shell
+拆成多个参数。
 
 该 Mod 把 `beforeToolCall` 与 `afterToolCall` 映射到共享 Tokenless Hook。`beforeToolCall`
 替换 `shell_command` 和 `powershell` 工具的 `command`，并原样保留其余输入字段——因为

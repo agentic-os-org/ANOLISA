@@ -395,7 +395,7 @@ make cmd-install
 `mods.paths` 设置中列出的目录，并不读取这两个变量，因此当解析出的目录不是
 `~/.commandcode/mods` 时，安装脚本与 `detect.sh` 都会打印告警。请把该目录加入
 `~/.commandcode/settings.json` 的 `mods.paths`，或用 `cmd --mod <mods 目录>/tokenless.ts`
-按会话加载。
+按会话加载；路径含空格时要加引号，否则会被 shell 拆成多个参数。
 
 Mod 在每个进程中只加载一次，因此安装或移除后需要开启新会话或执行 `/reload`。完整生命周期
 参阅[框架集成](../../docs/user-guide/zh/tokenless/framework-integration.md#command-code-cmd)。

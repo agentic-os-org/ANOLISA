@@ -30,12 +30,19 @@ MOD_LINK="$MODS_DIR/tokenless.ts"
 # a bare success the host cannot honour.
 HOST_MODS_DIR="$HOME/.commandcode/mods"
 
+# The remediation below is meant to be copied into a shell, so its path argument
+# has to survive word splitting: $HOME may contain a space, and an unquoted path
+# would arrive as several arguments and load nothing.
+shell_quote() {
+    printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+
 warn_when_not_host_scanned() {
     if [ "$MODS_DIR" = "$HOST_MODS_DIR" ]; then
         return 0
     fi
     echo "[${COMPONENT}] WARNING: Command Code scans ${HOST_MODS_DIR}, not ${MODS_DIR}." >&2
-    echo "[${COMPONENT}] WARNING: TOKENLESS_CMD_MODS_DIR and COMMANDCODE_HOME only move this link; the ${AGENT} mod stays inactive until ${MODS_DIR} is listed under \"mods.paths\" in $HOME/.commandcode/settings.json, or is loaded per session with: cmd --mod ${MOD_LINK}" >&2
+    echo "[${COMPONENT}] WARNING: TOKENLESS_CMD_MODS_DIR and COMMANDCODE_HOME only move this link; the ${AGENT} mod stays inactive until ${MODS_DIR} is listed under \"mods.paths\" in $HOME/.commandcode/settings.json, or is loaded per session with: cmd --mod $(shell_quote "$MOD_LINK")" >&2
 }
 
 is_managed_link() {
@@ -69,4 +76,10 @@ fi
 
 echo "[${COMPONENT}] ${AGENT} mod installed at ${MOD_LINK}."
 warn_when_not_host_scanned
-echo "[${COMPONENT}] Start a new Command Code session (or run /reload) to load the mod."
+if [ "$MODS_DIR" = "$HOST_MODS_DIR" ]; then
+    echo "[${COMPONENT}] Start a new Command Code session (or run /reload) to load the mod."
+else
+    # A new session only loads mods from a directory Command Code scans, so do
+    # not promise one while this override is missing from "mods.paths".
+    echo "[${COMPONENT}] After ${MODS_DIR} is listed under \"mods.paths\", start a new Command Code session (or run /reload) to load the mod."
+fi

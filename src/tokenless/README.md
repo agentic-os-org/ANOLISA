@@ -889,7 +889,8 @@ Both overrides are installer-side only: Command Code scans
 setting, and reads neither variable, so the installer and `detect.sh` warn when
 the resolved directory is not `~/.commandcode/mods`. List such a directory under
 `mods.paths` in `~/.commandcode/settings.json`, or load the mod for a single
-session with `cmd --mod <mods-dir>/tokenless.ts`.
+session with `cmd --mod <mods-dir>/tokenless.ts`; quote a path that contains
+spaces so the shell does not split it.
 
 Mods load once per process, so start a new session or run `/reload` after
 installing or removing the mod. See

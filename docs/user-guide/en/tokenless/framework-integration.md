@@ -670,7 +670,8 @@ Both override variables are installer-side only. Command Code discovers user mod
 variable, so an override moves the link without activating the mod. `install.sh` and
 `scripts/detect.sh` therefore warn whenever the resolved directory is not `~/.commandcode/mods`. To
 use an override, also list that directory under `mods.paths` in `~/.commandcode/settings.json`, or
-load the mod for a single session with `cmd --mod <mods-dir>/tokenless.ts`.
+load the mod for a single session with `cmd --mod <mods-dir>/tokenless.ts`; quote that path when it
+contains spaces, or the shell splits it into several arguments.
 
 The mod maps `beforeToolCall` and `afterToolCall` onto the shared Tokenless hooks. `beforeToolCall`
 replaces the `command` of the `shell_command` and `powershell` tools and carries every other input
