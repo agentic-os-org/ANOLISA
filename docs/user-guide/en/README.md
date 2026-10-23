@@ -43,6 +43,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | AI-native Linux terminal with an integrated Agent runtime |
 | [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-tuning engine with JSON recommendations and safe rollback |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
+| [semantic-arbiter](user-entrypoint/semantic-arbiter.md) | semantic-arbiter | Incubating deterministic checks and model-backed judgments for preservation and task scope; no live execution |
 
 ### Agent Observability (`agent-observability/`)
 
