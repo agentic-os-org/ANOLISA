@@ -36,7 +36,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### DevOps
 - **github** — GitHub workflows and integration
-- **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
+- **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream); build arguments are checked before dependency installation, and help/status do not require a build environment
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning
 

@@ -359,9 +359,34 @@ main() {
     echo "========================================"
     echo ""
     
+    # Informational actions and invalid requests do not need package or system work.
+    case "$BUILD_METHOD" in
+        help|--help|-h) usage; return 0 ;;
+        status) show_status; return 0 ;;
+        srpm|upstream)
+            if [[ ! "$PARALLEL_JOBS" =~ ^0*[1-9][0-9]*$ ]]; then
+                error "Parallel jobs must be a positive integer: $PARALLEL_JOBS"
+                return 1
+            fi
+            if [ "$BUILD_METHOD" = "upstream" ]; then
+                case "$CONFIG_TYPE" in
+                    defconfig|tinyconfig|menuconfig|current) ;;
+                    *) error "Unknown config type: $CONFIG_TYPE"; return 1 ;;
+                esac
+            fi
+            ;;
+        install)
+            case "${2:-upstream}" in
+                srpm|upstream) ;;
+                *) error "Unknown install method: $2"; return 1 ;;
+            esac
+            ;;
+        *) error "Unknown method: $BUILD_METHOD"; usage; return 1 ;;
+    esac
+
     check_root
     detect_system
-    
+
     case "$BUILD_METHOD" in
         srpm)
             install_deps
