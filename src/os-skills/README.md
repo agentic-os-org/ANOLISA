@@ -49,6 +49,8 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+Inspect large spreadsheets with an explicit analyzed-row budget; see the [bounded-analysis reference](../../docs/user-guide/en/user-entrypoint/os-skills.md#bounded-spreadsheet-analysis).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
