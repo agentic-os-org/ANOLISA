@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
+import json
 import sys
 import types
 import unittest
@@ -242,6 +244,151 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         self.toolkit.register_tool_function(large_result)
         self.agent = _Agent(self.toolkit)
         self.integration.install(self.agent, session_id="session-1")
+
+    async def test_sdk_post_tool_failure_retains_complete_result(self) -> None:
+        errors = (
+            (core.TokenlessError, ("stash backend unavailable",)),
+            (ValueError, ("invalid Core response",)),
+            (TypeError, ("invalid Core response object",)),
+            (KeyError, ("missing response field",)),
+            (json.JSONDecodeError, ("invalid Core JSON", "{", 0)),
+            (RuntimeError, ("SDK lifecycle failure",)),
+        )
+        for error_type, error_args in errors:
+            for failure_at in (1, 2):
+                for success, interrupted in ((True, False), (False, False), (False, True)):
+                    with self.subTest(
+                        error=error_type,
+                        failure_at=failure_at,
+                        success=success,
+                        interrupted=interrupted,
+                    ):
+                        calls = 0
+
+                        async def post_tool(request):
+                            nonlocal calls
+                            calls += 1
+                            if calls == failure_at:
+                                raise error_type(*error_args)
+                            return _post_response("compressed", "temporary hint")
+
+                        self.integration.sdk.post_tool = post_tool
+                        image = {"type": "image", "source": {"url": "https://example.com/image"}}
+                        content = [
+                            {"type": "text", "text": "first original result"},
+                            image,
+                            {"type": "text", "text": "second original result"},
+                        ]
+                        metadata = {"success": success, "duration": 3}
+                        response = _Response(content, metadata=metadata, is_interrupted=interrupted)
+                        chunk = _Response(
+                            [{"type": "text", "text": "streamed chunk"}], is_last=False
+                        )
+                        call = {"name": "large_result", "id": "failed-compression", "input": {}}
+                        registered = self.toolkit.tools["large_result"]
+                        self.assertIs(await registered.postprocess_func(call, chunk), chunk)
+                        self.assertEqual(calls, 0)
+                        failures = self.integration._post_tool_failures
+                        with mock.patch.object(
+                            self.integration, "_status", wraps=self.integration._status
+                        ) as status:
+                            with self.assertLogs("tokenless_agentscope._v1", level="ERROR") as logs:
+                                result = await registered.postprocess_func(call, response)
+                        status.assert_called_once_with(response)
+                        self.assertIs(result, response)
+                        self.assertIs(result.content, content)
+                        self.assertIs(result.metadata, metadata)
+                        self.assertIs(content[1], image)
+                        self.assertEqual(result.is_interrupted, interrupted)
+                        self.assertEqual(content[0]["text"], "first original result")
+                        self.assertEqual(content[2]["text"], "second original result")
+                        self.assertEqual(calls, failure_at)
+                        self.assertEqual(self.integration._post_tool_failures, failures + 1)
+                        self.assertIn(f"failures={failures + 1}", logs.output[0])
+                        self.assertIn("failed-compression", logs.output[0])
+
+    async def test_older_request_constructor_retains_original_result(self) -> None:
+        adapter = sys.modules[type(self.integration).__module__]
+        request_type = adapter.PostToolRequest
+
+        def older_request(
+            *,
+            result_kind,
+            tool_name,
+            content,
+            status,
+            content_origin,
+            output_optimization,
+            capabilities,
+            attribution,
+        ):
+            return request_type(
+                result_kind=result_kind,
+                tool_name=tool_name,
+                content=content,
+                status=status,
+                content_origin=content_origin,
+                output_optimization=output_optimization,
+                capabilities=capabilities,
+                attribution=attribution,
+            )
+
+        post_tool = mock.AsyncMock(return_value=_post_response("unexpected replacement"))
+        self.integration.sdk.post_tool = post_tool
+        response = _Response(
+            [{"type": "text", "text": "original result"}], metadata={"success": True}
+        )
+        with mock.patch.object(adapter, "PostToolRequest", older_request):
+            with self.assertLogs("tokenless_agentscope._v1", level="ERROR") as logs:
+                result = await self.toolkit.tools["large_result"].postprocess_func(
+                    {"name": "large_result", "id": "old-wheel", "input": {}}, response
+                )
+        self.assertIs(result, response)
+        post_tool.assert_not_awaited()
+        self.assertIn("unexpected keyword argument 'command'", logs.output[0])
+
+    async def test_invalid_core_wire_response_retains_original_result(self) -> None:
+        for raw in ("[]", "{", "{}", '{"output":"ignored","disposition":"unknown"}'):
+            with self.subTest(raw=raw):
+                response = _Response(
+                    [{"type": "text", "text": "original result"}], metadata={"success": True}
+                )
+                with mock.patch.object(
+                    self.integration.sdk.runtime, "_post_tool_json", return_value=raw, create=True
+                ) as native:
+                    with self.assertLogs("tokenless_agentscope._v1", level="ERROR"):
+                        result = await self.toolkit.tools["large_result"].postprocess_func(
+                            {"name": "large_result", "id": "invalid-response", "input": {}},
+                            response,
+                        )
+                self.assertIs(result, response)
+                native.assert_called_once()
+
+    async def test_post_tool_cancellation_propagates(self) -> None:
+        async def post_tool(request):
+            raise asyncio.CancelledError()
+
+        self.integration.sdk.post_tool = post_tool
+        response = _Response([{"type": "text", "text": "original result"}])
+        with self.assertRaises(asyncio.CancelledError):
+            await self.toolkit.tools["large_result"].postprocess_func(
+                {"name": "large_result", "id": "cancelled", "input": {}}, response
+            )
+        self.assertEqual(self.integration._post_tool_failures, 0)
+        self.assertEqual(response.content[0]["text"], "original result")
+
+    async def test_uninstalled_integration_error_remains_visible(self) -> None:
+        self.integration._installed_agent = None
+        post_tool = mock.AsyncMock()
+        self.integration.sdk.post_tool = post_tool
+        with self.assertRaisesRegex(RuntimeError, "must be installed before use"):
+            await self.integration._after_tool(
+                self.toolkit,
+                {"name": "large_result", "id": "not-installed", "input": {}},
+                _Response([{"type": "text", "text": "original result"}]),
+            )
+        post_tool.assert_not_awaited()
+        self.assertEqual(self.integration._post_tool_failures, 0)
 
     async def _assert_postprocessor_chain(
         self,
