@@ -27,7 +27,9 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+def detect_and_load(
+    file_path: str, sheet_name_filter: str | None = None, delimiter: str | None = None
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
@@ -57,7 +59,7 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
             return {sheet_name_filter: result}
 
     elif suffix in (".csv", ".tsv"):
-        sep = "\t" if suffix == ".tsv" else ","
+        sep = delimiter if delimiter is not None else ("\t" if suffix == ".tsv" else ",")
         encodings = ["utf-8-sig", "gbk", "utf-8", "latin-1"]
         last_error = None
         for enc in encodings:
@@ -319,6 +321,12 @@ def render_report(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def delimiter_character(value: str) -> str:
+    if len(value) != 1 or value in {"\n", "\r", "\0"}:
+        raise argparse.ArgumentTypeError("--delimiter must be a single non-newline character")
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Read and analyze Excel/CSV files without modifying them."
@@ -332,10 +340,16 @@ def main() -> None:
         "--quality", action="store_true",
         help="Run data quality audit only (skip stats)"
     )
+    parser.add_argument(
+        "--delimiter", type=delimiter_character, default=None,
+        help="single-character separator for CSV/TSV (defaults: comma/tab)",
+    )
     args = parser.parse_args()
+    if args.delimiter is not None and Path(args.file).suffix.lower() not in {".csv", ".tsv"}:
+        parser.error("--delimiter is only supported for CSV/TSV input")
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, delimiter=args.delimiter)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
