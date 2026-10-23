@@ -80,7 +80,12 @@ pub fn edit(svc: &MemoryService, path: &str, old_str: &str, new_str: &str) -> Re
     }
 
     let updated = body.replacen(old_str, new_str, 1);
-    let bytes = match safe_fs::write(svc.mount.root_fd.as_fd(), rel_path, updated.as_bytes()) {
+    let bytes = match safe_fs::write_atomic(
+        svc.mount.root_fd.as_fd(),
+        Path::new(svc.mount.meta_dir_name()),
+        rel_path,
+        updated.as_bytes(),
+    ) {
         Ok(n) => n,
         Err(e) => {
             svc.audit_log(AuditEntry::new(TOOL).path(rel).error(e.to_string()));

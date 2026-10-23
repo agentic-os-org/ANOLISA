@@ -17,6 +17,10 @@
 //! Linux-only (the parent crate already is). Requires kernel ≥ 5.6 for
 //! openat2 + ResolveFlag; AOS ships 6.x.
 
+mod atomic;
+
+pub use atomic::write_atomic;
+
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};

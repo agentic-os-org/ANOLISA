@@ -243,6 +243,25 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_promote` | `session_path`, `store_path` | — | atomically move session scratch file into the persistent store |
 | `mem_session_log` | — | — | current session JSONL |
 
+`mem_edit` and `mem_write` with `overwrite=true` prepare a complete
+replacement for an existing regular file before publishing it. A write failure
+before publication leaves the original content intact. New files retain normal
+exclusive-create behavior and their destination parent's default ACL and group.
+
+Replacement requires readable/writable destination and metadata directories on
+the same filesystem, Linux procfs, and enough free space for the complete new
+content. Temporary files stay under `.anolisa/`, outside ordinary listings,
+searches, Git history and snapshots. File mode, POSIX access ACLs and `user.*`
+attributes must be preserved; failures abort before replacement. Owner and group
+are preserved when permitted; otherwise a warning records that writer ownership
+or the staging group is retained. Changed ownership can change owner/group-based
+access. Host-managed labels and integrity signatures
+are not copied: the replacement uses host defaults, so custom SELinux/IMA/EVM
+policies require host-specific validation. Set-ID bits and file capabilities are
+not retained. Other hard links and already-open handles keep the old content.
+An error saying the replacement was published but directory sync failed means
+new content is already visible; read the file before retrying.
+
 ### Tier B — structured retrieval (7)
 
 | Tool | Required | Optional | Returns |
