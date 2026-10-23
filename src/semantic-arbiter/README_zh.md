@@ -11,7 +11,7 @@ Agent 无关的语义判断组件，支持可配置决策模型后端与基于�
 - `describe` 以 JSON 列出支持的协议、场景、后端和消息上限。
 - `--help` 提供人可读的用法和示例；`help <command>` 解释各子命令。
 
-场景选择使用 `preservation` 和 `task_scope`。当前 `check` 输出 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。所有操作及未来场景共用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。`ask` 是确定性的审批决策，不是歧义回退；类型、校验和 Approval Directive 投影现已预留，运行时 `ApprovalExecutor` 与 Adapter 准入仍待 A4/A10。实时取证、动态注册、可配置组合、其他 Executor 和 AW Adapter 也尚待实现。模型概率阈值是未经校准的决策参数，不能证明语义准确率或提供安全保证。
+场景选择使用 `preservation` 和 `task_scope`。当前 `check` 输出 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。所有操作及未来场景共用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。`ask` 表示确定性的审批决策；模型歧义不会产生 `ask`。类型、校验和 Approval Directive 投影现已预留，运行时 `ApprovalExecutor` 与 Adapter 准入仍待实现。库已提供显式 EvidenceSource 注册表，在求值前冻结协作式采集且受 deadline 约束的来源输出；生产证据源、可配置组合、其他 Executor 和 AW Adapter 仍待实现。模型概率阈值是未经校准的决策参数，不能证明语义准确率或提供安全保证。
 
 ## 源码快速运行
 
@@ -31,6 +31,7 @@ make check
 | 模块 | 职责 |
 |---|---|
 | `contract` | 任务/候选绑定、证据来源、预算和单元答案 |
+| `evidence` | 显式来源注册、有界采集、冻结证据和覆盖缺口 |
 | `config` | 后端选择、端点配置、凭证环境变量名称和阈值 |
 | `model` | Noul 概率、后端接口、显式测试夹具和有界 HTTP 传输 |
 | `judgment` | 版本化保留意图与任务范围问题，以及概率解释 |

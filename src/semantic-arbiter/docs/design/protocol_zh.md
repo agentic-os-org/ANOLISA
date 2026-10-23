@@ -12,9 +12,9 @@
 | `evaluate` | `semantic-arbiter/v1alpha2` / `model_evaluation` | 在实时截止期限内复用同一确定性硬门禁，再向模型提交满足条件的问题 |
 | `describe` | 能力声明 | 支持的操作、版本、模式、场景、后端、候选控制、obligation 类型和消息大小上限 |
 
-两种操作均使用内联冻结证据。`check` 不执行外部 I/O，也不重放 Agent 或其动作；模型求值将选定输入发送给配置的后端。两者都不采集文件系统事实或执行 Directive。单元注册表和组合规则固定；调用者可选择 `preservation`、`task_scope` 或二者。当前 `check` 生产方输出候选 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。所有操作及未来场景的完整 CandidateControl 接口始终为 `nop < allow < ask < block`。动态 EvidenceSource 注册、可配置组合、实时采集和 Executor 尚待实现。
+两种操作均使用内联冻结证据。`check` 不执行外部 I/O，也不重放 Agent 或其动作；模型求值将选定输入发送给配置的后端。两者都不采集文件系统事实或执行 Directive。单元注册表和组合规则固定；调用者可选择 `preservation`、`task_scope` 或二者。当前 `check` 生产方输出候选 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。所有操作及未来场景的完整 CandidateControl 接口始终为 `nop < allow < ask < block`。库已提供显式 EvidenceSource 注册和求值前有界采集；生产证据源、可配置组合、真实 Agent 接入和 Executor 尚待实现。
 
-公共定义位于 [`contract.rs`](../../src/contract.rs)、[`config.rs`](../../src/config.rs)、[`evaluation.rs`](../../src/evaluation.rs)、[`outcome.rs`](../../src/outcome.rs) 和 [`protocol.rs`](../../src/protocol.rs)。使用公共解码和校验入口执行语义约束。
+公共定义位于 [`contract.rs`](../../src/contract.rs)、[`evidence.rs`](../../src/evidence.rs)、[`config.rs`](../../src/config.rs)、[`evaluation.rs`](../../src/evaluation.rs)、[`outcome.rs`](../../src/outcome.rs) 和 [`protocol.rs`](../../src/protocol.rs)。使用公共解码和校验入口执行语义约束。
 
 ## 请求字段
 
@@ -61,6 +61,14 @@
 来源标签属于声明。消费方必须独立认证任务入口、证据来源和验证器结果。合成夹具仅声明这些事实。`source_reported` 和 `model_echo` 不能证明本地重建结果。
 
 `check` 使用记录时钟。模型请求的预算和证据时间戳使用 Unix 毫秒。证据仅在 `captured_at_ms <= evaluation_time < valid_until_ms` 时可用。在 `check` 中，事件预算过期、超出调用者证据限制或其他确定性 unknown 均 fail-closed 为候选 `block`。时间字段非法、硬上限超限和绑定不匹配属于协议错误。
+
+### 求值前证据采集
+
+`EvidenceSourceRegistry` 是可选的生产侧库接口，不属于任一线协议。消费方在最终确定 check 或 evaluation 请求前显式注册进程内来源并选择 source ID。采集接收不含 evidence 和 gaps 的冻结请求上下文。注册表注入已注册的来源身份、版本、provenance 和请求 binding；来源输出不能替换这些字段。结果包含确定排序的内联 `evidence`、`gaps`、脱敏的逐来源报告和一个最终 `collected_at_ms`。
+
+每个协作式异步来源只在来源超时与原事件截止时间的较早者之前尝试一次。来源实现必须立即返回 future，且不得阻塞执行器线程；Tokio deadline 无法抢占进程内阻塞代码。不重试、不回退、无隐式来源、无插件发现，也不续期。来源不可用、超时，或返回未来、过期、超龄批次时，为已选择且来源支持的场景生成显式 gap。最终冻结时点会复检全部批次，后续来源消耗的时间不能让先前已经过期的证据进入结果。来源输出非法、证据 ID 重复，或超出条数/紧凑数组字节预算时，整次采集失败且不截断。
+
+采集不认证来源，也不提升 provenance。内存示例保持 `source_reported`，其重建声明不能满足本地验证器要求。消费方把返回的证据和缺口填入请求；确定性请求还要将 `check_at_ms` 设为返回的 `collected_at_ms`。`check` 与 `evaluate` 自身不会调用注册表。
 
 ### 线格式上限
 
@@ -177,7 +185,7 @@ CLI 在入口捕获墙钟和单调时钟。准备、推理、正文读取、校�
 | Approval `parameters.id`、`candidate_id` | 保留 ID `candidate-approval` 和等待审批的绑定候选 |
 | Subject / obligation `parameters` | 原始主体请求或 obligation，保留不可变 `id` 和动作参数 |
 
-所有操作和未来场景均使用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。当前 `check` 生产方输出 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。两者的主体控制均为空，obligation 仅有 `snapshot/audit`。`ask` 是确定性的“需要审批”决策，不是歧义或 `unknown` 答案的同义词。其类型、校验和 Approval Directive 投影现已预留，但当前成果保护/任务范围生产方不会输出；运行时 `ApprovalExecutor` 与 Adapter 准入仍待 A4/A10。更广的词汇覆盖未来增强/审批、安全、主体控制和清理场景；通用合并、执行调度和动作实现尚待完成。`Outcome::directives` 投影 ask、主体请求和 obligation。消费方通过原生接口阻断候选。主体请求保持独立；等待中的 kill 不吸收 freeze 或 quarantine。
+所有操作和未来场景均使用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。当前 `check` 生产方输出 `allow/block`；当前 `evaluate` 生产方输出 `nop/allow/block`。两者的主体控制均为空，obligation 仅有 `snapshot/audit`。`ask` 表示确定性的“需要审批”决策；歧义和 `unknown` 答案都不会产生 `ask`。其类型、校验和 Approval Directive 投影现已预留。当前成果保护/任务范围生产方不会输出，运行时 `ApprovalExecutor` 与 Adapter 准入仍待实现。更广的词汇覆盖未来增强/审批、安全、主体控制和清理场景；通用合并、执行调度和动作实现尚待完成。`Outcome::directives` 投影 ask、主体请求和 obligation。消费方通过原生接口阻断候选。主体请求保持独立；等待中的 kill 不吸收 freeze 或 quarantine。
 
 | Obligation `action.kind` | `action.parameters` |
 |---|---|

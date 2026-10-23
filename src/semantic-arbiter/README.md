@@ -11,7 +11,7 @@ Agent-independent semantic judgments with configurable decision-model backends a
 - `describe` lists supported protocols, scenarios, backends and message limits as JSON.
 - `--help` shows human-readable usage and examples; `help <command>` explains each command.
 
-Scenario selection uses `preservation` and `task_scope`. Current `check` outcomes are `allow/block`; current `evaluate` outcomes are `nop/allow/block`. The full CandidateControl contract for every operation and future scenario is ordered `nop < allow < ask < block`. `ask` is a deterministic approval decision, not an ambiguity fallback; its types, validation and Approval Directive projection are reserved, while runtime `ApprovalExecutor` and Adapter admission remain pending A4/A10. Live evidence collection, dynamic registration, configurable composition, Executors and an AW adapter also remain pending. Model probability thresholds are uncalibrated decision parameters; they do not establish semantic accuracy or safety guarantees.
+Scenario selection uses `preservation` and `task_scope`. Current `check` outcomes are `allow/block`; current `evaluate` outcomes are `nop/allow/block`. The full CandidateControl contract for every operation and future scenario is ordered `nop < allow < ask < block`. `ask` is a deterministic approval decision; ambiguity never produces it. Its types, validation and Approval Directive projection are reserved, while runtime `ApprovalExecutor` and Adapter admission remain pending. The library provides an explicit EvidenceSource registry that freezes cooperatively collected, deadline-bounded source output before evaluation; production sources, configurable composition, Executors and an AW adapter remain pending. Model probability thresholds are uncalibrated decision parameters; they do not establish semantic accuracy or safety guarantees.
 
 ## Source quick start
 
@@ -31,6 +31,7 @@ See the [CLI guide](../../docs/user-guide/en/semantic-arbiter/index.md) for conf
 | Module | Responsibility |
 |---|---|
 | `contract` | Task/candidate binding, evidence provenance, budgets and unit answers |
+| `evidence` | Explicit source registration, bounded collection, frozen evidence and coverage gaps |
 | `config` | Backend selection, endpoint configuration, credential environment-variable names and thresholds |
 | `model` | Noul probabilities, backend interface, explicit test fixtures and bounded HTTP transport |
 | `judgment` | Versioned preservation and task-scope questions and probability interpretation |
