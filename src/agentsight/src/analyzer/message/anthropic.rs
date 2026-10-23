@@ -741,6 +741,84 @@ mod tests {
         }
     }
 
+    /// The result block of the same turn: the provider streams
+    /// `web_search_tool_result` complete on its start event and sends no
+    /// deltas for it, so the catch-all used to open an empty text accumulator
+    /// that finish then dropped — a streamed search turn kept the call but
+    /// lost the result the answer was built from. The non-streaming body of
+    /// the very same turn keeps the result (see
+    /// `test_parse_response_keeps_server_tool_blocks`); both paths must agree.
+    #[test]
+    fn test_aggregate_sse_keeps_the_streamed_server_tool_result() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_ws", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "server_tool_use", "id": "srvtoolu_1",
+                               "name": "web_search", "input": {}}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"rust 2026\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                               "content": [{"type": "web_search_result",
+                                            "url": "https://example.com/rust",
+                                            "title": "Rust",
+                                            "text": "A systems language."}]}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_start", "index": 2,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 2,
+             "delta": {"type": "text_delta", "text": "Here is what I found."}},
+            {"type": "content_block_stop", "index": 2},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 5}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.content.len(),
+            3,
+            "every block of the turn must survive: {:?}",
+            resp.content
+        );
+        match &resp.content[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input, &serde_json::json!({"query": "rust 2026"}));
+            }
+            other => panic!("the streamed call must come first, got {other:?}"),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "srvtoolu_1");
+                assert_eq!(
+                    content.as_ref(),
+                    Some(&serde_json::json!([
+                        {"type": "web_search_result", "url": "https://example.com/rust",
+                         "title": "Rust", "text": "A systems language."}
+                    ])),
+                    "the streamed result payload must reach the block unchanged"
+                );
+                assert_eq!(*is_error, None);
+            }
+            other => panic!("the streamed result must be read as a tool result, got {other:?}"),
+        }
+        match &resp.content[2] {
+            AnthropicContentBlock::Text { text, .. } => {
+                assert_eq!(text, "Here is what I found.")
+            }
+            other => panic!("the answer text must keep its own block, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_response_with_cache_tokens() {
         let json = serde_json::json!({
