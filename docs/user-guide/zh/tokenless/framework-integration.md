@@ -440,6 +440,21 @@ tokenless init
 
 `tokenless init` 读取适配器清单，运行各框架的 `detect.sh`，报告适配器状态（就绪 / 可安装 / 缺少前置依赖），然后为选定框架执行 `install.sh`。
 
+若适配器目录不存在，`tokenless init` 将报错退出：
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+```
+
+请先安装 tokenless 包再重试：
+
+```bash
+npm install -g anolisa-tokenless
+# 或
+anolisa install tokenless
+```
+
 ### 手动安装脚本
 
 OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：

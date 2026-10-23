@@ -123,7 +123,17 @@ fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStat
         .output()
     {
         Ok(out) => match out.status.code() {
-            Some(0) => DetectStatus::Ready,
+            Some(0) => {
+                // Some detectors (e.g. Codex) always exit 0 but emit
+                // {"installed": false} when the tool is absent.
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+                    if v.get("installed") == Some(&serde_json::Value::Bool(false)) {
+                        return DetectStatus::Installable;
+                    }
+                }
+                DetectStatus::Ready
+            }
             Some(1) => DetectStatus::Installable,
             _ => DetectStatus::MissingPrereqs,
         },
@@ -137,21 +147,32 @@ fn run_install(adapter_dir: &Path, name: &str, install_script: &str) -> Result<(
     if !script.exists() {
         return Err(format!("install script not found: {}", script.display()));
     }
-    let status = Command::new("bash")
+    let out = Command::new("bash")
         .arg(&script)
         .env("ANOLISA_COMPONENT", "tokenless")
         .env("ANOLISA_TARGET", name)
         .env("ANOLISA_ADAPTER_DIR", adapter_dir)
-        .status()
+        .output()
         .map_err(|e| format!("failed to run install.sh: {}", e))?;
-    if status.success() {
+    if out.status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "install.sh for {} exited with code {}",
-            name,
-            status.code().unwrap_or(-1)
-        ))
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr_snippet = stderr.trim();
+        if stderr_snippet.is_empty() {
+            Err(format!(
+                "install.sh for {} exited with code {}",
+                name,
+                out.status.code().unwrap_or(-1)
+            ))
+        } else {
+            Err(format!(
+                "install.sh for {} exited with code {}: {}",
+                name,
+                out.status.code().unwrap_or(-1),
+                stderr_snippet
+            ))
+        }
     }
 }
 
@@ -250,7 +271,6 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
     }
 
     if list_only {
-        print_install_hints();
         return Ok(());
     }
 
@@ -296,6 +316,7 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
         return Ok(());
     };
 
+    let mut failed: Vec<String> = Vec::new();
     for fw in &to_install {
         let script = match &fw.install_script {
             Some(s) => s,
@@ -307,8 +328,18 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
         println!("\nInstalling {} adapter...", fw.name);
         match run_install(&adapter_dir, &fw.name, script) {
             Ok(()) => println!("{} adapter installed successfully.", fw.name),
-            Err(e) => eprintln!("{} adapter installation failed: {}", fw.name, e),
+            Err(e) => {
+                eprintln!("{} adapter installation failed: {}", fw.name, e);
+                failed.push(fw.name.clone());
+            }
         }
+    }
+
+    if !failed.is_empty() {
+        return Err((
+            format!("installation failed for: {}", failed.join(", ")),
+            1,
+        ));
     }
 
     Ok(())

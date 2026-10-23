@@ -496,6 +496,21 @@ tokenless init
 
 `tokenless init` reads the adapter manifest, runs each framework's `detect.sh`, and reports whether the adapter is ready, installable, or missing prerequisites — then runs `install.sh` for the selected framework.
 
+If the adapter directory is absent, `tokenless init` exits with an error:
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+```
+
+Resolve this by installing the tokenless package first:
+
+```bash
+npm install -g anolisa-tokenless
+# or
+anolisa install tokenless
+```
+
 ### Manual install scripts
 
 OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
