@@ -308,6 +308,86 @@ fn compress_schema_from_file() {
     assert_eq!(result["function"]["name"], "f");
 }
 
+/// Run a tokenless subcommand with `input` on stdin and capture its output.
+/// Stats and SLS stay off so the assertions see only the emitted payload.
+fn run_stdin_command(
+    fixture: &TempDataDir,
+    compression_enabled: &str,
+    args: &[&str],
+    input: &str,
+) -> std::process::Output {
+    fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", compression_enabled)
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+/// `compress-schema` shares the byte-exact stdout contract of `compress-toon`
+/// and `retrieve`: the payload is emitted verbatim, so a passthrough run
+/// reproduces the input byte-for-byte (no LF appended, none doubled) and an
+/// encoded run emits exactly the candidate the stats recorder measures.
+#[test]
+fn compress_schema_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let schema = r#"{"function":{"name":"test","description":"A test function","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#;
+
+    // Dry-run passthrough emits the input unchanged; the trailing-LF variant
+    // catches a doubled newline just as the bare variant catches an added one.
+    for payload in [schema.to_string(), format!("{schema}\n")] {
+        let output = run_stdin_command(&fixture, "0", &["compress-schema", "--no-stash"], &payload);
+        assert!(
+            output.status.success(),
+            "compress-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-schema must reproduce the input byte-for-byte"
+        );
+    }
+
+    // With compression on, stdout is exactly the emitted candidate: compact
+    // JSON from the schema compressor, with no LF appended.
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let schema = format!(
+        r#"{{"function":{{"name":"test","description":"{long_desc}","parameters":{{"type":"object","properties":{{"x":{{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}}}}}}"#
+    );
+    let output = run_stdin_command(&fixture, "1", &["compress-schema", "--no-stash"], &schema);
+    assert!(
+        output.status.success(),
+        "compress-schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    let expected =
+        serde_json::to_string(&tokenless_schema::SchemaCompressor::new().compress(&value)).unwrap();
+    assert_ne!(
+        expected, schema,
+        "fixture must compress, otherwise the run is a passthrough"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        expected,
+        "compress-schema stdout must equal the emitted candidate byte-for-byte"
+    );
+}
+
 #[test]
 fn compress_schema_batch_mode() {
     let schemas = r#"[{"function":{"name":"a","parameters":{"type":"object","properties":{}}}},{"function":{"name":"b","parameters":{"type":"object","properties":{}}}}]"#;
@@ -509,10 +589,44 @@ fn compress_response_cli_matches_runtime_library() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        expected.output,
-    );
+    // Exact equality with the runtime library output: no `trim_end()`, so an
+    // appended trailing newline fails the comparison.
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected.output);
+}
+
+/// `compress-response` shares the byte-exact stdout contract of
+/// `compress-toon` and `retrieve`: a passthrough run must reproduce the input
+/// verbatim, so automation can detect the passthrough by comparing stdout with
+/// the input payload. The runs here are dry-run with statistics off, so they
+/// assert the emitted bytes only - equality with the recorded `after` text
+/// holds in active mode alone (see the CLI reference).
+#[test]
+fn compress_response_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = r#"{"data":"value","debug":"remove"}"#;
+    // The trailing-LF variant catches a doubled newline just as the bare
+    // variant catches an added one.
+    for payload in [input.to_string(), format!("{input}\n")] {
+        let output = run_stdin_command(
+            &fixture,
+            "0",
+            &["compress-response", "--no-stash"],
+            &payload,
+        );
+        assert!(
+            output.status.success(),
+            "compress-response failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-response must reproduce the input byte-for-byte"
+        );
+    }
 }
 
 #[test]
@@ -563,10 +677,10 @@ fn compress_response_stats_use_unicode_aware_estimates() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].before_tokens, estimate_tokens(&response));
-    assert_eq!(
-        records[0].after_tokens,
-        estimate_tokens(compressed.trim_end())
-    );
+    // The recorded `after` is measured on exactly the emitted bytes: no
+    // compensating trim, so an LF the CLI appended but the recorder did not
+    // measure fails here.
+    assert_eq!(records[0].after_tokens, estimate_tokens(&compressed));
 }
 
 #[test]
@@ -594,8 +708,9 @@ fn dry_run_no_savings_keeps_the_no_savings_warning() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        response
+        output.stdout,
+        response.as_bytes(),
+        "dry-run passthrough must reproduce the input byte-for-byte"
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("response compression did not reduce size"));
@@ -3110,8 +3225,8 @@ fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
-/// The payload path: a healthy run keeps the bytes `println!` wrote (the
-/// compressed output plus one LF), and an unwritable stdout becomes an
+/// The payload path: a healthy run emits the compressed output byte-exact (the
+/// writer appends no LF any more), and an unwritable stdout becomes an
 /// operation error instead of a panic.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3142,11 +3257,17 @@ fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
             .unwrap()
     };
 
+    // Control: the healthy run wrote its payload through the same writer the
+    // unwritable run below exercises. `compress-response` is byte-exact, so the
+    // single trailing LF `println!` used to append is part of what this checks
+    // is gone - the assertion follows the emitted bytes, not the old newline.
     let healthy = run(std::process::Stdio::piped());
     assert!(healthy.status.success(), "{healthy:?}");
+    assert!(!healthy.stdout.is_empty(), "no payload was written");
     assert!(
-        healthy.stdout.ends_with(b"\n"),
-        "the payload still carries the single trailing LF println! added"
+        !healthy.stdout.ends_with(b"\n"),
+        "the payload is emitted byte-exact, so the writer appends no LF: {}",
+        String::from_utf8_lossy(&healthy.stdout)
     );
 
     let full = run(std::process::Stdio::from(dev_full()));

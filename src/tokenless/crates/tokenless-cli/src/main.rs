@@ -802,7 +802,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            write_stdout(&emit_text)?;
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a candidate
+            // that already ends in LF is not doubled. `println!` appended one,
+            // desyncing stdout from the recorded `after` text. That text equals
+            // the emitted bytes in active mode only: in dry-run `emit_text` is
+            // the original input while `output_text` below keeps the smaller
+            // predicted candidate, so the recorded `after_chars` is a prediction
+            // rather than a byte count of stdout. `write_stdout` would append
+            // that LF again, so this goes through the raw variant, which keeps
+            // the shared broken-pipe policy.
+            write_stdout_raw(&emit_text)?;
 
             record_compression_stats(
                 &config,
@@ -893,7 +905,20 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             let output_text = stats_after_text(&result, &input);
-            write_stdout(&result.output)?;
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a compressed
+            // candidate that already ends in LF is not doubled. `println!`
+            // appended one, desyncing stdout from the recorded `after_text`.
+            // That text equals the emitted bytes in active mode only: in dry-run
+            // `result.output` is the original input while `stats_after_text`
+            // below returns `result.compressed_output` for
+            // `Disposition::DryRun`, so the recorded `after_chars` is a
+            // prediction rather than a byte count of stdout. `write_stdout`
+            // would append that LF again, so this goes through the raw variant,
+            // which keeps the shared broken-pipe policy.
+            write_stdout_raw(&result.output)?;
 
             record_compression_stats(
                 &config,
