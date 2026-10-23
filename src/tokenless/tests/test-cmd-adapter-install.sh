@@ -213,6 +213,38 @@ case "$cmd_home_out" in
     *)
         fail "installer reported COMMANDCODE_HOME without a warning" ;;
 esac
+
+# The remediation that the warning prints is meant to be copied into a shell,
+# and this overridden directory contains a space: an unquoted path would split
+# into several arguments, so the workaround could not load the inactive mod.
+suggested="$(printf '%s\n' "$cmd_home_out" | sed -n 's/.*cmd --mod //p' | head -1)"
+if [ -n "$suggested" ]; then
+    pass "installer prints a per-session cmd --mod remediation"
+    roundtrip="$(eval "printf '%s\n' $suggested" 2>/dev/null)" || roundtrip="<eval failed>"
+    roundtrip_args="$(printf '%s\n' "$roundtrip" | grep -c .)" || roundtrip_args=0
+    if [ "$roundtrip_args" -eq 1 ] && [ "$roundtrip" = "$COMMANDCODE_HOME_DIR/mods/tokenless.ts" ]; then
+        pass "the printed cmd --mod path survives a shell round-trip with a space in it"
+    else
+        fail "the printed cmd --mod path split into $roundtrip_args argument(s): $roundtrip"
+    fi
+else
+    fail "installer printed no cmd --mod remediation"
+fi
+
+# A plain "start a new session" promise is wrong while the override is missing
+# from mods.paths, so the reload instruction has to be conditional.
+case "$cmd_home_out" in
+    *"Start a new Command Code session"*)
+        fail "installer promised a plain session reload for an unregistered override" ;;
+    *)
+        pass "installer does not promise a plain session reload for an unregistered override" ;;
+esac
+case "$cmd_home_out" in
+    *'"mods.paths", start a new Command Code session'*)
+        pass "installer ties the session reload to registering mods.paths first" ;;
+    *)
+        fail "installer gave no conditional session-reload instruction for the override" ;;
+esac
 bash "$UNINSTALL_SH" >/dev/null
 unset COMMANDCODE_HOME
 
@@ -226,6 +258,12 @@ fi
 case "$host_out" in
     *WARNING*) fail "the host-scanned install warned without reason" ;;
     *) pass "the host-scanned install prints no mods-directory warning" ;;
+esac
+case "$host_out" in
+    *"Start a new Command Code session"*)
+        pass "the host-scanned install still tells the user to start a new session" ;;
+    *)
+        fail "the host-scanned install dropped the plain session-reload instruction" ;;
 esac
 
 # Without a cmd binary the installer is a no-op and detect reports "absent",
