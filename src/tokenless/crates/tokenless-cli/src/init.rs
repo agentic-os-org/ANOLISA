@@ -61,7 +61,17 @@ struct FrameworkInfo {
 }
 
 /// Find the adapter directory by checking known locations.
+///
+/// An explicit `ANOLISA_ADAPTER_DIR` environment variable takes precedence,
+/// which also supports custom install prefixes outside the default Unix
+/// share paths.
 fn find_adapter_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("ANOLISA_ADAPTER_DIR") {
+        let p = PathBuf::from(dir);
+        if has_manifest(&p) {
+            return Some(p);
+        }
+    }
     if let Some(home) = dirs::home_dir() {
         let p = home.join(".local/share").join(ADAPTER_SUBPATH);
         if has_manifest(&p) {
@@ -124,15 +134,19 @@ fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStat
     {
         Ok(out) => match out.status.code() {
             Some(0) => {
-                // Some detectors (e.g. Codex) always exit 0 but emit
-                // {"installed": false} when the tool is absent.
+                // Detectors may emit JSON. Only treat the adapter as Ready
+                // when the output explicitly claims installed: true;
+                // otherwise prefer Installable so missing adapters are not
+                // silently reported as ready.
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-                    if v.get("installed") == Some(&serde_json::Value::Bool(false)) {
-                        return DetectStatus::Installable;
+                    match v.get("installed") {
+                        Some(&serde_json::Value::Bool(true)) => return DetectStatus::Ready,
+                        Some(&serde_json::Value::Bool(false)) => return DetectStatus::Installable,
+                        _ => {}
                     }
                 }
-                DetectStatus::Ready
+                DetectStatus::Installable
             }
             Some(1) => DetectStatus::Installable,
             _ => DetectStatus::MissingPrereqs,
@@ -177,9 +191,18 @@ fn run_install(adapter_dir: &Path, name: &str, install_script: &str) -> Result<(
 }
 
 pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), (String, i32)> {
+    if framework.is_some() && list_only {
+        return Err((
+            "--framework and --list cannot be used together".to_string(),
+            1,
+        ));
+    }
+
     let adapter_dir = find_adapter_dir().ok_or_else(|| {
         (
-            "Adapter directory not found.\nInstall tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`."
+            "Adapter directory not found.\n\
+             Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.\n\
+             For a custom location, set ANOLISA_ADAPTER_DIR to the directory containing manifest.json."
                 .to_string(),
             1,
         )
@@ -246,9 +269,8 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
                         }
                     }
                 } else {
-                    eprintln!("tokenless: no install script for {}", f.name);
+                    return Err((format!("no install script configured for {}", f.name), 1));
                 }
-                return Ok(());
             }
             Some(f) if f.status == DetectStatus::Ready => {
                 println!("\n{} is already installed and ready.", f.name);
@@ -336,10 +358,7 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
     }
 
     if !failed.is_empty() {
-        return Err((
-            format!("installation failed for: {}", failed.join(", ")),
-            1,
-        ));
+        return Err((format!("installation failed for: {}", failed.join(", ")), 1));
     }
 
     Ok(())
