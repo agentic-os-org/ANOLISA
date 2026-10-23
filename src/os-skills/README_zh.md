@@ -46,6 +46,12 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 读取受保护的 PDF
+
+`pdf-reader` 技能可通过 `--password` 或 `--password-env NAME` 提供已知密码，
+读取受密码保护的 PDF。环境变量选项从指定变量读取密码，避免把密码值放入
+命令参数。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
