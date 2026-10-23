@@ -92,17 +92,19 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
     // Sync cron schedules — independent of autoCheckpoint
     const cronWs = pluginState.resolvedConfig?.workspace;
     if (cronWs) {
+      // An empty list must re-sync too: syncing [] is the removal path for
+      // lines a previously-failed sync (or an old workspace) left installed.
       const schedules = config.cronSchedules ?? [];
-      if (schedules.length > 0) {
-        try {
-          if (await CrontabManager.syncWithRetry(cronWs, schedules)) {
+      try {
+        if (await CrontabManager.syncWithRetry(cronWs, schedules)) {
+          if (schedules.length > 0) {
             console.log(`[ws-ckpt] Cron synced: ${schedules.length} schedule(s)`);
-          } else {
-            console.warn("[ws-ckpt] Cron sync failed after 3 attempts");
           }
-        } catch (err) {
-          console.warn("[ws-ckpt] Cron sync error:", err instanceof Error ? err.message : String(err));
+        } else {
+          console.warn("[ws-ckpt] Cron sync failed after 3 attempts");
         }
+      } catch (err) {
+        console.warn("[ws-ckpt] Cron sync error:", err instanceof Error ? err.message : String(err));
       }
     }
 
