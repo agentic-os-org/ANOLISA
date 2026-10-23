@@ -2,7 +2,7 @@
 
 [中文版](../../zh/adapters/adapter-dispatch.md)
 
-[Design index](../README.md) · [Architecture](../../../../../../docs/developer-guide/en/aw/architecture.md)
+[Design index](../README.md) · [Architecture](../architecture.md)
 
 The `aw` executable owns daemon discovery, instance binding, foreground process
 lifetime and cleanup. Each native adapter owns version and entrypoint admission,

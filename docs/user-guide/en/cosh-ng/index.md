@@ -57,7 +57,7 @@ The published Linux raw contract is not currently portable across all routed
 distributions, so it is not the recommended Linux installation path. The raw
 package supports macOS arm64, where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
-[developer setup](../../../developer-guide/en/cosh-ng/getting-started.md)
+[developer setup](../../../../contribute/en/cosh-ng/getting-started.md)
 after the packaged options above.
 
 ### 2. Start the terminal

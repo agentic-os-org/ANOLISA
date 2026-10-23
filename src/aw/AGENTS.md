@@ -101,7 +101,7 @@ remove a contract merely because its version is older. New Core capability
 profiles require explicit schemas, Registry entries and cross-record validation;
 Provider-private data belongs to its Provider. Schema moves must preserve active
 bytes, IDs, registered names and digest vectors. Update the
-[architecture overview](../../docs/developer-guide/en/aw/architecture.md) and
+[architecture overview](docs/design/en/architecture.md) and
 [design index](docs/design/en/README.md) when ownership or call paths change.
 Show runtime flow in the overview; keep compilation dependencies in separate
 framework and Provider tables, with test-only dependencies identified.

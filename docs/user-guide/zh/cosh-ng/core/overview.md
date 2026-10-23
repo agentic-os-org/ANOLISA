@@ -45,4 +45,4 @@ stdin 不是 TTY 时，`cosh-core` 会自动选择 headless 模式。在 headles
 3. 读取流式输出，并使用相同 request ID 回复 Core 发出的 `control_request`。客户端需要在发生时处理工具审批、用户提问和认证。
 4. 前端结束时发送 `subtype: "shutdown"`。
 
-消息示例见 [Headless 模式](headless-mode.md)，完整 schema 见[IPC 协议参考](../../../../developer-guide/zh/cosh-ng/ipc-protocol.md)。凭据配置见 [Providers](providers.md)，工作空间和持久化设置见[配置](../configuration.md)。
+消息示例见 [Headless 模式](headless-mode.md)，完整 schema 见[IPC 协议参考](../../../../../src/cosh-ng/docs/design/zh/ipc-protocol.md)。凭据配置见 [Providers](providers.md)，工作空间和持久化设置见[配置](../configuration.md)。

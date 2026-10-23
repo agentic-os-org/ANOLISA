@@ -313,8 +313,8 @@ tokenless stats list --limit 1
 
 ### 下一步
 
-- [Python SDK](sdk.md)：通用与 AgentScope 两层及可运行示例
-- [AgentScope SDK 集成](sdk/agentscope.md)：AgentScope 1.x、2.x 与 App 挂载
+- [Python SDK](../../../developer-guide/zh/sdk/tokenless/index.md)：通用与 AgentScope 两层及可运行示例
+- [AgentScope SDK 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md)：AgentScope 1.x、2.x 与 App 挂载
 - [Agent 集成](framework-integration.md)：产品 Adapter 激活
 - [能力与边界](#能力与边界)：运行行为和适用范围
 - [CLI 参考](cli-reference.md)：全部子命令和参数
@@ -351,7 +351,7 @@ python3 -m venv /tmp/tokenless-python
 Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、可直接调用的
 `TokenlessRuntime` 操作和 typed `TokenlessStats` 查询；相同版本的
 `anolisa-tokenless-agentscope` 包把该通用生命周期映射到 AgentScope。两层结构、可运行示例与
-配置见 [Python SDK 指南](sdk.md)。
+配置见 [Python SDK 指南](../../../developer-guide/zh/sdk/tokenless/index.md)。
 
 ## 能力与边界
 
@@ -444,7 +444,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 - OpenClaw Plugin 读取同一份 `tool_categories.json` 分类，把工具映射为内容来源（文件内容、命令输出或 API 响应），该文件缺失或无效时回退到内置列表，再由 Core 套用对应阈值；它原有的 `skip_tools`、`shell_tools` 覆盖项已删除，不再控制 Adapter。当前选项见[配置与数据隐私](configuration-and-privacy.md)。
 - TOON 编码是独立的触发判断：只对至少 500 字符的负载、且宿主槽位接受文本时运行，并且只有编码结果比当前内容更小时才会采用。
 - Git Diff 上下文裁剪是独立的可选判断，默认关闭：在 Agent 进程环境设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`（或 SDK 的 `diff_compression_enabled` 选项）后，槽位接受文本时 Core 才会裁剪命令输出中 Git Diff 的未变更上下文；每条变更行都保留，完整原始输出写入 Stash 并附取回提示，计入该包装文本后净节省不足 16 个估算 Token 的候选会被拒绝。
-- Python SDK 与 AgentScope 层不通过 Python 配置设置上述阈值：压缩阈值、内容检测和 TOON 选择都是 Core 行为；直接调用 `TokenlessRuntime.compress_response` 时仍可按次覆盖截断参数。详见 [Python SDK](sdk.md) 与 [AgentScope 集成](sdk/agentscope.md)文档。
+- Python SDK 与 AgentScope 层不通过 Python 配置设置上述阈值：压缩阈值、内容检测和 TOON 选择都是 Core 行为；直接调用 `TokenlessRuntime.compress_response` 时仍可按次覆盖截断参数。详见 [Python SDK](../../../developer-guide/zh/sdk/tokenless/index.md) 与 [AgentScope 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md)文档。
 
 ### 控制搜索路径共享
 
@@ -567,8 +567,8 @@ JSON 响应压缩保留诊断类名称的字段、`null` 和空值。Stash 并�
 | 第一次安装并验证 | [快速开始](index.md) |
 | 使用 npm、curl 或 Skill 安装 | [快速开始 · 安装 Tokenless](index.md#安装-tokenless) |
 | 从源码构建独立 CLI | [本页 · 从源码构建独立 CLI](#从源码构建独立-cli) |
-| 使用进程内 Python SDK | [Python SDK](sdk.md) |
-| 集成 AgentScope | [AgentScope SDK 集成](sdk/agentscope.md) |
+| 使用进程内 Python SDK | [Python SDK](../../../developer-guide/zh/sdk/tokenless/index.md) |
+| 集成 AgentScope | [AgentScope SDK 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md) |
 | 接入 Agent 产品 | [Agent 集成](framework-integration.md) |
 | 手动压缩或取回 | [CLI 参考](cli-reference.md) |
 | 了解压缩何时触发、阈值多大 | [本页 · 压缩的触发条件与阈值](#压缩的触发条件与阈值) |

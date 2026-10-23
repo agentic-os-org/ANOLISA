@@ -11,7 +11,7 @@ The framework continues to manage its interface, model account and permissions.
 | Task | Guide |
 | --- | --- |
 | Install AW and start your first Qoder session | [Installation and first run](installation.md) |
-| Compile on your own Linux machine | [Build AW from source](../../../developer-guide/en/aw/building.md) |
+| Compile on your own Linux machine | [Build AW from source](../../../../contribute/en/aw/building.md) |
 | Choose an Agent, add rules or edit configuration | [Configuration and Agent launch](configuration.md) |
 | Reduce the context used by tool results | [Use Tokenless](tokenless.md) |
 | Check commands before execution | [Use sec-core](security.md) |
@@ -47,4 +47,4 @@ corresponding Provider or all-in-one, then enable it in configuration.
 
 AW can observe or block calls before tools execute and compress supported text results afterwards.
 Native permission checks remain in effect. Current Hook checks do not provide an OS sandbox.
-For custom components and SDK applications, see the [developer guide](../../../developer-guide/en/aw/README.md).
+For custom components and SDK applications, see the [developer guide](../../../developer-guide/en/aw/index.md).

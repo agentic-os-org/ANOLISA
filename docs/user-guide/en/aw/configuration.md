@@ -50,7 +50,7 @@ Successful validation prints `configuration valid`. It checks fields and referen
 program availability is checked at launch. Write actual absolute paths in YAML;
 AW does not expand variables such as `$HOME`.
 For all editor commands and a custom rule example, see the
-[configuration tool reference](../../../developer-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration).
+[configuration tool reference](packages.md#edit-existing-provider-and-hook-configuration).
 
 ## Compare policy edits
 

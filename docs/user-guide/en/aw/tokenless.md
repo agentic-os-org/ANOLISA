@@ -39,7 +39,7 @@ aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 For OpenClaw, use its [Agent arguments](configuration.md#openclaw). To also check safety,
 install and start [sec-core](security.md) and select
 `--provider sec-core+tokenless --socket /run/agent-sec-core/daemon.sock`. Use the socket path of your running backend.
-For other frameworks and SDKs, see the [integration reference](../../../developer-guide/en/aw/tokenless.md).
+For other frameworks and SDKs, see the [integration reference](../../../developer-guide/en/aw/providers/tokenless.md).
 
 ## Runtime behavior
 
@@ -63,7 +63,7 @@ aw inspect --config "$AW_HOME/tokenless.yaml" --json
 Check the Tokenless card and recent step records. `no_data` means no statistics are available;
 `unsupported` means the configuration has no queryable metrics. On errors, check the Provider
 and data directory first. Newly generated Tokenless configuration includes query settings;
-for older files, see the [query reference](../../../developer-guide/en/aw/tokenless.md#read-only-panel-queries).
+for older files, see the [query reference](../../../developer-guide/en/aw/providers/tokenless.md#read-only-panel-queries).
 
 Tokenless statistics identify their source using the Agent name configured in AW,
 the name selected by `aw run --agent`. For example, `qoder-work` and `qoder-test`

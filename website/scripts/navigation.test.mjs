@@ -3,7 +3,10 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {insertNavigation, loadNavigation, userGuideSidebar} from './navigation.mjs';
+import {
+  documentSidebar, footerLinks, insertNavigation, loadNavigation, navbarItems,
+  navigationTranslations, userGuideSidebar, websiteSidebars,
+} from './navigation.mjs';
 import {loadDocumentRedirects, publicDocumentPath} from './document-routes.mjs';
 import redirectPlugin from '../plugins/document-redirects.mjs';
 
@@ -65,6 +68,68 @@ test('regrouping components changes navigation without changing document routes 
   assert.ok(insertNavigation(source, regrouped, 'en')
     .includes('[AW](aw/index.md): Use shared Agent capabilities.'));
   assert.ok(!output.includes('old snapshot'));
+});
+
+test('website navigation separates SDK, AW integration, and contributions using stable routes', async () => {
+  const navigation = await loadNavigation();
+  const navbar = navbarItems(navigation);
+  const developer = navbar.find((item) => item.label === 'Developer Guide');
+  assert.deepEqual(developer.items.map(({label, to}) => ({label, to})), [
+    {label: 'SDK', to: '/docs/developer-guide/sdk/'},
+    {label: 'AW Integration', to: '/docs/developer-guide/aw/'},
+  ]);
+  assert.equal(navbar.find((item) => item.label === 'Contribute').to, '/docs/contribute/');
+  const sidebars = websiteSidebars(navigation);
+  assert.deepEqual(sidebars.sdkGuide[0].link,
+    {type: 'generated-index', slug: '/developer-guide/sdk', title: 'SDK'});
+  assert.equal(sidebars.sdkGuide[0].items[0].link.id, 'developer-guide/sdk/tokenless/index');
+  assert.equal(sidebars.sdkGuide[0].items[0].items[0].id, 'developer-guide/sdk/tokenless/agentscope');
+  assert.equal(sidebars.contributeGuide[0].id, 'contribute/index');
+  assert.deepEqual(sidebars.contributeGuide.slice(1).map((item) => item.label), ['AW', 'cosh-ng', 'ws-ckpt']);
+  assert.equal(sidebars.contributeGuide[1].link.id, 'contribute/aw/index');
+  assert.equal(sidebars.contributeGuide[2].link.id, 'contribute/cosh-ng/index');
+  assert.equal(documentSidebar(navigation, 'developer-guide/sdk/tokenless/index.md'), 'sdkGuide');
+  assert.equal(documentSidebar(navigation, 'developer-guide/aw/providers/protocol.md'), 'awGuide');
+  assert.equal(documentSidebar(navigation, 'contribute/aw/index.md'), 'contributeGuide');
+  assert.equal(documentSidebar(navigation, 'developer-guide/index.md'), 'developerGuide');
+  assert.equal(documentSidebar(navigation, 'user-guide/aw/index.md'), 'userGuide');
+  assert.ok(footerLinks(navigation).some((group) =>
+    group.items.some((item) => item.to === '/docs/developer-guide/')));
+});
+
+test('bilingual navigation and generated sidebar titles come from the same configuration', async () => {
+  const navigation = await loadNavigation();
+  const translated = navigationTranslations(navigation);
+  assert.equal(navbarItems(navigation, 'zh').find((item) => item.label === '开发者指南').items[1].label, 'AW 接入');
+  assert.equal(translated.navbar['item.label.Contribute'].message, '贡献者指南');
+  assert.equal(translated.footer['link.item.label.AW Integration'].message, 'AW 接入');
+  assert.equal(translated.sidebar['sidebar.contributeGuide.doc.overview'].message, '通用贡献指南');
+  assert.equal(translated.sidebar['sidebar.sdkGuide.category.sdk.link.generated-index.title'].message, 'SDK');
+  assert.equal(translated.sidebar['sidebar.awGuide.category.providers'].message, 'Provider 开发与接入');
+  navigation.website.navbar[1].items[1].label.zh = 'AW 开发接入';
+  assert.equal(navigationTranslations(navigation).navbar['item.label.AW Integration'].message, 'AW 开发接入');
+  assert.equal(navbarItems(navigation, 'zh')[1].items[1].label, 'AW 开发接入');
+  assert.deepEqual(websiteSidebars({}), {});
+  assert.equal(documentSidebar({}, 'developer-guide/index.md'), undefined);
+});
+
+test('website configuration rejects ambiguous routes and documents assigned to multiple sidebars', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-navigation-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  await mkdir(path.join(root, 'docs'), {recursive: true});
+  const navigation = await loadNavigation();
+  navigation.groups = [];
+  const save = () => writeFile(path.join(root, 'docs/navigation.yaml'), JSON.stringify(navigation));
+  await save();
+  await loadNavigation(root);
+  navigation.website.navbar[0].to = '/docs/../user-guide/';
+  await save();
+  await assert.rejects(loadNavigation(root), /needs one absolute route or HTTPS URL/);
+  navigation.website.navbar[0].to = '/docs/user-guide/';
+  navigation.website.sidebars.developerGuide.push({id: 'duplicate', label: {en: 'SDK', zh: 'SDK'},
+    doc: 'developer-guide/sdk/tokenless/index'});
+  await save();
+  await assert.rejects(loadNavigation(root), /duplicate sidebar document developer-guide\/sdk\/tokenless\/index/);
 });
 
 test('old routes redirect directly to flat destinations with locale, prefix, and fragments', async (t) => {

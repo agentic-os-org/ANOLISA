@@ -4,7 +4,7 @@
 
 Tokenless connects to Agent products through plugins, hooks, and extensions. This guide covers
 product adapters. The Python SDK and its AgentScope-specific child document live under
-[Python SDK](sdk.md).
+[Python SDK](../../../developer-guide/en/sdk/tokenless/index.md).
 
 ## Agent adapter support matrix
 
@@ -539,7 +539,7 @@ A running QwenPaw hot-loads the plugin; otherwise start QwenPaw. Schema compress
 
 AgentScope is the second Python SDK layer, not a product adapter. Its complete build, version,
 attachment, configuration, and validation guidance now lives in
-[AgentScope SDK integration](sdk/agentscope.md). This heading remains as a compatibility pointer for
+[AgentScope SDK integration](../../../developer-guide/en/sdk/tokenless/agentscope.md). This heading remains as a compatibility pointer for
 existing links.
 
 ## Verify an Agent adapter
@@ -558,8 +558,8 @@ Then execute a tool task with visible output in the target agent. If `stats list
 ## Related documents
 
 - [Quick Start](index.md)
-- [Python SDK](sdk.md)
-- [AgentScope SDK integration](sdk/agentscope.md)
+- [Python SDK](../../../developer-guide/en/sdk/tokenless/index.md)
+- [AgentScope SDK integration](../../../developer-guide/en/sdk/tokenless/agentscope.md)
 - [Measuring savings](measuring-savings.md)
 - [Configuration and data privacy](configuration-and-privacy.md)
 - [Troubleshooting](troubleshooting.md)

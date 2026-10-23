@@ -12,7 +12,7 @@ AW 当前使用 Preview 包，尚未接入 ANOLISA CLI 或 RPM。
 下载 `aw-preview-linux-x86_64-…` artifact，解压 ZIP 后得到安装包和 `SHA256SUMS`。
 CI 包面向 Linux x86_64，要求 glibc 2.39 或更新版本，例如 Ubuntu 24.04。
 
-需要自行编译或使用 Linux aarch64 时，按[源码构建](../../../developer-guide/zh/aw/building.md)
+需要自行编译或使用 Linux aarch64 时，按[源码构建](../../../../contribute/zh/aw/building.md)
 生成安装包，再继续本页。构建过程需要联网下载依赖。
 
 | 安装包 | 内容 |

@@ -36,4 +36,4 @@ Preview 按同一批构建交付，安装时校验 core 与 Provider 的版本�
 现有打包器支持 core、sec-core 和 Tokenless。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。
 
-协议、示例和验证入口见 [Provider 开发与分发](../docs/developer-guide/zh/aw/providers.md)。
+协议、示例和验证入口见 [Provider 开发与分发](../docs/developer-guide/zh/aw/providers/index.md)。

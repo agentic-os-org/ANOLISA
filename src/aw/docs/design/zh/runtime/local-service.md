@@ -2,7 +2,7 @@
 
 [English](../../en/runtime/local-service.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw-service` 通过独立 Linux 进程和可复用的同步 Rust 客户端提供 Provider 执行
 能力。一个服务持有一份不可变的 AW 配置快照，管理绑定和事件，并持久保存执行

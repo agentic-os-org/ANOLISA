@@ -1,4 +1,4 @@
-import {copyFile, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
+import {copyFile, mkdir, readFile, rm, stat, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {
   exists,
@@ -11,7 +11,8 @@ import {
   websiteDir,
 } from './lib.mjs';
 import {
-  insertNavigation, itemPath, loadNavigation, navigationEnd, navigationStart, userGuideSidebar,
+  documentSidebar, footerLinks, insertNavigation, itemPath, loadNavigation, navbarItems,
+  navigationEnd, navigationStart, navigationTranslations, userGuideSidebar, websiteSidebars,
 } from './navigation.mjs';
 import {publicDocumentPath} from './document-routes.mjs';
 
@@ -37,14 +38,33 @@ const navigation = await loadNavigation();
 
 async function sourceDocuments(locale) {
   const documents = [];
-  for (const section of ['user-guide', 'developer-guide']) {
-    const root = path.join(repoRoot, 'docs', section, locale);
+  const sections = [
+    ['user-guide', path.join(repoRoot, 'docs/user-guide', locale)],
+    ['developer-guide', path.join(repoRoot, 'docs/developer-guide', locale)],
+    ['contribute', path.join(repoRoot, 'contribute', locale)],
+  ];
+  for (const [section, root] of sections) {
+    if (!(await exists(root))) continue;
     for (const file of await walkFiles(root, (candidate) => candidate.endsWith('.md'))) {
       documents.push({
         source: toPosix(path.relative(repoRoot, file)),
         target: path.posix.join(section, normalizedTarget(path.relative(root, file))),
       });
     }
+  }
+  const suffix = locale === 'zh' ? '_zh' : '';
+  for (const [directory, target] of [
+    ['', 'contribute/index.md'],
+    ['src/aw', 'contribute/aw/index.md'],
+    ['src/cosh-ng', 'contribute/cosh-ng/index.md'],
+  ]) {
+    const source = path.posix.join(directory, `CONTRIBUTING${suffix}.md`);
+    if (await exists(path.join(repoRoot, source))) documents.push({source, target});
+  }
+  const targets = new Set();
+  for (const {target} of documents) {
+    if (targets.has(target)) throw new Error(`Multiple source documents publish to ${target}`);
+    targets.add(target);
   }
   return documents;
 }
@@ -63,7 +83,11 @@ function knownAlias(source, unresolvedPath) {
   const locale = source.includes('/zh/') || source.endsWith('_zh.md') ? 'zh' : 'en';
   if (unresolvedPath.includes('/user-entrypoint/developers/')) {
     const basename = path.posix.basename(unresolvedPath);
-    if (source.includes('/cosh-ng/')) return `docs/developer-guide/${locale}/cosh-ng/${basename}`;
+    if (source.includes('/cosh-ng/')) {
+      const section = ['architecture.md', 'ipc-protocol.md', 'security-heuristics.md'].includes(basename)
+        ? `src/cosh-ng/docs/design/${locale}` : `contribute/${locale}/cosh-ng`;
+      return `${section}/${basename}`;
+    }
   }
   return undefined;
 }
@@ -94,9 +118,8 @@ async function rewriteLinks(markdown, source) {
       continue;
     }
 
-    if (!targetWithoutHash.endsWith('.md')) continue;
-
     let resolved = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
+    if (resolved === '..' || resolved.startsWith('../')) continue;
     if (!(await exists(path.join(repoRoot, resolved)))) {
       resolved = knownAlias(source, resolved) || resolved;
     }
@@ -112,7 +135,8 @@ async function rewriteLinks(markdown, source) {
         replacement = new URL(`${baseUrl}${replacement.replace(/^\//, '')}`, siteUrl).toString();
       }
     } else if (await exists(path.join(repoRoot, resolved))) {
-      replacement = `${repository}/blob/main/${resolved}${hash ? `#${hash}` : ''}`;
+      const kind = (await stat(path.join(repoRoot, resolved))).isDirectory() ? 'tree' : 'blob';
+      replacement = `${repository}/${kind}/main/${resolved}${hash ? `#${hash}` : ''}`;
     }
     if (replacement) {
       replacements.push({start: match.index, end: match.index + match[0].length, value: `${match[1]}[${match[2]}](${replacement})`});
@@ -187,6 +211,12 @@ function preserveLegacyQuickstartId(markdown, target) {
 }
 
 function sidebarLabel(document, title, locale) {
+  const id = document.target.replace(/\.md$/, '');
+  const entries = Object.values(navigation.website?.sidebars ?? {}).flat();
+  for (const entry of entries) {
+    if (entry.doc === id) return entry.label[locale];
+    if (entry.items) entries.push(...entry.items);
+  }
   const item = navigation.groups.flatMap((group) => group.items)
     .concat(navigation.reports ?? [])
     .find((entry) => `user-guide/${itemPath(entry)}` === document.target);
@@ -223,8 +253,8 @@ function frontMatter(document, markdown, locale) {
   const position = document.position ?? documentPositions[document.target];
   if (position) fields.push(`sidebar_position: ${position}`);
   if (document.target.endsWith('/index.md')) fields.push('sidebar_position: 1');
-  if (document.target.startsWith('user-guide/')) fields.push('displayed_sidebar: userGuide');
-  if (document.target === 'developer-guide/index.md') fields.push('displayed_sidebar: developerGuide');
+  const sidebar = documentSidebar(navigation, document.target);
+  if (sidebar) fields.push(`displayed_sidebar: ${sidebar}`);
   fields.push('---', '');
   return fields.join('\n');
 }
@@ -236,16 +266,26 @@ const categoryNames = {
     cli: 'CLI', core: '核心', shell: 'Shell', hooks: 'Hooks' },
 };
 const categoryPathNames = {
-  en: {'developer-guide/aw': 'AW', 'developer-guide/cosh-ng': 'cosh-ng',
-    'user-guide/cosh-ng/shell': 'Terminal', 'user-guide/cosh-ng/core': 'Automation and Integration',
+  en: {'user-guide/cosh-ng/shell': 'Terminal', 'user-guide/cosh-ng/core': 'Automation and Integration',
     'user-guide/cosh-ng/cli': 'System Operations'},
-  zh: {'developer-guide/aw': 'AW', 'developer-guide/cosh-ng': 'cosh-ng',
-    'user-guide/cosh-ng/shell': '终端', 'user-guide/cosh-ng/core': '自动化与集成',
+  zh: {'user-guide/cosh-ng/shell': '终端', 'user-guide/cosh-ng/core': '自动化与集成',
     'user-guide/cosh-ng/cli': '系统操作'},
 };
+function websiteCategoryNames(items, locale) {
+  for (const item of items) {
+    const directory = item.generated?.replace(/^\//, '')
+      ?? (item.doc?.endsWith('/index') ? item.doc.slice(0, -'/index'.length) : undefined)
+      ?? (item.items?.[0]?.doc ? path.posix.dirname(item.items[0].doc) : undefined);
+    if (directory) categoryPathNames[locale][directory] = item.label[locale];
+    if (item.items) websiteCategoryNames(item.items, locale);
+  }
+}
 for (const locale of ['en', 'zh']) {
   for (const item of navigation.groups.flatMap((group) => group.items)) {
     if (item.component) categoryPathNames[locale][`user-guide/${item.component}`] = item.label[locale];
+  }
+  for (const items of Object.values(navigation.website?.sidebars ?? {})) {
+    websiteCategoryNames(items, locale);
   }
 }
 const categoryPositions = {
@@ -261,16 +301,20 @@ const documentPositions = {
   'user-guide/aw/security.md': 5,
   'user-guide/aw/observability.md': 6,
   'user-guide/aw/operations.md': 7,
-  'developer-guide/aw/architecture.md': 2,
-  'developer-guide/aw/building.md': 3,
-  'developer-guide/aw/providers.md': 4,
-  'developer-guide/aw/integration.md': 5,
+  'user-guide/aw/packages.md': 8,
+  'developer-guide/aw/integration.md': 2,
+  'developer-guide/aw/native-agents.md': 3,
+  'developer-guide/aw/agentsight.md': 5,
   'developer-guide/aw/configuration.md': 6,
-  'developer-guide/aw/native-agents.md': 7,
-  'developer-guide/aw/packages.md': 8,
-  'developer-guide/aw/tokenless.md': 9,
-  'developer-guide/aw/sec-core.md': 10,
-  'developer-guide/aw/agentsight.md': 11,
+  'developer-guide/aw/providers/protocol.md': 2,
+  'developer-guide/aw/providers/views.md': 3,
+  'developer-guide/aw/providers/sec-core.md': 4,
+  'developer-guide/aw/providers/tokenless.md': 5,
+  'contribute/aw/building.md': 2,
+  'contribute/cosh-ng/getting-started.md': 2,
+  'contribute/cosh-ng/adding-commands.md': 3,
+  'contribute/cosh-ng/adding-distros.md': 4,
+  'contribute/cosh-ng/testing.md': 5,
   'user-guide/cosh-ng/mcp.md': 4,
   'user-guide/cosh-ng/configuration.md': 7,
   'user-guide/cosh-ng/supported-distros.md': 8,
@@ -338,6 +382,12 @@ await prepareLocale(chineseDocuments, i18nOutput, 'zh');
 
 await writeFile(path.join(generatedDir, 'user-guide-sidebar.json'),
   `${JSON.stringify(userGuideSidebar(navigation, englishDocuments), null, 2)}\n`);
+await writeFile(path.join(generatedDir, 'guide-sidebars.json'),
+  `${JSON.stringify(websiteSidebars(navigation), null, 2)}\n`);
+await writeFile(path.join(generatedDir, 'navbar-items.json'),
+  `${JSON.stringify(navbarItems(navigation), null, 2)}\n`);
+await writeFile(path.join(generatedDir, 'footer-links.json'),
+  `${JSON.stringify(footerLinks(navigation), null, 2)}\n`);
 
 await rm(path.join(staticOutput, 'docs'), {recursive: true, force: true});
 await rm(path.join(staticOutput, 'zh', 'docs'), {recursive: true, force: true});
@@ -349,6 +399,7 @@ for (const image of referencedImages) {
 }
 
 const translationRoot = path.join(generatedDir, 'i18n', 'zh');
+const websiteTranslations = navigationTranslations(navigation);
 const docsTranslationRoot = path.join(translationRoot, 'docusaurus-plugin-content-docs');
 await mkdir(docsTranslationRoot, {recursive: true});
 await writeFile(
@@ -372,10 +423,7 @@ await writeFile(
             message: label, description: `User guide category ${category}`,
           },
         ])),
-      'sidebar.developerGuide.category.Cosh-ng': {
-        message: 'cosh-ng',
-        description: "The label for category 'Cosh-ng' in sidebar 'developerGuide'",
-      },
+      ...websiteTranslations.sidebar,
     },
     null,
     2,
@@ -388,11 +436,7 @@ await writeFile(
   `${JSON.stringify(
     {
       title: {message: 'ANOLISA', description: 'The title in the navbar'},
-      'item.label.User Guide': {message: '用户指南', description: 'Navbar item with label User Guide'},
-      'item.label.Developer Guide': {message: '开发者指南', description: 'Navbar item with label Developer Guide'},
-      'item.label.Changelog': {message: '变更日志', description: 'Navbar item with label Changelog'},
-      'item.label.For Agents': {message: 'Agent 入口', description: 'Navbar item with label For Agents'},
-      'item.label.GitHub': {message: 'GitHub', description: 'Navbar item with label GitHub'},
+      ...websiteTranslations.navbar,
     },
     null,
     2,
@@ -402,19 +446,7 @@ await writeFile(
   path.join(themeTranslationRoot, 'footer.json'),
   `${JSON.stringify(
     {
-      'link.title.Docs': {message: '文档', description: 'Footer column title'},
-      'link.title.Guides': {message: '指南', description: 'Footer column title'},
-      'link.title.Community': {message: '社区', description: 'Footer column title'},
-      'link.item.label.Documentation': {message: '文档首页', description: 'Footer link label'},
-      'link.item.label.Quickstart': {message: '快速开始', description: 'Footer link label'},
-      'link.item.label.Building': {message: '源码构建', description: 'Footer link label'},
-      'link.item.label.Changelog': {message: '变更日志', description: 'Footer link label'},
-      'link.item.label.User Guide': {message: '用户指南', description: 'Footer link label'},
-      'link.item.label.Developer Guide': {message: '开发者指南', description: 'Footer link label'},
-      'link.item.label.For Agents': {message: 'Agent 入口', description: 'Footer link label'},
-      'link.item.label.GitHub': {message: 'GitHub', description: 'Footer link label'},
-      'link.item.label.Contributing': {message: '参与贡献', description: 'Footer link label'},
-      'link.item.label.Security': {message: '安全', description: 'Footer link label'},
+      ...websiteTranslations.footer,
       copyright: {message: `Copyright © ${new Date().getFullYear()} ANOLISA 贡献者。Apache-2.0。`, description: 'Footer copyright'},
     },
     null,

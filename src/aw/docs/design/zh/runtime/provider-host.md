@@ -2,7 +2,7 @@
 
 [English](../../en/runtime/provider-host.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw-host` 将已校验的配置和 `aw-provider/v1alpha1` 协议接到 Linux 命令执行层。
 它执行真实的 Provider 进程，返回已检查的候选效果与可关联的调用报告。
@@ -55,7 +55,7 @@ Agent 已采用策略。准入范围仍为：
 | `tool.after` | `observe`, `replace_result` | `report` |
 
 启用但不受支持的事件、精确工具选择器、guard、`ask`、输入替换效果及超出
-`native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../providers/provider-protocol.md)。
+`native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../../../../../../docs/developer-guide/zh/aw/providers/protocol.md)。
 
 ## Adapter 执行语义
 

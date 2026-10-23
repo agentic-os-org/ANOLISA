@@ -2,7 +2,7 @@
 
 [中文版](../../zh/runtime/provider-host.md)
 
-[Design index](../README.md) · [Architecture](../../../../../../docs/developer-guide/en/aw/architecture.md)
+[Design index](../README.md) · [Architecture](../architecture.md)
 
 `aw-host` connects validated configuration and the `aw-provider/v1alpha1`
 protocol to Linux command execution. It executes real Provider processes and
@@ -65,7 +65,7 @@ adopted a policy. The admitted surface remains:
 
 Enabled unsupported events, exact tool selectors, guards, `ask`, input-replacement
 effects and guarantees beyond `native_hook` are rejected. The
-[protocol design](../providers/provider-protocol.md) defines the complete admission contract.
+[protocol design](../../../../../../docs/developer-guide/en/aw/providers/protocol.md) defines the complete admission contract.
 
 ## Adapter execution semantics
 

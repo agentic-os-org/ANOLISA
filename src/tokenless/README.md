@@ -285,9 +285,9 @@ where its native wheel was built. It exposes the four Tokenless lifecycle
 methods and bundles the matching RTK executable; TOON is linked into the native
 runtime. It does not require the Tokenless CLI or system helper binaries. The
 package is built and tested in this repository but is not yet published to
-PyPI. See the [Python SDK guide](../../docs/user-guide/en/tokenless/sdk.md) for
+PyPI. See the [Python SDK guide](../../docs/developer-guide/en/sdk/tokenless/index.md) for
 runnable lifecycle and Stats examples, the
-[AgentScope SDK integration](../../docs/user-guide/en/tokenless/sdk/agentscope.md) for
+[AgentScope SDK integration](../../docs/developer-guide/en/sdk/tokenless/agentscope.md) for
 AgentScope attachment, the
 [Agent integration guide](../../docs/user-guide/en/tokenless/framework-integration.md)
 for product adapters, and the [runtime design](docs/design/runtime-library.md) for internal contracts.

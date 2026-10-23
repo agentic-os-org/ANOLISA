@@ -85,4 +85,4 @@ failures also include `session_error_code` and `session_error_phase`. Invalid
 JSONL input produces an error result and exits with a non-zero status. Keep
 stdout reserved for protocol messages; diagnostics are logged separately.
 
-For the complete schema, see the developer [IPC protocol reference](../../../../developer-guide/en/cosh-ng/ipc-protocol.md).
+For the complete schema, see the developer [IPC protocol reference](../../../../../src/cosh-ng/docs/design/en/ipc-protocol.md).

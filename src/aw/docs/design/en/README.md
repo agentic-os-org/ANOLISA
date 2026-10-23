@@ -2,7 +2,7 @@
 
 [中文版](../zh/README.md)
 
-Start with the [architecture overview](../../../../../docs/developer-guide/en/aw/architecture.md)
+Start with the [architecture overview](architecture.md)
 for crate dependencies and source entry points. The current Hook path is:
 
 Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
@@ -36,7 +36,7 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | [Adapter dispatch](adapters/adapter-dispatch.md) | The CLI registers native callbacks, normalizes events, and adopts effects |
 | [Local service](runtime/local-service.md) | `aw-service` manages bindings, events, and audit; dispatches steps to Host |
 | [Provider Host](runtime/provider-host.md) | `aw-host` prepares Providers and invokes admitted steps |
-| [Provider protocol](providers/provider-protocol.md) | `aw-provider` validates request/reply messages and capabilities |
+| [Provider protocol](../../../../../docs/developer-guide/en/aw/providers/protocol.md) | `aw-provider` validates request/reply messages and capabilities |
 | [Bounded execution](runtime/bounded-execution.md) | `aw-exec` owns command transport and process cleanup |
 
 ## Choose an integration
@@ -44,12 +44,12 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | Integration | Design |
 | --- | --- |
 | Native Agent callbacks | [AgentScope](adapters/agentscope-adapter.md), [Claude SDK](adapters/claude-sdk-adapter.md), [Hermes](adapters/hermes-adapter.md), [OpenClaw](adapters/openclaw-adapter.md), [Pi](adapters/pi-adapter.md), [QwenPaw](adapters/qwenpaw-adapter.md); Qoder is covered by [Adapter dispatch](adapters/adapter-dispatch.md) and [Local service](runtime/local-service.md) |
-| Independent Provider development and contribution | [Shared directory](../../../../../providers/README.md) and [distribution guide](../../../../../docs/developer-guide/en/aw/providers.md) |
+| Independent Provider development and contribution | [Shared directory](../../../../../providers/README.md) and [distribution guide](../../../../../docs/developer-guide/en/aw/providers/index.md) |
 | Security Provider and backend readiness | [sec-core Provider](providers/sec-core/sec-core-provider.md), then [sec-core health](providers/sec-core/sec-core-health.md) |
-| Tokenless Provider | [Integration reference](../../../../../docs/developer-guide/en/aw/tokenless.md) |
-| Packaging and configuration editing | [Build guide](../../../../../docs/developer-guide/en/aw/building.md), then [Configuration editing](configuration/configuration-editing.md) |
+| Tokenless Provider | [Integration reference](../../../../../docs/developer-guide/en/aw/providers/tokenless.md) |
+| Packaging and configuration editing | [Build guide](../../../../../contribute/en/aw/building.md), then [Configuration editing](configuration/configuration-editing.md) |
 | Local package database, preview, removal and crash recovery | [Local package management](packaging/package-management.md) |
-| Read-only inspection | [Provider views](providers/provider-views.md); independent of Hook admission |
+| Read-only inspection | [Provider views](../../../../../docs/developer-guide/en/aw/providers/views.md); independent of Hook admission |
 
 ## Audit, evidence, and capability plans
 

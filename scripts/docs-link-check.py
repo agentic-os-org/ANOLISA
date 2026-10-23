@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Relative markdown link checker for the documentation tree.
 
-Scans docs/**/*.md, archived Copilot Shell docs, and README entry points,
+Scans docs/**/*.md, contribution guides, archived Copilot Shell docs, and README entry points,
 extracts relative links, and verifies each target exists in the repository.
 External URLs, mailto and pure in-page anchors are skipped.
 """
@@ -37,9 +37,11 @@ def files_to_check(root: Path) -> list[Path]:
             "--others",
             "--exclude-standard",
             "docs/**/*.md",
+            "contribute/**/*.md",
             ":(glob)docs/*.md",
             ":(glob)*.md",
             ":(glob)src/*/README*.md",
+            ":(glob)src/*/CONTRIBUTING*.md",
             ":(glob)src/*/python/*/README*.md",
             ":(glob)deprecated/copilot-shell/README*.md",
             ":(glob)deprecated/copilot-shell/docs/**/*.md",

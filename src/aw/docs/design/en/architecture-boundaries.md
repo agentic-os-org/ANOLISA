@@ -143,6 +143,6 @@ Native bridge assets keep their bytes; only references move. Real SDK/CLI and
 Tokenless/RTK acceptance remain separate integration checks; passing the daily
 gate does not certify those native boundaries.
 
-See the [architecture overview](../../../../../docs/developer-guide/en/aw/architecture.md)
+See the [architecture overview](architecture.md)
 for dependencies and source entrypoints, and [Contributing](../../../CONTRIBUTING.md)
 for native acceptance boundaries.

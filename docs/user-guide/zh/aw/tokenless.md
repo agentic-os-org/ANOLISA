@@ -38,7 +38,7 @@ aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 OpenClaw 使用[对应的 Agent 参数](configuration.md#openclaw)。需要同时检查风险时，
 安装并启动 [sec-core](security.md)，把 Provider 参数改为
 `--provider sec-core+tokenless --socket /run/agent-sec-core/daemon.sock`。将 socket 路径改成实际后端使用的路径。
-其他框架与 SDK 的接线见[集成参考](../../../developer-guide/zh/aw/tokenless.md)。
+其他框架与 SDK 的接线见[集成参考](../../../developer-guide/zh/aw/providers/tokenless.md)。
 
 ## 运行时会发生什么
 
@@ -61,7 +61,7 @@ aw inspect --config "$AW_HOME/tokenless.yaml" --json
 检查 Tokenless 卡片和最近的步骤记录。`no_data` 表示尚无统计记录，`unsupported`
 表示当前配置没有可查询的指标；出现错误时先检查 Provider 和数据目录。
 新生成的 Tokenless 配置已包含查询设置，旧配置的补充方法见
-[查询接口参考](../../../developer-guide/zh/aw/tokenless.md#panel-只读查询)。
+[查询接口参考](../../../developer-guide/zh/aw/providers/tokenless.md#panel-只读查询)。
 
 Tokenless 统计使用 AW 配置中的 Agent 名称标记来源，也就是 `aw run --agent` 后指定的名称。
 例如，`qoder-work` 和 `qoder-test` 即使都使用 Qoder，也会分别标记来源。

@@ -13,7 +13,7 @@ Download the `aw-preview-linux-x86_64-…` artifact from a
 Extract the ZIP to obtain the packages and `SHA256SUMS`. CI packages target Linux x86_64
 with glibc 2.39 or later, such as Ubuntu 24.04.
 
-To compile yourself or use Linux aarch64, follow [Build from source](../../../developer-guide/en/aw/building.md)
+To compile yourself or use Linux aarch64, follow [Build from source](../../../../contribute/en/aw/building.md)
 and then continue here. Building requires network access to download dependencies.
 
 | Package | Contents |

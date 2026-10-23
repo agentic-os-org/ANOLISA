@@ -188,14 +188,14 @@ cargo test --locked -p aw-exec --test packages
 
 通用框架位于 `crates/<name>/`，具体 Provider 位于仓库根 `providers/<provider>/`，各自构建；
 根清单只组织 workspace。[Provider 协作约定](../../providers/README_zh.md)说明如何收录和分发。
-包的职责和依赖见[架构总览](../../docs/developer-guide/zh/aw/architecture.md)，
+包的职责和依赖见[架构总览](docs/design/zh/architecture.md)，
 协议阅读顺序见[设计索引](docs/design/zh/README.md)。
 
 原生方言和桥接资产归 `aw-adapter`；`aw-cli` 负责参数、RPC、信号和资源，服务负责
 状态、预算和审计。两者共用 Adapter，不向它传递服务内部类型。
 `aw-provider` 负责离线协议校验，进程执行统一使用 `aw-exec`。
 修改 crate 边界时，同时更新 [check_layout.py](scripts/check_layout.py)
-和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](../../docs/developer-guide/zh/aw/architecture.md)。
+和[回归检查](tests/test_ci_checks.py)，并同步[架构表格](docs/design/zh/architecture.md)。
 
 ## 构建服务
 

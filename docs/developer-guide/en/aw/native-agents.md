@@ -195,7 +195,7 @@ native-plugin uninstall command.
 Retain audit evidence before deleting the demo directory, following the
 [walkthrough's cleanup](integration.md#5-verify-native-adoption-and-clean-up).
 Framework profiles remain separate. Package removal is covered by the
-[Preview guide](packages.md#6-stop-upgrade-or-uninstall).
+[Preview guide](../../../user-guide/en/aw/packages.md#6-stop-upgrade-or-uninstall).
 
 ## Build and start Qoder
 
@@ -752,7 +752,7 @@ hide files installed there during the image build; see Docker's
 | `<state_dir>/journal/` | Persist when execution history must survive container replacement; audit is enabled and metadata-only in this version |
 | Socket, locks, `launch-*` and session bindings | Runtime artifacts, not recoverable sessions; each service/Agent launch creates fresh runtime state |
 | Native profiles, credentials, conversations and workspaces | Persist according to the selected framework's requirements; these are not AW audit data |
-| sec-core backend data | Managed by sec-core independently of AW; see the [Preview backend setup](packages.md#2-optionally-install-and-start-sec-core) |
+| sec-core backend data | Managed by sec-core independently of AW; see the [Preview backend setup](../../../user-guide/en/aw/packages.md#2-optionally-install-and-start-sec-core) |
 
 AW always needs writable local state even when no history is retained across
 container replacement. For durable history, set an absolute `daemon.state_dir`

@@ -33,7 +33,7 @@ export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 
 This builds debug binaries in `src/aw/target/debug`; it installs no system
 service. For distributable release packages, use `aw-build` as described in the
-[package build instructions](building.md).
+[package build instructions](../../../../contribute/en/aw/building.md).
 Core builds independently of sec-core. Do not mix installed core and Provider
 packages from different source commits or package versions.
 
@@ -42,7 +42,7 @@ packages from different source commits or package versions.
 An initial `aw.yaml` must exist before any `aw config add-*` command.
 For an installed core with Qoder/OpenClaw, use `aw config init` to create
 it; omitting `--provider` creates an empty policy configuration. Follow the
-[initialization and editing flow](packages.md#edit-existing-provider-and-hook-configuration)
+[initialization and editing flow](../../../user-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
 for `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`.
 `aw config init` verifies an installed package prefix; source binaries alone do not
 supply it. It creates a new file and refuses to overwrite an existing one.
@@ -91,7 +91,7 @@ step. The sample requests a block when a before-tool input contains
 The [configuration reference](configuration.md) explains all fields. The
 generator `aw config init` currently creates Qoder/OpenClaw entries only;
 copying this YAML is the path for a four-framework configuration. The
-[configuration editor](packages.md#edit-existing-provider-and-hook-configuration)
+[configuration editor](../../../user-guide/en/aw/packages.md#edit-existing-provider-and-hook-configuration)
 can add/remove Providers and Hook steps; it does not edit Agent entries.
 
 ```bash
@@ -160,7 +160,7 @@ by substituting false.
 
 For a full Provider, start with the existing
 [Rust example](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs), built in
-step 1, and the [protocol reference](../../../../src/aw/docs/design/en/providers/provider-protocol.md).
+step 1, and the [protocol reference](providers/protocol.md).
 These two calls exercise its discovery and private configuration contract:
 
 ```bash

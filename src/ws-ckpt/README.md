@@ -57,7 +57,7 @@ cd src
 cargo build --release
 ```
 
-[Maintainer guide: Raw packaging and GitHub builds](../../docs/developer-guide/en/ws-ckpt/packaging.md)
+[Maintainer guide: Raw packaging and GitHub builds](../../contribute/en/ws-ckpt/packaging.md)
 
 ### Install (RPM)
 

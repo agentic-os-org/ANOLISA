@@ -9,23 +9,31 @@
 ## 目录结构
 
 ```text
-docs/
-├── README.md                    # 文档目录的组织与维护说明
-├── README_zh.md
-├── navigation.yaml              # 网站分组、顺序、中英文标签和简介
-├── user-guide/
-│   ├── en/
-│   │   ├── index.md             # 用户手册入口
-│   │   ├── getting-started/     # 共用的安装、构建、测试和排障
-│   │   │   └── quickstart.md    # 项目级的简短上手流程
-│   │   ├── aw/index.md
-│   │   ├── cosh-ng/index.md
-│   │   ├── skillfs/index.md
-│   │   └── …/index.md           # 每个组件都有自己的目录
-│   └── zh/                     # 对应的中文手册
-└── developer-guide/
-    ├── en/                     # 现有开发文档
-    └── zh/
+ANOLISA/
+├── CONTRIBUTING.md              # 通用贡献指南
+├── CONTRIBUTING_zh.md
+├── contribute/
+│   └── {en,zh}/
+│       ├── aw/building.md
+│       ├── cosh-ng/             # 组件开发和测试
+│       └── ws-ckpt/packaging.md
+└── docs/
+    ├── README.md                # 文档目录的组织与维护说明
+    ├── README_zh.md
+    ├── navigation.yaml          # 网站导航、中英文标签和简介
+    ├── user-guide/
+    │   └── {en,zh}/
+    │       ├── index.md
+    │       ├── getting-started/
+    │       │   ├── quickstart.md
+    │       │   └── …            # 共用的安装、构建、测试和排障
+    │       └── {component}/index.md
+    └── developer-guide/
+        └── {en,zh}/
+            ├── index.md
+            ├── sdk/tokenless/   # SDK 总览和 AgentScope 集成
+            └── aw/              # 框架、Provider 和观测接入
+                └── providers/
 ```
 
 用户手册中的组件目录平铺存放。每个组件的 `index.md` 介绍功能、包含首次使用步骤，
@@ -55,9 +63,14 @@ node website/scripts/navigation.mjs --write-indexes
 
 ## 其他文档放在哪里
 
-通用贡献流程放在仓库根目录的[贡献指南](../CONTRIBUTING_zh.md)中。组件开发和
-集成文档集中在 [`developer-guide/`](developer-guide/zh/README.md)。组件技术设计
+通用贡献流程放在仓库根目录的[贡献指南](../CONTRIBUTING_zh.md)中，组件开发章节
+放在根目录 [`contribute/`](../contribute/zh/)。SDK 和集成文档集中在
+[`developer-guide/`](developer-guide/zh/index.md)。组件技术设计
 随源码放在 `src/<component>/docs/` 或组件登记的源码目录中。
+
+同一份导航 YAML 也定义 SDK、AW 接入下拉菜单和贡献者指南侧栏。网站将现有根目录及
+组件内的 `CONTRIBUTING*.md` 与 `contribute/` 章节一起展示，不另写重复的贡献总览。
+SDK 目录页由网站根据配置的条目生成。
 
 已弃用组件的手册随组件保留在 `deprecated/<component>/docs/` 中，不进入当前用户
 手册和网站导航。[文档规范](../specs/documentation-standard.md)规定命名、中英文

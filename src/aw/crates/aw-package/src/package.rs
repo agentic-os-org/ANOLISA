@@ -453,8 +453,8 @@ fn stage(
                 );
             }
             text = text.replace(
-                &format!("../../../developer-guide/{language}/aw/building.md"),
-                &format!("https://agentic-os.sh{locale}/docs/developer-guide/aw/building/"),
+                &format!("../../../../contribute/{language}/aw/building.md"),
+                &format!("https://agentic-os.sh{locale}/docs/contribute/aw/building/"),
             );
             fs::write(root.join(name), text)?;
         }

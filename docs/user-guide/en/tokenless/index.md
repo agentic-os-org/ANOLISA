@@ -321,8 +321,8 @@ To build the standalone CLI from source, see [User manual · Build the standalon
 
 ### Next steps
 
-- [Python SDK](sdk.md): framework-neutral and AgentScope layers with runnable examples
-- [AgentScope SDK integration](sdk/agentscope.md): AgentScope 1.x, 2.x, and App attachment
+- [Python SDK](../../../developer-guide/en/sdk/tokenless/index.md): framework-neutral and AgentScope layers with runnable examples
+- [AgentScope SDK integration](../../../developer-guide/en/sdk/tokenless/agentscope.md): AgentScope 1.x, 2.x, and App attachment
 - [Agent integration](framework-integration.md): product adapter activation
 - [Capabilities and boundaries](#capabilities-and-boundaries): runtime behavior and limits
 - [CLI reference](cli-reference.md): all subcommands and options
@@ -361,7 +361,7 @@ was built.
 The Python SDK has two layers. The `anolisa-tokenless` package exposes the framework-neutral
 `TokenlessSdk`, direct `TokenlessRuntime` operations, and typed `TokenlessStats` queries. The
 same-version `anolisa-tokenless-agentscope` package maps that generic lifecycle to AgentScope. See
-the [Python SDK guide](sdk.md) for both layers, runnable examples, and configuration.
+the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for both layers, runnable examples, and configuration.
 
 ## Capabilities and boundaries
 
@@ -456,7 +456,7 @@ Per-path differences worth noting:
 - The OpenClaw plugin reads the same `tool_categories.json` lists to map each tool to a content origin (file content, command output, or API response), falling back to its built-in lists when that file is missing or invalid; Core then applies the matching thresholds. Its former `skip_tools` and `shell_tools` overrides have been removed and no longer control the adapter. See [Configuration and data privacy](configuration-and-privacy.md) for the current options.
 - TOON encoding is a separate trigger decision: it runs only on payloads of at least 500 characters and only when the host slot accepts text, and it is adopted only when the encoded result is smaller than the current content.
 - Git diff context cropping is a separate opt-in decision, disabled by default: with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` in the agent process environment (or the SDK's `diff_compression_enabled` option), Core crops unchanged context from command-output Git diffs when the slot accepts text; every changed line is preserved, the complete original output is stashed behind a recovery hint, and a candidate is rejected unless it saves at least 16 estimated tokens net of that wrapper text.
-- The Python SDK and AgentScope layers do not set these thresholds through Python configuration: compression thresholds, content detection, and TOON selection are Core behavior. Direct `TokenlessRuntime.compress_response` calls can still override the truncation limits per call. See the [Python SDK](sdk.md) and [AgentScope integration](sdk/agentscope.md) docs.
+- The Python SDK and AgentScope layers do not set these thresholds through Python configuration: compression thresholds, content detection, and TOON selection are Core behavior. Direct `TokenlessRuntime.compress_response` calls can still override the truncation limits per call. See the [Python SDK](../../../developer-guide/en/sdk/tokenless/index.md) and [AgentScope integration](../../../developer-guide/en/sdk/tokenless/agentscope.md) docs.
 
 ### Controlling search path sharing
 
@@ -595,8 +595,8 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Install and verify for the first time | [Quick Start](index.md) |
 | Install via npm, curl, or Skill | [Quick Start · Install Tokenless](index.md#install-tokenless) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
-| Use the in-process Python SDK | [Python SDK](sdk.md) |
-| Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
+| Use the in-process Python SDK | [Python SDK](../../../developer-guide/en/sdk/tokenless/index.md) |
+| Integrate AgentScope | [AgentScope SDK integration](../../../developer-guide/en/sdk/tokenless/agentscope.md) |
 | Connect an Agent product | [Agent integration](framework-integration.md) |
 | Compress or retrieve manually | [CLI reference](cli-reference.md) |
 | Understand when compression triggers and what the thresholds are | [This page · Compression trigger conditions and thresholds](#compression-trigger-conditions-and-thresholds) |

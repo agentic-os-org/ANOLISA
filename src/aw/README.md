@@ -114,8 +114,8 @@ capabilities in the configuration. AW does not install Agents or configure model
 | Enable command security checks | [Security checks](../../docs/user-guide/en/aw/security.md) |
 | View Agent activity | [Connect AgentSight](../../docs/user-guide/en/aw/observability.md) |
 | Inspect status, upgrade, uninstall, and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
-| Build and package on customer machines | [Build AW from source](../../docs/developer-guide/en/aw/building.md) |
-| Write rules or integrate Providers and SDKs | [AW developer guide](../../docs/developer-guide/en/aw/README.md) |
+| Build and package on customer machines | [Build AW from source](../../contribute/en/aw/building.md) |
+| Write rules or integrate Providers and SDKs | [AW developer guide](../../docs/developer-guide/en/aw/index.md) |
 
 User documentation lives in `docs/user-guide/{en,zh}/aw/` and
 integration references in `docs/developer-guide/{en,zh}/aw/`. Component protocol
@@ -167,7 +167,7 @@ flow from `aw-service` to `aw-host`, which calls Providers through `aw-exec`.
 `aw-cli` owns command parsing and presentation, calling the `aw-package` library
 for installation and configuration and `aw-service` for runtime operations.
 
-The [architecture overview](../../docs/developer-guide/en/aw/architecture.md)
+The [architecture overview](docs/design/en/architecture.md)
 explains crate ownership and runtime flow. The [design index](docs/design/en/README.md)
 organizes protocol details in call order.
 

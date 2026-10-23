@@ -54,7 +54,7 @@ approval boundary; allow-listing a tool can grant real execution authority.
 4. Send `subtype: "shutdown"` when the frontend is done.
 
 See [Headless mode](headless-mode.md) for message examples and
-[the IPC protocol reference](../../../../developer-guide/en/cosh-ng/ipc-protocol.md)
+[the IPC protocol reference](../../../../../src/cosh-ng/docs/design/en/ipc-protocol.md)
 for the complete schema. Configure credentials in [Providers](providers.md),
 and see [Configuration](../configuration.md) for workspace and persistence
 settings.

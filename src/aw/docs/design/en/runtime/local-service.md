@@ -2,7 +2,7 @@
 
 [中文版](../../zh/runtime/local-service.md)
 
-[Design index](../README.md) · [Architecture](../../../../../../docs/developer-guide/en/aw/architecture.md)
+[Design index](../README.md) · [Architecture](../architecture.md)
 
 `aw-service` exposes prepared Provider execution through a standalone Linux
 process and a reusable synchronous Rust client. One service owns one immutable

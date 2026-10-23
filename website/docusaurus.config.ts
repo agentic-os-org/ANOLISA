@@ -1,6 +1,8 @@
 import type {Config} from '@docusaurus/types';
 import type {Options, ThemeConfig} from '@docusaurus/preset-classic';
 import {themes as prismThemes} from 'prism-react-renderer';
+import {readFileSync} from 'node:fs';
+import path from 'node:path';
 
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const baseUrl = process.env.BASE_URL ?? '/';
@@ -109,55 +111,13 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
-        {to: '/docs/user-guide', label: 'User Guide', position: 'left'},
-        {to: '/docs/developer-guide', label: 'Developer Guide', position: 'left'},
-        {to: '/changelog', label: 'Changelog', position: 'left'},
-        {to: '/agents/', label: 'For Agents', position: 'left'},
-        {
-          href: 'https://github.com/agentic-os-org/ANOLISA',
-          label: 'GitHub',
-          position: 'right',
-          className: 'headerGithubLink',
-          'aria-label': 'ANOLISA GitHub repository',
-        },
+        ...JSON.parse(readFileSync(path.join(__dirname, '.generated/navbar-items.json'), 'utf8')),
         {type: 'localeDropdown', position: 'right'},
       ],
     },
     footer: {
       style: 'dark',
-      links: [
-        {
-          title: 'Docs',
-          items: [
-            {label: 'Documentation', to: '/docs'},
-            {label: 'Quickstart', to: '/docs/user-guide/getting-started/quickstart/'},
-            {label: 'Building', to: '/docs/user-guide/getting-started/building/'},
-            {label: 'Changelog', to: '/changelog'},
-            {label: 'For Agents', to: '/agents/'},
-          ],
-        },
-        {
-          title: 'Guides',
-          items: [
-            {label: 'User Guide', to: '/docs/user-guide'},
-            {label: 'Developer Guide', to: '/docs/developer-guide'},
-          ],
-        },
-        {
-          title: 'Community',
-          items: [
-            {label: 'GitHub', href: 'https://github.com/agentic-os-org/ANOLISA'},
-            {
-              label: 'Contributing',
-              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md',
-            },
-            {
-              label: 'Security',
-              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md',
-            },
-          ],
-        },
-      ],
+      links: JSON.parse(readFileSync(path.join(__dirname, '.generated/footer-links.json'), 'utf8')),
       copyright: `Copyright © ${new Date().getFullYear()} ANOLISA contributors. Apache-2.0.`,
     },
     prism: {

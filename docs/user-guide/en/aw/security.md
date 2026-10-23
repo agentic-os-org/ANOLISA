@@ -96,5 +96,5 @@ Stop the foreground trial backend with Ctrl-C; shared system services remain man
 Uninstalling AW preserves external backend configuration and data.
 
 For other tools or observation without blocking, see
-[tool mappings and scan modes](../../../developer-guide/en/aw/sec-core.md#configure-a-provider).
+[tool mappings and scan modes](../../../developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
 Unmapped tools produce observation records without being scanned.

@@ -97,8 +97,8 @@ core 可独立使用。Tokenless 包自带 RTK 和 TOON 编码，安全检查需
 | 启用命令安全检查 | [安全检查](../../docs/user-guide/zh/aw/security.md) |
 | 查看 Agent 运行记录 | [接入 AgentSight](../../docs/user-guide/zh/aw/observability.md) |
 | 查询状态、升级、卸载和排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
-| 客户本地编译和打包 | [从源码构建 AW](../../docs/developer-guide/zh/aw/building.md) |
-| 编写规则、集成 Provider 或 SDK | [AW 开发指南](../../docs/developer-guide/zh/aw/README.md) |
+| 客户本地编译和打包 | [从源码构建 AW](../../contribute/zh/aw/building.md) |
+| 编写规则、集成 Provider 或 SDK | [AW 开发指南](../../docs/developer-guide/zh/aw/index.md) |
 
 用户手册集中在 `docs/user-guide/{en,zh}/aw/`，接入参考在
 `docs/developer-guide/{en,zh}/aw/`。组件协议设计保留在本目录的 `docs/design/`。
@@ -145,7 +145,7 @@ Hook 请求由 `aw-service` 交给 `aw-host`，通过 `aw-exec` 调用 Provider�
 `aw-cli` 负责命令解析和呈现，调用 `aw-package` 库完成安装与配置，调用
 `aw-service` 完成运行时操作。
 
-[架构总览](../../docs/developer-guide/zh/aw/architecture.md)说明各包职责与运行顺序，
+[架构总览](docs/design/zh/architecture.md)说明各包职责与运行顺序，
 [设计索引](docs/design/zh/README.md)按调用流程组织详细协议。
 
 ## 开发与验证

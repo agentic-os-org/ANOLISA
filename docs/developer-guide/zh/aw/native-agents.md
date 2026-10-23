@@ -174,7 +174,7 @@ QwenPaw 正常退出时删除自己的临时插件。Hermes 保留已安装插�
 
 保留审计证据后，按[教程的清理步骤](integration.md#5-验证原生效果并清理)
 删除演示目录。框架 profile 单独保留。包卸载见
-[Preview 指南](packages.md#6-停止升级与卸载)。
+[Preview 指南](../../../user-guide/zh/aw/packages.md#6-停止升级与卸载)。
 
 ## 构建并启动 Qoder
 
@@ -638,7 +638,7 @@ profile，并通过 `aw run` 启动所选 Agent；Dockerfile 无法保留活跃�
 | `<state_dir>/journal/` | 需要跨容器重建保留执行历史时持久化；本版本审计固定开启且仅保存元数据 |
 | Socket、锁、`launch-*` 和会话绑定 | 属于运行时产物，不能恢复会话；每次服务/Agent 启动建立新的运行状态 |
 | 原生 profile、凭据、会话与工作区 | 按所选框架的要求保留，不属于 AW 审计数据 |
-| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](packages.md#2-按需安装并启动-sec-core) |
+| sec-core 后端数据 | 由 sec-core 独立管理，见 [Preview 后端配置](../../../user-guide/zh/aw/packages.md#2-按需安装并启动-sec-core) |
 
 即使不跨容器保留历史，AW 也需要可写的本地状态目录。需要持久历史时，将
 `daemon.state_dir` 设置为支持 `fsync` 的本地持久文件系统上的绝对路径，保留

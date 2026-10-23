@@ -11,7 +11,7 @@ GUIDES = (
     "user-guide/{language}/aw/installation.md",
     "user-guide/{language}/aw/security.md",
     "user-guide/{language}/aw/tokenless.md",
-    "developer-guide/{language}/aw/packages.md",
+    "user-guide/{language}/aw/packages.md",
     "user-guide/{language}/aw/operations.md",
 )
 

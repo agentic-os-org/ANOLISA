@@ -76,7 +76,7 @@ The published Linux raw contract is not currently portable across all routed
 distributions, so it is not the recommended Linux installation path. The raw
 package supports macOS 11+ (arm64 / x86_64), where Linux-only package and service operations
 remain unavailable. Source builds are for contributors; follow the
-[developer setup](../../docs/developer-guide/en/cosh-ng/getting-started.md).
+[developer setup](../../contribute/en/cosh-ng/getting-started.md).
 
 The release build matrix also produces a macOS x86_64 (Intel) raw archive,
 with the same macOS 11.0 minimum as arm64. Intel artifacts are available from
@@ -383,8 +383,8 @@ when retained data needs inspection. See
 - [Configuration](../../docs/user-guide/en/cosh-ng/configuration.md)
 - [Manage system operations](../../docs/user-guide/en/cosh-ng/cli/overview.md)
 - [Headless integration](../../docs/user-guide/en/cosh-ng/core/headless-mode.md)
-- [Developer getting started](../../docs/developer-guide/en/cosh-ng/getting-started.md)
-- [Architecture](../../docs/developer-guide/en/cosh-ng/architecture.md)
+- [Developer getting started](../../contribute/en/cosh-ng/getting-started.md)
+- [Architecture](docs/design/en/architecture.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## Data Collection
@@ -413,7 +413,7 @@ sudo touch /etc/anolisa/.telemetry_disabled
 ## Contribute
 
 Source builds are a contributor workflow. Start with the
-[developer guide](../../docs/developer-guide/en/cosh-ng/getting-started.md).
+[developer guide](../../contribute/en/cosh-ng/getting-started.md).
 
 ## License
 

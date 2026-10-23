@@ -50,6 +50,29 @@ const legacyRedirects = {
   'user-guide/agent-observability/agentsight/quickstart': 'user-guide/agentsight#quick-start',
   'user-guide/token-saving/tokenless/quickstart': 'user-guide/tokenless#quick-start',
   'user-guide/runtime/blaze': 'https://github.com/agentic-os-org/blaze-rs',
+  'developer-guide/aw/building': 'contribute/aw/building',
+  'developer-guide/aw/packages': 'user-guide/aw/packages',
+  'developer-guide/aw/sec-core': 'developer-guide/aw/providers/sec-core',
+  'developer-guide/aw/tokenless': 'developer-guide/aw/providers/tokenless',
+  'developer-guide/cosh-ng/getting-started': 'contribute/cosh-ng/getting-started',
+  'developer-guide/cosh-ng/adding-commands': 'contribute/cosh-ng/adding-commands',
+  'developer-guide/cosh-ng/adding-distros': 'contribute/cosh-ng/adding-distros',
+  'developer-guide/cosh-ng/testing': 'contribute/cosh-ng/testing',
+  'developer-guide/ws-ckpt/packaging': 'contribute/ws-ckpt/packaging',
+  'user-guide/tokenless/sdk': 'developer-guide/sdk/tokenless',
+  'user-guide/tokenless/sdk/agentscope': 'developer-guide/sdk/tokenless/agentscope',
+  'user-guide/token-saving/tokenless/sdk': 'developer-guide/sdk/tokenless',
+  'user-guide/token-saving/tokenless/sdk/agentscope': 'developer-guide/sdk/tokenless/agentscope',
+  // Design pages remain beside their component source; the locale is selected
+  // when the website renders the redirect rather than publishing another copy.
+  'developer-guide/aw/architecture':
+    'https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/{locale}/architecture.md',
+  'developer-guide/cosh-ng/architecture':
+    'https://github.com/agentic-os-org/ANOLISA/blob/main/src/cosh-ng/docs/design/{locale}/architecture.md',
+  'developer-guide/cosh-ng/ipc-protocol':
+    'https://github.com/agentic-os-org/ANOLISA/blob/main/src/cosh-ng/docs/design/{locale}/ipc-protocol.md',
+  'developer-guide/cosh-ng/security-heuristics':
+    'https://github.com/agentic-os-org/ANOLISA/blob/main/src/cosh-ng/docs/design/{locale}/security-heuristics.md',
 };
 
 export async function loadDocumentRedirects(root = repoRoot) {
@@ -68,7 +91,7 @@ export async function loadDocumentRedirects(root = repoRoot) {
 
 export function redirectDestination(to, locale, baseUrl = '/') {
   const localePrefix = locale === 'zh' ? 'zh/' : '';
-  return /^https?:/.test(to) ? to :
+  return /^https?:/.test(to) ? to.replaceAll('{locale}', locale) :
     `${baseUrl}${localePrefix}docs/${to.split('#')[0]}/${to.includes('#') ? `#${to.split('#')[1]}` : ''}`;
 }
 

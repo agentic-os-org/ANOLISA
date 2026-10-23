@@ -70,4 +70,4 @@ ID 的作用域是工作空间。未传入 `--workspace <path>` 时，工作空�
 
 失败结果使用 `is_error: true` 并包含 `errors`；会话加载或持久化失败还会包含 `session_error_code` 和 `session_error_phase`。无效 JSONL 输入会输出错误 result，并以非零状态退出。stdout 只保留协议消息，诊断信息写入其他日志。
 
-完整 schema 见开发者[IPC 协议参考](../../../../developer-guide/zh/cosh-ng/ipc-protocol.md)。
+完整 schema 见开发者[IPC 协议参考](../../../../../src/cosh-ng/docs/design/zh/ipc-protocol.md)。

@@ -38,7 +38,7 @@ for (const htmlFile of htmlFiles) {
   }
 
   const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/)?.[1] ?? '';
-  if (/<a\b[^>]*>\s*(?:中文版|English)\s*<\/a>/.test(article)) {
+  if (/<p\b[^>]*>\s*<a\b[^>]*>\s*(?:中文版|English)\s*<\/a>\s*<\/p>/.test(article)) {
     errors.push(
       `${path.relative(buildDir, htmlFile)}: inline locale switch duplicates the navbar`,
     );

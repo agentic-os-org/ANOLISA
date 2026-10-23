@@ -345,7 +345,7 @@ fn core_selection_builds_and_stages_without_any_provider_tree() {
             )));
         }
         assert!(readme.contains(&format!(
-            "](https://agentic-os.sh{locale}/docs/developer-guide/aw/building/)"
+            "](https://agentic-os.sh{locale}/docs/contribute/aw/building/)"
         )));
         for target in readme.split("](").skip(1) {
             let target = target.split(')').next().unwrap();

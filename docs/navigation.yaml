@@ -1,5 +1,158 @@
 version: 1
 
+# Public routes and bilingual navigation labels are independent of source paths.
+website:
+  navbar:
+    - id: user-guide
+      label: {en: User Guide, zh: 用户指南}
+      to: /docs/user-guide/
+    - id: developer-guide
+      label: {en: Developer Guide, zh: 开发者指南}
+      items:
+        - id: sdk
+          label: {en: SDK, zh: SDK}
+          to: /docs/developer-guide/sdk/
+        - id: aw-integration
+          label: {en: AW Integration, zh: AW 接入}
+          to: /docs/developer-guide/aw/
+    - id: contribute
+      label: {en: Contribute, zh: 贡献者指南}
+      to: /docs/contribute/
+    - id: changelog
+      label: {en: Changelog, zh: 变更日志}
+      to: /changelog/
+    - id: agents
+      label: {en: For Agents, zh: Agent 入口}
+      to: /agents/
+    - id: github
+      label: {en: GitHub, zh: GitHub}
+      href: https://github.com/agentic-os-org/ANOLISA
+      position: right
+      className: headerGithubLink
+      ariaLabel: ANOLISA GitHub repository
+  footer:
+    - id: docs
+      label: {en: Docs, zh: 文档}
+      items:
+        - label: {en: Documentation, zh: 文档首页}
+          to: /docs/
+        - label: {en: Quickstart, zh: 快速开始}
+          to: /docs/user-guide/getting-started/quickstart/
+        - label: {en: Building, zh: 源码构建}
+          to: /docs/user-guide/getting-started/building/
+        - label: {en: Changelog, zh: 变更日志}
+          to: /changelog/
+        - label: {en: For Agents, zh: Agent 入口}
+          to: /agents/
+    - id: guides
+      label: {en: Guides, zh: 指南}
+      items:
+        - label: {en: User Guide, zh: 用户指南}
+          to: /docs/user-guide/
+        - label: {en: Developer Guide, zh: 开发者指南}
+          to: /docs/developer-guide/
+        - label: {en: SDK, zh: SDK}
+          to: /docs/developer-guide/sdk/
+        - label: {en: AW Integration, zh: AW 接入}
+          to: /docs/developer-guide/aw/
+        - label: {en: Contribute, zh: 贡献者指南}
+          to: /docs/contribute/
+    - id: community
+      label: {en: Community, zh: 社区}
+      items:
+        - label: {en: GitHub, zh: GitHub}
+          href: https://github.com/agentic-os-org/ANOLISA
+        - label: {en: Security, zh: 安全}
+          href: https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md
+  sidebars:
+    developerGuide:
+      - id: overview
+        label: {en: Developer Guide, zh: 开发者指南}
+        doc: developer-guide/index
+      - id: sdk
+        label: {en: SDK, zh: SDK}
+        to: /docs/developer-guide/sdk/
+      - id: aw-integration
+        label: {en: AW Integration, zh: AW 接入}
+        to: /docs/developer-guide/aw/
+    sdkGuide:
+      - id: sdk
+        label: {en: SDK, zh: SDK}
+        generated: /developer-guide/sdk
+        items:
+          - id: tokenless
+            label: {en: Tokenless SDK, zh: Tokenless SDK}
+            doc: developer-guide/sdk/tokenless/index
+            items:
+              - id: agentscope
+                label: {en: AgentScope Integration, zh: AgentScope 集成}
+                doc: developer-guide/sdk/tokenless/agentscope
+    awGuide:
+      - id: overview
+        label: {en: AW Integration, zh: AW 接入}
+        doc: developer-guide/aw/index
+      - id: integration
+        label: {en: Integration Tutorial, zh: 接入教程}
+        doc: developer-guide/aw/integration
+      - id: native-agents
+        label: {en: Agent / Framework / SDK Integration, zh: Agent / Framework / SDK 接入}
+        doc: developer-guide/aw/native-agents
+      - id: providers
+        label: {en: Provider Development, zh: Provider 开发与接入}
+        doc: developer-guide/aw/providers/index
+        items:
+          - id: protocol
+            label: {en: Execution Protocol, zh: 执行协议}
+            doc: developer-guide/aw/providers/protocol
+          - id: views
+            label: {en: Read-only Views, zh: 只读展示接口}
+            doc: developer-guide/aw/providers/views
+          - id: sec-core
+            label: {en: Agent Security Core, zh: Agent Security Core}
+            doc: developer-guide/aw/providers/sec-core
+          - id: tokenless
+            label: {en: Tokenless, zh: Tokenless}
+            doc: developer-guide/aw/providers/tokenless
+      - id: agentsight
+        label: {en: Observability Integration, zh: 观测来源接入}
+        doc: developer-guide/aw/agentsight
+      - id: configuration
+        label: {en: Configuration Reference, zh: 共用配置参考}
+        doc: developer-guide/aw/configuration
+    contributeGuide:
+      - id: overview
+        label: {en: General Contribution Guide, zh: 通用贡献指南}
+        doc: contribute/index
+      - id: aw
+        label: {en: AW, zh: AW}
+        doc: contribute/aw/index
+        items:
+          - id: building
+            label: {en: Building, zh: 构建}
+            doc: contribute/aw/building
+      - id: cosh-ng
+        label: {en: cosh-ng, zh: cosh-ng}
+        doc: contribute/cosh-ng/index
+        items:
+          - id: getting-started
+            label: {en: Development Setup, zh: 开发入门}
+            doc: contribute/cosh-ng/getting-started
+          - id: adding-commands
+            label: {en: Adding Commands, zh: 添加命令}
+            doc: contribute/cosh-ng/adding-commands
+          - id: adding-distros
+            label: {en: Adding Distributions, zh: 添加发行版}
+            doc: contribute/cosh-ng/adding-distros
+          - id: testing
+            label: {en: Testing, zh: 测试}
+            doc: contribute/cosh-ng/testing
+      - id: ws-ckpt
+        label: {en: ws-ckpt, zh: ws-ckpt}
+        items:
+          - id: packaging
+            label: {en: Packaging, zh: 打包}
+            doc: contribute/ws-ckpt/packaging
+
 # Website groups are independent of the flat component directories.
 groups:
   - id: getting-started

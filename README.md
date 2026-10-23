@@ -253,9 +253,9 @@ calls from an existing Agent without changing its framework.
 [Build from Source](https://agentic-os.sh/docs/user-guide/getting-started/building/) ·
 [Changelog](https://agentic-os.sh/changelog/)
 
-AW: [Architecture](docs/developer-guide/en/aw/architecture.md) · [User guide](docs/user-guide/en/aw/index.md) ·
-[Build and package](docs/developer-guide/en/aw/building.md) ·
-[Developer guide](docs/developer-guide/en/aw/README.md)
+AW: [Architecture](src/aw/docs/design/en/architecture.md) · [User guide](docs/user-guide/en/aw/index.md) ·
+[Build and package](contribute/en/aw/building.md) ·
+[Developer guide](docs/developer-guide/en/aw/index.md)
 
 ## Repository layout
 

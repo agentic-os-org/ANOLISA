@@ -7,8 +7,8 @@ TEST_ROOT="$(mktemp -d /tmp/tokenless-agentscope-integration-test.XXXXXX)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 GUIDES=(
-    "$ROOT/../../docs/user-guide/en/tokenless/sdk/agentscope.md"
-    "$ROOT/../../docs/user-guide/zh/tokenless/sdk/agentscope.md"
+    "$ROOT/../../docs/developer-guide/en/sdk/tokenless/agentscope.md"
+    "$ROOT/../../docs/developer-guide/zh/sdk/tokenless/agentscope.md"
 )
 GUIDE_FRAGMENTS=(
     '| 1.0.11'

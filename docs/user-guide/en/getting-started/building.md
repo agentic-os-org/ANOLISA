@@ -142,7 +142,7 @@ linked README and scoped developer guide for component-specific build details.
 
 | Component | Build |
 | ----------- | ------- |
-| [AW](../../../developer-guide/en/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` |
+| [AW](../../../../contribute/en/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` |
 | [os-skills](../../../../src/os-skills/README.md) | `cd src/os-skills && make build` |
 | [agent-sec-core](../../../../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` |
 | [agentsight](../../../../src/agentsight/README.md) | Linux: `cd src/agentsight && make build-all`; macOS local viewer: `cd src/agentsight && make build-mac` |
@@ -161,7 +161,7 @@ your changes.
 
 - [Testing](testing.md)
 - [User installation guide](installation.md)
-- [Developer guide index](../../../developer-guide/en/README.md)
+- [Developer guide index](../../../developer-guide/en/index.md)
 - [Component onboarding specification](../../../../specs/component-onboarding.md)
 - [Documentation standard](../../../../specs/documentation-standard.md)
 - [Commit message standard](../../../../specs/commit-message-standard.md)

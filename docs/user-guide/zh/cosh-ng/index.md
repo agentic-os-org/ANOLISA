@@ -54,7 +54,7 @@ cosh-cli --version
 当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
 Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
 不可用。源码构建仅供贡献者使用，请参阅
-[开发者入门指南](../../../developer-guide/zh/cosh-ng/getting-started.md)。
+[开发者入门指南](../../../../contribute/zh/cosh-ng/getting-started.md)。
 
 ### 2. 启动终端
 

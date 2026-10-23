@@ -296,8 +296,8 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
 TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
 但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
-[Python SDK 指南](../../docs/user-guide/zh/tokenless/sdk.md)，AgentScope 挂载见
-[AgentScope SDK 集成](../../docs/user-guide/zh/tokenless/sdk/agentscope.md)，产品 Adapter 见
+[Python SDK 指南](../../docs/developer-guide/zh/sdk/tokenless/index.md)，AgentScope 挂载见
+[AgentScope SDK 集成](../../docs/developer-guide/zh/sdk/tokenless/agentscope.md)，产品 Adapter 见
 [Agent 集成指南](../../docs/user-guide/zh/tokenless/framework-integration.md)，内部契约见
 [Runtime 设计](docs/design/runtime-library_zh.md)。
 

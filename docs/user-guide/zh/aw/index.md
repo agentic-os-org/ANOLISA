@@ -11,7 +11,7 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 | 要做什么 | 阅读哪一页 |
 | --- | --- |
 | 第一次使用，安装后启动 Qoder | [安装与首次运行](installation.md) |
-| 在自己的 Linux 机器上编译 | [从源码构建 AW](../../../developer-guide/zh/aw/building.md) |
+| 在自己的 Linux 机器上编译 | [从源码构建 AW](../../../../contribute/zh/aw/building.md) |
 | 选择 Agent、增加规则或修改配置 | [配置与 Agent 启动](configuration.md) |
 | 减少工具结果占用的上下文 | [使用 Tokenless](tokenless.md) |
 | 在工具执行前检查风险 | [使用 sec-core](security.md) |
@@ -46,4 +46,4 @@ core 可独立启动 Agent。安全检查和压缩需安装对应 Provider，或
 
 工具执行前可以检查或阻断调用，执行后可以压缩受支持的文本结果。
 原生权限判断始终保留；AW 当前的 Hook 检查不提供 OS 沙箱隔离。
-自有组件和 SDK 应用的接入方法见[开发指南](../../../developer-guide/zh/aw/README.md)。
+自有组件和 SDK 应用的接入方法见[开发指南](../../../developer-guide/zh/aw/index.md)。

@@ -12,7 +12,7 @@
 
 | 组件 | 测试和质量门禁 |
 | ------ | ---------------- |
-| [AW](../../../developer-guide/zh/aw/building.md) | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
+| [AW](../../../../contribute/zh/aw/building.md) | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
 | [os-skills](../../../../src/os-skills/README_zh.md) | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
 | [agent-sec-core](../../../../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |
 | [agentsight](../../../../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make lint && make test`；macOS 运行 local viewer 和 trajectory collector 相关测试。 |
@@ -62,4 +62,4 @@ PR 应根据变更文件选择组件矩阵中的对应行，运行相应的构�
 - [从源码构建](building.md)
 - [故障排查](troubleshooting.md)
 - [贡献指南](../../../../CONTRIBUTING_zh.md)
-- [开发指南索引](../../../developer-guide/zh/README.md)
+- [开发指南索引](../../../developer-guide/zh/index.md)

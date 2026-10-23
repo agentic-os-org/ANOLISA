@@ -46,7 +46,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 
 校验成功会打印 `configuration valid`。它检查字段和引用，实际程序是否可用会在启动时检查。
 YAML 中的路径须写成真实绝对路径，AW 不展开 `$HOME` 等变量。
-完整编辑命令和自定义规则示例见[配置工具参考](../../../developer-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)。
+完整编辑命令和自定义规则示例见[配置工具参考](packages.md#编辑已有-provider-与-hook-配置)。
 
 ## 比较策略修改
 

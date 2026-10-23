@@ -124,7 +124,7 @@ README 和开发指南。
 
 | 组件 | 构建 |
 | ------ | ------ |
-| [AW](../../../developer-guide/zh/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` |
+| [AW](../../../../contribute/zh/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` |
 | [os-skills](../../../../src/os-skills/README_zh.md) | `cd src/os-skills && make build` |
 | [agent-sec-core](../../../../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` |
 | [agentsight](../../../../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make build-all`；macOS local viewer 使用 `cd src/agentsight && make build-mac` |
@@ -142,7 +142,7 @@ README 和开发指南。
 
 - [测试](testing.md)
 - [用户安装指南](installation.md)
-- [开发指南索引](../../../developer-guide/zh/README.md)
+- [开发指南索引](../../../developer-guide/zh/index.md)
 - [组件接入规范](../../../../specs/component-onboarding.md)
 - [文档规范](../../../../specs/documentation-standard.md)
 - [Commit 规范](../../../../specs/commit-message-standard.md)

@@ -15,7 +15,7 @@ guide before changing component internals.
 
 | Component | Test and quality gate |
 | ----------- | ----------------------- |
-| [AW](../../../developer-guide/en/aw/building.md) | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
+| [AW](../../../../contribute/en/aw/building.md) | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
 | [os-skills](../../../../src/os-skills/README.md) | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
 | [agent-sec-core](../../../../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
 | [agentsight](../../../../src/agentsight/README.md) | Linux: `cd src/agentsight && make lint && make test`; macOS: run the tests relevant to the local viewer and trajectory collector. |
@@ -71,4 +71,4 @@ pull-request acceptance criterion.
 - [Build from source](building.md)
 - [Troubleshooting](troubleshooting.md)
 - [Contribution guide](../../../../CONTRIBUTING.md)
-- [Developer guide index](../../../developer-guide/en/README.md)
+- [Developer guide index](../../../developer-guide/en/index.md)

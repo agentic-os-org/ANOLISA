@@ -90,5 +90,5 @@ export AW_SEC_PROVIDER="$AW_PREFIX/libexec/aw/providers/sec-core"
 卸载 AW 保留外部后台配置和数据。
 
 需要检查其他工具或只记录不阻断时，阅读
-[工具映射与扫描模式](../../../developer-guide/zh/aw/sec-core.md#配置-provider)。
+[工具映射与扫描模式](../../../developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
 未映射工具只产生观察记录，不会扫描。

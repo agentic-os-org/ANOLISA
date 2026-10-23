@@ -4,7 +4,7 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {repoRoot} from './lib.mjs';
+import {exists, repoRoot} from './lib.mjs';
 import {checkMarkdownSourceLink, githubSourceAnchors, markdownSourceLinks,
   resolveMarkdownSourceLink} from './source-links.mjs';
 
@@ -46,13 +46,15 @@ test('migrated component entry links resolve in the repository Markdown', async 
     }
   }
   const sources = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard',
-    'docs/**/*.md', ':(glob)*.md', ':(glob)src/*/README*.md',
+    'docs/**/*.md', 'contribute/**/*.md', ':(glob)*.md', ':(glob)src/*/README*.md',
     ':(glob)src/*/python/*/README*.md', ':(glob)distribution/*/README*.md',
     ':(glob)deprecated/copilot-shell/README*.md', ':(glob)deprecated/copilot-shell/docs/**/*.md'],
   {cwd: repoRoot, encoding: 'utf8'}).trim().split('\n');
   const errors = [];
   let checked = 0;
   for (const source of sources) {
+    // Git still lists the old pathname before a working-tree move is staged.
+    if (!(await exists(path.join(repoRoot, source)))) continue;
     const markdown = await readFile(path.join(repoRoot, source), 'utf8');
     for (const {url, line} of markdownSourceLinks(markdown)) {
       const resolved = resolveMarkdownSourceLink(repoRoot, source, url);

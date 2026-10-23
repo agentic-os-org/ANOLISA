@@ -3,7 +3,7 @@
 [English](../../en/tokenless/framework-integration.md)
 
 Tokenless 通过 Plugin、Hook 和 Extension 接入具体 Agent 产品。本文只说明产品 Adapter。
-Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) 下。
+Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../developer-guide/zh/sdk/tokenless/index.md) 下。
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行清理和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
@@ -504,7 +504,7 @@ SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的
 ## AgentScope 框架集成
 
 AgentScope 是 Python SDK 的第二层，不是产品 Adapter。完整的构建、版本、挂载、配置与验证说明
-现已放在 [AgentScope SDK 集成](sdk/agentscope.md) 子文档。本标题继续保留，作为已有链接的兼容入口。
+现已放在 [AgentScope SDK 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md) 子文档。本标题继续保留，作为已有链接的兼容入口。
 
 ## 验证 Agent Adapter
 
@@ -521,8 +521,8 @@ tokenless stats list --limit 5
 ## 相关文档
 
 - [快速开始](index.md)
-- [Python SDK](sdk.md)
-- [AgentScope SDK 集成](sdk/agentscope.md)
+- [Python SDK](../../../developer-guide/zh/sdk/tokenless/index.md)
+- [AgentScope SDK 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md)
 - [效果度量](measuring-savings.md)
 - [配置与数据隐私](configuration-and-privacy.md)
 - [故障排查](troubleshooting.md)

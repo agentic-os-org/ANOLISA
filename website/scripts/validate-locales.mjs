@@ -66,6 +66,12 @@ compareSets(
   await relativeMarkdownFiles('docs/developer-guide/zh'),
   errors,
 );
+compareSets(
+  'contribute',
+  await relativeMarkdownFiles('contribute/en'),
+  await relativeMarkdownFiles('contribute/zh'),
+  errors,
+);
 
 if (errors.length > 0) {
   console.error(`Locale validation failed with ${errors.length} error(s):`);
@@ -73,4 +79,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log('Locale validation passed: shared setup pages, user guide, and developer guide are paired.');
+console.log('Locale validation passed: shared setup pages, user, developer, and contribution guides are paired.');

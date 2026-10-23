@@ -2,7 +2,7 @@
 
 [English](../en/README.md)
 
-先读[架构总览](../../../../../docs/developer-guide/zh/aw/architecture.md)，了解 crate 依赖和代码入口。
+先读[架构总览](architecture.md)，了解 crate 依赖和代码入口。
 当前 Hook 调用与审计经过以下路径。
 
 源码归属、内部接口与后续发布工作的范围见[架构边界](architecture-boundaries.md)。
@@ -34,7 +34,7 @@ flowchart LR
 | [Adapter 分发](adapters/adapter-dispatch.md) | aw-adapter 准备原生注册、转换事件并采用效果 |
 | [本地服务](runtime/local-service.md) | `aw-service` 管理绑定、事件和审计，把步骤交给 Host |
 | [Provider Host](runtime/provider-host.md) | `aw-host` 准备 Provider，执行已准入的步骤 |
-| [Provider 协议](providers/provider-protocol.md) | `aw-provider` 校验请求、响应和能力 |
+| [Provider 协议](../../../../../docs/developer-guide/zh/aw/providers/protocol.md) | `aw-provider` 校验请求、响应和能力 |
 | [有界执行](runtime/bounded-execution.md) | `aw-exec` 管理命令传输和进程清理 |
 
 ## 按接入对象阅读
@@ -42,12 +42,12 @@ flowchart LR
 | 接入对象 | 文档 |
 | --- | --- |
 | 原生 Agent 回调 | [AgentScope](adapters/agentscope-adapter.md)、[Claude SDK](adapters/claude-sdk-adapter.md)、[Hermes](adapters/hermes-adapter.md)、[OpenClaw](adapters/openclaw-adapter.md)、[Pi](adapters/pi-adapter.md)、[QwenPaw](adapters/qwenpaw-adapter.md)；Qoder 见 [Adapter 分发](adapters/adapter-dispatch.md)与[本地服务](runtime/local-service.md) |
-| Provider 独立开发与收录 | [协作目录](../../../../../providers/README_zh.md)与[开发分发指南](../../../../../docs/developer-guide/zh/aw/providers.md) |
+| Provider 独立开发与收录 | [协作目录](../../../../../providers/README_zh.md)与[开发分发指南](../../../../../docs/developer-guide/zh/aw/providers/index.md) |
 | 安全 Provider 与后端就绪检查 | [sec-core Provider](providers/sec-core/sec-core-provider.md)，再读 [sec-core 健康检查](providers/sec-core/sec-core-health.md) |
-| Tokenless Provider | [接入参考](../../../../../docs/developer-guide/zh/aw/tokenless.md) |
-| 打包和配置编辑 | [构建指南](../../../../../docs/developer-guide/zh/aw/building.md)，再读[配置编辑](configuration/configuration-editing.md) |
+| Tokenless Provider | [接入参考](../../../../../docs/developer-guide/zh/aw/providers/tokenless.md) |
+| 打包和配置编辑 | [构建指南](../../../../../contribute/zh/aw/building.md)，再读[配置编辑](configuration/configuration-editing.md) |
 | 本地包数据库、预览、卸载和中断恢复 | [本地包管理](packaging/package-management.md) |
-| 只读查看状态 | [Provider 视图](providers/provider-views.md)，独立于 Hook 准入 |
+| 只读查看状态 | [Provider 视图](../../../../../docs/developer-guide/zh/aw/providers/views.md)，独立于 Hook 准入 |
 
 ## 审计、证据与能力计划
 

@@ -245,9 +245,9 @@ anolisa install tokenless
 [源码构建](https://agentic-os.sh/zh/docs/user-guide/getting-started/building/) ·
 [变更日志](https://agentic-os.sh/zh/changelog/)
 
-AW 专项文档见[架构总览](docs/developer-guide/zh/aw/architecture.md)、[用户指南](docs/user-guide/zh/aw/index.md)、
-[本地编译与打包](docs/developer-guide/zh/aw/building.md)和
-[开发指南](docs/developer-guide/zh/aw/README.md)。
+AW 专项文档见[架构总览](src/aw/docs/design/zh/architecture.md)、[用户指南](docs/user-guide/zh/aw/index.md)、
+[本地编译与打包](contribute/zh/aw/building.md)和
+[开发指南](docs/developer-guide/zh/aw/index.md)。
 
 ## 仓库目录
 

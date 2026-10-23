@@ -230,7 +230,7 @@ commands do not replace the full AW gate or native acceptance.
 Framework crates live in `src/aw/crates/<name>/`, concrete Providers in
 the repository-root `providers/<provider>/` with independent workspaces; the root manifest only organizes the workspace. See
 [Provider collaboration](../../providers/README.md) for contribution and distribution,
-[Architecture](../../docs/developer-guide/en/aw/architecture.md) for ownership and
+[Architecture](docs/design/en/architecture.md) for ownership and
 dependencies, and the [design index](docs/design/en/README.md) for protocol reading order.
 
 Keep native dialects and bridge assets in `aw-adapter`; `aw-cli` owns argument
@@ -239,7 +239,7 @@ Both reuse the Adapter without exposing service internals to it.
 `aw-provider` owns offline protocol validation; process execution uses `aw-exec`.
 Changes to crate boundaries must update [check_layout.py](scripts/check_layout.py),
 its [regression tests](tests/test_ci_checks.py), and the
-[architecture tables](../../docs/developer-guide/en/aw/architecture.md).
+[architecture tables](docs/design/en/architecture.md).
 
 ## Build the service
 

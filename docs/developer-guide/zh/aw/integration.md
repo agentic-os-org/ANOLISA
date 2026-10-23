@@ -29,7 +29,7 @@ export AW_HOST="$AW_SOURCE/target/debug/examples/host"
 ```
 
 debug 二进制位于 `src/aw/target/debug`，此步骤不安装系统服务。需要可分发的
-release 包时，按[打包构建说明](building.md)
+release 包时，按[打包构建说明](../../../../contribute/zh/aw/building.md)
 使用 `aw-build`。core 可独立于 sec-core 构建。不要混装来自不同源码提交或包版本
 的 core 与 Provider 包。
 
@@ -37,7 +37,7 @@ release 包时，按[打包构建说明](building.md)
 
 运行任何 `aw config add-*` 命令前，必须先有初始 `aw.yaml`。已安装 core、
 使用 Qoder/OpenClaw 时，通过 `aw config init` 创建；不传 `--provider` 就生成
-空策略配置。按[初始化与编辑流程](packages.md#编辑已有-provider-与-hook-配置)
+空策略配置。按[初始化与编辑流程](../../../user-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)
 依次执行 `aw config init` → `aw config add-provider` → `aw config add-event` → `aw config add-hook` → `aw config validate`。
 `aw config init` 会校验已安装的包前缀，仅构建源码二进制还不能提供这个前缀。它只创建
 新文件，拒绝覆盖已有文件。
@@ -80,7 +80,7 @@ printf 'AW_BIN=%s\nAW_CONFIG=%s\nAW_DEMO=%s\n' "$AW_BIN" "$AW_CONFIG" "$AW_DEMO"
 
 [配置参考](configuration.md)解释全部字段。当前 `aw config init` 只生成
 Qoder/OpenClaw 条目；四框架配置使用本 YAML 副本。
-[配置编辑器](packages.md#编辑已有-provider-与-hook-配置)
+[配置编辑器](../../../user-guide/zh/aw/packages.md#编辑已有-provider-与-hook-配置)
 可以增删 Provider 和 Hook 步骤，不修改 Agent 条目。
 
 ```bash
@@ -138,7 +138,7 @@ timeout 15s "$AW_HOST" "$AW_CONFIG" tool.after demo_shell '{"command":"printf AW
 
 完整 Provider 可参考第 1 步已构建的
 [Rust 示例](https://github.com/agentic-os-org/ANOLISA/blob/1c164c90d7849251f53768fb1d4a04fb97445c99/src/aw/crates/aw-provider/examples/policy.rs)和
-[协议参考](../../../../src/aw/docs/design/zh/providers/provider-protocol.md)。以下两次调用验证它的
+[协议参考](providers/protocol.md)。以下两次调用验证它的
 发现与私有配置合同：
 
 ```bash

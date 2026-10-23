@@ -181,7 +181,7 @@ move execution vetoes back into Shell tracing hooks.
 ## D20: Gateway binary composition root
 
 The Gateway application owner maintains the binary-only `cosh-gateway-app`
-crate. Its [design note](../../src/cosh-ng/docs/design/gateway-app-composition.md)
+crate. Its [design note](../../src/cosh-ng/docs/design/en/gateway-app-composition.md)
 records callers, dependency direction, the executable surface, test boundaries,
 the in-package alternative, and concrete revisit conditions. This is a
 composition boundary, not a public Rust library or a policy duplication.

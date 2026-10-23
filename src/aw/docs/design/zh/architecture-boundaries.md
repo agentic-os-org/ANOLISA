@@ -120,5 +120,5 @@ Adapter 单元测试随实现迁移；服务、CLI 和 Provider 的组合测试�
 安全与压缩。原生桥接资产不改变内容，仅更新引用路径。真实 SDK/CLI 与真实
 Tokenless/RTK 的验收保留在独立集成流程，日常门禁通过不代表这些验收已经完成。
 
-依赖表与代码入口见[架构总览](../../../../../docs/developer-guide/zh/aw/architecture.md)，
+依赖表与代码入口见[架构总览](architecture.md)，
 原生验收边界见[贡献指南](../../../CONTRIBUTING_zh.md)。
