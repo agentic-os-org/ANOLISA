@@ -8,6 +8,36 @@ const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const htmlFiles = await walkFiles(buildDir, (file) => file.endsWith('.html'));
 const errors = [];
 
+function* srcsetUrls(input) {
+  const whitespace = /[\t\n\f\r ]/;
+  let position = 0;
+  while (position < input.length) {
+    while (position < input.length && (whitespace.test(input[position]) || input[position] === ',')) {
+      position += 1;
+    }
+    const start = position;
+    // WHATWG URL tokens end at ASCII whitespace, not at an internal comma.
+    while (position < input.length && !whitespace.test(input[position])) position += 1;
+    let url = input.slice(start, position);
+    if (!url) return;
+    if (url.endsWith(',')) {
+      url = url.replace(/,+$/, '');
+      if (url) yield url;
+      continue;
+    }
+    yield url;
+    // Descriptor commas separate candidates, except within descriptor parens.
+    // Descriptor validity is outside this resource-existence gate.
+    let inParens = false;
+    while (position < input.length) {
+      const character = input[position++];
+      if (character === ',' && !inParens) break;
+      if (character === '(' && !inParens) inParens = true;
+      else if (character === ')') inParens = false;
+    }
+  }
+}
+
 async function targetFile(urlPath) {
   let decoded = decodeURIComponent(urlPath).replace(/^\//, '');
   if (basePath && decoded === basePath) decoded = '';
@@ -42,6 +72,31 @@ for (const htmlFile of htmlFiles) {
     errors.push(
       `${path.relative(buildDir, htmlFile)}: inline locale switch duplicates the navbar`,
     );
+  }
+
+
+  const resources = [];
+  for (const tag of html.matchAll(/<(img|script|source|link)\b[^>]*>/gi)) {
+    const markup = tag[0];
+    const kind = tag[1].toLowerCase();
+    const url = markup.match(/\s(?:src|href)="([^"]+)"/i)?.[1];
+    if (url && (kind !== 'link' || /\srel="(?:stylesheet|icon|preload|modulepreload)"/i.test(markup))) {
+      resources.push(url);
+    }
+    const srcset = markup.match(/\ssrcset="([^"]+)"/i)?.[1];
+    if (srcset) resources.push(...srcsetUrls(srcset));
+  }
+  const assetRelativePath = relativeHtmlPath.endsWith('/index.html')
+    ? relativeHtmlPath.slice(0, -'index.html'.length)
+    : relativeHtmlPath === 'index.html' ? '' : relativeHtmlPath;
+  const deployedPath = `/${basePath ? `${basePath}/` : ''}${assetRelativePath}`;
+  const pageUrl = new URL(deployedPath, siteUrl);
+  for (const resource of resources) {
+    const asset = new URL(resource, pageUrl);
+    if (asset.origin !== pageUrl.origin) continue;
+    if (!(await exists(await targetFile(asset.pathname)))) {
+      errors.push(`${path.relative(buildDir, htmlFile)}: broken resource ${resource}`);
+    }
   }
 
   for (const match of html.matchAll(/<a\b[^>]*\shref="([^"]+)"/g)) {
