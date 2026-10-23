@@ -49,6 +49,8 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+Read stored PDF form values and widget metadata; see the [form-field reference](../../docs/user-guide/en/user-entrypoint/os-skills.md#pdf-form-field-analysis).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
