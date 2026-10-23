@@ -296,6 +296,12 @@ substring-search fallback.
 
 `mem_revert` restores only the requested file's working-tree content from HEAD. It leaves Git history and the index unchanged, including any staged changes to that file, and returns the source HEAD hash. A later manual commit without restaging can therefore commit the pre-restore index contents; stage the restored file explicitly if that is what you intend to commit. Other files remain available for separate undo operations. This applies with either value of `memory.git.auto_commit`; ordinary write tools retain their existing auto-commit behavior.
 
+Snapshot restore preserves read-only directory modes. Disposable extraction
+staging is cleaned after a failed attempt and before a retry. The previous live
+tree remains recoverable under `.anolisa/trash/` with its original modes;
+manual purging of read-only directories may require restoring owner write
+permission first. Restore does not automatically collect retained trash.
+
 ### Sovereignty & import/export (13)
 
 | Tool | Required | Optional | Returns / notes |
