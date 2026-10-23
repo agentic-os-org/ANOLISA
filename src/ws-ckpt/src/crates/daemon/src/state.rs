@@ -1205,6 +1205,7 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,

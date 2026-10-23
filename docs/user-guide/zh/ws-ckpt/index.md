@@ -247,7 +247,54 @@ systemd 服务在失败后等待 10 秒重试，5 分钟内最多启动 4 次（
 
 daemon 配置文件位于 `/etc/ws-ckpt/config.toml`，为系统级 daemon 进程配置。
 
-不存在用户侧全局配置文件。自动检查点和清理行为通过各插件配置控制：
+不存在用户侧全局配置文件。插件各自的自动检查点行为在下文单独配置。
+
+### 存储后端选择
+
+如需指定某个原生 btrfs 文件系统，编辑 `/etc/ws-ckpt/config.toml`：
+
+```toml
+[backend]
+type = "btrfs-base"
+
+[backend.btrfs-base]
+btrfs_mount = "/data"
+```
+
+`btrfs_mount` 是绝对路径的**挂载点**，不是设备或数据目录。该目录必须已经存在，
+在 `/proc/mounts` 中有精确匹配项，文件系统为 btrfs，并以读写方式挂载。
+daemon 还会检查实际文件系统类型和只读标志。数据存放在 `/data/ws-ckpt-data`，
+不要把此子目录填入配置。指定路径不存在、未挂载、不是 btrfs 或只读都会报错，
+即使系统还有其他可用 btrfs 挂载也不会自动替换。
+
+后端类型和存储位置分别选择：
+
+- `[backend] type = "auto"` 沿用 `/var/lib/ws-ckpt/state.json` 中记录的后端类型。
+  显式指定 `btrfs-base` 或 `btrfs-loop` 会在重启时覆盖该类型。
+- BtrfsBase 的位置优先级为：显式 `btrfs_mount` > 由持久化 `data_root` 推导的挂载点。
+  只有新选择后端、没有可恢复的 BtrfsBase 根目录时才检测。首次 `auto` 安装指定
+  挂载点也会选用 BtrfsBase；已有 BtrfsLoop 安装在类型仍为 `auto` 时不会因此切换。
+- 首次检测按内核挂载表顺序选择第一个可写的物理 btrfs 挂载，排除 loop 设备。
+  存在多个候选时，日志列出所有设备、挂载点及最终选择，并建议显式指定。
+  没有合适候选时，首次 `auto` 安装使用 BtrfsLoop。
+
+重启时，记录的 BtrfsBase 挂载点必须仍在原路径挂载。把它移动到其他位置，
+不会触发自动寻找新位置。这里识别的是路径，不是文件系统 UUID 或设备：
+同一路径改挂另一文件系统，由操作者负责确认。旧 manifest 将数据目录同时写入
+两个路径字段的格式仍受支持，恢复依据是 `data_root`。
+
+修改显式挂载点表示有意切换根目录，会警告但不会作为隐式漂移拒绝。
+显式切换后端类型同样不会接管旧后端数据。两种情况下，旧快照都不再可见，
+启动时的 reconciliation 可能清除 `/var/lib/ws-ckpt/indexes` 中未 pinned 的快照记录。
+**切回原位置不会恢复已清除的记录。** 有意切换前应停止 daemon，备份 manifest、
+索引和快照数据。此设置不会迁移任何数据。
+
+CLI 与 daemon 应使用同一构建版本一同升级；reload 回复包含扩展后的后端配置。
+升级或修改后端设置后，执行 `sudo systemctl restart ws-ckpt`。
+`ws-ckpt reload` 会提示挂载点配置有变化，但重启前继续使用原根目录。
+`ws-ckpt daemon --mount-path` 只配置 BtrfsLoop，不选择 BtrfsBase 文件系统。
+配置格式错误或无法读取 `state.json` 会中止启动，不会默默使用默认后端。
+应先修复配置或恢复原挂载和状态，再重试；删除 manifest 会重新选择后端，不是恢复步骤。
 
 ### OpenClaw 插件配置
 
