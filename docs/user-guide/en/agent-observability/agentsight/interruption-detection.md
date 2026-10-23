@@ -35,14 +35,14 @@ needed to enable any of it.
 | `network_timeout` | high | HTTP 408/504, or a gateway-level timeout error |
 | `service_unavailable` | high | HTTP 502/503, or an error body mentioning `overloaded` / `service_unavailable` |
 | `context_overflow` | high | `context_length_exceeded` or a comparable context-bound error |
-| `sse_truncated` | high | A streamed response ends without a terminal `finish_reason` and the call lasted at least 1 second. Gemini `STOP`, `OTHER`, `LANGUAGE` and `FINISH_REASON_UNSPECIFIED` are terminal; `SAFETY` family stops are `safety_filter`, `MAX_TOKENS` is `token_limit` |
+| `sse_truncated` | high | A streamed response ends without a terminal `finish_reason` and the call lasted at least 1 second. Gemini `STOP`, `OTHER`, `LANGUAGE`, `IMAGE_OTHER`, `NO_IMAGE` and `FINISH_REASON_UNSPECIFIED` are terminal; `SAFETY` family stops are `safety_filter`, `MAX_TOKENS` is `token_limit` |
 | `empty_response` | high | HTTP 200 with no output messages and no error |
 | `resource_exhaustion` | high | HTTP 402, or an error body about quota / billing limits (distinct from per-minute rate limiting) |
-| `state_machine_error` | high | Malformed provider response, a Gemini `MALFORMED_FUNCTION_CALL` finish reason, or an invalid Agent state transition |
+| `state_machine_error` | high | Malformed provider response, a Gemini `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL` or `TOO_MANY_TOOL_CALLS` finish reason, or an invalid Agent state transition |
 | `llm_error` | high | Fallback for any other HTTP status >= 400 |
 | `rate_limit` | medium | HTTP 429 or an error containing `rate_limit` |
 | `token_limit` | medium | `finish_reason = length` and output Tokens >= 95% of `max_tokens` |
-| `safety_filter` | medium | A safety stop from the provider's policy: `finish_reason = content_filter` (OpenAI), or Gemini's `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY` |
+| `safety_filter` | medium | A safety stop from the provider's policy: `finish_reason = content_filter` (OpenAI), GLM's `sensitive` (Zhipu), or Gemini's `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`, `IMAGE_RECITATION` |
 | `slow_response` | medium | The call succeeded but took at least 120 seconds |
 | `tool_failure` | medium | A tool or function result reports failure |
 | `unauthorized_action` | medium | A tool call was denied by a permission system or sandbox (`EPERM`, `EACCES`, sandbox denial) |

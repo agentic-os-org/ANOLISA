@@ -30,10 +30,15 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// explain further: the turn ended for a reason the enum has no specific value
 /// for, or in an unsupported language. `finish_reason_unspecified` is the
 /// enum's placeholder, reported when a gateway omits the reason altogether.
-/// None of them says the stream was cut, so none of them is truncation. Stops
-/// that carry a meaning the rule set has a better home for stay out of this
-/// list: a token cap is rule 9, a safety stop is rule 6, a malformed tool call
-/// is rule 6.5.
+/// `image_other` is the image-generation counterpart of `other`: the picture
+/// was abandoned for a reason the enum does not name, so it says nothing about
+/// the transport either. `no_image` is the stop of a request that asked for a
+/// picture and got none back — the answer was withheld, but the response
+/// arrived whole, so it is a terminal stop and not a cut stream. None of them
+/// says the stream was cut, so none of them is truncation. Stops that carry a
+/// meaning the rule set has a better home for stay out of this list: a token
+/// cap is rule 9, a safety stop is rule 6, a malformed, unexpected or
+/// over-eager tool call is rule 6.5.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     /// The stop reasons a completed turn may report. Compared ASCII
     /// case-insensitively: the casing is the provider's, not the protocol's,
@@ -51,6 +56,8 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
         "other",
         "language",
         "finish_reason_unspecified",
+        "image_other",
+        "no_image",
     ];
     reason.is_some_and(|reason| {
         NORMAL
@@ -810,6 +817,7 @@ impl InterruptionDetector {
                     "unexpected_tool_call",
                     "missing_thought_signature",
                     "malformed_response",
+                    "too_many_tool_calls",
                 ]
                 .iter()
                 .any(|known| reason.eq_ignore_ascii_case(known))
@@ -1451,6 +1459,7 @@ mod tests {
             "UNEXPECTED_TOOL_CALL",
             "MISSING_THOUGHT_SIGNATURE",
             "MALFORMED_RESPONSE",
+            "TOO_MANY_TOOL_CALLS",
         ] {
             let mut call = make_base_call();
             call.metadata
@@ -1491,6 +1500,36 @@ mod tests {
     #[test]
     fn test_gemini_unspecific_stop_is_not_truncation() {
         for reason in ["OTHER", "LANGUAGE", "FINISH_REASON_UNSPECIFIED"] {
+            let detector = InterruptionDetector::default();
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} is a terminal stop, not a cut stream, got {events:?}"
+            );
+        }
+    }
+
+    /// Gemini's enum also names two image-generation stops that are neither a
+    /// safety decision nor a transport cut. `IMAGE_OTHER` is the image
+    /// counterpart of the already-whitelisted `OTHER`, and `NO_IMAGE` says the
+    /// request asked for a picture and got none back on a response that
+    /// arrived whole. Both were in none of the lists, so they fell through to
+    /// rule 8 and were reported as a truncated stream (High).
+    #[test]
+    fn test_gemini_image_terminal_stops_are_not_truncation() {
+        for reason in ["IMAGE_OTHER", "NO_IMAGE"] {
             let detector = InterruptionDetector::default();
             let mut call = make_base_call();
             call.metadata
