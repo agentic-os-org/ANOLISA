@@ -36,12 +36,20 @@ case "$SCRIPT" in
     */*|"") fail_open ;;
 esac
 
+USER_HOME="${HOME:-}"
+case "$USER_HOME" in
+    /*) ;;
+    *) USER_HOME="" ;;
+esac
+
 CANDIDATES=(
     "${SCRIPT_DIR}/../../common/hooks/${SCRIPT}"
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
-    "${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
 )
+if [ -n "$USER_HOME" ]; then
+    CANDIDATES+=("$USER_HOME/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}")
+fi
 
 for candidate in "${CANDIDATES[@]}"; do
     [ -f "$candidate" ] || continue

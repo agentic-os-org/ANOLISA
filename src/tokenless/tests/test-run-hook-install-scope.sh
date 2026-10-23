@@ -43,6 +43,22 @@ output=$(
 )
 [ "$output" = "current" ]
 
+# Hook dispatch must remain fail-open even when a host launches it without HOME.
+# The adapter-local candidate is still sufficient and should be selected before
+# the optional user-level fallback.
+output=$(
+    env -i PATH="/usr/local/bin:/usr/bin:/bin" \
+        bash "$CURRENT_ROOT/qwencode/hooks/run-hook.sh" "$HOOK_NAME"
+)
+[ "$output" = "current" ]
+
+# The same stripped environment must fail open when no candidate exists.
+output=$(
+    env -i PATH="/usr/local/bin:/usr/bin:/bin" \
+        bash "$CURRENT_ROOT/qwencode/hooks/run-hook.sh" "no-such-hook.sh"
+)
+[ "$output" = "{}" ]
+
 # RPM's `install` command dereferences the source symlink into a regular file.
 rm "$CURRENT_ROOT/qwencode/hooks/run-hook.sh"
 cp "$RUN_HOOK" "$CURRENT_ROOT/qwencode/hooks/run-hook.sh"
