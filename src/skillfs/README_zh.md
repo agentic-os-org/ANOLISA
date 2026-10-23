@@ -140,8 +140,19 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 ### 挂载配置
 
 使用 `skillfs mount --config /path/to/skillfs-mount.toml`，通过 `mountpoint` 和
-有序 `sources` 数组聚合目录。同名 skill 整体选用较早的来源，多源挂载只读。
-路径必须为绝对路径。TOML 示例、支持的参数和 OpenClaw 接入限制见
+有序 `sources` 数组聚合目录。同名 skill 整体选用较早的来源，多个不同来源的挂载
+强制只读；单源默认可写，除非指定 `--read-only`。路径必须为绝对路径。
+添加 `--managed` 可启用 supervisor 恢复：
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+该模式在启动时冻结解析后的来源路径和顺序、挂载点、有效只读设置和
+`--allow-other` 设置。修改或删除原始挂载配置不会改变 worker 的恢复目标。
+恢复仍会读取当前来源内容和首个来源的 views。要应用配置变更，先成功执行
+`skillfs stop <MOUNTPOINT>`，再通过 `--config ... --managed` 重新启动。
+TOML 示例、支持的参数和 OpenClaw 接入限制见
 [配置参考](../../docs/user-guide/zh/skillfs/index.md#挂载配置)。
 
 ### Managed Mount 模式
@@ -154,13 +165,16 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 
 - client 写入 managed state，使用 `setsid` 在独立 session 中启动 detached
   supervisor，等待挂载 ready 后返回。
-- supervisor 用相同的 source、mountpoint、config、security、audit、
-  activation、trusted-writer、control socket 和 logging 选项启动前台 FUSE
-  worker。
+- 对于位置参数挂载，supervisor 用相同的 source、mountpoint、config、security、
+  audit、activation、trusted-writer、control socket 和 logging 选项启动前台
+  FUSE worker。挂载配置模式使用上文所述的冻结输入。
 - 如果 worker 在 desired state 仍为 `mounted` 时意外退出，supervisor 会在有界
   backoff 后重新挂载。
 - 只有 `skillfs stop <MOUNTPOINT>` 会清除 desired mounted state，终止
   supervisor/worker 并卸载。`stop` 是幂等的，对已经卸载的路径重复执行也是安全的。
+  成功清理后会删除运行时状态和冻结的挂载配置。对于配置文件启动的挂载，若挂载点
+  busy 或无法确认已卸载，会返回错误并保留 `stopped` 状态和冻结配置；解决原因后
+  再次执行 `stop` 可重试清理。
 - 如果 supervisor 被 `kill -9` 强制终止，可能留下仍在服务但无人监控的 orphan
   worker。重新启动 `mount --managed` 前，先执行 `skillfs stop <MOUNTPOINT>` 清理
   残留 state、process 和 mount。

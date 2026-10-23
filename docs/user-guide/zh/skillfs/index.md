@@ -143,6 +143,9 @@ skillfs stop /mnt/skillfs
 
 `skillfs stop <MOUNTPOINT>` 会清除 desired state、终止 supervisor 和 worker，并
 执行 unmount。该命令是幂等的，挂载已经停止时重复执行也安全。
+成功清理后会删除运行时状态及冻结的挂载配置。对于配置文件启动的挂载，若挂载点
+busy 或无法确认已卸载，`stop` 会返回错误并保留 `stopped` 状态和冻结配置。
+解决原因后再次执行 `stop` 可重试清理。
 
 Managed mode 还会在 worker 异常退出后检测 stale/dead FUSE endpoint，清理后按
 有界重试重新挂载。默认 foreground mount 行为不变：收到 `SIGTERM` 或 `Ctrl+C`
@@ -150,7 +153,7 @@ Managed mode 还会在 worker 异常退出后检测 stale/dead FUSE endpoint，�
 
 ### 挂载配置
 
-通过 TOML 文件聚合显式指定的源目录：
+通过 TOML 文件聚合显式指定的源目录，例如 `/path/to/skillfs-mount.toml`：
 
 ```toml
 mountpoint = "/mnt/skillfs"
@@ -179,17 +182,42 @@ skillfs mount --config /path/to/skillfs-mount.toml
 只使用第一个源的 `skillfs-views.toml`；挂载不更新此文件。
 未分配到任何 view 的 skill 会在内存中加入有效默认视图；显式分配到 secondary
 view 的 skill 保持原有分组。
-不合并源配置，不自动发现源，也不热加载。修改配置或新增、删除 skill 后需重新挂载；
+不合并源配置，不自动发现源，也不热加载。修改配置、views 或 skill 成员后需重新挂载；
 读取结果不是不可变的内容快照。
 
-挂载配置不能与位置参数或 security、activation、installation、layout、managed
-模式参数混用。允许的可选参数为 `--foreground`、`--allow-other`、`--read-only`、
+挂载配置不能与位置参数或 security、activation、installation、layout 参数混用。
+允许的可选参数为 `--foreground`、`--managed`、`--allow-other`、`--read-only`、
 `--verbose` 和 `--log-file`。不含 `sources` 或 `mountpoint` 的文件继续支持原有
-`mount SOURCE MOUNTPOINT --config security.toml` 用法。
+位置参数用法 `mount SOURCE MOUNTPOINT --config security.toml`。
+
+要让此挂载跨 launcher 重启继续运行，可在同一 TOML 文件上使用 `--managed`：
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+managed 挂载配置模式在启动时冻结解析后的来源路径和顺序、挂载点、有效只读设置
+（包括多源强制只读）和 `--allow-other` 设置。worker 恢复使用保存的配置，修改
+或删除原始 TOML 文件不会改变恢复目标，也不会妨碍 worker 恢复。来源内容不会被
+冻结：每个新 worker 都会读取这些来源的当前内容，以及首个来源的
+`skillfs-views.toml`。
+
+要应用挂载配置变更，必须显式停止现有实例，再通过更新后的文件启动。
+若配置中的挂载点已更改，`stop` 应使用原挂载点：
+
+```bash
+skillfs stop /mnt/skillfs &&
+  skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+从挂载配置启动的 managed 实例运行后不会被原地更新。对同一挂载点再次发起请求时，
+来源路径和顺序、输入模式（挂载配置或位置参数）、有效只读设置和 `--allow-other`
+设置必须匹配。不同配置会被拒绝，直到现有实例停止。
 
 接入 OpenClaw 时，将所需 skill loader 指向挂载后的 `skills` 目录，并检查实际加载路径。
 仅添加 extra directory 不会替代更高优先级的原生来源；直接访问源目录仍不受此挂载覆盖。
-回退时执行 `fusermount3 -u /mnt/skillfs`，再使用原有单源命令。
+回退时，managed mount 使用 `skillfs stop /mnt/skillfs` 停止，foreground mount
+使用 `fusermount3 -u /mnt/skillfs` 卸载，再使用原有单源命令。
 
 ## CLI 工具
 

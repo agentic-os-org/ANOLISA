@@ -147,7 +147,10 @@ skillfs stop /mnt/skillfs
 
 `skillfs stop <MOUNTPOINT>` clears desired state, terminates the supervisor and
 worker, and unmounts. It is idempotent and safe to run when the mount is already
-stopped.
+stopped. Successful cleanup removes runtime state and any frozen mount
+configuration. For configuration-based mounts, if the mount is busy or unmount
+cannot be confirmed, `stop` returns an error and retains the `stopped` state and
+frozen configuration. Resolve the cause and run `stop` again to retry cleanup.
 
 Managed mode also detects stale or dead FUSE endpoints after unexpected worker
 termination, clears them, and remounts with bounded recovery retries. Default
@@ -156,7 +159,8 @@ foreground mounts are unchanged: they still exit and unmount on `SIGTERM` or
 
 ### Mount Configuration
 
-Aggregate explicit source directories with a TOML file:
+Aggregate explicit source directories with a TOML file, for example
+`/path/to/skillfs-mount.toml`:
 
 ```toml
 mountpoint = "/mnt/skillfs"
@@ -192,19 +196,50 @@ mounts do not update that file. Skills absent from every
 view are included in the effective default view in memory; explicitly assigned
 secondary skills keep their grouping. No source config merge,
 automatic source discovery, or hot reload is performed. Remount after changing
-the config or adding/removing skills; reads are not an immutable content snapshot.
+the config, views, or skill membership; reads are not an immutable content
+snapshot.
 
 Mount configuration cannot be mixed with positional paths or security,
-activation, installation, layout, or managed-mode options. The supported optional
-flags are `--foreground`, `--allow-other`, `--read-only`, `--verbose`, and
-`--log-file`. Existing `mount SOURCE MOUNTPOINT --config security.toml` usage is
-unchanged for files without `sources` or `mountpoint`.
+activation, installation, or layout options. The supported optional flags are
+`--foreground`, `--managed`, `--allow-other`, `--read-only`, `--verbose`, and
+`--log-file`. Existing positional `mount SOURCE MOUNTPOINT --config security.toml`
+usage is unchanged for files without `sources` or `mountpoint`.
+
+To keep this mount running across launcher restarts, use the same TOML file
+with `--managed`:
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+At startup, managed mount-configuration mode freezes the resolved source paths
+and their order, the mountpoint, the effective read-only setting (including the
+multi-source requirement), and `--allow-other`. Worker recovery uses this saved
+configuration, so editing or deleting the original TOML file does not redirect
+or prevent recovery. Source contents are not frozen: each new worker reads the
+current contents of those sources and the first source's `skillfs-views.toml`.
+
+To apply mount-configuration changes, explicitly stop the existing instance
+before starting it with the updated file. Use the old mountpoint for `stop` if
+the file now names a different mountpoint:
+
+```bash
+skillfs stop /mnt/skillfs &&
+  skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+An active managed instance created from a mount configuration is not updated
+in place. A later request for the same mountpoint must match its source paths
+and order, input mode (mount configuration or positional paths), and effective
+read-only and `--allow-other` settings. A different configuration is rejected
+until the existing instance is stopped.
 
 For OpenClaw, point the intended skill loader at the mounted `skills` directory
 and verify actual loaded paths. Adding it as an extra directory alone does not
 replace higher-priority original sources. Direct source access remains outside
-this mount's coverage. Roll back by unmounting with `fusermount3 -u /mnt/skillfs`
-and returning to the existing single-source command.
+this mount's coverage. To roll back, stop a managed mount with
+`skillfs stop /mnt/skillfs`, or unmount a foreground mount with
+`fusermount3 -u /mnt/skillfs`, then return to the existing single-source command.
 
 ## CLI Utilities
 

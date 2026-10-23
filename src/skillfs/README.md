@@ -152,7 +152,20 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 
 Use `skillfs mount --config /path/to/skillfs-mount.toml` with `mountpoint` and
 an ordered `sources` array to aggregate directories. Earlier sources win whole
-skill-name conflicts; multiple sources are read-only. Paths must be absolute.
+skill-name conflicts; multiple distinct sources are read-only. A single source
+is writable unless `--read-only` is supplied. Paths must be absolute.
+Add `--managed` for supervised recovery:
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+This mode freezes the resolved source paths and order, mountpoint, effective
+read-only setting, and `--allow-other` setting at startup. Editing or deleting
+the original mount configuration does not change the worker's recovery target.
+Recovery still reads current source contents and the first source's views.
+To apply configuration changes, run `skillfs stop <MOUNTPOINT>` successfully,
+then start again with `--config ... --managed`.
 See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
 
@@ -168,14 +181,18 @@ restarts:
 
 - The client writes managed state, starts a detached supervisor in its own
   session with `setsid`, waits for readiness, and then returns.
-- The supervisor starts a foreground FUSE worker with the same source,
-  mountpoint, config, security, audit, activation, trusted-writer, control
-  socket, and logging options.
+- For positional mounts, the supervisor starts a foreground FUSE worker with
+  the same source, mountpoint, config, security, audit, activation,
+  trusted-writer, control socket, and logging options. Mount-configuration mode
+  uses the frozen inputs described above.
 - If the worker exits unexpectedly while desired state remains `mounted`, the
   supervisor remounts after bounded backoff.
 - Only `skillfs stop <MOUNTPOINT>` clears desired mounted state, terminates the
   supervisor/worker, and unmounts. `stop` is idempotent and can be run safely on
-  an already-unmounted path.
+  an already-unmounted path. Successful cleanup removes runtime state and the
+  frozen mount configuration. For configuration-based mounts, a busy mount or
+  an unconfirmed unmount returns an error and retains the `stopped` state and
+  frozen configuration; resolve the cause and run `stop` again to retry cleanup.
 - If the supervisor is killed with `kill -9`, an orphan worker may continue to
   serve the mount without monitoring. Run `skillfs stop <MOUNTPOINT>` to clean
   residual state, processes, and mounts before starting `mount --managed` again.

@@ -73,6 +73,18 @@ pub enum DesiredState {
     Stopped,
 }
 
+/// Validated config-mode roots and effective behavior fixed at managed start.
+/// Absence in old state retains positional-mode request matching.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedMountConfig {
+    /// Canonical roots, deduplicated in precedence order.
+    pub sources: Vec<PathBuf>,
+    /// Effective permission for users other than the mounter.
+    pub allow_other: bool,
+    /// Effective read-only setting, including the multi-source requirement.
+    pub read_only: bool,
+}
+
 /// On-disk record describing a managed mount instance.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ManagedState {
@@ -80,6 +92,9 @@ pub struct ManagedState {
     pub instance_id: String,
     pub mountpoint: String,
     pub source: String,
+    /// Config-mode identity; absent for legacy positional managed mounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_config: Option<ManagedMountConfig>,
     pub worker_program: String,
     pub worker_args: Vec<String>,
     pub desired_state: DesiredState,
@@ -164,24 +179,35 @@ impl ManagedState {
     /// try are fully deterministic under default parallel `cargo test`.
     fn save_with_counter(&self, path: &Path, counter: &AtomicU64) -> Result<(), Box<dyn Error>> {
         let raw = serde_json::to_string_pretty(self)?;
-        // Write-and-rename for atomicity so a concurrent reader never sees a
-        // half-written file. Every save stages on its own exclusive path and
-        // removes only the file it created, so concurrent savers — the
-        // client, the supervisor's stopped marker, and a racing teardown —
-        // never write through or publish another call's staging entry.
-        let (tmp, mut file) = create_staging_file(path, counter)?;
-        let result = (|| {
-            use std::io::Write;
-            file.write_all(raw.as_bytes())?;
-            std::fs::rename(&tmp, path)
-        })();
-        if result.is_err() {
-            // No other save ever stages at this path, so this removes only
-            // the file this call created.
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result.map_err(Into::into)
+        write_staged(path, &raw, counter)
     }
+}
+
+/// Publish a complete state or resolved mount file using exclusive staging.
+fn write_staged(path: &Path, raw: &str, counter: &AtomicU64) -> Result<(), Box<dyn Error>> {
+    let (tmp, mut file) = create_staging_file(path, counter)?;
+    let result = (|| {
+        use std::io::Write;
+        file.write_all(raw.as_bytes())?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        // Remove only the staging entry created by this call.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(Into::into)
+}
+
+fn save_mount_config(
+    config: &ManagedMountConfig,
+    mountpoint: &Path,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let file = super::mount_file::MountFile {
+        mountpoint: mountpoint.to_path_buf(),
+        sources: config.sources.clone(),
+    };
+    write_staged(path, &toml::to_string(&file)?, &STATE_STAGING_SEQUENCE)
 }
 
 /// Filesystem paths for a managed mount instance.
@@ -191,6 +217,8 @@ pub struct ManagedPaths {
     pub worker_pid: PathBuf,
     pub supervisor_log: PathBuf,
     pub worker_log: PathBuf,
+    /// Owned resolved mount specification replayed by config-mode workers.
+    pub mount_config: PathBuf,
 }
 
 impl ManagedPaths {
@@ -202,6 +230,7 @@ impl ManagedPaths {
             worker_pid: dir.join(format!("{instance_id}.worker.pid")),
             supervisor_log: dir.join(format!("{instance_id}.supervisor.log")),
             worker_log: dir.join(format!("{instance_id}.worker.log")),
+            mount_config: dir.join(format!("{instance_id}.mount.toml")),
         }
     }
 }
@@ -375,6 +404,40 @@ pub fn build_worker_args(raw_args: &[String]) -> Vec<String> {
     out
 }
 
+/// Replay the frozen mount file and effective options, preserving other args.
+fn build_config_worker_args(
+    raw_args: &[String],
+    config: &ManagedMountConfig,
+    path: &Path,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let path = path
+        .to_str()
+        .ok_or("managed mount config path is not valid UTF-8")?;
+    let mut out = build_worker_args(raw_args);
+    let config_index = out
+        .iter()
+        .position(|arg| arg == "--config" || arg.starts_with("--config="))
+        .ok_or("managed mount configuration requires --config")?;
+    if out[config_index] == "--config" {
+        let value = out
+            .get_mut(config_index + 1)
+            .ok_or("managed --config requires a path")?;
+        *value = path.to_string();
+    } else {
+        out[config_index] = format!("--config={path}");
+    }
+    for (enabled, flag) in [
+        (config.allow_other, "--allow-other"),
+        (config.read_only, "--read-only"),
+    ] {
+        if enabled && !out.iter().any(|arg| arg == flag) {
+            let option_end = out.iter().position(|arg| arg == "--").unwrap_or(out.len());
+            out.insert(option_end, flag.to_string());
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Process / mount helpers
 // ---------------------------------------------------------------------------
@@ -499,16 +562,18 @@ fn clear_mount(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 // ---------------------------------------------------------------------------
 
 /// Whether the recorded state of a live managed instance matches the
-/// requested source and mountpoint pair.
+/// requested mountpoint, input mode, roots and config-mode effective options.
 ///
 /// Pure so the refusal can be tested without a live supervisor.
 fn active_instance_matches(
     state: &ManagedState,
     source_norm: &Path,
     mountpoint_norm: &Path,
+    mount_config: Option<&ManagedMountConfig>,
 ) -> bool {
     state.source == source_norm.to_string_lossy()
         && state.mountpoint == mountpoint_norm.to_string_lossy()
+        && state.mount_config.as_ref() == mount_config
 }
 
 /// Entry point for a managed mount request. Validates the source, writes the
@@ -517,6 +582,7 @@ pub fn run_client(
     raw_args: &[String],
     source: &Path,
     mountpoint: &Path,
+    mount_config: Option<ManagedMountConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Fast, client-side validation so operators get an immediate error
     // instead of a readiness timeout when the source is wrong. Deeper
@@ -572,9 +638,10 @@ pub fn run_client(
                     normalized.display()
                 )
             })?;
-            if !active_instance_matches(&active, &source_norm, &normalized) {
+            if !active_instance_matches(&active, &source_norm, &normalized, mount_config.as_ref()) {
                 return Err(format!(
                     "managed mount '{}' is already active from source '{}' (requested '{}'); \
+                     source order, input mode, or effective options may differ; \
                      run `skillfs stop {}` first",
                     active.mountpoint,
                     active.source,
@@ -641,20 +708,35 @@ pub fn run_client(
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
-    let worker_args = build_worker_args(raw_args);
+    let worker_args = match &mount_config {
+        Some(config) => build_config_worker_args(raw_args, config, &paths.mount_config)?,
+        None => build_worker_args(raw_args),
+    };
+
+    if let Some(config) = &mount_config {
+        save_mount_config(config, &normalized, &paths.mount_config)?;
+    }
 
     let state = ManagedState {
         schema_version: STATE_SCHEMA_VERSION,
         instance_id: instance_id.clone(),
         mountpoint: normalized.to_string_lossy().to_string(),
         source: source_norm.to_string_lossy().to_string(),
+        mount_config,
         worker_program: worker_program.to_string_lossy().to_string(),
         worker_args,
         desired_state: DesiredState::Mounted,
     };
-    state.save(&paths.state)?;
+    if let Err(error) = state.save(&paths.state) {
+        let _ = std::fs::remove_file(&paths.mount_config);
+        return Err(error);
+    }
 
-    spawn_supervisor(&worker_program, &instance_id, &paths)?;
+    if let Err(error) = spawn_supervisor(&worker_program, &instance_id, &paths) {
+        let _ = std::fs::remove_file(&paths.state);
+        let _ = std::fs::remove_file(&paths.mount_config);
+        return Err(error);
+    }
 
     // Wait for readiness.
     let deadline = Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
@@ -678,6 +760,13 @@ pub fn run_client(
             if !pid_alive(pid) {
                 break;
             }
+        }
+        // State is published before spawning the supervisor, so both files
+        // disappearing means cleanup, not the initial window before PID write.
+        if matches!(paths.supervisor_pid.try_exists(), Ok(false))
+            && matches!(paths.state.try_exists(), Ok(false))
+        {
+            break;
         }
         if Instant::now() >= deadline {
             break;
@@ -782,7 +871,8 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         .map_err(|e| format!("failed to load managed state for '{instance_id}': {e}"))?;
     let mountpoint = PathBuf::from(&state.mountpoint);
 
-    write_pid(&paths.supervisor_pid, std::process::id())?;
+    write_pid(&paths.supervisor_pid, std::process::id())
+        .inspect_err(|_| finish(&paths, &mountpoint))?;
     install_term_handler();
     info!(
         instance = %instance_id,
@@ -805,8 +895,11 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .create(true)
             .append(true)
             .open(&paths.worker_log)
-            .map_err(|e| format!("failed to open worker log: {e}"))?;
-        let worker_err = worker_out.try_clone()?;
+            .map_err(|e| format!("failed to open worker log: {e}"))
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
+        let worker_err = worker_out
+            .try_clone()
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
 
         let start = Instant::now();
         let mut child = std::process::Command::new(&state.worker_program)
@@ -815,7 +908,8 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .stdout(std::process::Stdio::from(worker_out))
             .stderr(std::process::Stdio::from(worker_err))
             .spawn()
-            .map_err(|e| format!("failed to spawn worker: {e}"))?;
+            .map_err(|e| format!("failed to spawn worker: {e}"))
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
         let worker_pid = child.id();
         // teardown_instance uses this file to signal the worker directly when
         // the supervisor is gone. A missing file loses only that fallback:
@@ -999,11 +1093,52 @@ fn wait_for_shutdown(
     }
 }
 
-/// Remove instance state after worker shutdown or crash-loop exhaustion.
-fn finish(paths: &ManagedPaths, mountpoint: &Path) {
+/// Remove runtime files only when config-mode unmount is confirmed.
+/// The mount-table read is explicit so unreadable tables cannot mean absence.
+fn remove_instance_files(
+    paths: &ManagedPaths,
+    mountpoint: &Path,
+    mounts: std::io::Result<Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::ffi::OsStrExt;
+    let state = ManagedState::load(&paths.state).ok();
+    let config_mode = paths.mount_config.try_exists().unwrap_or(true)
+        || state
+            .as_ref()
+            .is_some_and(|state| state.mount_config.is_some());
+    if config_mode {
+        let unmounted = mounts.map(|mounts| {
+            !skillfs_fuse::proc_mounts::mounts_contain_target(
+                &mounts,
+                mountpoint.as_os_str().as_bytes(),
+            )
+        });
+        if !matches!(unmounted, Ok(true)) {
+            // Retain a stopped record and its frozen specification so a later
+            // stop can retry; an uncertain mount must never lose its snapshot.
+            if let Some(mut state) = state {
+                state.desired_state = DesiredState::Stopped;
+                let _ = state.save(&paths.state);
+            }
+            return Err(format!(
+                "cannot confirm unmount of '{}'; managed config state retained",
+                mountpoint.display()
+            )
+            .into());
+        }
+    }
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
+    let _ = std::fs::remove_file(&paths.mount_config);
+    Ok(())
+}
+
+/// Remove instance state after worker shutdown or crash-loop exhaustion.
+fn finish(paths: &ManagedPaths, mountpoint: &Path) {
+    if let Err(error) = remove_instance_files(paths, mountpoint, std::fs::read("/proc/mounts")) {
+        warn!(%error, "managed supervisor retained state for a later stop");
+    }
     info!(mountpoint = %mountpoint.display(), "managed supervisor exiting");
 }
 
@@ -1019,6 +1154,22 @@ fn finish(paths: &ManagedPaths, mountpoint: &Path) {
 /// Shared by `stop` and by the client's startup-abort path so neither has to
 /// duplicate the signal/unmount/wait sequence.
 fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<dyn Error>> {
+    teardown_instance_with_shutdown(
+        paths,
+        mountpoint,
+        |processes_gone| wait_for_shutdown(mountpoint, || Ok(processes_gone())),
+        || std::fs::read("/proc/mounts"),
+    )
+}
+
+// Inject only the shutdown outcome and final mount-table read so tests exercise
+// the same stopped marker and cleanup gates without a live FUSE mount.
+fn teardown_instance_with_shutdown(
+    paths: &ManagedPaths,
+    mountpoint: &Path,
+    shutdown: impl FnOnce(&dyn Fn() -> bool) -> Result<(), Box<dyn Error>>,
+    read_mounts: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
     if let Ok(mut state) = ManagedState::load(&paths.state) {
@@ -1048,7 +1199,7 @@ fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<
 
     let processes_gone =
         || sup_pid.is_none_or(|p| !pid_alive(p)) && worker_pid.is_none_or(|p| !pid_alive(p));
-    let unmount_result = wait_for_shutdown(mountpoint, || Ok(processes_gone()));
+    let unmount_result = shutdown(&processes_gone);
     if !processes_gone() {
         warn!("teardown timed out waiting for clean shutdown; forcing");
         for p in [sup_pid, worker_pid].into_iter().flatten() {
@@ -1058,10 +1209,14 @@ fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<
         }
     }
 
-    // Best-effort final cleanup of any residual state files.
-    let _ = std::fs::remove_file(&paths.worker_pid);
-    let _ = std::fs::remove_file(&paths.supervisor_pid);
-    let _ = std::fs::remove_file(&paths.state);
+    // Config state must survive a failed stop, including an unreadable mount
+    // table. Positional instances retain their existing best-effort cleanup.
+    let config_mode = paths.mount_config.try_exists().unwrap_or(true)
+        || ManagedState::load(&paths.state).is_ok_and(|state| state.mount_config.is_some());
+    if config_mode && unmount_result.is_err() {
+        return unmount_result;
+    }
+    remove_instance_files(paths, mountpoint, read_mounts())?;
 
     unmount_result
 }
@@ -1082,21 +1237,23 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     // stop timeout on processes that do not exist (handles stale or
     // non-managed dead mounts).
     if !had_state {
-        let _ = std::fs::remove_file(&paths.worker_pid);
-        let _ = std::fs::remove_file(&paths.supervisor_pid);
-        match classify_mount(&normalized) {
-            MountState::NotMounted => {
-                println!(
-                    "skillfs: no managed mount at {} (already stopped)",
-                    normalized.display()
-                );
-            }
-            // Present (ready or a stale/dead endpoint): unmount it, surfacing
-            // an error if cleanup cannot complete.
-            _ => {
-                clear_mount(&normalized)?;
-                println!("skillfs: unmounted {}", normalized.display());
-            }
+        if matches!(paths.mount_config.try_exists(), Ok(false)) {
+            // Preserve the legacy no-state PID cleanup even if unmount fails.
+            let _ = std::fs::remove_file(&paths.worker_pid);
+            let _ = std::fs::remove_file(&paths.supervisor_pid);
+        }
+        let was_mounted = classify_mount(&normalized) != MountState::NotMounted;
+        if was_mounted {
+            clear_mount(&normalized)?;
+        }
+        remove_instance_files(&paths, &normalized, std::fs::read("/proc/mounts"))?;
+        if was_mounted {
+            println!("skillfs: unmounted {}", normalized.display());
+        } else {
+            println!(
+                "skillfs: no managed mount at {} (already stopped)",
+                normalized.display()
+            );
         }
         return Ok(());
     }
@@ -1135,7 +1292,7 @@ mod tests {
         std::fs::write(&paths.supervisor_pid, std::process::id().to_string())
             .expect("write supervisor pid");
 
-        let err = run_client(&[], source.path(), mountpoint.path())
+        let err = run_client(&[], source.path(), mountpoint.path(), None)
             .expect_err("a missing state file must fail the request");
         let msg = err.to_string();
         assert!(
@@ -1146,7 +1303,7 @@ mod tests {
         // Corrupt state fails the same way, without touching the
         // incumbent.
         std::fs::write(&paths.state, "{not json").expect("write corrupt state");
-        let err = run_client(&[], source.path(), mountpoint.path())
+        let err = run_client(&[], source.path(), mountpoint.path(), None)
             .expect_err("a corrupt state file must fail the request");
         assert!(
             err.to_string().contains("state cannot be read"),
@@ -1277,6 +1434,80 @@ mod tests {
     }
 
     #[test]
+    fn config_worker_args_freeze_both_config_forms_and_effective_options() {
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            allow_other: true,
+            read_only: true,
+        };
+        for config_args in [
+            vec!["--config", "/original.toml"],
+            vec!["--config=/original.toml"],
+        ] {
+            let raw: Vec<String> = [
+                vec!["--verbose", "mount", "--managed", "--allow-other"],
+                config_args,
+                vec!["--log-file", "/logs/worker-{pid}.log", "--"],
+            ]
+            .concat()
+            .into_iter()
+            .map(String::from)
+            .collect();
+            let args = build_config_worker_args(&raw, &config, Path::new("/resolved.toml"))
+                .expect("resolved worker args");
+            assert!(!args.iter().any(|arg| arg.contains("original.toml")));
+            assert!(args.iter().any(|arg| arg.contains("/resolved.toml")));
+            for flag in ["--foreground", "--allow-other", "--read-only", "--verbose"] {
+                assert_eq!(args.iter().filter(|arg| arg.as_str() == flag).count(), 1);
+            }
+            assert_eq!(args.last().map(String::as_str), Some("--"));
+            assert!(
+                args.windows(2)
+                    .any(|args| { args == ["--log-file", "/logs/worker-{pid}.log"] })
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_mount_config_survives_original_edits_and_deletion() {
+        let dir = tempfile::tempdir().expect("config tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).expect("source directory");
+        let original = dir.path().join("original.toml");
+        let resolved = dir.path().join("resolved.toml");
+        let input = super::super::mount_file::MountFile {
+            mountpoint: dir.path().join("mount"),
+            sources: vec![source.clone(), source],
+        };
+        std::fs::write(&original, toml::to_string(&input).expect("input TOML"))
+            .expect("write original");
+        let file = super::super::mount_file::load(&original)
+            .expect("load original")
+            .expect("mount config")
+            .validate()
+            .expect("validated config");
+        assert_eq!(file.sources.len(), 1, "canonical duplicates collapse");
+        let config = ManagedMountConfig {
+            sources: file.sources.clone(),
+            allow_other: false,
+            read_only: false,
+        };
+        save_mount_config(&config, &file.mountpoint, &resolved).expect("save resolved config");
+        for delete in [false, true] {
+            if delete {
+                std::fs::remove_file(&original).expect("delete original config");
+            } else {
+                std::fs::write(&original, "invalid replacement config").expect("edit original");
+            }
+            let replay = super::super::mount_file::load(&resolved)
+                .expect("read frozen config")
+                .expect("frozen mount config");
+            assert_eq!(replay.mountpoint, file.mountpoint);
+            assert_eq!(replay.sources, file.sources);
+        }
+    }
+
+    #[test]
     fn state_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -1285,6 +1516,7 @@ mod tests {
             instance_id: "mnt-000000000000dead".to_string(),
             mountpoint: "/mnt/skillfs".to_string(),
             source: "/srv/skills".to_string(),
+            mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
             worker_args: vec![
                 "mount".to_string(),
@@ -1315,6 +1547,7 @@ mod tests {
             instance_id: instance_id.to_string(),
             mountpoint: "/mnt/skillfs".to_string(),
             source: "/srv/skills".to_string(),
+            mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
             worker_args: vec![
                 "mount".to_string(),
@@ -1324,6 +1557,228 @@ mod tests {
             ],
             desired_state: DesiredState::Mounted,
         }
+    }
+
+    #[test]
+    fn legacy_state_without_config_identity_remains_positional() {
+        let mut legacy = sample_state("legacy");
+        let json = serde_json::to_string(&legacy).expect("legacy JSON");
+        assert!(!json.contains("mount_config"));
+        legacy = serde_json::from_str(&json).expect("read old state shape");
+        assert!(legacy.mount_config.is_none());
+        // Legacy request matching intentionally does not compare worker options.
+        legacy.worker_args.push("--allow-other".to_string());
+        legacy.worker_args.push("--read-only".to_string());
+        assert!(active_instance_matches(
+            &legacy,
+            Path::new("/srv/skills"),
+            Path::new("/mnt/skillfs"),
+            None,
+        ));
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        };
+        assert!(!active_instance_matches(
+            &legacy,
+            Path::new("/srv/skills"),
+            Path::new("/mnt/skillfs"),
+            Some(&config),
+        ));
+    }
+
+    #[test]
+    fn config_identity_includes_order_mode_and_effective_options() {
+        let mut state = sample_state("config");
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills"), PathBuf::from("/srv/extra")],
+            allow_other: false,
+            read_only: true,
+        };
+        state.mount_config = Some(config.clone());
+        let matches = |request: Option<&ManagedMountConfig>| {
+            active_instance_matches(
+                &state,
+                Path::new("/srv/skills"),
+                Path::new("/mnt/skillfs"),
+                request,
+            )
+        };
+        assert!(matches(Some(&config)));
+        assert!(!matches(None));
+        let mut changed = config.clone();
+        changed.sources.reverse();
+        assert!(!matches(Some(&changed)));
+        changed = config.clone();
+        changed.sources[1] = PathBuf::from("/srv/other");
+        assert!(!matches(Some(&changed)));
+        changed = config.clone();
+        changed.allow_other = true;
+        assert!(!matches(Some(&changed)));
+        changed = config;
+        changed.read_only = false;
+        assert!(!matches(Some(&changed)));
+    }
+
+    #[test]
+    fn managed_cleanup_removes_only_owned_resolved_config() {
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let original = tempfile::NamedTempFile::new().expect("user config");
+        std::fs::write(original.path(), "user config unchanged").expect("user config bytes");
+        let normalized = normalize_mountpoint(mountpoint.path());
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.mountpoint = normalized.to_string_lossy().to_string();
+        state.mount_config = Some(ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        });
+        std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+        for mounts in [
+            Ok(format!("skillfs {} fuse rw 0 0\n", normalized.display()).into_bytes()),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unreadable mount table",
+            )),
+        ] {
+            state.save(&paths.state).expect("mounted config state");
+            std::fs::write(&paths.supervisor_pid, "supervisor pid fixture")
+                .expect("supervisor pid");
+            std::fs::write(&paths.worker_pid, "worker pid fixture").expect("worker pid");
+            remove_instance_files(&paths, &normalized, mounts)
+                .expect_err("busy or unknown mount must preserve config state");
+            assert!(paths.mount_config.exists());
+            assert!(paths.supervisor_pid.exists());
+            assert!(paths.worker_pid.exists());
+            let retained = ManagedState::load(&paths.state).expect("retained state");
+            assert_eq!(retained.desired_state, DesiredState::Stopped);
+            assert!(retained.mount_config.is_some());
+        }
+        for cleanup in 0..2 {
+            std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+            match cleanup {
+                0 => finish(&paths, &normalized),
+                _ => teardown_instance(&paths, &normalized).expect("teardown"),
+            }
+            assert!(!paths.mount_config.exists());
+            assert_eq!(
+                std::fs::read_to_string(original.path()).expect("original config survives"),
+                "user config unchanged"
+            );
+        }
+    }
+
+    fn assert_config_stop_retained_then_retry(
+        unmount_result: Result<(), Box<dyn Error>>,
+        mounts: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+    ) {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let original = tempfile::NamedTempFile::new().expect("user config");
+        std::fs::write(original.path(), "user config unchanged").expect("user config bytes");
+        let mountpoint = Path::new("/mnt/skillfs");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.mount_config = Some(ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        });
+        state.save(&paths.state).expect("mounted config state");
+        std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+        // Non-numeric fixtures exercise PID-file retention without signaling.
+        std::fs::write(&paths.supervisor_pid, "supervisor pid fixture").expect("supervisor pid");
+        std::fs::write(&paths.worker_pid, "worker pid fixture").expect("worker pid");
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint,
+            |processes_gone| {
+                assert!(processes_gone());
+                assert_eq!(
+                    ManagedState::load(&paths.state)
+                        .expect("stopped before shutdown")
+                        .desired_state,
+                    DesiredState::Stopped
+                );
+                unmount_result
+            },
+            || mounts(mountpoint),
+        )
+        .expect_err("failed or unconfirmed unmount must retain managed state");
+
+        let retained = ManagedState::load(&paths.state).expect("retained state");
+        assert_eq!(retained.desired_state, DesiredState::Stopped);
+        assert_eq!(retained.mount_config, state.mount_config);
+        assert_eq!(retained.worker_args, state.worker_args);
+        assert!(paths.supervisor_pid.exists());
+        assert!(paths.worker_pid.exists());
+        assert_eq!(
+            std::fs::read_to_string(&paths.mount_config).expect("retained frozen config"),
+            "owned frozen spec"
+        );
+
+        // Retry the same production teardown path against the retained record.
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint,
+            |processes_gone| {
+                assert!(processes_gone());
+                Ok(())
+            },
+            || Ok(Vec::new()),
+        )
+        .expect("successful stop retry");
+        assert!(!paths.state.exists());
+        assert!(!paths.mount_config.exists());
+        assert!(!paths.supervisor_pid.exists());
+        assert!(!paths.worker_pid.exists());
+        assert_eq!(
+            std::fs::read_to_string(original.path()).expect("original config survives"),
+            "user config unchanged"
+        );
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_after_busy_unmount_and_retries() {
+        // Even an absent final mount-table entry must not override failure.
+        assert_config_stop_retained_then_retry(
+            Err(std::io::Error::from_raw_os_error(libc::EBUSY).into()),
+            |_| Ok(Vec::new()),
+        );
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_when_mount_remains_and_retries() {
+        assert_config_stop_retained_then_retry(Ok(()), |mountpoint| {
+            Ok(format!("skillfs {} fuse rw 0 0\n", mountpoint.display()).into_bytes())
+        });
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_when_mount_table_is_unreadable_and_retries() {
+        assert_config_stop_retained_then_retry(Ok(()), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unreadable mount table",
+            ))
+        });
     }
 
     #[cfg(unix)]
@@ -1549,6 +2004,7 @@ mod tests {
             instance_id: "abc".to_string(),
             mountpoint: "/mnt/skills".to_string(),
             source: "/srv/src-a".to_string(),
+            mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
             worker_args: vec![],
             desired_state: DesiredState::Mounted,
@@ -1557,19 +2013,22 @@ mod tests {
         assert!(active_instance_matches(
             &state,
             Path::new("/srv/src-a"),
-            mnt
+            mnt,
+            None
         ));
         // Same mountpoint, different source: the instance id collides, so the
         // request must be refused rather than reported as already active.
         assert!(!active_instance_matches(
             &state,
             Path::new("/srv/src-b"),
-            mnt
+            mnt,
+            None
         ));
         assert!(!active_instance_matches(
             &state,
             Path::new("/srv/src-a"),
-            Path::new("/mnt/other")
+            Path::new("/mnt/other"),
+            None
         ));
     }
 
