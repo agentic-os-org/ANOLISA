@@ -300,11 +300,13 @@ development integration，但保留持久 Task state，供后续 setup 复用。
   `retry` 与 `resolve-approval`。Idempotency key 让 I/O 不确定后的重试保持安全。当前
   deterministic test 覆盖 launch selection 与 baseline policy；真实 Codex、SSH 断开和 package
   systemd execution 仍是与安装相关且尚未验收的 gate。
-- 实验性的 Web continuation 命令**仅在 Linux 上提供**，目前**会拒绝内置 Core/Codex
-  catalog**。请通过 `/task` 或 `cosh agent task` 继续 Task。macOS build 不包含 Web
+- 实验性的 Web continuation 命令**仅在 Linux 上提供**，且**本构建尚未开放**：已从
+  `--help` 隐藏，并在任何 workspace、token 或 Daemon 校验之前以 `web_failed` 的
+  not-yet-available 门控错误退出。请通过 `/task` 或 `cosh agent task` 继续 Task。macOS build 不包含 Web
   命令及其 Linux credential test，不会通过 `/proc/self/fd` 解析 credential。
 
-  在 Linux 上，`cosh agent web --help` 展示以下选项：
+  在 Linux 上，`cosh agent web --help` 仍展示保留 adapter 的以下选项；它们在构建门控
+  解除后才会生效：
 
   | 选项 | 契约 |
   |------|------|
@@ -314,14 +316,15 @@ development integration，但保留持久 Task state，供后续 setup 复用。
   | `--bind ADDRESS` | 仅支持 IPv4/IPv6 loopback；默认 `127.0.0.1:8765`。 |
   | `--output human\|jsonl` | 启动信息与错误的展示格式。 |
 
-  准入检查在绑定 HTTP **之前**查询经本机身份验证的 Daemon capabilities。Daemon 不可用、
+  当 brokered-only Runtime 边界存在且门控解除后，保留的启动 attestation 在绑定 HTTP
+  **之前**查询经本机身份验证的 Daemon capabilities。Daemon 不可用、
   launch schema 未知、workspace 不匹配、Runtime catalog 不完整、存在本地用户权限委派或
   非 brokered effect，都会产生可见的 `web_failed` 错误。Unavailable Runtime 条目同样接受
   检查：关闭新任务准入并不会移除历史 Task 的权限。`--capability-profile` 已移除，调用者的
   声明不能约束 Daemon 的权限。
 
   当前两个 Runtime 条目都声明拥有本地用户权限。把 token 放到工作区外无法与这些 Runtime
-  隔离，因此这个版本没有可通过准入的生产 Web 配置。启用 Web 前，需要另行实现和验证受限
+  隔离，因此本构建将该子命令门控为尚未开放并从 `--help` 隐藏，不再尝试启动。启用 Web 前，需要另行实现和验证受限
   Runtime 边界及对应的 Daemon attestation。这个限制不改变 Terminal、Task CLI 或 direct
   ACP 的流程。
 
