@@ -448,6 +448,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 所有集成路径均采用 fail-open 策略：
 
 - **OpenClaw 插件**：Protocol v2 进程失败、非法响应或不能安全重建 Slot 时，Hook 不返回值 → 宿主交付的结果透传（不恢复宿主此前的截断）
+- **进程内 Python 适配器**（AgentScope 1.x/2.x、QwenPaw）：工具完成后，Core 错误、无效 SDK 响应或不兼容 Wheel 导致 PostTool 压缩失败时，保留完整宿主响应，包括流式 Chunk、非文本 Block、Metadata 和结果状态；不交付部分压缩结果。取消操作等 `BaseException` 信号继续传播。AgentScope 的双语说明见 [English](../../../docs/developer-guide/en/sdk/tokenless/agentscope.md#completed-tool-results-on-compression-failure) / [中文](../../../docs/developer-guide/zh/sdk/tokenless/agentscope.md#压缩失败时保留已完成的工具结果)。
 - **copilot-shell hook**：任何失败点（依赖缺失、压缩失败、输出为空）均 `exit 0` 且不输出 stdout → 原始结果透传
 - **CLI**：错误输出到 stderr，调用方可检查退出码决定是否回退
 
