@@ -189,7 +189,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/configure_openclaw.py` | 为 ce-runner 配置 openclaw 设置 |
 | `scripts/run_integration_test.py` | 端到端集成测试,含时间戳与分数校验 |
 | `scripts/run_task_compare.py` | 以原生 + ce-runner 两种模式运行任务做对比 |
-| `scripts/list_tasks.py` | 按前缀(T/M/C)和难度列出任务 |
+| `scripts/list_tasks.py` | 按前缀和难度分组列出任务，或用 `--format csv` 导出 UTF-8 CSV 元数据 |
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
@@ -197,6 +197,10 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/prompt_task.py` | 显示指定任务的 system prompt |
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
+
+使用 `python scripts/list_tasks.py --prefix T --difficulty hard --format csv > tasks.csv` 导出离线筛选结果。
+CSV 保留扫描顺序，始终包含六列表头，没有匹配任务时也不省略。
+默认分组视图保持不变；字段、编码和引号规则详见[任务清单参考](../../docs/user-guide/zh/user-entrypoint/task-inventory.md)。
 
 ## 故障排查
 
