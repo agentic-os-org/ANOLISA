@@ -294,6 +294,11 @@ class NativeTests(GateFixture):
             case["results"][0]["cases"]["names"] = names
             with self.assertRaises(ValueError):
                 validate_case(case)
+        for result in (None, {"file": ["report.json"]}):
+            case = copy.deepcopy(self.manifest["agents"]["pi"]["cases"][0])
+            case["results"] = [result]
+            with self.subTest(result=result), self.assertRaisesRegex(ValueError, "file"):
+                validate_case(case)
 
     def test_custom_suites_reject_missing_empty_or_malformed_results(self) -> None:
         for agent, case in self.custom_cases():
