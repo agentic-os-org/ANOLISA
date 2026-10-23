@@ -21,7 +21,7 @@
 ### AI 工具
 - **install-claude-code** — 安装和配置 Claude Code IDE
 - **install-qwenpaw** — 部署 QwenPaw AI 助手（支持钉钉集成）
-- **install-openclaw** — 安装和配置 OpenClaw
+- **install-openclaw** — 安装和配置 OpenClaw；`--provider-api openai-completions` 同时预检兼容的 Chat Completions 端点
 - **install-tokenless** — 安装和配置 Tokenless（LLM token 优化）
 - **qwenpaw-usage** — QwenPaw 使用指南
 - **setup-mcp** — 在 Copilot Shell 中配置 MCP 服务器
