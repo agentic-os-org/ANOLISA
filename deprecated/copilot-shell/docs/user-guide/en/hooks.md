@@ -163,4 +163,4 @@ Allow execution with modified parameters:
 - [Hook Development Guide](../../developer-guide/en/hooks/index.md)
 - [Hook API Reference](../../developer-guide/en/hooks/reference.md)
 - [Writing Custom Hooks](../../developer-guide/en/hooks/writing-hooks.md)
-- [AgentSecCore Internal Commands](../../../../../docs/user-guide/en/agent-security/agent-sec-core/internal-commands.md) — contract of the `agent-sec-cli log-sandbox` audit command that `sandbox-guard` spawns
+- [AgentSecCore Internal Commands](../../../../../docs/user-guide/en/agent-sec-core/internal-commands.md) — contract of the `agent-sec-cli log-sandbox` audit command that `sandbox-guard` spawns

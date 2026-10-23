@@ -7,7 +7,7 @@ Qoder、OpenClaw、QwenPaw 和 Hermes。简单规则优先使用布尔判断命�
 自有操作或结构化效果时，再实现完整 Provider。
 
 AW 当前为 Preview，尚未提供 `anolisa install aw` 或 RPM 分发。使用预编译二进制请
-参阅 [Preview 包指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。下述源码流程在
+参阅 [Preview 包指南](../../../user-guide/zh/aw/installation.md)。下述源码流程在
 选择 sec-core 或原生 Agent 步骤之前，无需安装 sec-core 或配置模型账号。
 
 ## 1. 从源码构建
@@ -153,7 +153,7 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 Provider 无需修改 AW 或把组件 crate 引入 AW。可执行文件及其运行依赖须安装在
 Agent 运行的位置。AW 为每个方法启动新进程，长期运行的后端由组件自己管理。
 
-[sec-core 接入流程](../../../user-guide/zh/user-entrypoint/aw/security.md)展示了如何桥接已有
+[sec-core 接入流程](../../../user-guide/zh/aw/security.md)展示了如何桥接已有
 CLI/daemon。需要为每个框架映射**实际工具名称和输入 JSON Pointer**；标准化事件
 结构不代表所有工具参数相同。Preview 生成的 sec-core 映射覆盖 Qoder `Bash` 和
 OpenClaw `exec`。扩充并验证映射后，才能声明覆盖 QwenPaw 或 Hermes 扫描。

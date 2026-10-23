@@ -60,4 +60,4 @@ adoption. `aw-core::Core` plan execution is a separate API, described below.
 | [Evidence and context](runtime/evidence-context.md) | Native identity, observation, and explicit context freezing; schemas belong to `aw-contracts` |
 | [AgentSight integration roadmap](integrations/agentsight/agentsight-integration.md) | Relates observation to future coverage, incremental export, and semantic evaluation; these later stages are not current capabilities |
 
-For install and daily use, see the [user guide](../../../../../docs/user-guide/en/user-entrypoint/aw/README.md).
+For install and daily use, see the [user guide](../../../../../docs/user-guide/en/aw/index.md).

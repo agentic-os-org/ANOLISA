@@ -423,7 +423,7 @@ scan/certify/noop 成功处理后将路径记入 daemon 实际使用的配置文
 请求共用这一份配置发现集合。
 
 `enableDefaultSkillDirs` 默认开启，省略时也为 true。daemon 启动时从本地 `/etc/passwd` 获取
-HOME，加入系统及标准用户目录，详见 [V2 指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#系统配置与信任)。
+HOME，加入系统及标准用户目录，详见 [V2 指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#系统配置与信任)。
 不使用调用者环境变量或 CLI 发现。仅默认发现限制为 10,000 个目录项、1,024 个新增 Skill；
 显式模式保持完整。单目录错误保留发现结果，返回 `discoveryErrors` 和失败状态。
 账户与配置变更需重启 daemon。
@@ -547,7 +547,7 @@ V2 CI 使用 Node 22。`V2_CARGO_TARGET_DIR` 支持任务私有缓存，同时�
 不自动激活或创建密钥，以及 V1 unit 隔离。安装后的 Python V2 E2E 使用独立状态和审计目录，
 并以普通 UID 验证 root daemon 的 PAP 权限拒绝。这些检查与实际 systemd 生命周期和真实
 FUSE 证据分别记录。
-[核心指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)
+[核心指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md)
 提供源码/RPM 命令、共享卷要求及恢复匹配状态的升级回退步骤。
 
 历史交付验收（早于本次对齐）在 Alibaba Cloud Linux 4 x86_64 上通过。与主线系统 daemon 对齐后，源码
@@ -573,7 +573,7 @@ noexec，用例原位执行选定产物，仅在隔离测试 unit 注入非终�
 调整 daemon 初始化与命令结果校验，并将 Cosh 宿主超时设为 10 秒，覆盖顺序执行的
 3 秒初始化和 5 秒查询；不引入统一 Hook 框架或第二套策略层。
 六类适配器的行为和执行错误边界见
-[用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+[用户指南](../../../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
 
 按四个逻辑提交交付：初始化、结果处理、真实 Rust CLI／daemon 合同、文档与验收记录。
 真实宿主验收单独推进。

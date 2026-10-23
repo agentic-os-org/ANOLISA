@@ -11,7 +11,7 @@
 
 **AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa)，当前状态为 **Aligned**。
 
-AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-security/owasp-agentic-top10.md)。
+AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
 
 ## 背景
 
@@ -59,20 +59,20 @@ V2 systemd 系统服务单元名为 `agent-sec-core.service`，可执行文件�
 使用 `sudo systemctl status agent-sec-core.service` 检查服务状态。
 
 配置、命令以及单独的部署和 Agent Hook 验收边界见
-[V2 核心指南](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)。
+[V2 核心指南](../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md)。
 不导入 V1 历史及用户密钥。Hook 适配器通过 daemon 初始化，校验 `check`／`show` 结果，
-保留各宿主策略；详见 [Hook 接入边界](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+保留各宿主策略；详见 [Hook 接入边界](../../docs/user-guide/zh/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
 
 Cosh-NG 为同一次 SkillSec Hook 调用中的初始化和查询共预留 10 秒。
 
 Rust V2 客户端在发送请求前校验连接对端的内核 peer UID 为 0。
 
-源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供12 条 Policy、Scope、Binding 管理命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
+源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供12 条 Policy、Scope、Binding 管理命令。参阅[命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md)
 和 [V2 workspace](v2/README.md)。PAP 状态保存在 SQLite 中，Binding 受理不代表策略已生效。
 默认 Policy 数据目录 `/var/log/agent-sec` 的祖先不安全时，可回退到 `/var/lib/agent-sec/policy`；
 daemon 自己拥有的叶目录权限会先修复为 `0700`。
 两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
-详见 [Policy 存储](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md#policy-数据库位置)。
+详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
 PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
@@ -241,7 +241,7 @@ sudo anolisa --install-mode system adopt sec-core
 
 源码构建不会在 ANOLISA 状态中注册组件。请使用已安装的集成脚本，不要继续执行
 `anolisa adapter enable`。具体入口见
-[源码集成入口](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#源码集成入口)。
+[源码集成入口](../../docs/user-guide/zh/agent-sec-core/index.md#源码集成入口)。
 
 通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。
 请用拥有目标框架配置的用户启用 adapter。
@@ -274,7 +274,7 @@ agent-sec-cli events --summary
 ```
 
 完整 CLI 说明与各宿主集成步骤见
-[AgentSecCore 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)。
+[AgentSecCore 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md)。
 
 ## Prompt Scanner
 
@@ -306,10 +306,10 @@ L2 分类器默认使用 ModelScope 上的
 后端都需各自执行 `ollama pull`。`warmup` 只检查 Ollama 能否提供当前选定的模型，
 不会自动下载模型。
 
-详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/prompt-scanner.md)。
+详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-sec-core/prompt-scanner.md)。
 
 V2 包提供轻量 Rust 探针 `agent-sec-daemon-health`，发送 health 请求前先校验 daemon 的
-UID。用法见[探针说明](../../docs/user-guide/zh/agent-security/agent-sec-core/internal-commands.md#agent-sec-daemon-health)。
+UID。用法见[探针说明](../../docs/user-guide/zh/agent-sec-core/internal-commands.md#agent-sec-daemon-health)。
 
 ## Code Scanner
 
@@ -342,7 +342,7 @@ model-service timeout 为 1–300 秒，daemon 为可用性检查、chat 和一�
 因此依赖它们的 hook 仍处于延期状态。
 
 完整的 daemon endpoint、CLI 和宿主 hook 状态见
-[Code Scanner 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
+[Code Scanner 用户指南](../../docs/user-guide/zh/agent-sec-core/code-scanner.md)。
 
 ## PII Checker
 
@@ -369,7 +369,7 @@ V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、�
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
 
-详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md)。
+详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 
 ## Skill Ledger
 
@@ -463,7 +463,7 @@ Skill，随后执行只读的 `skill-ledger check`，并按
 `deny` 是 `block` 的别名。每次
 检查都会把 Qoder trace 标识写入安全审计日志。
 
-设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)
+设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-sec-core/skill-ledger.md)
 
 ## Agent Capability 视图
 
@@ -509,7 +509,7 @@ agent-sec-cli observability report --session-id <id> --format json
 agent-sec-cli observability schema
 ```
 
-详见 [Observability 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#observability可观测)。
+详见 [Observability 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md#observability可观测)。
 
 ## Security Events
 
@@ -526,12 +526,12 @@ agent-sec-cli events --count-by category --last-hours 24
 agent-sec-cli events --summary
 ```
 
-详见 [Security Events 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#security-events安全事件)。
+详见 [Security Events 用户指南](../../docs/user-guide/zh/agent-sec-core/index.md#security-events安全事件)。
 
 ## Agent Hook 环境变量
 
 宿主 hook 矩阵由用户指南维护，以保持环境变量和宿主 mode 语义只有一个权威来源：
-[Agent Hook 环境变量](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-环境变量)。
+[Agent Hook 环境变量](../../docs/user-guide/zh/agent-sec-core/index.md#agent-hook-环境变量)。
 
 ## 开发
 

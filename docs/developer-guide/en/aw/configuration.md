@@ -4,7 +4,7 @@
 
 This reference describes the fields accepted by the current configuration
 validator. For a starter file, current availability and the intended Agent
-workflow, begin with the [user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
+workflow, begin with the [user guide](../../../user-guide/en/aw/index.md).
 
 The [bundled schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 defines the public shape. Rust validation also checks references and relationships

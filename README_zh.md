@@ -24,14 +24,14 @@
 同时保留你现有的 Shell、Agent 框架和沙箱。
 
 [English](README.md) · [项目网站](https://agentic-os.sh/zh/) ·
-[快速开始](https://agentic-os.sh/zh/docs/quickstart/) ·
+[快速开始](https://agentic-os.sh/zh/docs/user-guide/getting-started/quickstart/) ·
 [用户指南](https://agentic-os.sh/zh/docs/user-guide/) ·
 [参与贡献](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING_zh.md)
 
 [![许可证](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE)
-[![平台](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/zh/docs/user-guide/installation/)
+[![平台](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/zh/docs/user-guide/getting-started/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
-[![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/zh/agent-security/owasp-agentic-top10.md)
+[![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)
 
 </div>
 
@@ -42,7 +42,7 @@ ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。它从终�
 Agent 框架和沙箱。ANOLISA CLI 提供统一的安装入口，各项能力可以按需启用。
 
 **第一次使用 ANOLISA？**
-[从快速入门选择你的第一个目标 →](https://agentic-os.sh/zh/docs/quickstart/)
+[从快速入门选择你的第一个目标 →](https://agentic-os.sh/zh/docs/user-guide/getting-started/quickstart/)
 
 ## 组件
 
@@ -56,24 +56,24 @@ Agent 框架和沙箱。ANOLISA CLI 提供统一的安装入口，各项能力�
   </thead>
   <tbody>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/">cosh-ng</a></strong><br><sub>Shell AI 副驾</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/quickstart/">Token-less</a></strong><br><sub>压缩工具输出</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/runtime/ws-ckpt/">ws-ckpt</a></strong><br><sub>检查点与回滚</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/cosh-ng/#quick-start">cosh-ng</a></strong><br><sub>Shell AI 副驾</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/tokenless/#quick-start">Token-less</a></strong><br><sub>压缩工具输出</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/ws-ckpt/">ws-ckpt</a></strong><br><sub>检查点与回滚</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/os-skills/">OS Skills</a></strong><br><sub>系统与 DevOps 经验</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/agent-observability/agentsight/">AgentSight</a></strong><br><sub>轨迹与 Token 观测</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/runtime/skillfs/">SkillFS</a></strong><br><sub>聚焦的 Skill 视图</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/os-skills/">OS Skills</a></strong><br><sub>系统与 DevOps 经验</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/agentsight/">AgentSight</a></strong><br><sub>轨迹与 Token 观测</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/skillfs/">SkillFS</a></strong><br><sub>聚焦的 Skill 视图</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/ktuner/">ktuner</a></strong><br><sub>内核调优</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/token-saving/agent-memory/">Agent Memory</a></strong><br><sub>跨会话记忆</sub></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/quickstart/">Agent Sec Core</a></strong><br><sub>沙箱与安全校验</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/ktuner/">ktuner</a></strong><br><sub>内核调优</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/agent-memory/">Agent Memory</a></strong><br><sub>跨会话记忆</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/agent-sec-core/">Agent Sec Core</a></strong><br><sub>沙箱与安全校验</sub></td>
     </tr>
     <tr>
       <td></td>
       <td></td>
-      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>统一的 Agent 策略配置</sub></td>
+      <td><strong><a href="https://agentic-os.sh/zh/docs/user-guide/aw/">AW</a></strong><br><sub>统一的 Agent 策略配置</sub></td>
     </tr>
   </tbody>
 </table>
@@ -91,19 +91,19 @@ cosh-ng 是面向 AI 时代重构的 Linux 终端。它保留熟悉的 Bash/Zsh 
 能理解意图、调用工具与 Skills、并在高风险操作前请求确认的 Agent。Shell 命令和
 自然语言共用一个终端，不必切换到独立的聊天应用。
 
-[开始使用 cosh-ng →](https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/)
+[开始使用 cosh-ng →](https://agentic-os.sh/zh/docs/user-guide/cosh-ng/#quick-start)
 
 <p align="center"><strong>02 · CONTEXT EFFICIENCY</strong></p>
 
 <h3 align="center">看清 Token 去向，在内容进入模型前减少无效消耗</h3>
 
-[Token-less](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/quickstart/)
+[Token-less](https://agentic-os.sh/zh/docs/user-guide/tokenless/#quick-start)
 在工具 Schema 和响应进入模型前去掉冗余。
-[Agent Memory](https://agentic-os.sh/zh/docs/user-guide/token-saving/agent-memory/)
+[Agent Memory](https://agentic-os.sh/zh/docs/user-guide/agent-memory/)
 复用跨会话信息。
-[SkillFS](https://agentic-os.sh/zh/docs/user-guide/runtime/skillfs/)
+[SkillFS](https://agentic-os.sh/zh/docs/user-guide/skillfs/)
 只在当前视图展示任务需要的 Skills，其余能力需要时仍可发现。
-[AgentSight](https://agentic-os.sh/zh/docs/user-guide/agent-observability/agentsight/)
+[AgentSight](https://agentic-os.sh/zh/docs/user-guide/agentsight/)
 记录 Token 花在哪里。
 
 ### 从内核层看清一次 Agent 运行
@@ -111,7 +111,7 @@ cosh-ng 是面向 AI 时代重构的 Linux 终端。它保留熟悉的 Bash/Zsh 
 在 Linux 上，AgentSight 使用 eBPF 观测 Agent，无需改动其代码。沿着用户输入
 查看模型和工具调用，Token 消耗与子代理分支也在同一视图里。
 
-[打开 AgentSight 指南 →](https://agentic-os.sh/zh/docs/user-guide/agent-observability/agentsight/)
+[打开 AgentSight 指南 →](https://agentic-os.sh/zh/docs/user-guide/agentsight/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -144,8 +144,8 @@ tokenless stats summary
 tokenless stats list --limit 5
 ```
 
-[打开完整 Token-less 快速体验 →](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/quickstart/)
-· [阅读完整用户手册](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/user-manual/)
+[打开完整 Token-less 快速体验 →](https://agentic-os.sh/zh/docs/user-guide/tokenless/#quick-start)
+· [阅读完整用户手册](https://agentic-os.sh/zh/docs/user-guide/tokenless/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -177,15 +177,15 @@ tokenless stats list --limit 5
 | ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
 
 节省比例针对进入上下文的工具响应，不代表整个会话的账单。具体工作负载的估算方法
-见 [Token-less 用户手册](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/user-manual/)。
+见 [Token-less 用户手册](https://agentic-os.sh/zh/docs/user-guide/tokenless/)。
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 
 <h3 align="center">让 Agent 的每次执行都有边界，也留有退路</h3>
 
 ANOLISA 正在完善面向 Agent 的执行环境。
-[Agent Sec Core](https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/quickstart/)
-隔离高风险操作，[ws-ckpt](https://agentic-os.sh/zh/docs/user-guide/runtime/ws-ckpt/)
+[Agent Sec Core](https://agentic-os.sh/zh/docs/user-guide/agent-sec-core/)
+隔离高风险操作，[ws-ckpt](https://agentic-os.sh/zh/docs/user-guide/ws-ckpt/)
 为工作区变更保留恢复点。
 
 ### 在 Skill 运行前发现它已被改动
@@ -193,8 +193,8 @@ ANOLISA 正在完善面向 Agent 的执行环境。
 已签名的 Skill 发生变化后，Agent 会在再次调用前报告 `drifted`。
 重新扫描发现阻断级风险时，新版本记录为 `deny`。
 
-[查看 Agent 演示 →](https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/qoder-skill-ledger-demo/)
-· [Skill Ledger 手册](https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/skill-ledger/)
+[查看 Agent 演示 →](https://agentic-os.sh/zh/docs/user-guide/agent-sec-core/qoder-skill-ledger-demo/)
+· [Skill Ledger 手册](https://agentic-os.sh/zh/docs/user-guide/agent-sec-core/skill-ledger/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -209,8 +209,8 @@ ANOLISA 正在完善面向 Agent 的执行环境。
   </tr>
 </table>
 
-[选择运行与安全能力的开始位置 →](https://agentic-os.sh/zh/docs/quickstart/)
-· [通过 ANOLISA CLI 开始](https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/anolisa-cli/)
+[选择运行与安全能力的开始位置 →](https://agentic-os.sh/zh/docs/user-guide/getting-started/quickstart/)
+· [通过 ANOLISA CLI 开始](https://agentic-os.sh/zh/docs/user-guide/getting-started/anolisa-cli/)
 
 ## 安装
 
@@ -227,25 +227,25 @@ anolisa install tokenless
 运行 `cosh` 进入 AI 原生终端。Token-less 也可直接优化现有 Agent 的工具调用，
 无需更换 Agent 框架。
 
-[查看快速开始 →](https://agentic-os.sh/zh/docs/quickstart/)
+[查看快速开始 →](https://agentic-os.sh/zh/docs/user-guide/getting-started/quickstart/)
 
 ## 标准与合规
 
 | 标准／框架 | 状态与说明 |
 |---|---|
 | [AARM](https://aarm.dev/builders/agentseccore-anolisa) | **Aligned** · 登记条目：AgentSecCore (ANOLISA) |
-| [OWASP Agentic Top 10 (2026)](docs/user-guide/zh/agent-security/owasp-agentic-top10.md) | 全部 10 类 ASI 风险均已映射至安全控制 |
+| [OWASP Agentic Top 10 (2026)](docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md) | 全部 10 类 ASI 风险均已映射至安全控制 |
 
 ## 文档
 
-[快速开始](https://agentic-os.sh/zh/docs/quickstart/) ·
-[安装指南](https://agentic-os.sh/zh/docs/user-guide/installation/) ·
+[快速开始](https://agentic-os.sh/zh/docs/user-guide/getting-started/quickstart/) ·
+[安装指南](https://agentic-os.sh/zh/docs/user-guide/getting-started/installation/) ·
 [用户指南](https://agentic-os.sh/zh/docs/user-guide/) ·
-[故障排查](https://agentic-os.sh/zh/docs/user-guide/troubleshooting/) ·
-[源码构建](https://agentic-os.sh/zh/docs/building/) ·
+[故障排查](https://agentic-os.sh/zh/docs/user-guide/getting-started/troubleshooting/) ·
+[源码构建](https://agentic-os.sh/zh/docs/user-guide/getting-started/building/) ·
 [变更日志](https://agentic-os.sh/zh/changelog/)
 
-AW 专项文档见[架构总览](docs/developer-guide/zh/aw/architecture.md)、[用户指南](docs/user-guide/zh/user-entrypoint/aw/README.md)、
+AW 专项文档见[架构总览](docs/developer-guide/zh/aw/architecture.md)、[用户指南](docs/user-guide/zh/aw/index.md)、
 [本地编译与打包](docs/developer-guide/zh/aw/building.md)和
 [开发指南](docs/developer-guide/zh/aw/README.md)。
 

@@ -4,7 +4,7 @@
 
 These user and developer guides are retained with Copilot Shell, which is
 deprecated for new development. For new terminal projects, start with the
-[cosh-ng guide](../../../docs/user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md).
+[cosh-ng guide](../../../docs/user-guide/en/cosh-ng/index.md).
 
 ## User guide
 

@@ -29,7 +29,7 @@ placement, bilingual and maintenance rules.
 | Scope | English (default) | Chinese | Notes |
 |-------|-------------------|---------|-------|
 | Repo root / component root | `FILE.md` | `FILE_zh.md` | No suffix = English |
-| `docs/` standalone pages | `docs/FILE.md` | `docs/FILE_zh.md` | e.g. QUICKSTART, BUILDING |
+| `docs/` directory guide | `docs/README.md` | `docs/README_zh.md` | Explains the documentation layout |
 | `docs/` long-form guides | `docs/{type}/en/` | `docs/{type}/zh/` | Directory-based separation |
 
 **Cross-reference convention:**
@@ -104,23 +104,33 @@ Chinese version (`CHANGELOG_zh.md`) mirrors the same structure with translated s
 
 ## 3. docs/ Directory Structure
 
-```
+```text
 docs/
-├── QUICKSTART.md              # Cross-component quick start (English)
-├── QUICKSTART_zh.md           # Cross-component quick start (Chinese)
-├── BUILDING.md                # Build from source (English)
-├── BUILDING_zh.md             # Build from source (Chinese)
+├── README.md                  # Documentation layout and placement rationale
+├── README_zh.md
+├── navigation.yaml            # Website groups, labels, descriptions and ordering
 ├── user-guide/
-│   ├── en/                    # User manual (English)
-│   │   ├── README.md          # Index page
-│   │   ├── installation.md
-│   │   └── {capability}/      # Organized by capability domain
-│   └── zh/                    # User manual (Chinese, mirrors en/)
-│       └── ...
-└── developer-guide/
-    ├── en/                    # Developer documentation (English)
-    │   └── {component}/       # Organized by component name
-    └── zh/                    # Developer documentation (Chinese)
+│   ├── en/
+│   │   ├── index.md           # Manual entry point
+│   │   ├── getting-started/
+│   │   │   ├── quickstart.md  # One short cross-component first-use journey
+│   │   │   ├── installation.md
+│   │   │   ├── anolisa-cli.md
+│   │   │   ├── building.md
+│   │   │   ├── testing.md
+│   │   │   └── troubleshooting.md
+│   │   ├── aw/
+│   │   │   ├── index.md
+│   │   │   └── ...
+│   │   ├── agent-sec-core/
+│   │   │   ├── index.md
+│   │   │   └── owasp-agentic-top10.md
+│   │   └── {component}/       # Flat component directories, each with index.md
+│   └── zh/                    # Mirrors the English manual
+└── developer-guide/           # Existing developer docs; separate migration
+    ├── en/
+    │   └── {component}/
+    └── zh/
         └── ...
 ```
 
@@ -132,8 +142,8 @@ docs/
 | Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
 | Archived manuals for deprecated components | `deprecated/<component>/docs/` | Published user/developer guides |
 | Component design docs | `src/<component>/docs/` | `docs/` top level |
-| Cross-component quick start | `docs/QUICKSTART.md` | README |
-| Build instructions | `docs/BUILDING.md` | README |
+| Cross-component quick start | `docs/user-guide/{en,zh}/getting-started/quickstart.md` | Component entry pages |
+| Build and test instructions | `docs/user-guide/{en,zh}/getting-started/{building,testing}.md` | Duplicate command inventories |
 
 > **Note on component README**: README.md serves as a **summary entry point** (positioning + quick-start + basic install/use). It is NOT a full how-to or reference manual. Complete usage documentation belongs in `docs/user-guide/`. When CLI/config changes occur, update both the README summary and the user-guide reference.
 
@@ -181,9 +191,21 @@ deployment target, not a hand-maintained documentation source.
 
 The website MUST consume canonical repository content at build time:
 
-- Documentation routes render `docs/QUICKSTART*.md`, `docs/BUILDING*.md`,
-  and the paired files under `docs/user-guide/{en,zh}/` and
-  `docs/developer-guide/{en,zh}/`.
+- Documentation routes render the paired files under
+  `docs/user-guide/{en,zh}/` and `docs/developer-guide/{en,zh}/`.
+  `docs/README*.md` explains the source directory and is not a website landing page.
+- `docs/navigation.yaml` defines user-manual groups, bilingual labels, fixed
+  one-sentence component descriptions, and ordering. Each component item supplies
+  non-empty, single-line `description.en` and `description.zh` values for the
+  manual index; sidebar entries use labels only. These descriptions summarize
+  the component's purpose without release numbers or installation details and
+  stay consistent with its documentation.
+  The website and generated navigation blocks in the manual indexes consume it.
+  Component source directories and canonical URLs stay flat when website groups
+  change: `/docs/user-guide/<component>/` is the entry, with chapters below it.
+  Shared pages use `/docs/user-guide/getting-started/<page>/`. Previous addresses
+  redirect directly to the current URL, retaining locale and incoming fragments;
+  navigation group names are not part of canonical component URLs.
 - Changelog routes render the root and component `CHANGELOG*.md` files.
 - `/agents/`, `/agents/repo-index.*`, `/agents/cli-reference.txt`,
   `/agents/changelog.txt`, `/llms.txt`, and `/llms-full.txt` are generated
@@ -283,12 +305,15 @@ AgentSight captures kernel-level events without modifying agent code...
 - Technical terms keep English form in Chinese docs (eBPF, Token, CLI)
 - Command examples identical across languages; only prose differs
 
-**Entry point convention:** when one page is sufficient, use a flat
-`{component}.md` file directly under its capability directory. Create a
-component subdirectory only when it contains multiple user documents. Reserve
-`QUICKSTART.md` for cross-component journeys or components whose setup needs a
-distinct, short onboarding path; do not duplicate a component manual into a
-second quickstart.
+**Entry point convention:** every component has a directory directly under
+`docs/user-guide/{en,zh}/`, with `index.md` as its manual entry point, even when
+one page is sufficient. Put first-use steps in that index rather than creating
+a separate component Quickstart. Keep the project-level `getting-started/quickstart.md`
+as a standalone short journey with prerequisites, a first useful result,
+verification and next steps. The `getting-started/` directory does not need an
+`index.md`; its shared pages can also be linked from contribution documentation.
+Website groups belong in `docs/navigation.yaml`, not in source directory names.
+The `docs/README*.md` pair describes this layout for documentation maintainers.
 
 ## 5. PR Documentation Update Rules
 
@@ -298,7 +323,7 @@ When a PR introduces any of the following changes, documentation MUST be updated
 |-------------|-------------------|
 | New/modified CLI command or flag | Component README (summary) + user-guide (full reference) |
 | New/modified config option | Component README (summary) + user-guide (full reference) |
-| Installation method change | docs/QUICKSTART + component README |
+| Installation method change | Shared installation/quickstart pages as applicable + component index and README |
 | Architecture or protocol change | Component `docs/design/` |
 | New component added | Root README + NOTICE (if applicable) |
 

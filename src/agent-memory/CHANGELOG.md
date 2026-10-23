@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **agent-memory**: **Breaking change:** renames the OpenClaw tools to `anolisa_memory_search` and `anolisa_memory_get`, agents can access ANOLISA memories alongside OpenClaw's own memory tools without name conflicts; update prompts and tool allowlists, restart the gateway, and start a new conversation. Internal MCP names and stored memories are unchanged (#3347)
-- **agent-memory**: Declares all four plugin tools in OpenClaw's `coding` profile, agents retain access to the plugin tools under that profile without disabling `memory-core`; custom policies still need explicit tool entries, and disable markers from intermediate installers require the manual recovery described in the [user guide](../../docs/user-guide/en/token-saving/agent-memory.md) (#3347)
+- **agent-memory**: Declares all four plugin tools in OpenClaw's `coding` profile, agents retain access to the plugin tools under that profile without disabling `memory-core`; custom policies still need explicit tool entries, and disable markers from intermediate installers require the manual recovery described in the [user guide](../../docs/user-guide/en/agent-memory/index.md) (#3347)
 
 ### Fixed
 

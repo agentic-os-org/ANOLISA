@@ -42,11 +42,13 @@ function compareSets(label, english, chinese, errors, exemptions = new Set()) {
 
 const errors = [];
 const rootFiles = new Set(await readdir(repoRoot));
-for (const name of ['QUICKSTART', 'BUILDING']) {
-  if (!rootFiles.has('docs')) break;
-  const docsFiles = new Set(await readdir(path.join(repoRoot, 'docs')));
-  if (!docsFiles.has(`${name}.md`)) errors.push(`docs: missing English source ${name}.md`);
-  if (!docsFiles.has(`${name}_zh.md`)) errors.push(`docs: missing Chinese source ${name}_zh.md`);
+for (const locale of ['en', 'zh']) {
+  const files = new Set(await relativeMarkdownFiles(`docs/user-guide/${locale}`));
+  for (const required of ['index.md', 'getting-started/quickstart.md', 'getting-started/building.md',
+    'getting-started/testing.md', 'getting-started/troubleshooting.md',
+    'getting-started/installation.md', 'getting-started/anolisa-cli.md']) {
+    if (!files.has(required)) errors.push(`user-guide: missing ${locale} source ${required}`);
+  }
 }
 if (!rootFiles.has('CHANGELOG.md')) errors.push('root: missing CHANGELOG.md');
 if (!rootFiles.has('CHANGELOG_zh.md')) errors.push('root: missing CHANGELOG_zh.md');
@@ -71,4 +73,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log('Locale validation passed: standalone pages, user guide, and developer guide are paired.');
+console.log('Locale validation passed: shared setup pages, user guide, and developer guide are paired.');

@@ -10,7 +10,7 @@
 - [本地编译与打包](aw/building.md)
 - [组件接入教程](aw/integration.md)
 - [配置参考](aw/configuration.md)
-- [用户指南](../../user-guide/zh/user-entrypoint/aw/README.md)
+- [用户指南](../../user-guide/zh/aw/index.md)
 
 ## Cosh-ng
 
@@ -25,4 +25,4 @@
 请从**开发入门**开始。它把常见改动映射到代码 owner 和最小相关测试 target，其余页面
 作为专题参考。
 
-仓库级的构建和贡献要求，请继续阅读[从源码构建](../../BUILDING_zh.md)和 [CONTRIBUTING.md](../../../CONTRIBUTING.md)。
+仓库级的构建和贡献要求，请继续阅读[从源码构建](../../user-guide/zh/getting-started/building.md)和 [CONTRIBUTING.md](../../../CONTRIBUTING.md)。

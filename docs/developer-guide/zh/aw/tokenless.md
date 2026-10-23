@@ -2,7 +2,7 @@
 
 [English](../../en/aw/tokenless.md)
 
-本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/aw/tokenless.md)。
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
@@ -11,7 +11,7 @@ Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK �
 
 ## 安装与启用
 
-使用 [AW Preview 包](../../../user-guide/zh/user-entrypoint/aw/installation.md)。`aw-provider-tokenless` 包含从同一源码提交
+使用 [AW Preview 包](../../../user-guide/zh/aw/installation.md)。`aw-provider-tokenless` 包含从同一源码提交
 构建的桥接程序和 Tokenless CLI，以及固定到
 `b1c0dc00649c50fbe8930f849c800d4d6ca12091` 的 RTK v0.49.0，附带 Tokenless 的
 统计和 pytest 补丁。要求匹配的 `aw-core`；`aw-all-in-one` 将完全相同的组件内容

@@ -115,7 +115,7 @@ export default function TokenlessProduct() {
             <div className="buttonRow">
               <SiteLink
                 locale={locale}
-                to="/docs/user-guide/token-saving/tokenless/quickstart"
+                to="/docs/user-guide/tokenless/#quick-start"
                 className="primaryButton">
                 {t.start} →
               </SiteLink>
@@ -188,7 +188,7 @@ tokenless stats summary
 # Check tool environments
 tokenless env-check --all`}</code></pre>
           </div>
-          <SiteLink locale={locale} to="/docs/user-guide/token-saving/tokenless/user-manual" className="primaryButton">
+          <SiteLink locale={locale} to="/docs/user-guide/tokenless/" className="primaryButton">
             {t.docs}
           </SiteLink>
         </section>

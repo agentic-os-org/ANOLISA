@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/building.md)
 
 Build and package AW on Linux x86_64 or aarch64. For prebuilt packages, see
-[Install AW](../../../user-guide/en/user-entrypoint/aw/installation.md).
+[Install AW](../../../user-guide/en/aw/installation.md).
 
 ## Build environment
 
@@ -50,12 +50,12 @@ credentials, and AgentSight separately.
 ## Deliver and verify
 
 Deliver the selected archives and their checksum entries. Follow
-[Install and run](../../../user-guide/en/user-entrypoint/aw/installation.md#install)
+[Install and run](../../../user-guide/en/aw/installation.md#install)
 to install, configure, and launch. For all-in-one, set `AW_BUNDLE_KIND=aw-all-in-one`.
 
 Verify that the Agent can call tools, `aw status` reports status, and `aw stop`
 stops the service. After enabling optional capabilities, verify their effects
-with [Tokenless](../../../user-guide/en/user-entrypoint/aw/tokenless.md) or
-[Security checks](../../../user-guide/en/user-entrypoint/aw/security.md).
+with [Tokenless](../../../user-guide/en/aw/tokenless.md) or
+[Security checks](../../../user-guide/en/aw/security.md).
 
-For other Agentic OS components, see the [repository build guide](../../../BUILDING.md).
+For other Agentic OS components, see the [repository build guide](../../../user-guide/en/getting-started/building.md).

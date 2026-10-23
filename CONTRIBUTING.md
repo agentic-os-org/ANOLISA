@@ -154,9 +154,9 @@ Use explicit component selections for development. See
 The `sight` selection uses the Linux eBPF build. On macOS, build AgentSight
 locally with `make build-mac` instead.
 
-See [`docs/BUILDING.md`](docs/BUILDING.md) and
-[`docs/BUILDING_zh.md`](docs/BUILDING_zh.md) for the longer dependency and
-packaging reference.
+See [Build from source](docs/user-guide/en/getting-started/building.md)
+([中文版](docs/user-guide/zh/getting-started/building.md)) for the longer
+dependency and packaging reference.
 
 ### Convenience test runner
 
@@ -273,7 +273,7 @@ long usage and architecture material belongs in the canonical locations below.
 | --- | --- |
 | CLI command or flag | Component `README.md` and the relevant `docs/user-guide/` page. |
 | Configuration option | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Installation method | `docs/QUICKSTART*.md` and the component README. |
+| Installation method | Shared installation/quickstart pages as applicable, the component manual, and its README. |
 | Architecture or protocol | `src/<component>/docs/design/`. |
 | New component | Root README and `NOTICE` when applicable. |
 

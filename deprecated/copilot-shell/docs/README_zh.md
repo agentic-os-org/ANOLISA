@@ -3,7 +3,7 @@
 [English](README.md)
 
 这里保留 Copilot Shell 的用户和开发者文档。该组件已不推荐用于新增开发；新的
-终端项目请从 [cosh-ng 指南](../../../docs/user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md)开始。
+终端项目请从 [cosh-ng 指南](../../../docs/user-guide/zh/cosh-ng/index.md)开始。
 
 ## 用户指南
 

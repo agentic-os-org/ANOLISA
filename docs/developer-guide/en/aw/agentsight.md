@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/agentsight.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/observability.md).
+see the [user guide](../../../user-guide/en/aw/observability.md).
 
 Configure an optional AgentSight source once, then use `aw run` to associate native
 callbacks and collect bounded evidence automatically. No action Provider or eBPF
@@ -16,7 +16,7 @@ and trusted source association for Pi require a separate Adapter contract.
 
 ## Prerequisites and configuration
 
-Install AW using the [Preview installation guide](../../../user-guide/en/user-entrypoint/aw/installation.md). Client, callbacks
+Install AW using the [Preview installation guide](../../../user-guide/en/aw/installation.md). Client, callbacks
 and daemon must come from the same build supporting `aw-service/v1alpha4`. Before
 upgrading, exit owned sessions and stop old daemons with the old binary; keep their
 Journal history. Provider stdio remains `aw-provider/v1alpha1`.
@@ -25,7 +25,7 @@ Use an independently managed AgentSight query service with authentication enable
 Both transports validate the common auth-status response and ATIF-v1.7; neither
 calls `/health` or gates on product version. Source product version is unknown (null). A running query
 service does not prove its collector or eBPF probes are ready. See
-[AgentSight deployment](../../../user-guide/en/agent-observability/agentsight/deployment.md).
+[AgentSight deployment](../../../user-guide/en/agentsight/deployment.md).
 
 Add the following block under the existing `spec.agents.<target>` entry. The
 source configuration belongs to that target; callback requests cannot replace it.
@@ -67,7 +67,7 @@ mode proves source process identity or a source-issued read-only role.
 
 Start the configured target normally, then inspect the same service from another
 terminal. This example uses an existing Qoder target; other frameworks keep their
-normal [native launch arguments](../../../user-guide/en/user-entrypoint/aw/README.md).
+normal [native launch arguments](../../../user-guide/en/aw/index.md).
 
 ```bash
 aw run --config ./aw.yaml --agent qoder

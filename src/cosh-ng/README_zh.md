@@ -28,7 +28,7 @@ JSONL 接口。
 
 使用 Bash 执行隔离命令时，运行 `cosh --isolated -c '<command>'`。
 Bash 无法禁用退出脚本，因此隔离模式下的 Bash login 调用会以状态码 2 拒绝。
-详见 [Shell 启动选项](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/interactive-mode.md)。
+详见 [Shell 启动选项](../../docs/user-guide/zh/cosh-ng/shell/interactive-mode.md)。
 
 ## 安装
 
@@ -102,7 +102,7 @@ Shell，同时仍可获得命令执行后的洞察。再次按下即可返回 As
 登录时，`cosh-shell` 会在后台检查托管安装的 `cosh-ng` 是否有可用更新，并在
 下一个空闲提示符处显示提示。该检查默认开启；设置 `COSH_SHELL_UPGRADE_CHECK=off`
 可在下一次会话禁用检查。完整的关闭取值与缓存路径见
-[登录升级提示](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#登录升级提示)。
+[登录升级提示](../../docs/user-guide/zh/cosh-ng/configuration.md#登录升级提示)。
 
 如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
 
@@ -112,7 +112,7 @@ COSH_SHELL_INTEGRATION=native cosh
 
 Enhanced 不会向子进程保留已导出的 Bash `PROMPT_COMMAND` 值。
 各版本的属性限制及 Native 替代方式见
-[Bash prompt 兼容边界](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-兼容边界)。
+[Bash prompt 兼容边界](../../docs/user-guide/zh/cosh-ng/shell/overview.md#bash-prompt-兼容边界)。
 
 ```text
 $ hello
@@ -134,12 +134,12 @@ bash: hello: command not found
 `/hooks trust-project` 授权。
 显式设置 `hooks.enabled = false` 后，即使安装了 Extension，配置 Hook 也保持禁用。
 禁用范围和 `PreToolUse` 默认阻断行为详见
-[Hooks](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/hooks.md)。
+[Hooks](../../docs/user-guide/zh/cosh-ng/core/hooks.md)。
 
 `type = "aliyun"` 时，SysOM 自动优先使用可达的 VPC 端点。
 设置 `ai.providers.<id>.sysom_endpoint` 可固定端点，`COSH_SYSOM_ENDPOINT` 优先级更高，
 `base_url` 不参与 SysOM 选路。仅自动选中的 VPC 路由绕过系统代理，显式覆盖与公网回退
-仍保留代理设置。详见 [provider 配置](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/providers.md)。
+仍保留代理设置。详见 [provider 配置](../../docs/user-guide/zh/cosh-ng/core/providers.md)。
 
 如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
 Adapter，再通过 stdin 发送 prompt。
@@ -186,7 +186,7 @@ Development 使用独立的 transient `cosh-gateway-dev@` unit、socket、state 
 environment file，不会覆盖 package file。Host 重启后需要重新运行 `setup`。
 Production Gateway 正在运行时会默认拒绝，除非显式传入
 `--stop-production`。状态查询、停止、清理、override 与完整安全边界请阅读
-[用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)。
+[用户手册](../../docs/user-guide/zh/cosh-ng/index.md)。
 
 Package 只安装一个按账号命名的 `cosh-gateway@.service`。Core 始终可配置；Codex ACP
 以及用于 Runtime 启动前 baseline 和 effect 前 barrier 的 checkpoint provider，都是同一
@@ -319,7 +319,7 @@ Daemon 的 capabilities，并验证 canonical workspace 身份与 Runtime 权限
 catalog 的两个条目都声明拥有本地用户权限，即使 token 位于工作区外也可读取，因此 Web
 会拒绝启动。这个版本请通过 `/task` 或 `cosh agent task` 继续任务。原来的
 `--capability-profile` 声明已移除，因为它从未限制 Daemon 的权限。平台限制与准入边界详见
-[Web 命令参考](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)。
+[Web 命令参考](../../docs/user-guide/zh/cosh-ng/index.md)。
 
 `SIGINT` 与 `SIGTERM` 会在 Daemon 退出前触发有界的 scheduler 与 Runtime shutdown。Daemon
 仍然只监听 Unix socket，不开放 remote listener。
@@ -329,16 +329,16 @@ catalog 的两个条目都声明拥有本地用户权限，即使 token 位于�
 
 `cosh-cli checkpoint recover --workspace <path>` 支持由 ws-ckpt daemon 恢复
 中断初始化；若还有数据保留供检查，成功 JSON 的 `meta.warning` 会说明位置。
-详见[工作区快照](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/checkpoint.md)。
+详见[工作区快照](../../docs/user-guide/zh/cosh-ng/cli/checkpoint.md)。
 
 ## 文档
 
-- [用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)
-- [接入 MCP server](../../docs/user-guide/zh/user-entrypoint/cosh-ng/mcp.md)
-- [交互式终端](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/overview.md)
-- [配置](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md)
-- [管理系统操作](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/overview.md)
-- [Headless 集成](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/headless-mode.md)
+- [用户手册](../../docs/user-guide/zh/cosh-ng/index.md)
+- [接入 MCP server](../../docs/user-guide/zh/cosh-ng/mcp.md)
+- [交互式终端](../../docs/user-guide/zh/cosh-ng/shell/overview.md)
+- [配置](../../docs/user-guide/zh/cosh-ng/configuration.md)
+- [管理系统操作](../../docs/user-guide/zh/cosh-ng/cli/overview.md)
+- [Headless 集成](../../docs/user-guide/zh/cosh-ng/core/headless-mode.md)
 - [开发者入门](../../docs/developer-guide/zh/cosh-ng/getting-started.md)
 - [架构](../../docs/developer-guide/zh/cosh-ng/architecture.md)
 - [贡献指南](CONTRIBUTING_zh.md)

@@ -715,7 +715,7 @@ V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺
 接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
 2.0.1 与保留的 Python 检测器同步要求完整卡号表达式、支持网络的前缀/长度组合及 Luhn；
 非常规分组及不合法表达式内部的局部匹配被拒绝。格式范围和边界见
-[PII 用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md#支持的银行卡格式)。
+[PII 用户指南](../../../../docs/user-guide/zh/agent-sec-core/pii-checker.md#支持的银行卡格式)。
 其他检测类型、置信度和脱敏格式保留，变化由共享卡号语料及独立质量用例定义。
 
 差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 142 个

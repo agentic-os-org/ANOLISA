@@ -491,5 +491,5 @@ analyze the database schema
 ## Getting help
 
 - **In Copilot Shell**: Type `/help` or ask "how do I..."
-- **Documentation**: Browse the [User Guide](../../../../../docs/user-guide/en/README.md)
+- **Documentation**: Browse the [User Guide](../../../../../docs/user-guide/en/index.md)
 - **Issues**: File an issue on the project repository

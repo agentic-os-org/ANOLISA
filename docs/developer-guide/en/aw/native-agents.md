@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/native-agents.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
+see the [user guide](../../../user-guide/en/aw/index.md).
 
 AW connects your tool policies and Hook commands to an Agent while preserving
 its normal interface. You describe the programs and events in `aw.yaml`; AW
@@ -17,14 +17,14 @@ and AgentScope SDK 2.0.6 through explicitly wired public factories in a foregrou
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
-Start with the [Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md) for installation, or the
+Start with the [Preview package guide](../../../user-guide/en/aw/installation.md) for installation, or the
 [component integration walkthrough](integration.md)
 for source builds and a policy you can verify without a model. Then use the
 shared configuration below to verify native tool behavior. Field definitions
 live in the [configuration reference](configuration.md).
 
 
-For optional lifecycle observation, see [AgentSight through aw run](../../../user-guide/en/user-entrypoint/aw/observability.md).
+For optional lifecycle observation, see [AgentSight through aw run](../../../user-guide/en/aw/observability.md).
 
 ## Current support
 
@@ -45,7 +45,7 @@ For optional lifecycle observation, see [AgentSight through aw run](../../../use
 | Start AgentScope SDK through AW | ✅ [Explicit public factories](#start-agentscope-sdk) in one foreground Python worker |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, input rewriting or OS enforcement | ❌ Not admitted by the current structured Provider path |
-| Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](../../../user-guide/en/user-entrypoint/aw/installation.md); not a stable release |
+| Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](../../../user-guide/en/aw/installation.md); not a stable release |
 
 For Qoder, `tool.after` maps to successful `PostToolUse` callbacks. Qoder's
 `PostToolUseFailure` is a separate event and is not connected in this adapter.
@@ -55,7 +55,7 @@ support; interactive approval is not part of this delivery's acceptance.
 
 ## Install a Preview
 
-Use the [Preview packages](../../../user-guide/en/user-entrypoint/aw/installation.md) for a prebuilt AW + sec-core demo.
+Use the [Preview packages](../../../user-guide/en/aw/installation.md) for a prebuilt AW + sec-core demo.
 The source instructions below are for developers.
 
 ## Use one configuration for four frameworks
@@ -314,7 +314,7 @@ steps. Observe-only chains keep native reverse unwind order.
 PreTool denies the original call and returns full retry arguments to the model;
 each new attempt passes native permissions and sec-core again. An attributed RTK
 retry avoids double compression even with a new call ID. Install RTK separately
-for PreTool; PostTool works without it. See [Tokenless behavior](../../../user-guide/en/user-entrypoint/aw/tokenless.md)
+for PreTool; PostTool works without it. See [Tokenless behavior](../../../user-guide/en/aw/tokenless.md)
 for text-slot eligibility, failure handling and telemetry configuration. Invalid
 final-response replacement directives report failure and retain the original result.
 
@@ -427,7 +427,7 @@ event = json.load(sys.stdin)
 print(json.dumps(contains(event["tool"]["input"])))
 ```
 
-Using the Preview prefix and paths from the [installation guide](../../../user-guide/en/user-entrypoint/aw/installation.md),
+Using the Preview prefix and paths from the [installation guide](../../../user-guide/en/aw/installation.md),
 generate the full YAML instead of assembling Provider and step objects by hand.
 Supply only the Agent entrypoints you need; this example declares both:
 
@@ -684,7 +684,7 @@ directory under `XDG_RUNTIME_DIR`, or under `/tmp/aw-UID` when that variable is
 unset. Explicit paths must be absolute and agree on the `aw.sock` location.
 
 The service retains its bootstrap configuration snapshot. Editing `aw.yaml` does not
-reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/user-entrypoint/aw/configuration.md#update-a-prewarmed-instance);
+reload it. Opt-in instances can use [explicit idle policy updates](../../../user-guide/en/aw/configuration.md#update-a-prewarmed-instance);
 these change the instance Host without changing service identity. Stop a service using its original file or socket before retiring that
 configuration; auto paths for changed configuration may select a different
 service. Exiting an Agent does not stop other sessions or the shared daemon.
@@ -845,9 +845,9 @@ The [configuration reference](configuration.md)
 covers every field and event name. The [local service contract](../../../../src/aw/docs/design/en/runtime/local-service.md)
 describes operation JSON, deadlines and lifecycle for Adapter developers.
 
-Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](../../../user-guide/en/user-entrypoint/aw/security.md).
+Connect sec-core scanning through `aw-provider-sec-core`; see the [Provider guide](../../../user-guide/en/aw/security.md).
 
-Model-visible PostTool compression uses the optional [Tokenless Provider](../../../user-guide/en/user-entrypoint/aw/tokenless.md).
+Model-visible PostTool compression uses the optional [Tokenless Provider](../../../user-guide/en/aw/tokenless.md).
 
 ## Start a Pi SDK worker
 
@@ -1002,7 +1002,7 @@ Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLI
 select its `claude` target, and replace the absolute executable, worker and state
 paths. The source `claude-worker.py` example explicitly exposes and allows native
 Bash in addition to its echo tool. Keep your application's own permission policy
-when composing its factory. See the [Tokenless guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md) for Provider
+when composing its factory. See the [Tokenless guide](../../../user-guide/en/aw/tokenless.md) for Provider
 installation, RTK requirements and statistics settings.
 
 PreTool blocks the original Bash attempt and returns retry arguments to the model;

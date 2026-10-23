@@ -121,7 +121,7 @@ cleanup 中断后，重启会清除普通缺失快照记录，并将恢复孤儿
 用 `ws-ckpt list -w <workspace> --orphans --format json` 查询，再用
 `ws-ckpt delete -w <workspace> -s <complete-id> --force` 删除确认不再需要的快照。
 delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 unavailable 状态；
-删除缺失目标返回 `SnapshotNotFound`。请同步升级 CLI 和 daemon。详见[快照恢复](../../docs/user-guide/zh/runtime/ws-ckpt.md#cleanup-中断后的快照恢复)。
+删除缺失目标返回 `SnapshotNotFound`。请同步升级 CLI 和 daemon。详见[快照恢复](../../docs/user-guide/zh/ws-ckpt/index.md#cleanup-中断后的快照恢复)。
 
 ### 恢复中断的初始化
 
@@ -133,7 +133,7 @@ delete 不再接受前缀。缺失的 pinned 快照和 guarded evidence 保留 u
 避免阻断下一次 `init`。若已注册工作区的子卷被外部删除，使用
 `ws-ckpt unregister -w <workspace> --force` 解除悬空注册；该操作不恢复数据，
 会保留快照和备份。两条命令的 `--force` 都仅跳过交互确认。
-详见[恢复说明](../../docs/user-guide/zh/runtime/ws-ckpt.md#恢复中断的初始化与悬空注册)。
+详见[恢复说明](../../docs/user-guide/zh/ws-ckpt/index.md#恢复中断的初始化与悬空注册)。
 
 ### 状态与配置
 
@@ -221,7 +221,7 @@ cargo clippy --workspace -- -D warnings
 
 ## 文档
 
-- [使用文档](../../docs/user-guide/zh/runtime/ws-ckpt.md)
+- [使用文档](../../docs/user-guide/zh/ws-ckpt/index.md)
 - [RPM 打包](docs/RPM-PACKAGING.md)
 
 ## License

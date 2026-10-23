@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/tokenless.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md).
+see the [user guide](../../../user-guide/en/aw/tokenless.md).
 
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
@@ -13,7 +13,7 @@ compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
 
-Use the [AW Preview packages](../../../user-guide/en/user-entrypoint/aw/installation.md). `aw-provider-tokenless` contains
+Use the [AW Preview packages](../../../user-guide/en/aw/installation.md). `aw-provider-tokenless` contains
 its bridge and Tokenless CLI from the same source commit, plus RTK v0.49.0 pinned
 at `b1c0dc00649c50fbe8930f849c800d4d6ca12091` with Tokenless's statistics and pytest
 patches. It requires matching `aw-core`; `aw-all-in-one` combines the same component

@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/sec-core.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/security.md).
+see the [user guide](../../../user-guide/en/aw/security.md).
 
 `aw-provider-sec-core` lets an AW policy call the existing `agent-sec-cli scan-code`
 command. You choose which tool inputs contain code and whether reported risks
@@ -15,7 +15,7 @@ Provider does not start either daemon, install Agent Hooks or persist AW audits.
 Tool-after support records an observation; it does not scan or replace results.
 
 For a prebuilt AW service + Qoder + sec-core integration, use the
-[Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md). The standalone source bridge below
+[Preview package guide](../../../user-guide/en/aw/installation.md). The standalone source bridge below
 is also available.
 
 For the general component integration path, start with the
@@ -28,7 +28,7 @@ in `config.tools`; an unmapped tool is observed without scanning.
 
 ## Prerequisites and build
 
-Install sec-core using the [sec-core guide](../../../user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
+Install sec-core using the [sec-core guide](../../../user-guide/en/agent-sec-core/index.md).
 This bridge requires the Rust V2 CLI with `--socket`, `--timeout-ms` and
 `scan-code --code --language --mode`, plus an accessible, running sec-core daemon.
 Check the deployed CLI's help; the legacy Python CLI is not certified by this
@@ -63,7 +63,7 @@ included under `share/aw/providers/sec-core/` as reference assets; installing th
 AW package does not register a service or modify `/etc`.
 
 Reuse an existing root `agent-sec-core.service` and its socket. For a new system
-backend, use the [sec-core installation guide](../../../user-guide/en/agent-security/agent-sec-core/QUICKSTART.md)
+backend, use the [sec-core installation guide](../../../user-guide/en/agent-sec-core/index.md)
 and the official system package's service lifecycle. Its current component
 manifest advertises Linux x86_64; a locally built AW ARM64 package does not imply
 an official sec-core ARM64 release. The source `make install-core-v2` target can

@@ -358,7 +358,7 @@ starting a foreground tracer.
 For node-wide collection in Kubernetes, use the DaemonSet manifest and runtime
 image under `src/agentsight/packaging/` (`k8s/daemonset.yaml` and
 `docker/Dockerfile`). See the
-[deployment guide](../../docs/user-guide/en/agent-observability/agentsight/deployment.md#kubernetes-daemonset-node-wide)
+[deployment guide](../../docs/user-guide/en/agentsight/deployment.md#kubernetes-daemonset-node-wide)
 for prerequisites and verification.
 
 ### Build from Source
@@ -466,7 +466,7 @@ per-database locks coordinate `trace` and `serve`. Cleanup removes expired recor
 before size pruning, and targets 90% logical usage after physical allocation crosses the limit;
 automatic maintenance never runs `VACUUM` and leaves freed pages reusable. The Dashboard Settings
 page shows policy, capacity, coverage, and worker health without exposing database paths. See the
-[configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
+[configuration guide](../../docs/user-guide/en/agentsight/configuration.md#sqlite-storage-policies).
 
 ### Feature Flags (`features`)
 
@@ -517,7 +517,7 @@ Resource removals report bounded metadata with `incomplete=true` and `metadata_o
 Hard byte limits still permit forced reclamation.
 Probe and FFI queues enforce byte limits alongside their slot limits and count rejected events.
 These budgets cover retained payloads; process RSS also includes the ring buffer, decoder working
-memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits)
+memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agentsight/configuration.md#runtime-limits)
 for timeout, raw capture and overload behavior.
 
 Configuration schema v5 ships these defaults. Startup upgrades back up and replace older config
@@ -562,7 +562,7 @@ For resource-constrained environments, disable non-essential features and reduce
 ## ATIF export
 
 Use `scripts/batch-analyze.py --export-atif DIRECTORY` to save converted Claude/Qoder ATIF locally without invoking an analyzer.
-See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Supported LLM Providers
 
@@ -576,7 +576,7 @@ Token parsing supports multiple LLM API formats:
 ## Batch concurrency
 
 The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
-See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Origins
 
@@ -586,4 +586,4 @@ This project is derived from [https://github.com/eunomia-bpf/agentsight.git](htt
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
 
-Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#tokenless-statistics-api).
+Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agentsight/configuration.md#tokenless-statistics-api).

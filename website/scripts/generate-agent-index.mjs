@@ -204,11 +204,11 @@ function installWorkflow(method, installName) {
   };
 }
 
-const quickstart = await readFile(path.join(repoRoot, 'docs/QUICKSTART.md'), 'utf8');
+const quickstart = await readFile(path.join(repoRoot, 'docs/user-guide/en/getting-started/quickstart.md'), 'utf8');
 const installCommand = quickstart.match(
   /curl\s+-fsSL\s+https:\/\/get\.agentic-os\.sh\s+\|\s+bash/,
 )?.[0];
-if (!installCommand) throw new Error('Could not derive the canonical install command from docs/QUICKSTART.md');
+if (!installCommand) throw new Error('Could not derive the canonical install command from docs/user-guide/en/getting-started/quickstart.md');
 
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
 const componentRows = parseOverview(agentsMarkdown)
@@ -265,8 +265,6 @@ for (const row of componentRows) {
 }
 
 const documentationSources = [
-  'docs/QUICKSTART.md',
-  'docs/BUILDING.md',
   ...(await walkFiles(path.join(repoRoot, 'docs/user-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
   ...(await walkFiles(path.join(repoRoot, 'docs/developer-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
 ];
@@ -301,8 +299,8 @@ const index = {
   },
   documentation: documentationSources.map((source) => ({
     source,
-    url: source === 'docs/QUICKSTART.md'
-      ? siteHref('docs/quickstart/')
+    url: source === 'docs/user-guide/en/getting-started/quickstart.md'
+      ? siteHref('docs/user-guide/getting-started/quickstart/')
       : `https://github.com/agentic-os-org/ANOLISA/blob/main/${source}`,
   })),
   components,
@@ -441,7 +439,7 @@ await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];

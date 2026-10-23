@@ -50,6 +50,7 @@ const config: Config = {
     },
   },
   staticDirectories: ['static', '.generated/static'],
+  plugins: ['./plugins/document-redirects.mjs'],
   i18n: {
     defaultLocale: 'en',
     locales: ['en', 'zh'],
@@ -67,6 +68,14 @@ const config: Config = {
           path: '.generated/docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',
+          async sidebarItemsGenerator({defaultSidebarItemsGenerator, ...args}) {
+            const items = await defaultSidebarItemsGenerator(args);
+            if (/^user-guide\/[^/]+$/.test(args.item.dirName)) {
+              // The component category already links to its manual entry.
+              return items.filter((item) => item.type !== 'doc' || item.id !== `${args.item.dirName}/index`);
+            }
+            return items;
+          },
           showLastUpdateAuthor: false,
         },
         blog: false,
@@ -121,8 +130,8 @@ const config: Config = {
           title: 'Docs',
           items: [
             {label: 'Documentation', to: '/docs'},
-            {label: 'Quickstart', to: '/docs/quickstart'},
-            {label: 'Building', to: '/docs/building'},
+            {label: 'Quickstart', to: '/docs/user-guide/getting-started/quickstart/'},
+            {label: 'Building', to: '/docs/user-guide/getting-started/building/'},
             {label: 'Changelog', to: '/changelog'},
             {label: 'For Agents', to: '/agents/'},
           ],

@@ -159,4 +159,4 @@ cargo test --locked -p cosh-cli
 - [ ] `Display` trait（通过 `display_name()`）正确格式化
 - [ ] 按需覆盖直接 ID、`ID_LIKE`、引号、文件回退和未知输入
 - [ ] 如需新 `PkgManager`，在 `pkg.rs` 所有操作中添加路由
-- [ ] 更新[支持的发行版](../../../user-guide/zh/user-entrypoint/cosh-ng/supported-distros.md)
+- [ ] 更新[支持的发行版](../../../user-guide/zh/cosh-ng/supported-distros.md)

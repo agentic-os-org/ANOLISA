@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Related documents: [user guide](../../../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md),
-[extension guide](../../../../docs/user-guide/en/user-entrypoint/cosh-ng/core/extensions.md)
+Related documents: [user guide](../../../../docs/user-guide/en/cosh-ng/core/hooks.md),
+[extension guide](../../../../docs/user-guide/en/cosh-ng/core/extensions.md)
 
 ## Summary
 

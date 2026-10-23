@@ -8,11 +8,11 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[3]
 GUIDES = (
-    "user-guide/{language}/user-entrypoint/aw/installation.md",
-    "user-guide/{language}/user-entrypoint/aw/security.md",
-    "user-guide/{language}/user-entrypoint/aw/tokenless.md",
+    "user-guide/{language}/aw/installation.md",
+    "user-guide/{language}/aw/security.md",
+    "user-guide/{language}/aw/tokenless.md",
     "developer-guide/{language}/aw/packages.md",
-    "user-guide/{language}/user-entrypoint/aw/operations.md",
+    "user-guide/{language}/aw/operations.md",
 )
 
 

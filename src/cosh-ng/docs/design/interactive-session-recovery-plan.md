@@ -448,7 +448,7 @@ must update:
 - `src/cosh-ng/README.md`
 - `src/cosh-ng/README_zh.md`
 - the cosh-ng user-guide entry point under
-  `docs/user-guide/{en,zh}/user-entrypoint/cosh-ng/`;
+  `docs/user-guide/{en,zh}/cosh-ng/`;
 - a full English and Chinese session-recovery reference in that user-guide
   directory;
 - developer IPC documentation if `--session-control` becomes a stable

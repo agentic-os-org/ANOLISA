@@ -123,7 +123,8 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 `sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
 
-更完整的依赖和打包说明请阅读 [`docs/BUILDING.md`](docs/BUILDING.md) 与 [`docs/BUILDING_zh.md`](docs/BUILDING_zh.md)。
+更完整的依赖和打包说明请阅读[从源码构建](docs/user-guide/zh/getting-started/building.md)
+（[English](docs/user-guide/en/getting-started/building.md)）。
 
 ### 便捷测试脚本
 
@@ -218,7 +219,7 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 | --- | --- |
 | CLI 命令或 flag | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
 | 配置选项 | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 安装方式 | `docs/QUICKSTART*.md` 和组件 README。 |
+| 安装方式 | 涉及的共享安装/快速开始页面、组件手册和组件 README。 |
 | 架构或协议 | `src/<component>/docs/design/`。 |
 | 新增组件 | 根 README，必要时更新 `NOTICE`。 |
 

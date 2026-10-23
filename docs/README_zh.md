@@ -1,12 +1,64 @@
-# 文档
+# docs 目录说明
 
 [English](README.md)
 
-这里汇总适用于整个 ANOLISA 的共性文档，包括安装入口、环境要求和源码构建。
+这个目录将用户手册和开发 ANOLISA 的文档分开组织。安装和使用组件请从
+[用户指南](user-guide/zh/index.md)开始；本页说明文档源码为什么这样存放，以及
+如何维护这些入口。
 
-- [快速开始](./QUICKSTART_zh.md) — 安装 CLI，先跑通最小可用环境。
-- [从源码构建](./BUILDING_zh.md) — 准备开发环境并构建仓库。
-- [用户指南](./user-guide/zh/README.md) — 了解日常使用、配置和问题排查。
-- [开发者指南](./developer-guide/zh/README.md) — 阅读架构、扩展功能并参与贡献。
+## 目录结构
 
-第一次使用 ANOLISA，建议先看快速开始；准备修改实现时，可以直接进入开发者指南。
+```text
+docs/
+├── README.md                    # 文档目录的组织与维护说明
+├── README_zh.md
+├── navigation.yaml              # 网站分组、顺序、中英文标签和简介
+├── user-guide/
+│   ├── en/
+│   │   ├── index.md             # 用户手册入口
+│   │   ├── getting-started/     # 共用的安装、构建、测试和排障
+│   │   │   └── quickstart.md    # 项目级的简短上手流程
+│   │   ├── aw/index.md
+│   │   ├── cosh-ng/index.md
+│   │   ├── skillfs/index.md
+│   │   └── …/index.md           # 每个组件都有自己的目录
+│   └── zh/                     # 对应的中文手册
+└── developer-guide/
+    ├── en/                     # 现有开发文档
+    └── zh/
+```
+
+用户手册中的组件目录平铺存放。每个组件的 `index.md` 介绍功能、包含首次使用步骤，
+并在需要时索引到其他章节。共用操作放在 `getting-started/`，让用户和贡献者引用
+同一份安装、构建、测试和排障说明。项目级 Quickstart 保留为独立的简短上手流程，
+末尾索引后续任务；`getting-started/` 无需再放一个索引页。
+
+网站的阅读分组在 [`navigation.yaml`](navigation.yaml) 中定义，不要求文档源码
+目录也按同样的层级存放。调整分组或名称时，无需移动组件手册。组件 URL 同样
+平铺：入口为 `/docs/user-guide/aw/`，章节为 `/docs/user-guide/aw/installation/`
+这样的路径。共用页面放在 `/docs/user-guide/getting-started/<page>/`。旧地址直接
+跳转到当前页面，保留语言和传入的章节锚点。中英文用户手册
+索引中的导航区块由这份 YAML 生成：
+
+```bash
+node website/scripts/navigation.mjs --write-indexes
+```
+
+组件条目的 `description.en` 和 `description.zh` 是手册索引中固定的一句话简介。
+在 YAML 中维护这些简介，并与组件文档保持一致，不从 README 段落中自动抽取。
+网站使用同一份简介，侧栏仍只显示组件名称。简介只说明组件做什么，不放版本号
+或安装细节。
+
+修改导航后，在仓库根目录执行此命令。请修改 YAML，不要直接修改手册索引中的
+生成区块。网站也从这些 Markdown 源文件生成页面，生成的网站文件不作为另一份
+文档源码维护。
+
+## 其他文档放在哪里
+
+通用贡献流程放在仓库根目录的[贡献指南](../CONTRIBUTING_zh.md)中。组件开发和
+集成文档集中在 [`developer-guide/`](developer-guide/zh/README.md)。组件技术设计
+随源码放在 `src/<component>/docs/` 或组件登记的源码目录中。
+
+已弃用组件的手册随组件保留在 `deprecated/<component>/docs/` 中，不进入当前用户
+手册和网站导航。[文档规范](../specs/documentation-standard.md)规定命名、中英文
+对应和维护要求。

@@ -163,4 +163,4 @@ cargo test --locked -p cosh-cli
 - [ ] `Display` trait (via `display_name()`) formats correctly
 - [ ] Tests cover direct IDs, `ID_LIKE`, quotes, file fallback, and unknown input as applicable
 - [ ] If a new `PkgManager` is needed, add routing in all `pkg.rs` operations
-- [ ] Update [Supported distributions](../../../user-guide/en/user-entrypoint/cosh-ng/supported-distros.md)
+- [ ] Update [Supported distributions](../../../user-guide/en/cosh-ng/supported-distros.md)

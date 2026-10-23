@@ -120,7 +120,7 @@ PreTool 可以继续；Core 失败、超时或响应非法时，Adapter 不返�
 交付的结果。2026.8.2 等旧版宿主会在 middleware 回调前裁剪到 100,000 个 UTF-16
 Code Unit；Fail-open 无法恢复被宿主丢弃的内容或元数据。它们仍在此限制内受支持，
 建议使用包含上游提交 `2f620b970a04` 的构建，详见
-[OpenClaw 兼容说明](../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+[OpenClaw 兼容说明](../../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 ### 路径 2：共享 PostTool Hook（Protocol v2）
 
@@ -538,7 +538,7 @@ tokenless stats summary
 
 统计启用条件：`TOKENLESS_STATS_ENABLED` 环境变量未设为 `0`/`false`，或通过 `tokenless stats enable` 启用。
 
-> **SLS 日志记录（JSONL）**：除 SQLite 统计外，tokenless 默认还会将每次压缩以 SLS JSONL 记录写入 `/var/log/anolisa/sls/ops/tokenless.jsonl`（默认开启）。该文件由 **anolisa SLS 组件统一管理**，tokenless 不创建/删除，仅在文件存在时追加，不存在则跳过。开关字段 `~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`），环境变量 `TOKENLESS_SLS_ENABLED` 优先；输出路径可用 `TOKENLESS_SLS_PATH` 覆盖（须位于 `/var/log/` 或 `/tmp/` 下）。仅记录度量，不含原文/敏感数据。详见 [Tokenless 效果度量 · SLS JSONL](../../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#sls-jsonl)。
+> **SLS 日志记录（JSONL）**：除 SQLite 统计外，tokenless 默认还会将每次压缩以 SLS JSONL 记录写入 `/var/log/anolisa/sls/ops/tokenless.jsonl`（默认开启）。该文件由 **anolisa SLS 组件统一管理**，tokenless 不创建/删除，仅在文件存在时追加，不存在则跳过。开关字段 `~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`），环境变量 `TOKENLESS_SLS_ENABLED` 优先；输出路径可用 `TOKENLESS_SLS_PATH` 覆盖（须位于 `/var/log/` 或 `/tmp/` 下）。仅记录度量，不含原文/敏感数据。详见 [Tokenless 效果度量 · SLS JSONL](../../../docs/user-guide/zh/tokenless/measuring-savings.md#sls-jsonl)。
 
 ### 9.3 压缩效果说明
 

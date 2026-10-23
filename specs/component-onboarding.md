@@ -101,7 +101,7 @@ Include these based on the component's form and characteristics:
 |-----------|-------------|------|---------|
 | Rust component | Add to §3 conventions scope list | `AGENTS.md` §3 opening line | Tech stack = Rust |
 | Complex architecture (multi-crate, non-trivial constraints) | Scoped AGENTS.md + register in §11 | `src/<name>/AGENTS.md` + `AGENTS.md` §11 table | More than 1 crate, or has design constraints that differ from global conventions |
-| User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/user-entrypoint/<name>.md` | Component has CLI subcommands or user-visible behavior |
+| User-facing CLI or interactive tool | User-guide documentation (en + zh) + link from index | `docs/user-guide/{en,zh}/<name>/index.md` | Component has CLI subcommands or user-visible behavior |
 | Agent-callable (can be invoked by cosh/agent directly) | Skill registration | `src/os-skills/<domain>/<name>/SKILL.md` | Tool is designed for agent autonomous invocation |
 | Daemon / needs packaging | Component contract | `.anolisa/component.toml` | Has systemd service, RPM spec, or runtime directories. See `distribution/anolisa/docs/COMPONENT_CONTRACT.md` for schema |
 | Pinned toolchain | rust-toolchain.toml | `src/<name>/rust-toolchain.toml` | Requires a Rust version different from repo default |

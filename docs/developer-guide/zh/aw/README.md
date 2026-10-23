@@ -3,7 +3,7 @@
 [English](../../en/aw/README.md)
 
 这里说明如何构建 AW、接入组件，以及维护 Adapter 和 Provider。
-安装与日常使用请从 [AW 用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)开始。
+安装与日常使用请从 [AW 用户指南](../../../user-guide/zh/aw/index.md)开始。
 
 | 任务 | 文档 |
 | --- | --- |

@@ -2,7 +2,7 @@
 
 [English](../../en/aw/building.md)
 
-在 Linux x86_64 或 aarch64 上编译并打包 AW。现成包见[安装 AW](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
+在 Linux x86_64 或 aarch64 上编译并打包 AW。现成包见[安装 AW](../../../user-guide/zh/aw/installation.md)。
 
 ## 构建环境
 
@@ -44,11 +44,11 @@ sha256sum -c SHA256SUMS
 
 ## 交付与验收
 
-交付选定的压缩包及其校验条目，按[安装与首次运行](../../../user-guide/zh/user-entrypoint/aw/installation.md#安装)
+交付选定的压缩包及其校验条目，按[安装与首次运行](../../../user-guide/zh/aw/installation.md#安装)
 完成安装、配置和启动。使用 all-in-one 时，设 `AW_BUNDLE_KIND=aw-all-in-one`。
 
 验收应确认 Agent 能调用工具、`aw status` 能查询状态、`aw stop` 能停止服务。
-启用可选能力后，再按 [Tokenless](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)
-或[安全检查](../../../user-guide/zh/user-entrypoint/aw/security.md)验证效果。
+启用可选能力后，再按 [Tokenless](../../../user-guide/zh/aw/tokenless.md)
+或[安全检查](../../../user-guide/zh/aw/security.md)验证效果。
 
-其他 Agentic OS 组件的编译见[仓库构建指南](../../../BUILDING_zh.md)。
+其他 Agentic OS 组件的编译见[仓库构建指南](../../../user-guide/zh/getting-started/building.md)。

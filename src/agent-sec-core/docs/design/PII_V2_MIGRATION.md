@@ -73,7 +73,7 @@ Existing large-input, Unicode, overlapping-redaction, backtracking and finding-l
 
 Version 2.0.1 and the retained Python detector validate complete card expressions against
 supported grouping and network prefix/length pairs before Luhn. The supported seven-network
-matrix and expression boundaries are documented in the [user guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md#supported-card-number-formats).
+matrix and expression boundaries are documented in the [user guide](../../../../docs/user-guide/en/agent-sec-core/pii-checker.md#supported-card-number-formats).
 `tests/fixtures/credit_cards.json` is shared by Python and Rust quality tests, including
 the original benign Host outputs; the historical V1 oracle is unchanged.
 

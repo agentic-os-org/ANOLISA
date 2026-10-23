@@ -56,7 +56,7 @@ OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 m
 失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
 旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
 额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
-追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 构建 CLI 和 OpenClaw Adapter 后，可在 `src/tokenless` 使用本地宿主镜像运行可选容器回归：
 

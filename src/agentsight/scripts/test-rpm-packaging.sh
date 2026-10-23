@@ -367,8 +367,8 @@ require_count src/agentsight/tests/security_pipeline.rs \
 
 # Companion-service setup belongs in the component guides, not the product overview.
 for document in \
-    docs/user-guide/en/agent-observability/agentsight/QUICKSTART.md \
-    docs/user-guide/zh/agent-observability/agentsight/QUICKSTART.md \
+    docs/user-guide/en/agentsight/index.md \
+    docs/user-guide/zh/agentsight/index.md \
     src/agentsight/README.md src/agentsight/README_zh.md; do
     require_literal "$document" "agentsight-enforcer"
 done

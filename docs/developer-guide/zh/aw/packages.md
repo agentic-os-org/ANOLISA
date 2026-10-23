@@ -2,7 +2,7 @@
 
 [English](../../en/aw/packages.md)
 
-本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/user-entrypoint/aw/installation.md)。
+本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../user-guide/zh/aw/installation.md)。
 
 本地安装、卸载、初始化和编辑分别使用 `aw install`、`aw uninstall`、`aw config init`
 及 `aw config` 编辑命令。独立 `aw-package` 可执行文件已删除，Rust 库保留。
@@ -339,4 +339,4 @@ CI / AW Integration 每晚运行，也可针对确切源码提交手动触发；
 `aw-all-in-one`。扩展包含桥接、Tokenless CLI 和固定版本带补丁的 RTK，要求匹配的 core，沿用 sec-core 的
 安装记录与完整性规则。通过 `aw config init --provider tokenless` 或
 `aw config init --provider sec-core+tokenless --socket ABS_FILE` 显式启用压缩。四框架配置、原生
-结果槽和故障行为见 [Tokenless 指南](../../../user-guide/zh/user-entrypoint/aw/tokenless.md)。
+结果槽和故障行为见 [Tokenless 指南](../../../user-guide/zh/aw/tokenless.md)。

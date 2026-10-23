@@ -4,7 +4,7 @@
 
 Use these guides to build AW, integrate components, and maintain Adapters and
 Providers. For installation and daily use, start with the
-[AW user guide](../../../user-guide/en/user-entrypoint/aw/README.md).
+[AW user guide](../../../user-guide/en/aw/index.md).
 
 | Task | Guide |
 | --- | --- |

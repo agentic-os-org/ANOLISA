@@ -3,7 +3,7 @@
 [English](../../en/aw/configuration.md)
 
 本文说明当前配置校验器接受的字段。起步模板、可用能力及 Agent
-使用流程见[用户指南](../../../user-guide/zh/user-entrypoint/aw/README.md)。
+使用流程见[用户指南](../../../user-guide/zh/aw/index.md)。
 
 [随包 Schema](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/schemas/configuration-v1alpha1.schema.json)
 定义公共字段结构，Rust 校验器另行检查引用及字段之间的关系。本地 Host 负责

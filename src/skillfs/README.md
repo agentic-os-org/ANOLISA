@@ -153,7 +153,7 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 Use `skillfs mount --config /path/to/skillfs-mount.toml` with `mountpoint` and
 an ordered `sources` array to aggregate directories. Earlier sources win whole
 skill-name conflicts; multiple sources are read-only. Paths must be absolute.
-See the [configuration reference](../../docs/user-guide/en/runtime/skillfs.md#mount-configuration)
+See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
 
 ### Managed Mount Mode
@@ -479,8 +479,8 @@ sed "s|skillfs-sidecar:dev|$IMAGE|g" deploy/kubernetes/20-pod.yaml |
 ```
 
 See the
-[Kubernetes sidecar user guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md)
-([中文](../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md)) for
+[Kubernetes sidecar user guide](../../docs/user-guide/en/skillfs/kubernetes-sidecar.md)
+([中文](../../docs/user-guide/zh/skillfs/kubernetes-sidecar.md)) for
 deployment, `skill-discover` verification, troubleshooting, and cleanup.
 
 ## Test Coverage
@@ -613,7 +613,7 @@ Related security surfaces:
 
 ## Documentation
 
-- [Kubernetes sidecar deployment guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md) -
+- [Kubernetes sidecar deployment guide](../../docs/user-guide/en/skillfs/kubernetes-sidecar.md) -
   Build, deploy, verify, and clean up SkillFS in Kubernetes.
 - [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - Architecture,
   runtime consistency boundaries, and deployment scenarios.

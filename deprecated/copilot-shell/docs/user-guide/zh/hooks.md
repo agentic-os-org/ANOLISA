@@ -162,4 +162,4 @@ Hook 脚本通过 stdin 接收 JSON 输入，通过 stdout 返回 JSON 输出。
 - [Hook 开发指南](../../developer-guide/zh/hooks/index.md)
 - [Hook API 参考](../../developer-guide/zh/hooks/reference.md)
 - [编写自定义 Hook](../../developer-guide/zh/hooks/writing-hooks.md)
-- [AgentSecCore 内部命令](../../../../../docs/user-guide/zh/agent-security/agent-sec-core/internal-commands.md) — `sandbox-guard` spawn 的 `agent-sec-cli log-sandbox` 审计命令契约
+- [AgentSecCore 内部命令](../../../../../docs/user-guide/zh/agent-sec-core/internal-commands.md) — `sandbox-guard` spawn 的 `agent-sec-cli log-sandbox` 审计命令契约

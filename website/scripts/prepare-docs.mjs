@@ -10,6 +10,10 @@ import {
   walkFiles,
   websiteDir,
 } from './lib.mjs';
+import {
+  insertNavigation, itemPath, loadNavigation, navigationEnd, navigationStart, userGuideSidebar,
+} from './navigation.mjs';
+import {publicDocumentPath} from './document-routes.mjs';
 
 const repository = 'https://github.com/agentic-os-org/ANOLISA';
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
@@ -29,27 +33,10 @@ function normalizedTarget(relativePath) {
   return path.posix.join(parsed.dir, basename);
 }
 
-function publicDocumentPath(target) {
-  // Keep published AW entry points stable when their source files move.
-  const awRoutes = {
-    'user-guide/user-entrypoint/aw/installation.md': 'user-guide/user-entrypoint/aw-preview',
-    'user-guide/user-entrypoint/aw/tokenless.md': 'user-guide/user-entrypoint/aw-tokenless',
-    'user-guide/user-entrypoint/aw/security.md': 'user-guide/user-entrypoint/aw-sec-core',
-    'user-guide/user-entrypoint/aw/observability.md': 'user-guide/user-entrypoint/aw-agentsight',
-  };
-  if (awRoutes[target]) return awRoutes[target];
-  const withoutExtension = target.replace(/\.md$/, '');
-  if (withoutExtension === 'index') return '';
-  return withoutExtension.replace(/\/index$/, '');
-}
+const navigation = await loadNavigation();
 
 async function sourceDocuments(locale) {
-  const suffix = locale === 'zh' ? '_zh' : '';
-  const documents = [
-    {source: `docs/README${suffix}.md`, target: 'index.md', position: 1},
-    {source: `docs/QUICKSTART${suffix}.md`, target: 'quickstart.md', position: 2},
-    {source: `docs/BUILDING${suffix}.md`, target: 'building.md', position: 3},
-  ];
+  const documents = [];
   for (const section of ['user-guide', 'developer-guide']) {
     const root = path.join(repoRoot, 'docs', section, locale);
     for (const file of await walkFiles(root, (candidate) => candidate.endsWith('.md'))) {
@@ -193,23 +180,29 @@ function makeMdxSafe(markdown) {
     .join('\n');
 }
 
+function preserveLegacyQuickstartId(markdown, target) {
+  if (!/^user-guide\/(?:cosh-ng|agentsight|tokenless)\/index\.md$/.test(target)) return markdown;
+  // Keep published fragments stable while repository Markdown stays renderer-neutral.
+  return markdown.replace(/^(## (?:Quick start|快速上手))$/m, '$1 {#quick-start}');
+}
+
 function sidebarLabel(document, title, locale) {
-  if (!document.target.startsWith('user-guide/')) return title;
-  if (document.target.endsWith('/quickstart.md')) return locale === 'zh' ? '快速开始' : 'Quickstart';
-  if (document.target.endsWith('/agent-memory.md')) return 'Agent Memory';
-  if (document.target.endsWith('/tokenless.md')) return 'Tokenless';
+  const item = navigation.groups.flatMap((group) => group.items)
+    .concat(navigation.reports ?? [])
+    .find((entry) => `user-guide/${itemPath(entry)}` === document.target);
+  if (item) return item.label[locale];
   const coshNgLabels = {
     en: {
-      'user-guide/user-entrypoint/cosh-ng/mcp.md': 'MCP Integration',
-      'user-guide/user-entrypoint/cosh-ng/configuration.md': 'Configuration',
-      'user-guide/user-entrypoint/cosh-ng/supported-distros.md': 'Platform Support',
-      'user-guide/user-entrypoint/cosh-ng/output-format.md': 'Output Format',
+      'user-guide/cosh-ng/mcp.md': 'MCP Integration',
+      'user-guide/cosh-ng/configuration.md': 'Configuration',
+      'user-guide/cosh-ng/supported-distros.md': 'Platform Support',
+      'user-guide/cosh-ng/output-format.md': 'Output Format',
     },
     zh: {
-      'user-guide/user-entrypoint/cosh-ng/mcp.md': '接入 MCP',
-      'user-guide/user-entrypoint/cosh-ng/configuration.md': '配置',
-      'user-guide/user-entrypoint/cosh-ng/supported-distros.md': '平台支持',
-      'user-guide/user-entrypoint/cosh-ng/output-format.md': '输出格式',
+      'user-guide/cosh-ng/mcp.md': '接入 MCP',
+      'user-guide/cosh-ng/configuration.md': '配置',
+      'user-guide/cosh-ng/supported-distros.md': '平台支持',
+      'user-guide/cosh-ng/output-format.md': '输出格式',
     },
   };
   if (coshNgLabels[locale][document.target]) return coshNgLabels[locale][document.target];
@@ -230,80 +223,44 @@ function frontMatter(document, markdown, locale) {
   const position = document.position ?? documentPositions[document.target];
   if (position) fields.push(`sidebar_position: ${position}`);
   if (document.target.endsWith('/index.md')) fields.push('sidebar_position: 1');
-  if (document.target === 'user-guide/index.md') fields.push('displayed_sidebar: userGuide');
+  if (document.target.startsWith('user-guide/')) fields.push('displayed_sidebar: userGuide');
   if (document.target === 'developer-guide/index.md') fields.push('displayed_sidebar: developerGuide');
   fields.push('---', '');
   return fields.join('\n');
 }
 
 const categoryNames = {
-  en: {
-    'user-guide': 'User Guide',
-    'developer-guide': 'Developer Guide',
-    'user-entrypoint': 'User Entry Points',
-    'agent-observability': 'Observability',
-    'agent-security': 'Security',
-    'token-saving': 'Token Efficiency',
-    runtime: 'Runtime',
-    cli: 'CLI', core: 'Core', shell: 'Shell', hooks: 'Hooks',
-  },
-  zh: {
-    'user-guide': '用户指南',
-    'developer-guide': '开发者指南',
-    'user-entrypoint': '用户入口',
-    'agent-observability': '可观测性',
-    'agent-security': '安全',
-    'token-saving': 'Token 效率',
-    runtime: '运行时',
-    cli: 'CLI', core: '核心', shell: 'Shell', hooks: 'Hooks',
-  },
+  en: { 'user-guide': 'User Guide', 'developer-guide': 'Developer Guide',
+    cli: 'CLI', core: 'Core', shell: 'Shell', hooks: 'Hooks' },
+  zh: { 'user-guide': '用户指南', 'developer-guide': '开发者指南',
+    cli: 'CLI', core: '核心', shell: 'Shell', hooks: 'Hooks' },
 };
-
 const categoryPathNames = {
-  en: {
-    'user-guide/user-entrypoint/aw': 'AW',
-    'developer-guide/aw': 'AW',
-    'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
-    'user-guide/user-entrypoint/cosh-ng/shell': 'Terminal',
-    'user-guide/user-entrypoint/cosh-ng/core': 'Automation and Integration',
-    'user-guide/user-entrypoint/cosh-ng/cli': 'System Operations',
-    'user-guide/agent-observability/agentsight': 'AgentSight',
-    'developer-guide/cosh-ng': 'cosh-ng',
-  },
-  zh: {
-    'user-guide/user-entrypoint/aw': 'AW',
-    'developer-guide/aw': 'AW',
-    'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
-    'user-guide/user-entrypoint/cosh-ng/shell': '终端',
-    'user-guide/user-entrypoint/cosh-ng/core': '自动化与集成',
-    'user-guide/user-entrypoint/cosh-ng/cli': '系统操作',
-    'user-guide/agent-observability/agentsight': 'AgentSight',
-    'developer-guide/cosh-ng': 'cosh-ng',
-  },
+  en: {'developer-guide/aw': 'AW', 'developer-guide/cosh-ng': 'cosh-ng',
+    'user-guide/cosh-ng/shell': 'Terminal', 'user-guide/cosh-ng/core': 'Automation and Integration',
+    'user-guide/cosh-ng/cli': 'System Operations'},
+  zh: {'developer-guide/aw': 'AW', 'developer-guide/cosh-ng': 'cosh-ng',
+    'user-guide/cosh-ng/shell': '终端', 'user-guide/cosh-ng/core': '自动化与集成',
+    'user-guide/cosh-ng/cli': '系统操作'},
 };
-
-// Sidebar ordering mirrors the architecture layers: entry points → token
-// saving → runtime → the cross-cutting observability/security layer.
-// Without explicit positions Docusaurus sorts categories alphabetically,
-// which reverses that reading order.
+for (const locale of ['en', 'zh']) {
+  for (const item of navigation.groups.flatMap((group) => group.items)) {
+    if (item.component) categoryPathNames[locale][`user-guide/${item.component}`] = item.label[locale];
+  }
+}
 const categoryPositions = {
-  'user-guide/user-entrypoint': 3,
-  'user-guide/user-entrypoint/cosh-ng/shell': 3,
-  'user-guide/user-entrypoint/cosh-ng/core': 5,
-  'user-guide/user-entrypoint/cosh-ng/cli': 6,
-  'user-guide/token-saving': 4,
-  'user-guide/runtime': 5,
-  'user-guide/agent-observability': 6,
-  'user-guide/agent-security': 7,
+  'user-guide/cosh-ng/shell': 3,
+  'user-guide/cosh-ng/core': 5,
+  'user-guide/cosh-ng/cli': 6,
 };
 
 const documentPositions = {
-  'user-guide/user-entrypoint/aw/installation.md': 2,
-  'user-guide/user-entrypoint/aw/configuration.md': 3,
-  'user-guide/user-entrypoint/aw/tokenless.md': 4,
-  'user-guide/user-entrypoint/aw/security.md': 5,
-  'user-guide/user-entrypoint/aw/observability.md': 6,
-  'user-guide/user-entrypoint/aw/operations.md': 7,
+  'user-guide/aw/installation.md': 2,
+  'user-guide/aw/configuration.md': 3,
+  'user-guide/aw/tokenless.md': 4,
+  'user-guide/aw/security.md': 5,
+  'user-guide/aw/observability.md': 6,
+  'user-guide/aw/operations.md': 7,
   'developer-guide/aw/architecture.md': 2,
   'developer-guide/aw/building.md': 3,
   'developer-guide/aw/providers.md': 4,
@@ -314,15 +271,10 @@ const documentPositions = {
   'developer-guide/aw/tokenless.md': 9,
   'developer-guide/aw/sec-core.md': 10,
   'developer-guide/aw/agentsight.md': 11,
-  'user-guide/installation.md': 2,
-  'user-guide/user-entrypoint/cosh-ng/quickstart.md': 2,
-  'user-guide/token-saving/tokenless/quickstart.md': 1,
-  'user-guide/agent-security/agent-sec-core/quickstart.md': 1,
-  'user-guide/user-entrypoint/cosh-ng/mcp.md': 4,
-  'user-guide/user-entrypoint/cosh-ng/configuration.md': 7,
-  'user-guide/user-entrypoint/cosh-ng/supported-distros.md': 8,
-  'user-guide/user-entrypoint/cosh-ng/output-format.md': 9,
-  'user-guide/troubleshooting.md': 8,
+  'user-guide/cosh-ng/mcp.md': 4,
+  'user-guide/cosh-ng/configuration.md': 7,
+  'user-guide/cosh-ng/supported-distros.md': 8,
+  'user-guide/cosh-ng/output-format.md': 9,
 };
 
 function humanize(segment) {
@@ -363,9 +315,14 @@ async function writeCategories(outputRoot, documents, locale) {
 
 async function prepareLocale(documents, outputRoot, locale) {
   for (const document of documents) {
-    const sourceMarkdown = await readFile(path.join(repoRoot, document.source), 'utf8');
+    const originalMarkdown = await readFile(path.join(repoRoot, document.source), 'utf8');
+    const sourceMarkdown = document.target === 'user-guide/index.md'
+      ? insertNavigation(originalMarkdown, navigation, locale)
+        .replace(navigationStart, '').replace(navigationEnd, '') : originalMarkdown;
     const websiteMarkdown = stripCopilotShellNavigation(stripLocaleSwitchLinks(sourceMarkdown));
-    const markdown = makeMdxSafe(await rewriteLinks(websiteMarkdown, document.source));
+    const markdown = preserveLegacyQuickstartId(
+      makeMdxSafe(await rewriteLinks(websiteMarkdown, document.source)), document.target,
+    );
     const output = path.join(outputRoot, document.target);
     await mkdir(path.dirname(output), {recursive: true});
     await writeFile(output, `${frontMatter(document, sourceMarkdown, locale)}${markdown}`);
@@ -378,6 +335,12 @@ await rm(path.join(generatedDir, 'i18n'), {recursive: true, force: true});
 await rm(path.join(staticOutput, 'images'), {recursive: true, force: true});
 await prepareLocale(englishDocuments, docsOutput, 'en');
 await prepareLocale(chineseDocuments, i18nOutput, 'zh');
+
+await writeFile(path.join(generatedDir, 'user-guide-sidebar.json'),
+  `${JSON.stringify(userGuideSidebar(navigation, englishDocuments), null, 2)}\n`);
+
+await rm(path.join(staticOutput, 'docs'), {recursive: true, force: true});
+await rm(path.join(staticOutput, 'zh', 'docs'), {recursive: true, force: true});
 
 for (const image of referencedImages) {
   const destination = path.join(staticOutput, image.slice('docs/'.length));
@@ -393,50 +356,22 @@ await writeFile(
   `${JSON.stringify(
     {
       'version.label': {message: '当前版本', description: 'The label for version current'},
-      'sidebar.userGuide.category.User Entry Points': {
-        message: '用户入口',
-        description: "The label for category 'User Entry Points' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng': {
-        message: 'cosh-ng',
-        description: "The label for category 'cosh-ng' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-shell': {
-        message: '终端',
-        description: "The label for the cosh-ng terminal category in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-core': {
-        message: '自动化与集成',
-        description: "The label for the cosh-ng integration category in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-cli': {
-        message: '系统操作',
-        description: "The label for the cosh-ng system operations category in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.Token Efficiency': {
-        message: 'Token 效率',
-        description: "The label for category 'Token Efficiency' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-token-saving-tokenless': {
-        message: 'Tokenless',
-        description: "The label for category 'Tokenless' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.Runtime': {
-        message: '运行时',
-        description: "The label for category 'Runtime' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.Observability': {
-        message: '可观测性',
-        description: "The label for category 'Observability' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.Security': {
-        message: '安全',
-        description: "The label for category 'Security' in sidebar 'userGuide'",
-      },
-      'sidebar.userGuide.category.category-user-guide-agent-security-agent-sec-core': {
-        message: 'Agent Sec Core',
-        description: "The label for category 'Agent Sec Core' in sidebar 'userGuide'",
-      },
+      ...Object.fromEntries(navigation.groups.flatMap((group) => [
+        [`sidebar.userGuide.category.navigation-${group.id}`, {
+          message: group.label.zh, description: `User guide group ${group.id}`,
+        }],
+        ...group.items.filter((item) => item.component).map((item) => [
+          `sidebar.userGuide.category.component-${item.component}`, {
+            message: item.label.zh, description: `User guide component ${item.component}`,
+          },
+        ]),
+      ])),
+      ...Object.fromEntries(Object.entries(categoryPathNames.zh).filter(([category]) =>
+        category.startsWith('user-guide/cosh-ng/')).map(([category, label]) => [
+          `sidebar.userGuide.category.category-${category.replaceAll('/', '-')}`, {
+            message: label, description: `User guide category ${category}`,
+          },
+        ])),
       'sidebar.developerGuide.category.Cosh-ng': {
         message: 'cosh-ng',
         description: "The label for category 'Cosh-ng' in sidebar 'developerGuide'",

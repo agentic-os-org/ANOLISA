@@ -14,7 +14,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
 conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
 not isolated by Tokenless tenant or session.
-See [bundled RTK commands](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#bundled-rtk-commands)
+See [bundled RTK commands](../../docs/user-guide/en/tokenless/cli-reference.md#bundled-rtk-commands)
 for flag migration, pipeline behavior, and output recovery.
 
 Agent adapters are available for:
@@ -67,7 +67,7 @@ repository's committed reference fixtures; they are neither a
 production range nor additive. Compression depends on payload size and shape,
 formatting overhead, removable schema metadata, configured thresholds, and the share of tool data in the
 session. Short or already compact payloads may save only a few percent or pass
-through unchanged. See [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md#run-the-repository-reference-workload)
+through unchanged. See [Measuring Tokenless Savings](../../docs/user-guide/en/tokenless/measuring-savings.md#run-the-repository-reference-workload)
 for the exact inputs, command, full output, and limitations.
 
 PostTool leaves the entire JSON response unchanged when its parser cannot preserve a numeric value. Otherwise, compaction and record reduction can proceed; Core selects TOON only when decoding it recovers the same retained values and types.
@@ -116,7 +116,7 @@ on the share and shape of that content in the session.
 Example: dashboard shows 60% compression rate, but if tool responses account for 20% of total consumption, the actual savings rate is 60% × 20% = **12%**. This is why savings feel "lighter than a feather" in experiments consuming 15 million tokens — tokenless only optimizes the ~3 million tokens of tool responses.
 
 > Recoverable omissions include an optional action: `If needed, run in shell: tokenless retrieve HASH`. AgentScope instead sees `If needed, call tool tokenless_retrieve with hash_or_marker=HASH` (using its configured static Tool name). Recovery returns the saved payload while it remains in Stash; it costs additional tokens and is not required for every omission. Historical `<<tokenless:HASH>>` markers remain readable but are no longer generated. Use `TOKENLESS_COMPRESSION_ENABLED=0/1` dual runs to compare real savings.
-> See [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md) for per-strategy trigger conditions.
+> See [user manual](../../docs/user-guide/en/tokenless/index.md) for per-strategy trigger conditions.
 
 ## Architecture
 
@@ -205,7 +205,7 @@ instead. The curl installer records what it created in
 consumes to remove exactly those paths; its source-build path is CLI-only
 (no `rtk`, no adapters). Agent frameworks can run the same steps through the
 `install-tokenless` OS Skill. The full method matrix lives in
-`docs/user-guide/en/token-saving/tokenless/QUICKSTART.md`.
+`docs/user-guide/en/tokenless/index.md`.
 
 `~/.local/share/anolisa/adapters/tokenless` is shared with anolisa-managed
 installs, so neither public route takes it over blindly. Ownership has to be
@@ -285,11 +285,11 @@ where its native wheel was built. It exposes the four Tokenless lifecycle
 methods and bundles the matching RTK executable; TOON is linked into the native
 runtime. It does not require the Tokenless CLI or system helper binaries. The
 package is built and tested in this repository but is not yet published to
-PyPI. See the [Python SDK guide](../../docs/user-guide/en/token-saving/tokenless/sdk.md) for
+PyPI. See the [Python SDK guide](../../docs/user-guide/en/tokenless/sdk.md) for
 runnable lifecycle and Stats examples, the
-[AgentScope SDK integration](../../docs/user-guide/en/token-saving/tokenless/sdk/agentscope.md) for
+[AgentScope SDK integration](../../docs/user-guide/en/tokenless/sdk/agentscope.md) for
 AgentScope attachment, the
-[Agent integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md)
+[Agent integration guide](../../docs/user-guide/en/tokenless/framework-integration.md)
 for product adapters, and the [runtime design](docs/design/runtime-library.md) for internal contracts.
 
 The same wheel provides typed, read-only statistics queries without requiring
@@ -319,10 +319,10 @@ Tokenless session second.
 The standalone `compress-schema` and `compress-response` commands use this
 content-dependent savings check rather than a fixed byte or character minimum.
 The description, string, array, and depth limits in the
-[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md)
+[CLI reference](../../docs/user-guide/en/tokenless/cli-reference.md)
 trigger individual transformations; they are not minimum total payload sizes.
 Agent adapters may apply separate pre-check thresholds; see the
-[Agent integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#adapter-processing-rules).
+[Agent integration guide](../../docs/user-guide/en/tokenless/framework-integration.md#adapter-processing-rules).
 
 ### compress
 
@@ -345,7 +345,7 @@ with a valid Hash or Marker and sends its output through the Retrieve bypass,
 preventing a second compression pass. Legacy copilot-shell and other hosts that
 cannot replace the result remain lossless-only. BeforeModel Schema compression
 still requires its separate authorized recovery capability. See the
-[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#compress)
+[CLI reference](../../docs/user-guide/en/tokenless/cli-reference.md#compress)
 for the request/response contract and an executable example.
 
 ### compress-schema
@@ -431,7 +431,7 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 `tokenless stats serve --data-dir /var/lib/tokenless --credential-file /run/secrets/tokenless-query`
 runs an independent read-only HTTP service with Bearer validation, listening on
 `127.0.0.1:7397` by default. The paths are deployment placeholders; the database
-must already exist. See the [CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#read-only-http-queries)
+must already exist. See the [CLI reference](../../docs/user-guide/en/tokenless/cli-reference.md#read-only-http-queries)
 for endpoints, pagination, and content access.
 
 Use `stats summary` for totals, `show` for the stored before/after payload, or
@@ -454,7 +454,7 @@ reporting 0% savings. Session overviews contain metrics only. Record and
 tool-use reports include a unified content diff; consecutive active stages are
 linked only when their stored output/input content matches exactly, avoiding
 duplicate intermediate token counts. See
-[Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
+[Measuring Tokenless Savings](../../docs/user-guide/en/tokenless/measuring-savings.md)
 for options and measurement limits.
 
 ### Trace correlation
@@ -472,9 +472,9 @@ span in an in-process carrier and does not export it to child processes, so a
 host or adapter that wants correlation must set one of them before spawning
 Tokenless. Without a usable context the record shape is unchanged, and the
 identity is written only to the SLS JSONL — never to the local `stats.db`. See
-[Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
+[Measuring Tokenless Savings](../../docs/user-guide/en/tokenless/measuring-savings.md)
 and
-[Configuration and Data Privacy](../../docs/user-guide/en/token-saving/tokenless/configuration-and-privacy.md).
+[Configuration and Data Privacy](../../docs/user-guide/en/tokenless/configuration-and-privacy.md).
 
 ### Database location
 
@@ -602,7 +602,7 @@ missing or returns an invalid response. For PostTool, fail-open retains the resu
 from the host, including any prior truncation. Legacy hosts such as 2026.8.2 cap text at
 100,000 UTF-16 code units when middleware is registered. They remain supported with this
 limit; builds containing upstream commit `2f620b970a04` are recommended. See the
-[OpenClaw compatibility notes](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#openclaw)
+[OpenClaw compatibility notes](../../docs/user-guide/en/tokenless/framework-integration.md#openclaw)
 for host limits and how to disable PostTool.
 
 ### Configuration
@@ -717,7 +717,7 @@ its single MCP text block is handled as shell output. Uninstall previous
 script-managed installations with their original script before enabling through
 the CLI; CLI-managed copies use `anolisa adapter disable tokenless qwenwork`.
 Installation, removal, and compatibility baselines are covered in
-[QwenWork integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#qwenwork-macos).
+[QwenWork integration](../../docs/user-guide/en/tokenless/framework-integration.md#qwenwork-macos).
 
 ## Claude Code Plugin
 
@@ -801,7 +801,7 @@ make opencode-install
 The bundled lifecycle scripts additionally honor `TOKENLESS_OPENCODE_CONFIG_DIR` as the
 highest-priority override. Both methods refuse conflicting files or links. To return to standalone
 management after ANOLISA disable, rerun `make opencode-install` or the bundled `scripts/install.sh`.
-See [framework integration](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#opencode)
+See [framework integration](../../docs/user-guide/en/tokenless/framework-integration.md#opencode)
 for the complete lifecycle.
 
 If a response contains a Retrieve Marker, OpenCode can run the embedded
@@ -838,7 +838,7 @@ stops with an explanatory error when the asset answers `404`. Set
 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` to skip the probe on offline or mirrored
 networks; `ANOLISA_TOKENLESS_PROBE_TIMEOUT` bounds each probe in seconds
 (default 15). See
-[troubleshooting](../../docs/user-guide/en/token-saving/tokenless/troubleshooting.md#qwenpaw-install-reports-an-unavailable-sdk-wheel)
+[troubleshooting](../../docs/user-guide/en/tokenless/troubleshooting.md#qwenpaw-install-reports-an-unavailable-sdk-wheel)
 for the full reference.
 
 ## DeepSeek Harness Plugin
@@ -877,7 +877,7 @@ set. It removes the bundle from profiles recorded by the prior receipt but
 omitted from the new command, so always include every profile that should keep
 Tokenless. Each name must match a profile passed to `dsh --profile <profile>`.
 Configuration belongs in that profile's `cordis.patch.yml`; see the
-[DeepSeek Harness integration reference](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#deepseek-harness-native-processing)
+[DeepSeek Harness integration reference](../../docs/user-guide/en/tokenless/framework-integration.md#deepseek-harness-native-processing)
 for every option and default.
 
 ## AgentScope Framework Integration

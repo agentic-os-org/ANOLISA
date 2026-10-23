@@ -1,0 +1,80 @@
+version: 1
+
+# Website groups are independent of the flat component directories.
+groups:
+  - id: getting-started
+    label:
+      en: Getting started
+      zh: 开始使用
+    items:
+      - path: getting-started/quickstart.md
+        label: {en: Quickstart, zh: 快速开始}
+      - path: getting-started/installation.md
+        label: {en: Installation, zh: 安装}
+      - path: getting-started/anolisa-cli.md
+        label: {en: ANOLISA CLI, zh: ANOLISA CLI}
+      - path: getting-started/building.md
+        label: {en: Building and deployment, zh: 构建与部署}
+      - path: getting-started/testing.md
+        label: {en: Testing, zh: 测试}
+      - path: getting-started/troubleshooting.md
+        label: {en: Troubleshooting, zh: 排障}
+  - id: user-entrypoint
+    label: {en: User Entrypoint Layer, zh: 用户入口层}
+    items:
+      - component: cosh-ng
+        label: {en: cosh (cosh-ng), zh: cosh (cosh-ng)}
+        description:
+          en: An AI-native terminal that preserves your existing shell experience, with natural-language tasks, tools, and Skills.
+          zh: 保持现有 Shell 使用体验的 AI 原生终端，可通过自然语言完成任务，并调用工具与 Skills。
+      - component: os-skills
+        label: {en: OS Skills, zh: OS Skills}
+        description:
+          en: An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more.
+          zh: 面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。
+  - id: aw-unified-stack
+    label: {en: AW Unified Stack, zh: AW 统一栈}
+    items:
+      - component: aw
+        label: {en: AW, zh: AW}
+        description:
+          en: A unified architecture connecting Agent frameworks with extensible AI-native system software.
+          zh: 以统一架构向上对接 Agent framework，向下衔接可扩展的 AI 原生系统软件。
+  - id: agent-semantic-layer
+    label: {en: Agent Semantic Layer, zh: Agent 语义层}
+    items:
+      - component: agentsight
+        label: {en: AgentSight, zh: AgentSight}
+        description:
+          en: Observe Agent execution through trajectories, LLM calls, and Token usage.
+          zh: Agent 可观测性工具，用于查看运行轨迹、LLM 调用和 Token 消耗。
+      - component: agent-sec-core
+        label: {en: Agent Security Core, zh: Agent Security Core}
+        description:
+          en: OS-level security kernel for AI Agents.
+          zh: 面向 AI Agent 的 OS 级安全内核。
+      - component: tokenless
+        label: {en: Tokenless, zh: Tokenless}
+        description:
+          en: Reduce AI Agent Token usage through tool output compression, tool schema simplification, command rewriting, and other techniques.
+          zh: 通过工具输出压缩、工具 Schema 精简、命令改写等方式，减少 AI Agent 的 Token 消耗。
+      - component: agent-memory
+        label: {en: Agent Memory, zh: Agent Memory}
+        description:
+          en: Give Agents searchable, persistent memory to retain and reuse information across sessions.
+          zh: 为 Agent 提供可检索的持久化记忆，让信息在不同会话之间保留和复用。
+      - component: skillfs
+        label: {en: SkillFS, zh: SkillFS}
+        description:
+          en: Organize Skills into stable filesystem views for Agents to discover and read on demand.
+          zh: 将 Skills 组织成稳定的文件系统视图，供 Agent 按需发现和读取。
+      - component: ws-ckpt
+        label: {en: Workspace Checkpoint, zh: Workspace Checkpoint}
+        description:
+          en: Create Agent workspace snapshots, compare file differences, and roll back changes when needed.
+          zh: 为 Agent 工作区创建快照、比较文件差异，并在需要时回滚变更。
+      - component: ktuner
+        label: {en: ktuner, zh: ktuner}
+        description:
+          en: Inspect Linux kernel parameters, get tuning recommendations, and apply or roll back changes.
+          zh: 检查 Linux 内核参数，给出调优建议，并支持应用和回滚改动。

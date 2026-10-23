@@ -13,7 +13,7 @@ listed below.
 
 **AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
 
-AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
+AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
 
 ## Background
 
@@ -64,24 +64,24 @@ disablement; revoke them by removing the entries and restarting the daemon.
 The V2 systemd system unit is `agent-sec-core.service`; `agent-sec-daemon` is the executable name.
 Check the service with `sudo systemctl status agent-sec-core.service`.
 
-See the [V2 core guide](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+See the [V2 core guide](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 for configuration, commands and the separate deployment/Agent Hook acceptance boundaries.
 V1 history and per-user keys are not imported. Hook adapters use daemon-owned initialization and
 validated `check`/`show` results while retaining host policies; see the
-[Hook integration boundary](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
+[Hook integration boundary](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#agent-hook-integration).
 
 Cosh-NG reserves 10 seconds for SkillSec initialization and querying in one Hook invocation.
 
 Rust V2 clients verify the connected daemon's kernel peer UID is 0 before sending requests.
 
 The source-built Rust `agent-sec-cli` provides 12 Policy, Scope and Binding administration
-commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [V2 workspace](v2/README.md). PAP state persists in SQLite; Binding acceptance does not imply enforcement.
 The default Policy database can fall back to `/var/lib/agent-sec/policy` when its
 `/var/log/agent-sec` ancestors are unsafe; owned leaf permissions are repaired to 0700.
 Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
-[Policy storage](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md#policy-database-location).
+[Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
 PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
 currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
 own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
@@ -258,7 +258,7 @@ install command and exits; install them and rerun the same command.
 
 The source build does not register the component in ANOLISA state. Use the
 installed integration scripts instead of `anolisa adapter enable`; see
-[Source-build Integration](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#source-build-integration).
+[Source-build Integration](../../docs/user-guide/en/agent-sec-core/index.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.
 Enable one as the user who owns the target framework configuration:
@@ -291,7 +291,7 @@ agent-sec-cli events --summary
 ```
 
 Full CLI reference and per-host integration steps:
-[AgentSecCore User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
+[AgentSecCore User Guide](../../docs/user-guide/en/agent-sec-core/index.md).
 
 ## Prompt Scanner
 
@@ -324,11 +324,11 @@ with `--model` or `PROMPT_SCANNER_L2_MODEL` (`--model` wins). Only one backend
 runs at a time and each needs its own `ollama pull`. `warmup` checks that Ollama
 can serve the selected model; it never downloads models automatically.
 
-Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/prompt-scanner.md).
+Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-sec-core/prompt-scanner.md).
 
 The V2 packages include `agent-sec-daemon-health`, a lightweight Rust probe that
 authenticates the daemon's UID before sending a health request. See the
-[probe reference](../../docs/user-guide/en/agent-security/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
+[probe reference](../../docs/user-guide/en/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
 
 ## Code Scanner
 
@@ -365,7 +365,7 @@ return a parseable `error` result; `DENY` returns a successful `warn` result.
 requiring them remain deferred.
 
 Full daemon endpoint, CLI, and host-hook status:
-[Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
+[Code Scanner User Guide](../../docs/user-guide/en/agent-sec-core/code-scanner.md).
 
 ## PII Checker
 
@@ -395,7 +395,7 @@ this input hook scans only the current `prompt`, excluding system prompts and hi
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
 
-Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
+Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 
 ## Skill Ledger
 
@@ -494,7 +494,7 @@ from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies 
 alias for `observe`, while `deny` is an alias for `block`. Each
 check carries Qoder trace identifiers into the security audit log.
 
-Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
+Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-sec-core/skill-ledger.md)
 
 ## Agent Capability View
 
@@ -540,7 +540,7 @@ agent-sec-cli observability report --session-id <id> --format json
 agent-sec-cli observability schema
 ```
 
-Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#observability).
+Details: [Observability User Guide](../../docs/user-guide/en/agent-sec-core/index.md#observability).
 
 ## Security Events
 
@@ -558,13 +558,13 @@ agent-sec-cli events --count-by category --last-hours 24
 agent-sec-cli events --summary
 ```
 
-Details: [Security Events User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#security-events).
+Details: [Security Events User Guide](../../docs/user-guide/en/agent-sec-core/index.md#security-events).
 
 ## Agent Hook Environment Variables
 
 The host hook matrix is maintained in the user guide to keep one authoritative
 source for environment variables and host-specific mode semantics:
-[Agent Hook Environment Variables](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-environment-variables).
+[Agent Hook Environment Variables](../../docs/user-guide/en/agent-sec-core/index.md#agent-hook-environment-variables).
 
 ## Development
 

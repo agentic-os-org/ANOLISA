@@ -8,7 +8,7 @@ Hermes. Start with a boolean command for a simple rule; implement a full Provide
 when your component needs its own operations or structured effects.
 
 AW is a Preview. `anolisa install aw` and RPM distribution are not available.
-For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
+For prebuilt binaries, follow the [Preview package guide](../../../user-guide/en/aw/installation.md).
 The source path below needs no sec-core installation or model account until you
 choose the sec-core or native Agent steps.
 
@@ -177,7 +177,7 @@ or importing your component's crates into it. Your executable and its runtime
 dependencies must be installed where the Agent runs. AW starts a fresh process
 per method; any long-lived backend belongs to your component.
 
-Use the [sec-core walkthrough](../../../user-guide/en/user-entrypoint/aw/security.md)
+Use the [sec-core walkthrough](../../../user-guide/en/aw/security.md)
 for a concrete bridge to an existing CLI/daemon. Map the **actual tool name and
 input JSON Pointer for each framework**; a standard event envelope does not
 make every tool's arguments identical. The Preview-generated sec-core mapping

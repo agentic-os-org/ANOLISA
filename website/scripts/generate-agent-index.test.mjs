@@ -39,8 +39,8 @@ async function createFixture(t, migrated, missing) {
         tokenless: {install: 'anolisa install tokenless', install_method: 'cli'},
       },
     }),
-    'docs/QUICKSTART.md': `# Quickstart\n\n${installCommand}\n`,
-    'docs/BUILDING.md': '# Building\n',
+    'docs/user-guide/en/getting-started/quickstart.md': `# Quickstart\n\n${installCommand}\n`,
+    'docs/user-guide/en/getting-started/building.md': '# Building\n',
     'docs/user-guide/en/intro.md': '# User guide\n',
     'docs/developer-guide/en/intro.md': '# Developer guide\n',
     'CHANGELOG.md': '# Root changelog\n\n## 9.0.0\n\nRoot release.\n',
@@ -126,11 +126,18 @@ for (const migrated of [false, true]) {
       assert.ok(!JSON.stringify(index).includes('copilot-shell'));
     }
     assert.deepEqual(index.documentation.map(({source}) => source), [
-      'docs/QUICKSTART.md',
-      'docs/BUILDING.md',
+      'docs/user-guide/en/getting-started/building.md',
+      'docs/user-guide/en/getting-started/quickstart.md',
       'docs/user-guide/en/intro.md',
       'docs/developer-guide/en/intro.md',
     ]);
+    assert.equal(
+      index.documentation.find(({source}) => source.endsWith('/quickstart.md')).url,
+      'https://example.com/docs/user-guide/getting-started/quickstart/',
+    );
+    const llmsIndex = await readFile(path.join(root, 'website/.generated/static/llms.txt'), 'utf8');
+    assert.ok(llmsIndex.includes('- Quickstart: https://example.com/docs/user-guide/getting-started/quickstart/\n'));
+    assert.ok(!llmsIndex.includes('/docs/quickstart/'));
     const fullDocumentation = await readFile(path.join(root, 'website/.generated/static/llms-full.txt'), 'utf8');
     assert.ok(fullDocumentation.includes('===== docs/user-guide/en/intro.md ====='));
     assert.ok(fullDocumentation.includes('===== docs/developer-guide/en/intro.md ====='));

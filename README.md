@@ -25,14 +25,14 @@ responses that reach the model before they cost you — while keeping the Shell,
 Agent framework, and sandbox you already run.
 
 [中文版](README_zh.md) · [Website](https://agentic-os.sh/) ·
-[Quick Start](https://agentic-os.sh/docs/quickstart/) ·
+[Quick Start](https://agentic-os.sh/docs/user-guide/getting-started/quickstart/) ·
 [User Guide](https://agentic-os.sh/docs/user-guide/) ·
 [Contributing](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/installation/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/getting-started/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
-[![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/en/agent-security/owasp-agentic-top10.md)
+[![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md)
 
 </div>
 
@@ -45,7 +45,7 @@ already use. ANOLISA CLI provides a single installation entry point, while each
 capability can be enabled independently.
 
 **New to ANOLISA?**
-[Choose your first outcome in the Quick Start →](https://agentic-os.sh/docs/quickstart/)
+[Choose your first outcome in the Quick Start →](https://agentic-os.sh/docs/user-guide/getting-started/quickstart/)
 
 ## Components
 
@@ -59,24 +59,24 @@ capability can be enabled independently.
   </thead>
   <tbody>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/">cosh-ng</a></strong><br><sub>Shell copilot</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/">Token-less</a></strong><br><sub>Tool-output compression</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/ws-ckpt/">ws-ckpt</a></strong><br><sub>Checkpoint and rollback</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/cosh-ng/#quick-start">cosh-ng</a></strong><br><sub>Shell copilot</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/tokenless/#quick-start">Token-less</a></strong><br><sub>Tool-output compression</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/ws-ckpt/">ws-ckpt</a></strong><br><sub>Checkpoint and rollback</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/os-skills/">OS Skills</a></strong><br><sub>System and DevOps expertise</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/">AgentSight</a></strong><br><sub>Trace and Token visibility</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/skillfs/">SkillFS</a></strong><br><sub>Focused Skill views</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/os-skills/">OS Skills</a></strong><br><sub>System and DevOps expertise</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agentsight/">AgentSight</a></strong><br><sub>Trace and Token visibility</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/skillfs/">SkillFS</a></strong><br><sub>Focused Skill views</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/ktuner/">ktuner</a></strong><br><sub>Kernel tuning</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/token-saving/agent-memory/">Agent Memory</a></strong><br><sub>Cross-session memory</sub></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/quickstart/">Agent Sec Core</a></strong><br><sub>Sandbox and verification</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/ktuner/">ktuner</a></strong><br><sub>Kernel tuning</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-memory/">Agent Memory</a></strong><br><sub>Cross-session memory</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-sec-core/">Agent Sec Core</a></strong><br><sub>Sandbox and verification</sub></td>
     </tr>
     <tr>
       <td></td>
       <td></td>
-      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>Unified Agent policy configuration</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/aw/">AW</a></strong><br><sub>Unified Agent policy configuration</sub></td>
     </tr>
   </tbody>
 </table>
@@ -95,19 +95,19 @@ then adds an Agent that can understand intent, use tools and Skills, and ask
 for approval before risky work. Shell commands and natural language share one
 terminal instead of forcing users into a separate chat application.
 
-[Get started with cosh-ng →](https://agentic-os.sh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/)
+[Get started with cosh-ng →](https://agentic-os.sh/docs/user-guide/cosh-ng/#quick-start)
 
 <p align="center"><strong>02 · CONTEXT EFFICIENCY</strong></p>
 
 <h3 align="center">See where Tokens go and cut waste before it reaches the model</h3>
 
-[Token-less](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/)
+[Token-less](https://agentic-os.sh/docs/user-guide/tokenless/#quick-start)
 removes redundancy from tool schemas and responses before they reach the model.
-[Agent Memory](https://agentic-os.sh/docs/user-guide/token-saving/agent-memory/)
+[Agent Memory](https://agentic-os.sh/docs/user-guide/agent-memory/)
 reuses useful context across sessions.
-[SkillFS](https://agentic-os.sh/docs/user-guide/runtime/skillfs/) keeps the
+[SkillFS](https://agentic-os.sh/docs/user-guide/skillfs/) keeps the
 current Skill view focused and makes other Skills discoverable when needed.
-[AgentSight](https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/)
+[AgentSight](https://agentic-os.sh/docs/user-guide/agentsight/)
 shows where Tokens are spent.
 
 ### See an Agent run from the kernel up
@@ -116,7 +116,7 @@ On Linux, AgentSight uses eBPF to observe an Agent without changing its code.
 Follow user input through model and tool calls, with Token use and sub-agent
 branches in the same view.
 
-[Open the AgentSight guide →](https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/)
+[Open the AgentSight guide →](https://agentic-os.sh/docs/user-guide/agentsight/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -149,8 +149,8 @@ tokenless stats summary
 tokenless stats list --limit 5
 ```
 
-[Open the full Token-less Quick Start →](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/)
-· [Read the user manual](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/user-manual/)
+[Open the full Token-less Quick Start →](https://agentic-os.sh/docs/user-guide/tokenless/#quick-start)
+· [Read the user manual](https://agentic-os.sh/docs/user-guide/tokenless/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -183,7 +183,7 @@ through a `<<tokenless:KEY>>` marker, which keeps the compression reversible.
 | ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
 
 Savings apply to the tool responses entering the context, not to the whole
-session bill. The [Token-less user manual](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/user-manual/)
+session bill. The [Token-less user manual](https://agentic-os.sh/docs/user-guide/tokenless/)
 explains how to estimate the effect for a given workload.
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
@@ -191,9 +191,9 @@ explains how to estimate the effect for a given workload.
 <h3 align="center">Give every Agent execution a boundary and a way back</h3>
 
 ANOLISA is building out the Agent execution environment:
-[Agent Sec Core](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/quickstart/)
+[Agent Sec Core](https://agentic-os.sh/docs/user-guide/agent-sec-core/)
 isolates risky operations, and
-[ws-ckpt](https://agentic-os.sh/docs/user-guide/runtime/ws-ckpt/) keeps recovery
+[ws-ckpt](https://agentic-os.sh/docs/user-guide/ws-ckpt/) keeps recovery
 points for workspace changes.
 
 ### Catch a changed Skill before it runs
@@ -201,8 +201,8 @@ points for workspace changes.
 When a signed Skill changes, the Agent reports `drifted` before using it again.
 A rescan records blocking findings as `deny`.
 
-[Try the Agent demo →](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/qoder-skill-ledger-demo/)
-· [Skill Ledger guide](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/skill-ledger/)
+[Try the Agent demo →](https://agentic-os.sh/docs/user-guide/agent-sec-core/qoder-skill-ledger-demo/)
+· [Skill Ledger guide](https://agentic-os.sh/docs/user-guide/agent-sec-core/skill-ledger/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -217,8 +217,8 @@ A rescan records blocking findings as `deny`.
   </tr>
 </table>
 
-[Choose a runtime or security starting point →](https://agentic-os.sh/docs/quickstart/)
-· [Start with ANOLISA CLI](https://agentic-os.sh/docs/user-guide/user-entrypoint/anolisa-cli/)
+[Choose a runtime or security starting point →](https://agentic-os.sh/docs/user-guide/getting-started/quickstart/)
+· [Start with ANOLISA CLI](https://agentic-os.sh/docs/user-guide/getting-started/anolisa-cli/)
 
 ## Install
 
@@ -235,25 +235,25 @@ anolisa install tokenless
 Run `cosh` to enter the AI-native terminal. Token-less can also optimize tool
 calls from an existing Agent without changing its framework.
 
-[Read the Quick Start →](https://agentic-os.sh/docs/quickstart/)
+[Read the Quick Start →](https://agentic-os.sh/docs/user-guide/getting-started/quickstart/)
 
 ## Standards & Compliance
 
 | Standard / Framework | Status and details |
 |---|---|
 | [AARM](https://aarm.dev/builders/agentseccore-anolisa) | **Aligned** · Registry entry: AgentSecCore (ANOLISA) |
-| [OWASP Agentic Top 10 (2026)](docs/user-guide/en/agent-security/owasp-agentic-top10.md) | All 10 ASI risk categories mapped to security controls |
+| [OWASP Agentic Top 10 (2026)](docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md) | All 10 ASI risk categories mapped to security controls |
 
 ## Documentation
 
-[Quick Start](https://agentic-os.sh/docs/quickstart/) ·
-[Installation](https://agentic-os.sh/docs/user-guide/installation/) ·
+[Quick Start](https://agentic-os.sh/docs/user-guide/getting-started/quickstart/) ·
+[Installation](https://agentic-os.sh/docs/user-guide/getting-started/installation/) ·
 [User Guide](https://agentic-os.sh/docs/user-guide/) ·
-[Troubleshooting](https://agentic-os.sh/docs/user-guide/troubleshooting/) ·
-[Build from Source](https://agentic-os.sh/docs/building/) ·
+[Troubleshooting](https://agentic-os.sh/docs/user-guide/getting-started/troubleshooting/) ·
+[Build from Source](https://agentic-os.sh/docs/user-guide/getting-started/building/) ·
 [Changelog](https://agentic-os.sh/changelog/)
 
-AW: [Architecture](docs/developer-guide/en/aw/architecture.md) · [User guide](docs/user-guide/en/user-entrypoint/aw/README.md) ·
+AW: [Architecture](docs/developer-guide/en/aw/architecture.md) · [User guide](docs/user-guide/en/aw/index.md) ·
 [Build and package](docs/developer-guide/en/aw/building.md) ·
 [Developer guide](docs/developer-guide/en/aw/README.md)
 

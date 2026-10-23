@@ -3,7 +3,7 @@
 [中文版](../../zh/aw/packages.md)
 
 This reference is for integration and maintenance. For installation and daily use,
-see the [user guide](../../../user-guide/en/user-entrypoint/aw/installation.md).
+see the [user guide](../../../user-guide/en/aw/installation.md).
 
 Use `aw install`, `aw uninstall`, `aw config init`, and `aw config` editing
 commands for local package operations. The standalone `aw-package` executable
@@ -377,5 +377,5 @@ CI / AW Integration runs nightly and can be dispatched manually for an exact sou
 includes it in `aw-all-in-one`. The extension contains its bridge, Tokenless CLI and pinned patched RTK,
 requires matching core, and follows the same installation-record and integrity rules as sec-core.
 Use `aw config init --provider tokenless` or `aw config init --provider sec-core+tokenless --socket ABS_FILE`
-to enable compression explicitly. See the [Tokenless guide](../../../user-guide/en/user-entrypoint/aw/tokenless.md) for
+to enable compression explicitly. See the [Tokenless guide](../../../user-guide/en/aw/tokenless.md) for
 four-framework configuration, native result slots and failure behavior.

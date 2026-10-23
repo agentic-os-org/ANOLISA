@@ -32,7 +32,7 @@ and `Ctrl+C` continue to work in the foreground terminal.
 
 For isolated command execution, use `cosh --isolated -c '<command>'` with Bash.
 Isolated Bash login invocations are rejected with status 2 because Bash cannot
-suppress logout files. See [shell invocation options](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/interactive-mode.md).
+suppress logout files. See [shell invocation options](../../docs/user-guide/en/cosh-ng/shell/interactive-mode.md).
 
 ## Install
 
@@ -111,7 +111,7 @@ Status symbols are optional: set `shell.status_symbols = true` in `config.toml`
 At login, `cosh-shell` checks in the background whether a managed `cosh-ng`
 update is available and shows a notice at the next idle prompt. The check is
 on by default; set `COSH_SHELL_UPGRADE_CHECK=off` to disable it for the next
-session. See [Login upgrade notice](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#login-upgrade-notice)
+session. See [Login upgrade notice](../../docs/user-guide/en/cosh-ng/configuration.md#login-upgrade-notice)
 for all opt-out values and the cache path.
 
 Start Native explicitly when the session must have no Cosh hooks, observation,
@@ -122,7 +122,7 @@ COSH_SHELL_INTEGRATION=native cosh
 ```
 
 Enhanced does not preserve exported Bash `PROMPT_COMMAND` values in child
-processes. See [Bash prompt compatibility](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-compatibility)
+processes. See [Bash prompt compatibility](../../docs/user-guide/en/cosh-ng/shell/overview.md#bash-prompt-compatibility)
 for the version-specific attribute limits and Native alternative.
 
 ```text
@@ -149,14 +149,14 @@ In `cosh-core`, system and user config Hooks run by default without `hooks.enabl
 Project config Hook definitions are ignored; project Shell Hooks in `.cosh/hooks` require
 separate consent through `/hooks trust-project`.
 Explicit `hooks.enabled = false` keeps config Hooks disabled even when Extensions
-are installed. See [Hooks](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/hooks.md)
+are installed. See [Hooks](../../docs/user-guide/en/cosh-ng/core/hooks.md)
 for disable scope and fail-closed `PreToolUse` behavior.
 
 For `type = "aliyun"`, SysOM automatically prefers a reachable VPC endpoint.
 Set `ai.providers.<id>.sysom_endpoint` to pin an endpoint; `COSH_SYSOM_ENDPOINT`
 takes precedence, and `base_url` does not route SysOM. Only automatic VPC routes
 bypass system proxies; explicit overrides and public fallback retain proxy
-settings. See [provider configuration](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/providers.md).
+settings. See [provider configuration](../../docs/user-guide/en/cosh-ng/core/providers.md).
 
 To run one locally installed ACP adapter without entering the interactive
 Shell, verify it first and then pipe the prompt through stdin:
@@ -207,7 +207,7 @@ inside the packaged containment and is not a workspace filesystem sandbox.
 Development uses a separate transient `cosh-gateway-dev@` unit, socket, state,
 and environment file without overwriting package files. Rerun `setup` after a
 host reboot. An active production Gateway is rejected unless you explicitly
-pass `--stop-production`. See the [user guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)
+pass `--stop-production`. See the [user guide](../../docs/user-guide/en/cosh-ng/index.md)
 for status, shutdown, cleanup, overrides, and the full security boundary.
 
 The package installs one account-named `cosh-gateway@.service`. Core is always
@@ -360,7 +360,7 @@ Core/Codex catalog because both entries attest local-user authority, which can
 read a same-user token even outside the workspace. Use `/task` or
 `cosh agent task` for continuation with this release. The former
 `--capability-profile` declaration has been removed; it never restricted the
-daemon. See the [Web command reference](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)
+daemon. See the [Web command reference](../../docs/user-guide/en/cosh-ng/index.md)
 for the admission boundary and platform limits.
 
 `SIGINT` and `SIGTERM` trigger bounded scheduler and Runtime shutdown before the
@@ -373,16 +373,16 @@ acceptance before treating a particular ACP installation as production-validated
 `cosh-cli checkpoint recover --workspace <path>` supports recovery of interrupted
 initialization through the ws-ckpt daemon. Successful JSON includes `meta.warning`
 when retained data needs inspection. See
-[workspace checkpoints](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/checkpoint.md).
+[workspace checkpoints](../../docs/user-guide/en/cosh-ng/cli/checkpoint.md).
 
 ## Documentation
 
-- [User guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)
-- [Connect an MCP server](../../docs/user-guide/en/user-entrypoint/cosh-ng/mcp.md)
-- [Interactive terminal](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/overview.md)
-- [Configuration](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md)
-- [Manage system operations](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/overview.md)
-- [Headless integration](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/headless-mode.md)
+- [User guide](../../docs/user-guide/en/cosh-ng/index.md)
+- [Connect an MCP server](../../docs/user-guide/en/cosh-ng/mcp.md)
+- [Interactive terminal](../../docs/user-guide/en/cosh-ng/shell/overview.md)
+- [Configuration](../../docs/user-guide/en/cosh-ng/configuration.md)
+- [Manage system operations](../../docs/user-guide/en/cosh-ng/cli/overview.md)
+- [Headless integration](../../docs/user-guide/en/cosh-ng/core/headless-mode.md)
 - [Developer getting started](../../docs/developer-guide/en/cosh-ng/getting-started.md)
 - [Architecture](../../docs/developer-guide/en/cosh-ng/architecture.md)
 - [Contributing](CONTRIBUTING.md)

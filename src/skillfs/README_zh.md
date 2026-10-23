@@ -142,7 +142,7 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 使用 `skillfs mount --config /path/to/skillfs-mount.toml`，通过 `mountpoint` 和
 有序 `sources` 数组聚合目录。同名 skill 整体选用较早的来源，多源挂载只读。
 路径必须为绝对路径。TOML 示例、支持的参数和 OpenClaw 接入限制见
-[配置参考](../../docs/user-guide/zh/runtime/skillfs.md#挂载配置)。
+[配置参考](../../docs/user-guide/zh/skillfs/index.md#挂载配置)。
 
 ### Managed Mount 模式
 
@@ -434,8 +434,8 @@ sed "s|skillfs-sidecar:dev|$IMAGE|g" deploy/kubernetes/20-pod.yaml |
 ```
 
 部署、`skill-discover` 验证、故障排查和清理见
-[Kubernetes Sidecar 用户指南](../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md)
-（[English](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md)）。
+[Kubernetes Sidecar 用户指南](../../docs/user-guide/zh/skillfs/kubernetes-sidecar.md)
+（[English](../../docs/user-guide/en/skillfs/kubernetes-sidecar.md)）。
 
 ## 测试覆盖
 
@@ -551,7 +551,7 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 
 ## 文档
 
-- [Kubernetes Sidecar 部署指南](../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md) -
+- [Kubernetes Sidecar 部署指南](../../docs/user-guide/zh/skillfs/kubernetes-sidecar.md) -
   在 Kubernetes 中构建、部署、验证和清理 SkillFS。
 - [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - 架构、运行时一致性边界和部署场景。
 - [docs/specs/core-spec.md](docs/specs/core-spec.md) - `skillfs-core` 实现。

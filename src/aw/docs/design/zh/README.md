@@ -58,4 +58,4 @@ flowchart LR
 | [证据与上下文](runtime/evidence-context.md) | 原生身份关联、观测和显式上下文冻结；Schema 由 `aw-contracts` 管理 |
 | [AgentSight 集成规划](integrations/agentsight/agentsight-integration.md) | 说明观测与后续覆盖率、增量导出、语义评估的关系；这些后续阶段尚未提供 |
 
-安装和日常使用见[用户指南](../../../../../docs/user-guide/zh/user-entrypoint/aw/README.md)。
+安装和日常使用见[用户指南](../../../../../docs/user-guide/zh/aw/index.md)。

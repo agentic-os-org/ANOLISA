@@ -8,7 +8,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
-[随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+[随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
@@ -31,7 +31,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、排版开销、可移除的 Schema 元数据、
 配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
 点，也可能直接原样透传。精确输入、命令、完整结果和限制见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#运行仓库参考负载)。
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md#运行仓库参考负载)。
 
 Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规范、执行调用前检查、自动修复环境或阻止工具调用。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
 
@@ -59,10 +59,10 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
   规则的合法 JSON 生成候选结果。在 Active 模式下，只有候选结果的估算 Token 数严格少于原文时
   才输出它。包含可移除内容的小输入仍可能被压缩，而已经紧凑的较大输入也可能原样透传；CLI 会把
   原因写入 stderr，且不记录统计。在 Dry-run 模式下，CLI 始终输出原文，并可能把较小的候选结果
-  记为预测节省。[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md)
+  记为预测节省。[CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md)
   中的描述、字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小；
   Agent Adapter 还可能应用独立的
-  [预检门槛](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#adapter-处理规则)。
+  [预检门槛](../../docs/user-guide/zh/tokenless/framework-integration.md#adapter-处理规则)。
 - **模型推理 token / 计费 token**：不在 tokenless 经手范围。
 
 ### 预期效果估算
@@ -82,7 +82,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 > 可恢复省略会附带按需操作：`If needed, run in shell: tokenless retrieve HASH`。AgentScope 则看到 `If needed, call tool tokenless_retrieve with hash_or_marker=HASH`，其中 Tool 名称采用实际静态配置。数据仍在 Stash 时可以取回；恢复会增加 Token 开销，并非每次省略都要恢复。历史 `<<tokenless:HASH>>` Marker 仍可读取，但不再生成。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
 > 对支持实时结果替换的 Agent，恢复提示通过已有 Shell Tool 执行裸 Hash 命令；成功的恢复结果原样返回，不会再次压缩。
-> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
+> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/tokenless/index.md)。
 
 ## 集成路径
 
@@ -111,7 +111,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 包括此前发生的截断。2026.8.2 等旧版宿主在注册 middleware 后会把文本限制在
 100,000 个 UTF-16 Code Unit 内，仍在该限制下受支持；建议使用包含上游提交
 `2f620b970a04` 的构建。宿主限制及关闭 PostTool 的方法见
-[OpenClaw 兼容说明](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+[OpenClaw 兼容说明](../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 该 Adapter 要求 OpenClaw `2026.6.6` 或更高版本；安装脚本在安装前拒绝旧版和无法识别的
 版本，Package Metadata 也声明相同下限。运行时缺少 middleware API 或注册抛错时，插件
@@ -171,7 +171,7 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 `~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
 回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
 adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
-完整的方式对照见 `docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md`。
+完整的方式对照见 `docs/user-guide/zh/tokenless/index.md`。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
 公开路径都不会盲目接管它。所有权必须被证明：npm 的 postinstall 只刷新带有它
@@ -226,7 +226,7 @@ PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有
 有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
 不能替换结果的宿主保持无损模式。BeforeModel Schema 压缩仍需要独立的授权恢复能力。
 请求/响应契约和可执行示例见
-[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
+[CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md#compress)。
 
 ### Schema 压缩 CLI
 
@@ -296,9 +296,9 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
 TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
 但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
-[Python SDK 指南](../../docs/user-guide/zh/token-saving/tokenless/sdk.md)，AgentScope 挂载见
-[AgentScope SDK 集成](../../docs/user-guide/zh/token-saving/tokenless/sdk/agentscope.md)，产品 Adapter 见
-[Agent 集成指南](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md)，内部契约见
+[Python SDK 指南](../../docs/user-guide/zh/tokenless/sdk.md)，AgentScope 挂载见
+[AgentScope SDK 集成](../../docs/user-guide/zh/tokenless/sdk/agentscope.md)，产品 Adapter 见
+[Agent 集成指南](../../docs/user-guide/zh/tokenless/framework-integration.md)，内部契约见
 [Runtime 设计](docs/design/runtime-library_zh.md)。
 
 同一个 Wheel 还提供不依赖 CLI 的只读 typed Stats 查询。可以让 `TokenlessStats` 指向
@@ -350,7 +350,7 @@ make opencode-install
 Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 两种方式都会拒绝冲突的文件或链接。在 ANOLISA disable 后若要恢复独立管理，重新运行
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
-完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
+完整生命周期参阅[框架集成](../../docs/user-guide/zh/tokenless/framework-integration.md#opencode)。
 
 ### 千问办公插件（macOS）
 
@@ -374,7 +374,7 @@ anolisa adapter status tokenless
 Linux VM 会话仍不受支持。工作区 Shell 的状态保存在对话工作目录中，
 其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
-安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#千问办公macos)。
+安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公macos)。
 
 ### QwenPaw 安装
 
@@ -396,7 +396,7 @@ make qwenpaw-install
 在把 Bundle 交给 QwenPaw 之前，安装器会先探测这个 wheel URL，资产返回 `404` 时给出说明性报错并停止。
 离线或镜像网络可用 `ANOLISA_SKIP_WHEEL_PREFLIGHT=1` 跳过探测；
 `ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。完整参考见
-[故障排查](../../docs/user-guide/zh/token-saving/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
+[故障排查](../../docs/user-guide/zh/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
 
 ### DeepSeek Harness 插件
 
@@ -425,7 +425,7 @@ anolisa adapter enable tokenless dsh \
 中已有但本次没有列出的 profile 会卸载 Bundle，因此每次都要列出需要继续使用
 Tokenless 的全部 profile。每个名称必须与 `dsh --profile <profile>` 使用的名称
 一致。配置写在对应 profile 的 `cordis.patch.yml` 中。全部配置项和默认值见
-[DeepSeek Harness 集成参考](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
+[DeepSeek Harness 集成参考](../../docs/user-guide/zh/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
 
 ### AgentScope 框架集成
 
@@ -569,7 +569,7 @@ node npm/scripts/package-npm.js --all
 `tokenless stats serve --data-dir /var/lib/tokenless --credential-file /run/secrets/tokenless-query`
 提供独立的只读 HTTP 查询服务，默认监听 `127.0.0.1:7397`，通过 Bearer 凭据校验。
 两个文件路径为部署占位值，统计数据库必须已存在。
-接口、分页和内容访问约定见 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#只读-http-查询)。
+接口、分页和内容访问约定见 [CLI 参考](../../docs/user-guide/zh/tokenless/cli-reference.md#只读-http-查询)。
 
 `stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
 `diff` 用于解释估算 Token 节省，并只突出发生变化的行：
@@ -590,7 +590,7 @@ tokenless stats diff 42 --json
 总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
 active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
 阶段的 Token。完整选项和度量限制见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md)。
 
 ## Trace 关联
 
@@ -605,9 +605,9 @@ active 阶段的输出与输入内容完全一致时才会串成一条链，从�
 span，不会导出到子进程，因此需要关联能力的宿主或 Adapter 必须
 在启动 Tokenless 前写入其中一个。没有可用上下文时记录结构不变，
 且该标识只写入 SLS JSONL，不会写入本地 `stats.db`。详见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)
+[Tokenless 效果度量](../../docs/user-guide/zh/tokenless/measuring-savings.md)
 与
-[配置与数据隐私](../../docs/user-guide/zh/token-saving/tokenless/configuration-and-privacy.md)。
+[配置与数据隐私](../../docs/user-guide/zh/tokenless/configuration-and-privacy.md)。
 
 ## 数据库位置
 

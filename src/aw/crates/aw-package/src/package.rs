@@ -434,34 +434,26 @@ fn stage(
         )?;
         copy(&aw.join("aw"), &root.join("aw"), cancel)?;
         for (language, name) in [("en", "README.md"), ("zh", "README_zh.md")] {
-            let mut text = fs::read_to_string(repo.join(format!(
-                "docs/user-guide/{language}/user-entrypoint/aw/installation.md"
-            )))?
-            .replace(
-                "../../../zh/user-entrypoint/aw/installation.md",
-                "README_zh.md",
-            )
-            .replace(
-                "../../../en/user-entrypoint/aw/installation.md",
-                "README.md",
-            );
+            let mut text = fs::read_to_string(
+                repo.join(format!("docs/user-guide/{language}/aw/installation.md")),
+            )?
+            .replace("../../zh/aw/installation.md", "README_zh.md")
+            .replace("../../en/aw/installation.md", "README.md");
             // The archive contains the installation page only; follow-up guides live online.
             let locale = if language == "zh" { "/zh" } else { "" };
             for (source, route) in [
                 ("configuration.md", "aw/configuration"),
-                ("tokenless.md", "aw-tokenless"),
-                ("security.md", "aw-sec-core"),
+                ("tokenless.md", "aw/tokenless"),
+                ("security.md", "aw/security"),
                 ("operations.md", "aw/operations"),
             ] {
                 text = text.replace(
                     &format!("]({source})"),
-                    &format!(
-                        "](https://agentic-os.sh{locale}/docs/user-guide/user-entrypoint/{route}/)"
-                    ),
+                    &format!("](https://agentic-os.sh{locale}/docs/user-guide/{route}/)"),
                 );
             }
             text = text.replace(
-                &format!("../../../../developer-guide/{language}/aw/building.md"),
+                &format!("../../../developer-guide/{language}/aw/building.md"),
                 &format!("https://agentic-os.sh{locale}/docs/developer-guide/aw/building/"),
             );
             fs::write(root.join(name), text)?;
