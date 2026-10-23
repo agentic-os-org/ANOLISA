@@ -16,6 +16,16 @@ use agentsight::parser::Parser;
 use agentsight::pipeline_core::PipelineCore;
 use agentsight::response_map::ResponseSessionMapper;
 
+#[ctor::ctor]
+fn isolate_procfs() {
+    // Synthetic event PIDs must not inherit metadata from unrelated host processes.
+    let root = std::env::temp_dir().join(format!(
+        "agentsight-pipeline-procfs-{}",
+        uuid::Uuid::new_v4()
+    ));
+    assert!(agentsight::utils::procfs::set_proc_root(root));
+}
+
 #[test]
 fn configured_connection_capacity_preserves_concurrent_sse() {
     for concurrency in [32, 64] {
