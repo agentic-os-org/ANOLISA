@@ -58,3 +58,26 @@ for every request, including failures and continuation pages. Legacy `List` / `L
 keep `ops_name: "list"` and `list_time: 1`. These are daemon request results;
 there is no query-wide correlation or final CLI outcome event, so page logs
 must not be used to calculate whole-query counts or success rates.
+
+## Hermes tool pagination
+
+The existing `ws-ckpt-list` tool opts into one-page JSON output when either
+`limit` or `cursor` is present. The handler distinguishes missing keys from null,
+rejects invalid limit types/ranges and empty/non-string cursors before invoking
+the CLI, and passes opaque cursors unchanged. Cursor-only requests omit the CLI
+limit flag, retaining its default of 1000. Without either key, the original table
+command and `{success, output}` response remain unchanged.
+
+A page must be an object with a `snapshots` array of objects and an explicit
+`next_cursor` that is null or a non-empty string. The handler emits a JSON string
+with `success`, `snapshots`, and `next_cursor`; extra envelope fields are ignored.
+Snapshot objects retain all nested fields, including summary markers and future
+extensions. Only a null cursor ends traversal; the handler never infers completion
+from page length, follows cursors automatically, or retries failures as a full
+listing. It does not modify configuration or checkpoint/rollback state.
+
+The tool description recommends a bounded first page and on-demand continuation.
+Validation covers the registered schema, exact CLI arguments and one-call
+behavior, invalid arguments, malformed responses, short/empty continuation pages,
+summary preservation, and subprocess failures. OpenClaw and the Rust protocol
+remain unchanged; pagination still requires a capable CLI and matching daemon.

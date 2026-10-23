@@ -38,3 +38,20 @@ P 页需要 O(N * P) 次索引访问，另加候选维护和序列化。减少�
 每个分页请求（包括后续页和失败）都记录为 `ops_name: "list_page"`、`list_time: 0`、
 `ops_time: 1`。旧 `List` / `ListOrphans` 保留 `ops_name: "list"` 和 `list_time: 1`。日志表示 daemon
 请求结果，尚无整次查询关联或 CLI 最终结果事件，不能用于计算整次查询次数和成功率。
+
+## Hermes 工具分页
+
+现有 `ws-ckpt-list` 工具在出现 `limit` 或 `cursor` 任意键时启用单页 JSON 输出。
+handler 区分键缺失与 null，在调用 CLI 前拒绝类型或范围错误的 limit、空或非字符串
+cursor，并原样传递不透明游标。仅传 cursor 时不添加 CLI limit 参数，沿用默认值 1000。
+两个键都不存在时，保留原有表格命令及 `{success, output}` 响应。
+
+分页响应必须是对象，包含元素均为对象的 `snapshots` 数组，以及显式存在、值为 null
+或非空字符串的 `next_cursor`。handler 返回含 `success`、`snapshots` 和 `next_cursor`
+的 JSON 字符串，忽略 CLI 顶层附加字段。快照对象的全部嵌套字段均保留，包括摘要标记
+及未来扩展。仅 null 游标表示结束；handler 不根据页长推断完成，不自动追踪游标，
+不将失败重试为完整列表，也不修改配置或 checkpoint/rollback 状态。
+
+工具描述建议使用有数量上限的第一页，并按需续页。验证覆盖注册后的 schema、精确 CLI
+参数及单次调用、无效参数、异常响应、短页和空页的续页游标、摘要保留及子进程失败。
+OpenClaw 和 Rust 协议保持不变；分页仍需支持该功能的 CLI 和匹配的 daemon。
