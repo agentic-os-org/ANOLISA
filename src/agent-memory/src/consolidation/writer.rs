@@ -43,7 +43,7 @@ impl FactWriter {
             root_fd: None,
             jsonl_file: Mutex::new(None),
             index: None,
-            conflict_threshold: -2.0,
+            conflict_threshold: crate::config::default_conflict_threshold(),
         }
     }
 
@@ -81,9 +81,15 @@ impl FactWriter {
                 fact.content.chars().take(100).collect::<String>()
             );
             let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-            match s.detect_conflicts(&search_text, self.conflict_threshold) {
+            match s.detect_fact_conflicts(&search_text, self.conflict_threshold) {
                 Ok(conflicts) => {
                     for (old_path, score) in &conflicts {
+                        // Search also indexes journals and source notes; only fact
+                        // records participate in the replacement lifecycle.
+                        if !crate::index::store::is_fact_record(old_path) {
+                            tracing::warn!(path = %old_path, "skipping non-fact conflict candidate");
+                            continue;
+                        }
                         tracing::info!(
                             "conflict detected: new fact '{}' conflicts with '{}' (score={:.2})",
                             fact.title,
