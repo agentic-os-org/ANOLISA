@@ -209,6 +209,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         // overwrite concern). Regular files use unpack_in with
         // overwrite=false so any collision in the freshly-created
         // staging dir is caught as an anomaly.
+        let mut directories = Vec::new();
         for entry in tar
             .entries()
             .map_err(|e| MemoryError::Other(format!("tar entries: {e}")))?
@@ -216,12 +217,11 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
             let mut entry =
                 entry.map_err(|e| MemoryError::Other(format!("tar entry read: {e}")))?;
             match entry.header().entry_type() {
-                ::tar::EntryType::Regular | ::tar::EntryType::Directory => {
+                ::tar::EntryType::Directory => directories.push(entry),
+                ::tar::EntryType::Regular => {
                     // unpack_in validates the entry path stays inside
                     // staging (validate_inside_dst rejects ".." and
-                    // absolute paths). This is the same guard that the
-                    // old tar.unpack() used; Directory and Regular share
-                    // one branch because both go through the same
+                    // absolute paths). Deferred directories use the same
                     // validation before filesystem dispatch.
                     entry.unpack_in(&staging).map_err(|e| {
                         MemoryError::Other(format!(
@@ -238,6 +238,18 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                     )));
                 }
             }
+        }
+        // Match tar::Archive::unpack's ordering: restrictive directory
+        // permissions must not prevent extracting children. Reverse path
+        // order also handles archives that list children before parents.
+        directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+        for mut directory in directories {
+            directory.unpack_in(&staging).map_err(|e| {
+                MemoryError::Other(format!(
+                    "tar unpack directory {}: {e}",
+                    directory.path().unwrap_or_default().display()
+                ))
+            })?;
         }
     }
 
@@ -273,7 +285,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
             let rolled = mount
                 .meta_dir
                 .join(format!("{rollback_prefix}{}", name.to_string_lossy()));
-            std::fs::rename(&original, &rolled)?;
+            rename_preserving_directory_mode(&original, &rolled)?;
             rollbacks.push((original, rolled));
         }
 
@@ -282,7 +294,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
             let entry = entry?;
             let from = entry.path();
             let to = mount.root.join(entry.file_name());
-            std::fs::rename(&from, &to)?;
+            rename_preserving_directory_mode(&from, &to)?;
             applied.push((from, to));
         }
         Ok(())
@@ -291,10 +303,10 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     if let Err(e) = restore_result {
         // Rollback: undo any applied staging moves, then move rollbacks back.
         for (from, to) in applied.into_iter().rev() {
-            let _ = std::fs::rename(&to, &from);
+            let _ = rename_preserving_directory_mode(&to, &from);
         }
         for (original, rolled) in rollbacks.into_iter().rev() {
-            let _ = std::fs::rename(&rolled, &original);
+            let _ = rename_preserving_directory_mode(&rolled, &original);
         }
         let _ = crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging);
         return Err(e);
@@ -330,7 +342,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                 .map(|s| s.to_os_string())
                 .unwrap_or_else(|| std::ffi::OsString::from("entry"));
             let dest = trash_dir.join(&leaf);
-            if let Err(e) = std::fs::rename(&rolled, &dest) {
+            if let Err(e) = rename_preserving_directory_mode(&rolled, &dest) {
                 tracing::warn!(
                     "could not move rollback {} → {}: {e}",
                     rolled.display(),
@@ -343,6 +355,54 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging)
     {
         tracing::warn!("staging cleanup {}: {e}", staging.display());
+    }
+    Ok(())
+}
+
+/// Linux requires write permission on a directory when changing its parent
+/// (the move updates `..`). Restore its archived mode after every move, also
+/// when parking the old tree in trash or undoing a failed restore.
+fn rename_preserving_directory_mode(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let error = match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind() != std::io::ErrorKind::PermissionDenied {
+        return Err(error);
+    }
+    let meta = std::fs::symlink_metadata(from)?;
+    let original = meta.permissions();
+    if !meta.is_dir() || original.mode() & 0o200 != 0 {
+        return Err(error);
+    }
+    std::fs::set_permissions(
+        from,
+        std::fs::Permissions::from_mode(original.mode() | 0o200),
+    )?;
+    if let Err(error) = std::fs::rename(from, to) {
+        std::fs::set_permissions(from, original).map_err(|restore| {
+            std::io::Error::other(format!(
+                "rename {} to {} failed: {error}; restoring directory mode failed: {restore}",
+                from.display(),
+                to.display()
+            ))
+        })?;
+        return Err(error);
+    }
+    if let Err(error) = std::fs::set_permissions(to, original.clone()) {
+        // Keep the caller's move journal accurate: a failed operation must
+        // return the entry to its source before the caller starts its undo.
+        std::fs::rename(to, from)
+            .and_then(|()| std::fs::set_permissions(from, original))
+            .map_err(|undo| {
+                std::io::Error::other(format!(
+                    "directory moved to {}, mode restoration failed: {error}; undo failed: {undo}",
+                    to.display()
+                ))
+            })?;
+        return Err(error);
     }
     Ok(())
 }
@@ -388,6 +448,30 @@ fn read_sidecar(path: &Path) -> Result<SnapshotInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_directory_move_restores_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let destination_parent = tmp.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination_parent).unwrap();
+        for path in [&source, &destination_parent] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let result = rename_preserving_directory_mode(&source, &destination_parent.join("moved"));
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        for path in [&source, &destination_parent] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(result.is_err());
+        assert_eq!(mode, 0o555);
+        assert!(!destination_parent.join("moved").exists());
+    }
 
     #[test]
     fn validate_snapshot_id_accepts_generated_form() {

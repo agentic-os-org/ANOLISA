@@ -147,3 +147,67 @@ fn snapshot_excludes_meta_directory() {
         );
     }
 }
+
+#[test]
+fn snapshot_restores_nested_readonly_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, svc) = setup();
+    svc.write("reference/nested/guide.md", "saved reference", false)
+        .unwrap();
+    svc.mkdir("reference/empty").unwrap();
+    for (dir, mode) in [
+        ("reference/nested", 0o500),
+        ("reference/empty", 0o555),
+        ("reference", 0o555),
+    ] {
+        std::fs::set_permissions(
+            svc.mount.root.join(dir),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+    }
+    let snapshot = svc.mem_snapshot(Some("read-only references")).unwrap();
+    std::fs::set_permissions(
+        svc.mount.root.join("reference"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        svc.mount.root.join("reference/nested"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    svc.write("reference/nested/guide.md", "new contents", true)
+        .unwrap();
+    let first = svc.mem_snapshot_restore(&snapshot.id);
+    // A second snapshot avoids the independently tracked same-id trash
+    // collision while exercising an already read-only live directory.
+    let result = first.and_then(|()| {
+        let second = svc.mem_snapshot(None)?;
+        svc.mem_snapshot_restore(&second.id)
+    });
+    let modes: Vec<_> = ["reference", "reference/nested", "reference/empty"]
+        .into_iter()
+        .map(|p| {
+            std::fs::metadata(svc.mount.root.join(p))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        })
+        .collect();
+    let content = svc.read("reference/nested/guide.md");
+    // Restore write permission throughout this private fixture before checking
+    // the result, so failed extractions and read-only trash can be removed.
+    for entry in walkdir::WalkDir::new(_tmp.path())
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_dir() {
+            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    assert!(result.is_ok(), "restore failed: {result:?}");
+    assert_eq!(content.unwrap(), "saved reference");
+    assert_eq!(modes, vec![0o555, 0o500, 0o555]);
+}
