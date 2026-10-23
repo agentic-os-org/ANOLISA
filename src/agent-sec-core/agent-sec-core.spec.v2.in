@@ -243,6 +243,9 @@ rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild-v2 DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
+* Fri Oct 23 2026 Shirong Hao <shirong@linux.alibaba.com> - 1.1.0-1
+- Update version to 1.1.0
+
 * Thu Oct 15 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 1.0.1-1
 - Update version to 1.0.1
 

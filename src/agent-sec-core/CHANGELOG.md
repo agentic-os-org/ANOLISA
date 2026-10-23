@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.1.0
+
+**Breaking Changes**
+
+- Switched source builds and installs to the V2 Rust CLI and host-level systemd
+  daemon, replacing the source-build Python runtime, user sandbox, and venv
+  layout; source-install scripts must migrate to the V2 hook-facing command
+  surface. (#3510)
+
+**V2 Policy & Daemon Runtime**
+
+- Rejected stale policy reconciliation results atomically, tracked real write-receipt
+  versions, and let newer Delete intents supersede exhausted Apply retries, with
+  deterministic crash-recovery coverage for SQLite persistence. (#6944)
+
+**Storage Safety**
+
+- Fell back to `/var/lib/agent-sec/policy/policy-state.db` for default Policy storage
+  when the primary directory is unsafe, checking both candidates before initialization
+  and rejecting conflicting databases with actionable diagnostics. (#8782)
+
+**Skill Ledger Runtime**
+
+- Raised a typed `SkillLedgerError` instead of a raw `NotADirectoryError` when
+  `skill export --output` points to an existing file. (#6105)
+
+**Build & Packaging**
+
+- Updated rustls to 0.23.45 to address a Dependabot security advisory. (#7783)
+
+**Raw Packaging**
+
+- Added a Linux x86_64 sec-core prebuilt raw-archive release target with SHA-256 and
+  CycloneDX SBOM sidecars. (#8461)
+
 ## 1.0.1
 
 **Breaking Changes**
