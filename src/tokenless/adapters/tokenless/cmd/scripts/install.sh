@@ -23,6 +23,21 @@ fi
 MODS_DIR="${TOKENLESS_CMD_MODS_DIR:-${COMMANDCODE_HOME:-$HOME/.commandcode}/mods}"
 MOD_LINK="$MODS_DIR/tokenless.ts"
 
+# Command Code discovers user mods in ~/.commandcode/mods plus the directories
+# its own "mods.paths" setting lists; it reads neither TOKENLESS_CMD_MODS_DIR
+# nor COMMANDCODE_HOME. Both variables only move this installer's link, so a
+# link placed anywhere else is created but never loaded. Report that instead of
+# a bare success the host cannot honour.
+HOST_MODS_DIR="$HOME/.commandcode/mods"
+
+warn_when_not_host_scanned() {
+    if [ "$MODS_DIR" = "$HOST_MODS_DIR" ]; then
+        return 0
+    fi
+    echo "[${COMPONENT}] WARNING: Command Code scans ${HOST_MODS_DIR}, not ${MODS_DIR}." >&2
+    echo "[${COMPONENT}] WARNING: TOKENLESS_CMD_MODS_DIR and COMMANDCODE_HOME only move this link; the ${AGENT} mod stays inactive until ${MODS_DIR} is listed under \"mods.paths\" in $HOME/.commandcode/settings.json, or is loaded per session with: cmd --mod ${MOD_LINK}" >&2
+}
+
 is_managed_link() {
     [ -L "$MOD_LINK" ] && {
         [ "$MOD_LINK" -ef "$MOD_SOURCE" ] ||
@@ -33,6 +48,7 @@ is_managed_link() {
 if [ -e "$MOD_LINK" ] || [ -L "$MOD_LINK" ]; then
     if is_managed_link; then
         echo "[${COMPONENT}] ${AGENT} mod already installed at ${MOD_LINK}."
+        warn_when_not_host_scanned
         exit 0
     fi
     echo "[${COMPONENT}] ERROR: refusing to replace unmanaged path: ${MOD_LINK}" >&2
@@ -52,4 +68,5 @@ if ! is_managed_link; then
 fi
 
 echo "[${COMPONENT}] ${AGENT} mod installed at ${MOD_LINK}."
+warn_when_not_host_scanned
 echo "[${COMPONENT}] Start a new Command Code session (or run /reload) to load the mod."

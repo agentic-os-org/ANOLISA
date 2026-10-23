@@ -330,6 +330,66 @@ try {
     { type: "image", source: { data: "aaa" } },
     { type: "text", text: "compressed-response" },
   ]);
+  assert.deepEqual(
+    mod.withReplacedText(
+      [
+        { type: "image", source: { data: "aaa" } },
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ],
+      "compressed-response",
+    ),
+    [{ type: "image", source: { data: "aaa" } }, { type: "text", text: "compressed-response" }],
+    "contiguous text blocks fold into the first slot",
+  );
+
+  // A non-text block *between* two text blocks is different: folding them into
+  // one string would leave a single combined caption in front of both images,
+  // so the model would lose the text-to-image pairing. Such a result stays
+  // exactly as cmd produced it, and the hook is never called -- Core must not
+  // record a saving for text the model still reads in full.
+  clearLog();
+  const interleaved = [
+    { type: "text", text: "Image A:" },
+    { type: "image", source: { data: "aaa" } },
+    { type: "text", text: "Image B:" },
+    { type: "image", source: { data: "bbb" } },
+  ];
+  assert.equal(
+    await hooks.afterToolCall({
+      toolCallId: "call-11b",
+      toolName: "read_file",
+      input: { file_path: "/repo/a.png" },
+      result: interleaved,
+      state: { sessionId: "session-1" },
+    }),
+    undefined,
+    "an interleaved text/image result is left unchanged",
+  );
+  assert.equal(hookCalls().length, 0, "an interleaved result never reaches the hook");
+  assert.equal(
+    mod.withReplacedText(interleaved, "compressed-response"),
+    null,
+    "the rebuild helper refuses an interleaved result",
+  );
+
+  // One text block is nothing to interleave with, so it still compresses even
+  // when an image follows it.
+  clearLog();
+  const singleText = await hooks.afterToolCall({
+    toolCallId: "call-11c",
+    toolName: "read_file",
+    input: { file_path: "/repo/a.png" },
+    result: [
+      { type: "text", text: "Image A:" },
+      { type: "image", source: { data: "aaa" } },
+    ],
+    state: { sessionId: "session-1" },
+  });
+  assert.deepEqual(singleText.content, [
+    { type: "text", text: "compressed-response" },
+    { type: "image", source: { data: "aaa" } },
+  ]);
 
   // A failure keeps its diagnostic channel: the hook decides what to add.
   process.env.TOKENLESS_TEST_RESPONSE = "context";
