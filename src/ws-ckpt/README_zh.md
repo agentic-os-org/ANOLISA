@@ -99,6 +99,10 @@ ws-ckpt delete --workspace ~/my-workspace -s feature
 
 ### 快照管理
 
+Hermes 的 `ws-ckpt-list` 工具也支持用 `{"limit":20}` 获取一页，再用
+`{"limit":20,"cursor":"<next_cursor>"}` 继续。仅在 `next_cursor:null` 时结束；
+`{}` 仍返回完整表格。详见[用户指南](../../docs/user-guide/zh/ws-ckpt/index.md#hermes-快照列表分页)。
+
 ```bash
 # 列出工作区所有快照
 ws-ckpt list --workspace ~/my-workspace

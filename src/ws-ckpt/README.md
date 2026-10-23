@@ -103,6 +103,10 @@ ws-ckpt delete --workspace ~/my-workspace -s feature
 
 ### Snapshot Management
 
+The Hermes `ws-ckpt-list` tool also accepts `{"limit":20}` for one page and
+`{"limit":20,"cursor":"<next_cursor>"}` to continue. Stop only at `next_cursor:null`;
+`{}` still returns the complete table. See the [user guide](../../docs/user-guide/en/ws-ckpt/index.md#hermes-snapshot-list-pagination).
+
 ```bash
 # List all snapshots
 ws-ckpt list --workspace ~/my-workspace

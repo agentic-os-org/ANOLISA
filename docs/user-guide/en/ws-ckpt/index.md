@@ -332,6 +332,45 @@ symlink, rather than the live snapshot directory behind that link.
 Parent-directory aliases and equivalent path spellings still identify the same
 registration.
 
+### Hermes snapshot list pagination
+
+For a large history, call the existing `ws-ckpt-list` tool with a bounded first
+page, then request another page only when needed:
+
+```json
+{"limit":20}
+```
+
+A successful page is a JSON string containing
+`{"success":true,"snapshots":[...],"next_cursor":"..."}`. Copy the returned cursor
+unchanged into the next call:
+
+```json
+{"limit":20,"cursor":"<next_cursor>"}
+```
+
+Only `next_cursor:null` means completion. A short or empty page can still have a
+continuation cursor. Keep the configured workspace unchanged between calls.
+`limit` must be an integer from 1 to 10000; booleans, fractional values, strings,
+and explicit null are invalid. `cursor` must be a non-empty string; explicit null
+is invalid. Supplying only a cursor uses the CLI default limit of 1000.
+
+With neither key supplied, `{}` preserves the complete table and the existing
+`{"success":true,"output":"..."}` response. Explicit pagination performs one CLI
+call and returns `snapshots` and `next_cursor`, with no `output` wrapper or
+automatic traversal. It requires a pagination-capable CLI and matching daemon;
+no minimum release version is asserted here. Missing CLI, unsupported flags,
+invalid or cross-workspace cursors, daemon failures, timeouts, and malformed
+page output return `{"success":false,"error":"..."}` without retrying a full list.
+
+Each snapshot object is preserved, including nested `meta`, unknown fields,
+`detail:"summary"`, and `omitted_fields`. Omitted fields remain absent. Additional
+CLI envelope fields such as `elapsed_secs` are ignored. The count limit does not
+override the daemon byte budget: summaries and short pages remain possible.
+Pages follow the snapshot listing's ascending order and weak consistency; they
+are not a frozen view while snapshots are created or deleted. This option changes neither checkpoint/rollback state
+nor plugin configuration. OpenClaw's list tool is unchanged.
+
 ### CLI-Based Configuration
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.

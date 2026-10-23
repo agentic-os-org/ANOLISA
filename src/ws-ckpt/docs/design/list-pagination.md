@@ -58,3 +58,50 @@ for every request, including failures and continuation pages. Legacy `List` / `L
 keep `ops_name: "list"` and `list_time: 1`. These are daemon request results;
 there is no query-wide correlation or final CLI outcome event, so page logs
 must not be used to calculate whole-query counts or success rates.
+
+## Hermes tool pagination
+
+The existing `ws-ckpt-list` tool opts into one-page JSON output when either
+`limit` or `cursor` is present. The handler distinguishes missing keys from null,
+rejects invalid limit types/ranges and empty/non-string cursors before invoking
+the CLI, and passes opaque cursors unchanged. Cursor-only requests omit the CLI
+limit flag, retaining its default of 1000. Without either key, the original table
+command and `{success, output}` response remain unchanged.
+
+A page must be an object with a `snapshots` array of objects and an explicit
+`next_cursor` that is null or a non-empty string. The handler emits a JSON string
+with `success`, `snapshots`, and `next_cursor`; extra envelope fields are ignored.
+Snapshot objects retain all nested fields, including summary markers and future
+extensions. Only a null cursor ends traversal; the handler never infers completion
+from page length, follows cursors automatically, or retries failures as a full
+listing. It does not modify configuration or checkpoint/rollback state.
+
+The tool description recommends a bounded first page and on-demand continuation.
+Validation covers the registered schema, exact CLI arguments and one-call
+behavior, invalid arguments, malformed responses, short/empty continuation pages,
+summary preservation, and subprocess failures. OpenClaw and the Rust protocol
+remain unchanged; pagination still requires a capable CLI and matching daemon.
+
+
+### Installed Hermes acceptance
+
+`tests/hermes_pagination_smoke.py` runs through the installed Hermes plugin
+loader and tool registry, using the normal plugin installer in a temporary
+Hermes profile. Run it with the Python environment belonging to that Hermes
+installation. A dedicated daemon must already be running, with two registered
+Btrfs workspaces and at least five real snapshots in the first workspace.
+From the repository root:
+
+```bash
+python3 src/ws-ckpt/tests/hermes_pagination_smoke.py \
+  --socket /tmp/ws-ckpt-pagination.sock \
+  --workspace /tmp/ws-ckpt-pagination-a \
+  --other-workspace /tmp/ws-ckpt-pagination-b
+```
+
+The script compares native first/continuation pages with the full CLI result,
+checks default table output and cursor-only continuation, and requires explicit
+errors for invalid arguments, cross-workspace cursors and an unavailable socket.
+It checks that the snapshot listing is unchanged afterward. It creates no
+workspaces or snapshots and makes no model calls. This is a manual acceptance
+harness, not evidence that a Btrfs or interactive Hermes run has passed.

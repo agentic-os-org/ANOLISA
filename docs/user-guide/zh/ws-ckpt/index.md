@@ -293,6 +293,40 @@ Hermes 保留按工作区区分的状态；本次修改没有为其 hook 添加�
 使用路径时，请使用工作区的注册路径，包括路径末尾的符号链接，而不是链接所指向的当前快照目录。
 父目录别名和等价路径写法仍表示同一个注册路径。
 
+### Hermes 快照列表分页
+
+快照历史较大时，使用现有 `ws-ckpt-list` 工具请求有数量上限的第一页，
+之后按需读取下一页：
+
+```json
+{"limit":20}
+```
+
+成功响应为 JSON 字符串，内容是
+`{"success":true,"snapshots":[...],"next_cursor":"..."}`。将返回的游标原样传入下一次调用：
+
+```json
+{"limit":20,"cursor":"<next_cursor>"}
+```
+
+只有 `next_cursor:null` 表示遍历结束。短页或空页仍可能带有续页游标。
+续页期间保持配置的工作区不变。`limit` 必须是 1 至 10000 的整数；布尔值、
+小数、字符串和显式 null 均无效。`cursor` 必须是非空字符串，显式 null 无效。
+仅传游标时沿用 CLI 的默认页大小 1000。
+
+两个键都不传时，`{}` 保留完整表格及原有
+`{"success":true,"output":"..."}` 响应。显式分页只执行一次 CLI 调用，
+返回 `snapshots` 和 `next_cursor`，不添加 `output` 包装，也不自动遍历。
+分页需要支持该功能的 CLI 和匹配的 daemon；这里不指定未经验证的最低发行版本。
+CLI 缺失、不支持参数、游标无效或跨工作区、daemon 故障、超时及分页输出格式异常，
+均返回 `{"success":false,"error":"..."}`，不会重试完整列表。
+
+每个快照对象均原样保留，包括嵌套 `meta`、未知字段、`detail:"summary"`
+和 `omitted_fields`；省略的字段保持不存在。`elapsed_secs` 等 CLI 顶层附加字段
+会被忽略。条目数量上限不取代 daemon 的字节预算，因此仍可能出现摘要条目和短页。
+分页沿用快照列表的升序及弱一致性：创建或删除快照期间，列表不是固定时间点的视图。
+此选项不修改 checkpoint/rollback 状态或插件配置。OpenClaw 的列表工具保持原行为。
+
 ### CLI 配置
 
 配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。

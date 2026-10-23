@@ -38,3 +38,40 @@ P 页需要 O(N * P) 次索引访问，另加候选维护和序列化。减少�
 每个分页请求（包括后续页和失败）都记录为 `ops_name: "list_page"`、`list_time: 0`、
 `ops_time: 1`。旧 `List` / `ListOrphans` 保留 `ops_name: "list"` 和 `list_time: 1`。日志表示 daemon
 请求结果，尚无整次查询关联或 CLI 最终结果事件，不能用于计算整次查询次数和成功率。
+
+## Hermes 工具分页
+
+现有 `ws-ckpt-list` 工具在出现 `limit` 或 `cursor` 任意键时启用单页 JSON 输出。
+handler 区分键缺失与 null，在调用 CLI 前拒绝类型或范围错误的 limit、空或非字符串
+cursor，并原样传递不透明游标。仅传 cursor 时不添加 CLI limit 参数，沿用默认值 1000。
+两个键都不存在时，保留原有表格命令及 `{success, output}` 响应。
+
+分页响应必须是对象，包含元素均为对象的 `snapshots` 数组，以及显式存在、值为 null
+或非空字符串的 `next_cursor`。handler 返回含 `success`、`snapshots` 和 `next_cursor`
+的 JSON 字符串，忽略 CLI 顶层附加字段。快照对象的全部嵌套字段均保留，包括摘要标记
+及未来扩展。仅 null 游标表示结束；handler 不根据页长推断完成，不自动追踪游标，
+不将失败重试为完整列表，也不修改配置或 checkpoint/rollback 状态。
+
+工具描述建议使用有数量上限的第一页，并按需续页。验证覆盖注册后的 schema、精确 CLI
+参数及单次调用、无效参数、异常响应、短页和空页的续页游标、摘要保留及子进程失败。
+OpenClaw 和 Rust 协议保持不变；分页仍需支持该功能的 CLI 和匹配的 daemon。
+
+
+### 已安装 Hermes 的验收
+
+`tests/hermes_pagination_smoke.py` 使用已安装的 Hermes 插件加载器和工具注册表，
+并通过正常插件安装脚本在临时 Hermes profile 中启用插件。请使用该 Hermes 安装
+对应的 Python 环境运行。需要事先启动专用 daemon，注册两个 Btrfs 工作区，并在
+第一个工作区创建至少五个真实快照。从仓库根目录运行：
+
+```bash
+python3 src/ws-ckpt/tests/hermes_pagination_smoke.py \
+  --socket /tmp/ws-ckpt-pagination.sock \
+  --workspace /tmp/ws-ckpt-pagination-a \
+  --other-workspace /tmp/ws-ckpt-pagination-b
+```
+
+脚本比较原生首页面、续页和完整 CLI 结果，检查默认表格输出及仅传 cursor 的续页，
+并要求无效参数、跨工作区游标和不可用 socket 返回明确错误。结束前检查快照列表
+未改变。脚本不创建工作区或快照，不调用模型。这是手动验收工具，不表示 Btrfs
+或交互式 Hermes 验收已经通过。
