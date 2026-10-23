@@ -21,6 +21,16 @@
 3. **保留最近轮次原文** — 最近 N 个 turn 的消息始终原样传递给 LLM
 4. **按需展开** — LLM 可通过 `expand_turn` 工具，按 turn_seq 展开被压缩轮次的完整原始消息
 
+宿主传入的 `tokenBudget` 按本地 Token 估算限制组装结果：优先保留完整的最近轮次，
+剩余空间保留连续的较新历史摘要，遇到放不下的摘要后不再填入更旧的轮次。省略范围会在
+预算允许时显示为带 `expand_turn` 提示的标记；空间不足以容纳标记时，宿主日志仍会记录
+省略范围。原始消息保留在 SQLite 中，不会截断工具调用或工具结果。
+如果最近轮次本身已经超过预算，组装抛出从插件入口导出的 `TokenBudgetExceededError`
+（`RangeError` 的子类），携带 `requiredTokens`、`tokenBudget`、`freshTailTurnCount` 和
+`freshTailMessageCount`。宿主应捕获该错误、减少近期输入或提高预算后重试。直接调用
+`Assembler` 时，预算必须为有限正数；`stats.droppedTurns` 只统计已显示的无摘要预览，
+`stats.omittedTurns` 单独统计预算省略的轮次。
+
 ## 工作原理
 
 ```

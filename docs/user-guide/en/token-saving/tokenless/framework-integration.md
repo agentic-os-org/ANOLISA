@@ -443,6 +443,17 @@ is `selective-claw.db` under `OPENCLAW_STATE_DIR`, or under `~/.openclaw` when t
 variable is unset. Setting the plugin's `enabled` option to `false` skips database,
 context engine and recall tool registration.
 
+The context engine keeps the recent turns intact and fills the remaining locally
+estimated token budget with a contiguous suffix of historical summaries. Omitted
+turn ranges include an `expand_turn` marker when it fits; otherwise a host warning
+still records the omitted range. Original archived messages remain available. If
+the recent tail alone exceeds the budget, assembly throws `TokenBudgetExceededError`
+(a `RangeError` subclass exported from the plugin entry). Hosts can inspect
+`requiredTokens`, `tokenBudget`, `freshTailTurnCount`, and `freshTailMessageCount`,
+then reduce recent input or increase the budget before retrying. Tool-call and
+tool-result payloads are never truncated to fit.
+
+
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the

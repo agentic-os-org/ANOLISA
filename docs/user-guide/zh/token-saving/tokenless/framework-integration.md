@@ -402,6 +402,14 @@ middleware 不返回替换内容也是如此。过大的 `details` 也可能被�
 `selective-claw.db`；该环境变量未设置时使用 `~/.openclaw`。将插件的 `enabled` 选项设为
 `false` 时，不打开数据库，也不注册上下文引擎或召回工具。
 
+上下文引擎保留完整的最近轮次，并用连续的较新历史摘要填充剩余的本地估算 Token 预算。
+预算允许时，省略轮次范围会附带 `expand_turn` 标记；无法容纳标记时，宿主日志仍会记录
+省略范围，原始归档消息保持可用。如果最近轮次本身超过预算，组装会抛出插件入口导出的
+`TokenBudgetExceededError`（`RangeError` 的子类）。宿主可以读取 `requiredTokens`、
+`tokenBudget`、`freshTailTurnCount` 和 `freshTailMessageCount`，减少近期输入或提高预算后
+重试。工具调用和工具结果载荷不会为了满足预算而被截断。
+
+
 ### Hermes
 
 Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具任务验证阻止后重试改写，
