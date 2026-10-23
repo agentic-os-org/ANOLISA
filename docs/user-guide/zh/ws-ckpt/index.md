@@ -105,13 +105,14 @@ ws-ckpt status -w /home/user/projects/my-project --format json
 
 显式分页的 JSON 是包含 `snapshots` 和 `next_cursor` 的对象。分页按
 `(created_at, workspace_id, snapshot_id)` 升序排列。游标是不透明且带版本的，并绑定
-原始工作区范围和第一页的上界（首次索引扫描观察到的最大键，而非当前时间）。上界之后
+原始工作区范围和第一页的上界（第一页观察到的最大键，而非当前时间）。上界之后
 的新快照不会混入，位于上界内的并发插入以及
 删除仍可能影响后续页。如需无变更的时点列表，应在遍历期间暂停 checkpoint 和 cleanup。
 
-Daemon 从内存中的快照索引读取每一页，不扫描快照文件内容。每页仍重新扫描查询范围：
-N 条快照、P 页需要 O(N * P) 次索引访问，另加候选维护和渲染。只有入选候选键会被复制，
-但重复扫描仍然存在；不承诺固定延迟。页面目标约为 1 MiB，且不会超过
+Daemon 在各查询工作区的内存有序索引中直接定位到游标之后，不再每页重新扫描全部快照。
+该顺序在启动时重建，并随快照变化维护；额外内存与快照数量成正比。
+仅查询 orphan 时，仍可能检查剩余范围内的非 orphan 键。列表不读取快照文件内容，
+也不承诺固定延迟。页面目标约为 1 MiB，且不会超过
 16 MiB IPC 帧上限。如果单条记录的可选 `message` 或 `metadata` 会导致超限，该记录会以
 `detail: "summary"` 和 `omitted_fields` 返回。保留的 `created_at`、`pinned`、`missing`
 仍位于 `meta` 下，与完整记录一致；省略字段缺席，不返回 null。快照仍可通过 ID 操作。

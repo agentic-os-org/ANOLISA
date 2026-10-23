@@ -1413,9 +1413,7 @@ mod tests {
         let arc = state.get_by_wsid(&ws_id).unwrap();
         arc.write()
             .await
-            .index
-            .snapshots
-            .insert("snap-1".into(), recovery_snapshot());
+            .insert_snapshot("snap-1".into(), recovery_snapshot());
         let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
         std::fs::create_dir_all(snapshot_dir.join("snap-1")).unwrap();
         std::fs::create_dir(snapshot_dir.join("unindexed-snapshot")).unwrap();
@@ -1488,9 +1486,7 @@ mod tests {
         let arc = state.get_by_wsid(&ws_id).unwrap();
         arc.write()
             .await
-            .index
-            .snapshots
-            .insert("new-snapshot".into(), recovery_snapshot());
+            .insert_snapshot("new-snapshot".into(), recovery_snapshot());
         let response = dispatch(&state, Request::RecoverConfirmed { preview }).await;
         assert!(
             matches!(

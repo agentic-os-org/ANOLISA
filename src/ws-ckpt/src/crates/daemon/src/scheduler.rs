@@ -534,8 +534,9 @@ mod tests {
                     (format!("snap-new-{round}"), 2),
                     (format!("snap-newer-{round}"), 1),
                 ] {
-                    ws.index.snapshots.get_mut(&id).unwrap().created_at =
-                        chrono::Utc::now() - chrono::Duration::days(age);
+                    let mut meta = ws.index.snapshots[&id].clone();
+                    meta.created_at = chrono::Utc::now() - chrono::Duration::days(age);
+                    ws.insert_snapshot(id, meta);
                 }
             }
             for retention in [
