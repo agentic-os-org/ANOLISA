@@ -16,7 +16,8 @@ ACTPLANE_POST_0005_BPF_LIB_BLOB="efe99bacf1f50ec388e35542aa0210b74c9ac970"
 ACTPLANE_POST_0007_BPF_LIB_BLOB="1f7208a5d81ce822ac6ddc25b4c126d1ac96c891"
 ACTPLANE_POST_0008_BPF_LIB_BLOB="d76db22d5517abf3c5b43d5d30fe11d641d4c805"
 ACTPLANE_POST_0009_BPF_LIB_BLOB="450b8c3035bb66602f5b946da7dc4af72cdc5202"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="0d5a9c60ff943ad0076f02948897e4a5141a7784"
+ACTPLANE_POST_0010_BPF_LIB_BLOB="0d5a9c60ff943ad0076f02948897e4a5141a7784"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="89823a248a37d477672bc1422921236a435e793e"
 ACTPLANE_BASE_BPF_BUILD_BLOB="ae2345ecd26bbf47a6f7dae228ed08ec7e83bcbc"
 ACTPLANE_PATCHED_BPF_BUILD_BLOB="c3ba506d246d3139b8ee148d942db6ba4159b1b9"
 ACTPLANE_BASE_BPF_MAKEFILE_BLOB="eddb4267ba5a10e7f94ad64f19323040368813c1"
@@ -38,6 +39,7 @@ PATCH_0007_FILE="$PATCH_DIR/0007-dedicated-drain-trigger.patch"
 PATCH_0008_FILE="$PATCH_DIR/0008-clean-stale-pin-root.patch"
 PATCH_0009_FILE="$PATCH_DIR/0009-migrate-session-tree.patch"
 PATCH_0010_FILE="$PATCH_DIR/0010-support-legacy-kernel-runtime.patch"
+PATCH_0011_FILE="$PATCH_DIR/0011-gate-blocking-on-active-lsm.patch"
 PATCH_FILES="$PATCH_0001_FILE
 $PATCH_0002_FILE
 $PATCH_0003_FILE
@@ -47,7 +49,8 @@ $PATCH_0006_FILE
 $PATCH_0007_FILE
 $PATCH_0008_FILE
 $PATCH_0009_FILE
-$PATCH_0010_FILE"
+$PATCH_0010_FILE
+$PATCH_0011_FILE"
 CARGO=${CARGO:-cargo}
 
 # An explicit target is opt-in; native callers retain their existing behavior.
@@ -182,43 +185,48 @@ if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0001_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0002_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0003_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0004_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0005_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0007_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0008_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0009_FILE" "$PATCH_0010_FILE"; do
+    for patch_file in "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0009_BPF_LIB_BLOB" ]; then
-    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0010_FILE"
-    git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0010_FILE"
+    for patch_file in "$PATCH_0010_FILE" "$PATCH_0011_FILE"; do
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0010_BPF_LIB_BLOB" ]; then
+    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0011_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0011_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
     echo "ActPlane BPF loader does not match the pinned revision or reviewed patch queue" >&2
     exit 1
