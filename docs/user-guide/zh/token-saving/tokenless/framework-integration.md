@@ -151,6 +151,55 @@ anolisa adapter disable tokenless qwenwork
 内嵌 Qoder CLI 或未公开的桌面 API。需要恢复独立脚本管理时，先 disable CLI 管理的
 Adapter，再使用独立安装器。
 
+### selective-claw 会话搜索
+
+`selective-claw` 是独立的可选 OpenClaw 上下文引擎，源码位于
+`src/tokenless/plugins/selective-claw`。它完整保留最近的轮次，将较早的轮次作为摘要注入。
+需要 Node.js 22+ 和 OpenClaw 2026.5.22 或更高版本。从插件源码目录构建并安装：
+
+```bash
+cd /path/to/ANOLISA/src/tokenless/plugins/selective-claw
+npm install
+npm run build
+openclaw plugins install .
+```
+
+摘要未包含需要的细节时，可调用 `search_turns`，传入关键词或带引号的短语。
+搜索覆盖当前会话的全部已存储消息，包括尚未摘要的最近消息，并按相关性返回匹配项。
+所有关键词必须出现在同一条消息中；引号短语还要求词语相邻。匹配不区分大小写，并使用
+英语词干归一化，因此 `databases` 可以匹配 `database`，`configuring` 可以匹配 `configure`：
+
+```json
+{ "query": "Docker compose", "limit": 5 }
+```
+
+响应包含 `status`、`found`、`matches`、`truncated` 和 `nextOffset`。
+`found` 是当前页返回的消息数。每个匹配项返回 `turnSeq`、消息序号 `seq`、`role` 和预览。
+预览最多保留 300 个 Unicode 字符，截断时追加省略号。`limit` 默认返回 5 条匹配消息，
+必须为 1–20 的整数；字符串和超出范围的值会被拒绝。`offset` 默认为 0，必须为非负安全整数。
+`truncated` 为 true 时，以相同查询和 `offset: nextOffset` 读取下一页；最后一页的
+`nextOffset` 为 null。分页基于当前已存储消息，新增消息可能改变分页边界。
+同一轮次可能匹配多条消息；将需要的、不重复的 `turnSeq` 传给 `expand_turn`，即可读取完整原始消息：
+
+```json
+{ "turn_ids": [2] }
+```
+
+FTS 运算符单词按普通关键词处理。解读空结果前应先检查 `status`：
+
+| Status | 含义 |
+| --- | --- |
+| `ok` | 搜索成功；零条匹配表示没有已存储消息满足查询。 |
+| `invalid_arguments` | 查询为空或不是字符串，或分页参数无效。 |
+| `session_unresolved` | 宿主既未提供非空会话 ID，也未提供已知会话 key。 |
+| `no_stored_messages` | 存储中不存在该会话，或该会话尚无消息。 |
+| `search_unavailable` | 搜索索引缺失或数据库查询失败；宿主日志中包含诊断。 |
+
+两个工具均绑定调用方会话 ID，或绑定上下文引擎生命周期调用中记录的会话 key 所对应的 ID，
+不会回退到其他活跃会话。无法确定会话时，`expand_turn` 也返回
+`status: "session_unresolved"`。如果只有搜索索引不可用，仍可用 `expand_turn` 展开
+已确定会话中已知编号的轮次。
+
 ### DeepSeek Harness 原生处理路径
 
 DSH Bundle 要求 Node.js 22 或更高版本，并需要兼容的 DSH profile。应在同一条

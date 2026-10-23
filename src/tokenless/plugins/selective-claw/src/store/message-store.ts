@@ -137,21 +137,26 @@ export class MessageStore {
   }
 
   searchMessages(sessionId: string, query: string, limit: number): MessageRecord[] {
-    const sanitized = sanitizeFts5Query(query);
     try {
-      const rows = this.prepare(`
+      return this.searchMessagesPage(sessionId, query, limit);
+    } catch {
+      return [];
+    }
+  }
+
+  // Discovery tools must distinguish an unavailable index from a successful miss.
+  searchMessagesPage(sessionId: string, query: string, limit: number, offset = 0): MessageRecord[] {
+    const sanitized = sanitizeFts5Query(query);
+    const rows = this.prepare(`
         SELECT m.message_id, m.session_id, m.seq, m.turn_seq, m.role, m.content, m.token_count, m.raw_message, m.created_at
         FROM messages_fts fts
         JOIN messages m ON m.message_id = fts.rowid
         WHERE messages_fts MATCH ? AND m.session_id = ?
-        ORDER BY rank
-        LIMIT ?
-      `).all(sanitized, sessionId, limit) as RawMessageRow[];
+        ORDER BY rank, m.message_id
+        LIMIT ? OFFSET ?
+      `).all(sanitized, sessionId, limit, offset) as RawMessageRow[];
 
-      return rows.map(toMessageRecord);
-    } catch {
-      return [];
-    }
+    return rows.map(toMessageRecord);
   }
 
   getMessagesByTurnSeqs(sessionId: string, turnSeqs: number[]): MessageRecord[] {

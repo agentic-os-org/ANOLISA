@@ -175,6 +175,64 @@ lifecycle scripts and their ownership marker. Neither route uses the embedded
 Qoder CLI or undocumented desktop APIs. To return to standalone management,
 disable the CLI-managed adapter first, then use the standalone installer.
 
+### selective-claw conversation search
+
+`selective-claw` is a separate optional OpenClaw context engine in
+`src/tokenless/plugins/selective-claw`. It keeps recent turns in full and older
+turns as summaries. It requires Node.js 22+ and OpenClaw 2026.5.22 or later.
+Build and install the plugin from its source directory:
+
+```bash
+cd /path/to/ANOLISA/src/tokenless/plugins/selective-claw
+npm install
+npm run build
+openclaw plugins install .
+```
+
+When a summary omits a detail you need, call `search_turns` with keywords or a
+quoted phrase. Search covers all stored messages in the current conversation,
+including recent messages that have not been summarized, and ranks matches by
+relevance. All keywords must occur in the same message; a quoted phrase also
+requires adjacent words. Matching is case-insensitive and uses English stemming,
+so `databases` can match `database` and `configuring` can match `configure`:
+
+```json
+{ "query": "Docker compose", "limit": 5 }
+```
+
+The response has `status`, `found`, `matches`, `truncated`, and `nextOffset`.
+`found` counts the messages returned on this page. Each match includes `turnSeq`, the message
+`seq`, `role`, and a preview of at most 300 Unicode characters plus an ellipsis
+when truncated. `limit` defaults to 5 matching messages and must be an integer
+from 1–20; strings and out-of-range values are rejected. `offset` defaults to 0
+and must be a non-negative safe integer. When `truncated` is true, repeat the
+same query with `offset` set to `nextOffset` to read the next page. `nextOffset`
+is null on the final page. Pagination reflects the currently stored messages,
+so new messages can change page boundaries.
+Several messages can belong to one turn; pass the distinct `turnSeq` values you
+need to `expand_turn` for the full original messages:
+
+```json
+{ "turn_ids": [2] }
+```
+
+FTS operator words are treated as literal keywords. Check `status` before
+interpreting an empty result:
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | Search succeeded; zero matches means no stored message matched. |
+| `invalid_arguments` | The query is empty or not a string, or pagination arguments are invalid. |
+| `session_unresolved` | The host supplied neither a non-empty session ID nor a known session key. |
+| `no_stored_messages` | The identified session is unknown to the store or has no messages yet. |
+| `search_unavailable` | The search index is missing or a database query failed; the host log contains a diagnostic. |
+
+Both tools bind to the invoking session ID, or to the ID observed for its
+session key during a context-engine lifecycle call. They never fall back to
+another active conversation. An unresolved `expand_turn` also returns
+`status: "session_unresolved"`. If only the search index is unavailable,
+`expand_turn` still works for known turn numbers in the resolved session.
+
 ### DeepSeek Harness native processing
 
 The DSH bundle requires Node.js 22 or later and a compatible DSH profile. Pass

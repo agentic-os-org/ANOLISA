@@ -7,6 +7,7 @@ import type {
   ContextEngine,
   ContextEngineInfo,
   IngestResult,
+  SessionContext,
 } from "./openclaw-bridge.js";
 import type { SelectiveClawConfig } from "./types.js";
 import type { SummarizeFn } from "./summarize.js";
@@ -68,6 +69,7 @@ export class SelectiveContextEngine implements ContextEngine {
   };
 
   private activeSessionId: string | null = null;
+  private sessionIdsByKey = new Map<string, string>();
   private turnSummaryCache = new Map<string, Map<number, string>>();
   private turnMessagesCache = new Map<string, Map<number, AgentMessage[]>>();
   private sessionAccessOrder: string[] = [];
@@ -106,13 +108,29 @@ export class SelectiveContextEngine implements ContextEngine {
     return this.activeSessionId;
   }
 
+  resolveSessionId(context?: SessionContext): string | null {
+    if (typeof context?.sessionId === "string" && context.sessionId.trim()) {
+      return context.sessionId;
+    }
+    return typeof context?.sessionKey === "string"
+      ? this.sessionIdsByKey.get(context.sessionKey) ?? null
+      : null;
+  }
+
+  private bindSession(context: SessionContext & { sessionId: string }): void {
+    this.activeSessionId = context.sessionId;
+    if (context.sessionId.trim() && context.sessionKey?.trim()) {
+      this.sessionIdsByKey.set(context.sessionKey, context.sessionId);
+    }
+    this.touchSession(context.sessionId);
+  }
+
   async bootstrap(params: {
     sessionId: string;
     sessionKey?: string;
     messages?: AgentMessage[];
   }): Promise<BootstrapResult> {
-    this.activeSessionId = params.sessionId;
-    this.touchSession(params.sessionId);
+    this.bindSession(params);
 
     if (params.messages && params.messages.length > 0) {
       const existingCount = this.store.getMessageCount(params.sessionId);
@@ -130,8 +148,7 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionKey?: string;
     message: AgentMessage;
   }): Promise<IngestResult> {
-    this.activeSessionId = params.sessionId;
-    this.touchSession(params.sessionId);
+    this.bindSession(params);
 
     const { message, sessionId } = params;
     const role = this.normalizeRole(message.role);
@@ -165,8 +182,7 @@ export class SelectiveContextEngine implements ContextEngine {
     tokenBudget?: number;
     prompt?: string;
   }): Promise<AssembleResult> {
-    this.activeSessionId = params.sessionId;
-    this.touchSession(params.sessionId);
+    this.bindSession(params);
 
     let records: MessageRecord[];
     if (params.messages && params.messages.length > 0) {
@@ -221,8 +237,7 @@ export class SelectiveContextEngine implements ContextEngine {
     sessionKey?: string;
     messages?: AgentMessage[];
   }): Promise<void> {
-    this.activeSessionId = params.sessionId;
-    this.touchSession(params.sessionId);
+    this.bindSession(params);
 
     if (params.messages && params.messages.length > 0) {
       this.reconcileMessages(params.sessionId, params.messages);
@@ -247,6 +262,7 @@ export class SelectiveContextEngine implements ContextEngine {
     tokenBudget?: number;
     force?: boolean;
   }): Promise<CompactResult> {
+    this.bindSession(params);
     return {
       ok: true,
       compacted: true,
@@ -442,6 +458,9 @@ export class SelectiveContextEngine implements ContextEngine {
       const evicted = this.sessionAccessOrder.shift()!;
       this.turnSummaryCache.delete(evicted);
       this.turnMessagesCache.delete(evicted);
+      for (const [key, sessionId] of this.sessionIdsByKey) {
+        if (sessionId === evicted) this.sessionIdsByKey.delete(key);
+      }
     }
   }
 
