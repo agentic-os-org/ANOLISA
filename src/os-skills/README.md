@@ -49,6 +49,8 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+Discover embedded PDF files and extract a selected payload to a new explicit path; see the [attachment workflow](../../docs/user-guide/en/user-entrypoint/os-skills.md#pdf-embedded-attachments).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
