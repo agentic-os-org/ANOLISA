@@ -48,6 +48,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### Other
 - **cosh-guide** - Copilot Shell user guide
+- **xlsx** — Analyze exported Excel tables; `xlsx_reader.py --header-row 3` skips title and blank preamble rows
 
 ## Skill Format
 

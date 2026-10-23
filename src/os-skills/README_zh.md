@@ -46,6 +46,9 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+### 其他
+- **xlsx** — 分析导出的 Excel 表格；`xlsx_reader.py --header-row 3` 跳过标题和空白说明行
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
