@@ -4,6 +4,11 @@ use std::sync::Mutex;
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+/// The file_write probe uses a process-unique pid-derived path in TMPDIR;
+/// tests that exercise it must serialize to avoid creating/removing the
+/// probe underneath each other (poison-safe, matching ENV_MUTEX's style).
+static FILE_WRITE_PROBE_MUTEX: Mutex<()> = Mutex::new(());
+
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -624,8 +629,59 @@ fn check_permission_file_read() {
 
 #[test]
 fn check_permission_file_write() {
+    let _probe_lock = FILE_WRITE_PROBE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Exercise the file_write path; result depends on filesystem permissions
     let _ = check_permission("file_write");
+}
+
+#[test]
+fn check_permission_file_write_recovers_from_stale_probe_file() {
+    let _probe_lock = FILE_WRITE_PROBE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let test_path = std::env::temp_dir()
+        .join(format!(".tokenless-ready-test-{}", std::process::id()));
+    std::fs::write(&test_path, b"stale probe from a crashed run").unwrap();
+    // A writable temp directory must report file_write=true even when a
+    // stale probe file occupies the pid-derived name, and the probe must
+    // self-heal by removing the leftover.
+    assert!(
+        check_permission("file_write"),
+        "stale probe file must not flip the writable-dir check to denied"
+    );
+    assert!(!test_path.exists(), "probe must clean up after itself");
+}
+
+#[cfg(unix)]
+#[test]
+fn check_permission_file_write_stale_probe_symlink_is_unlinked_not_followed() {
+    let _probe_lock = FILE_WRITE_PROBE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    use std::os::unix::fs::symlink;
+    let test_path = std::env::temp_dir()
+        .join(format!(".tokenless-ready-test-{}", std::process::id()));
+    let victim = std::env::temp_dir().join(format!(
+        ".tokenless-ready-victim-{}",
+        std::process::id()
+    ));
+    std::fs::write(&victim, b"victim").unwrap();
+    let _ = std::fs::remove_file(&test_path);
+    symlink(&victim, &test_path).unwrap();
+
+    // A stale probe symlink must be unlinked (never followed) so the
+    // retry creates a fresh regular file and the check stays true.
+    assert!(
+        check_permission("file_write"),
+        "stale probe symlink must not flip the writable-dir check to denied"
+    );
+    assert!(!test_path.exists());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
+    let _ = std::fs::remove_file(&victim);
 }
 
 #[test]
