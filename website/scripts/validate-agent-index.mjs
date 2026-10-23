@@ -48,9 +48,9 @@ function targetsOverlap(left, right) {
 function targetCoveredBy(candidate, target) {
   return candidate.os === target.os && (
     candidate.architectures.length === 0 ||
-    target.architectures.every(
+    (target.architectures.length > 0 && target.architectures.every(
       (architecture) => candidate.architectures.includes(architecture),
-    )
+    ))
   );
 }
 
