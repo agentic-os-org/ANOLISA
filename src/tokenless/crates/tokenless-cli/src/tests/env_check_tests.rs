@@ -243,44 +243,42 @@ fn binary_fallback_paths_skip_user_layout_without_absolute_home() {
 
 #[test]
 fn build_json_result_ready() {
-    let result = build_json_result("Shell", &ReadyStatus::Ready, &[], &[]);
-    assert_eq!(result["tool"], "Shell");
-    assert_eq!(result["status"], "READY");
-    assert!(result.get("fixed").is_none());
-    assert!(result.get("missing").is_none());
-    assert!(result.get("diagnostic").is_none());
+    let result = make_result(&[], &[], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &[]);
+    assert_eq!(json["tool"], "TestTool");
+    assert_eq!(json["status"], "READY");
+    assert!(json.get("fixed").is_none());
+    assert!(json.get("missing").is_none());
+    assert!(json.get("diagnostic").is_none());
 }
 
 #[test]
 fn build_json_result_not_ready() {
-    let result = build_json_result(
-        "Shell",
-        &ReadyStatus::NotReady,
-        &[],
-        &["fakebin99".to_string()],
-    );
-    assert_eq!(result["tool"], "Shell");
-    assert_eq!(result["status"], "NOT_READY");
-    assert_eq!(result["missing"][0], "fakebin99");
-    let diag = result["diagnostic"].as_str().unwrap();
+    let result = make_result(&["fakebin99"], &[], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &[]);
+    assert_eq!(json["tool"], "TestTool");
+    assert_eq!(json["status"], "NOT_READY");
+    assert_eq!(json["missing"][0], "fakebin99");
+    let diag = json["diagnostic"].as_str().unwrap();
     assert!(diag.contains("Skip retry"));
     assert!(diag.contains("required dependency missing"));
 }
 
 #[test]
 fn build_json_result_unknown() {
-    let result = build_json_result("UnknownTool", &ReadyStatus::Unknown, &[], &[]);
-    assert_eq!(result["tool"], "UnknownTool");
-    assert_eq!(result["status"], "UNKNOWN");
-    assert!(result.get("fixed").is_none());
-    assert!(result.get("missing").is_none());
-    assert!(result.get("diagnostic").is_none());
+    let json = build_unknown_tool_json("UnknownTool");
+    assert_eq!(json["tool"], "UnknownTool");
+    assert_eq!(json["status"], "UNKNOWN");
+    assert!(json.get("fixed").is_none());
+    assert!(json.get("missing").is_none());
+    assert!(json.get("diagnostic").is_none());
 }
 
 #[test]
 fn build_json_result_with_fixed() {
-    let result = build_json_result("Shell", &ReadyStatus::Ready, &["jq".to_string()], &[]);
-    assert_eq!(result["fixed"][0], "jq");
+    let result = make_result(&[], &[], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &["jq".to_string()]);
+    assert_eq!(json["fixed"][0], "jq");
 }
 
 #[test]
@@ -797,6 +795,109 @@ fn check_tool_partial_missing_config() {
     assert_eq!(result.status, ReadyStatus::Partial);
 }
 
+/// A completed check whose only non-default categories are the given
+/// config/permission/network results. The status is backfilled at
+/// construction through the real classifier; mutate a category list and
+/// re-backfill, or the fixture will disagree with the rule.
+fn make_post_fix_result(
+    config_results: Vec<(String, bool)>,
+    permission_results: Vec<(String, bool)>,
+    network_results: Vec<(String, bool)>,
+) -> ToolReadyResult {
+    let mut result = make_post_fix_result_raw(config_results, permission_results, network_results);
+    result.status = classify_readiness(&result);
+    result
+}
+
+fn make_post_fix_result_raw(
+    config_results: Vec<(String, bool)>,
+    permission_results: Vec<(String, bool)>,
+    network_results: Vec<(String, bool)>,
+) -> ToolReadyResult {
+    // Leaves the Unknown placeholder: callers must backfill through
+    // classify_readiness before handing the result to build_json_result.
+    ToolReadyResult {
+        tool_name: "TestTool".to_string(),
+        status: ReadyStatus::Unknown,
+        required_results: vec![(make_dep("sh"), DepStatus::Available)],
+        recommended_results: vec![],
+        config_results,
+        permission_results,
+        network_results,
+    }
+}
+
+/// A completed check whose required/recommended dependency lists are the
+/// given names, all missing. The status is backfilled at construction
+/// through the real classifier; mutate a category list and re-backfill,
+/// or the fixture will disagree with the rule.
+fn make_result(
+    required_missing: &[&str],
+    recommended_missing: &[&str],
+    config_results: Vec<(String, bool)>,
+    permission_results: Vec<(String, bool)>,
+    network_results: Vec<(String, bool)>,
+) -> ToolReadyResult {
+    let mut result = make_post_fix_result_raw(config_results, permission_results, network_results);
+    result.required_results = required_missing
+        .iter()
+        .map(|n| (make_dep(n), DepStatus::Missing))
+        .collect();
+    result.recommended_results = recommended_missing
+        .iter()
+        .map(|n| (make_dep(n), DepStatus::Missing))
+        .collect();
+    result.status = classify_readiness(&result);
+    result
+}
+
+#[test]
+fn classify_readiness_reports_partial_when_config_files_still_missing() {
+    // A fix attempt repairs dependencies, not config files; the post-fix
+    // status must keep reporting PARTIAL while a config file is absent,
+    // exactly like the pre-fix check does.
+    let result = make_post_fix_result(
+        vec![("~/.missing-config.json".to_string(), false)],
+        vec![("file_read".to_string(), true)],
+        vec![],
+    );
+    assert_eq!(classify_readiness(&result), ReadyStatus::Partial);
+}
+
+#[test]
+fn classify_readiness_reports_partial_when_network_check_still_fails() {
+    let result = make_post_fix_result(
+        vec![],
+        vec![("file_read".to_string(), true)],
+        vec![("https_outbound".to_string(), false)],
+    );
+    assert_eq!(classify_readiness(&result), ReadyStatus::Partial);
+}
+
+#[test]
+fn classify_readiness_not_ready_when_required_dep_still_missing() {
+    let mut result = make_post_fix_result(vec![], vec![], vec![]);
+    result.required_results = vec![(make_dep("still_missing_xyz_99"), DepStatus::Missing)];
+    result.status = classify_readiness(&result);
+    assert_eq!(classify_readiness(&result), ReadyStatus::NotReady);
+}
+
+#[test]
+fn classify_readiness_not_ready_when_permission_denied() {
+    let result = make_post_fix_result(vec![], vec![("file_write".to_string(), false)], vec![]);
+    assert_eq!(classify_readiness(&result), ReadyStatus::NotReady);
+}
+
+#[test]
+fn classify_readiness_ready_when_all_checks_pass() {
+    let result = make_post_fix_result(
+        vec![("/etc/hostname".to_string(), true)],
+        vec![("file_read".to_string(), true)],
+        vec![],
+    );
+    assert_eq!(classify_readiness(&result), ReadyStatus::Ready);
+}
+
 #[test]
 fn generate_checklist_ready_partial_not_ready() {
     let results = vec![
@@ -981,16 +1082,153 @@ fn load_spec_with_aliases() {
 
 #[test]
 fn build_json_result_partial() {
-    let result = build_json_result(
-        "Shell",
-        &ReadyStatus::Partial,
-        &["jq".to_string()],
-        &["curl".to_string()],
+    let result = make_result(&[], &["curl"], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &["jq".to_string()]);
+    assert_eq!(json["status"], "PARTIAL");
+    assert_eq!(json["fixed"][0], "jq");
+    assert_eq!(json["missing"][0], "curl");
+    assert!(json.get("diagnostic").is_none());
+}
+
+#[test]
+fn build_json_result_reports_reasons_for_partial_status() {
+    // A PARTIAL caused by config files or network checks must explain
+    // itself: the JSON consumers would otherwise invent a reason (#7899).
+    let result = make_result(
+        &[],
+        &[],
+        vec![("~/.missing-config.json".to_string(), false)],
+        vec![("file_read".to_string(), true)],
+        vec![("https_outbound".to_string(), false)],
     );
-    assert_eq!(result["status"], "PARTIAL");
-    assert_eq!(result["fixed"][0], "jq");
-    assert_eq!(result["missing"][0], "curl");
-    assert!(result.get("diagnostic").is_none());
+    assert_eq!(result.status, ReadyStatus::Partial);
+    let json = build_json_result(&result, &[]);
+    let obj = json.as_object().unwrap();
+    // The serialized status itself, not just the fixture field: this is
+    // the #7899 contract (a config-driven PARTIAL must not serialize as
+    // READY), and nothing else pins the builder to `result.status`.
+    assert_eq!(obj["status"], "PARTIAL");
+    let reported = obj.get("reasons").and_then(|r| r.as_array()).unwrap();
+    assert_eq!(reported.len(), 2);
+    assert!(reported
+        .iter()
+        .any(|r| r.as_str().unwrap().contains("~/.missing-config.json")));
+    assert!(reported
+        .iter()
+        .any(|r| r.as_str().unwrap().contains("https_outbound")));
+    assert!(obj.get("diagnostic").is_none());
+}
+
+#[test]
+fn build_json_result_omits_reasons_when_clean() {
+    let result = make_result(
+        &[],
+        &[],
+        vec![("/etc/hostname".to_string(), true)],
+        vec![("file_read".to_string(), true)],
+        vec![],
+    );
+    let json = build_json_result(&result, &[]);
+    assert!(json.as_object().unwrap().get("reasons").is_none());
+}
+
+#[test]
+fn build_json_result_not_ready_diagnostic_includes_non_dependency_reasons() {
+    // A NOT_READY caused by a denied permission with no missing
+    // dependency must still produce a meaningful diagnostic.
+    let result = make_result(&[], &[], vec![], vec![("file_write".to_string(), false)], vec![]);
+    assert_eq!(result.status, ReadyStatus::NotReady);
+    let json = build_json_result(&result, &[]);
+    let diag = json["diagnostic"].as_str().unwrap();
+    assert!(diag.contains("NOT_READY"));
+    assert!(diag.contains("permission denied: file_write"));
+    let reported = json["reasons"].as_array().unwrap();
+    assert_eq!(reported.len(), 1);
+}
+
+#[test]
+fn build_json_result_tool_field_comes_from_the_result() {
+    // The tool field is derived from the result, not from a call-site
+    // constant: keep a fixture name that differs from every assertion
+    // default so a hardcode in the builder cannot pass.
+    let mut result = make_result(&[], &[], vec![], vec![], vec![]);
+    result.tool_name = "Shell".to_string();
+    assert_eq!(build_json_result(&result, &[])["tool"], "Shell");
+}
+
+#[test]
+fn classify_readiness_not_ready_when_required_dep_version_low() {
+    // The required arm's VersionLow half: an installed-but-outdated
+    // required dependency must keep the tool NOT_READY, matching the
+    // documented "missing or outdated required dependency" promise.
+    let mut result = make_post_fix_result(vec![], vec![], vec![]);
+    result.required_results = vec![(
+        make_dep("oldreq"),
+        DepStatus::VersionLow {
+            installed: "1.0.0".to_string(),
+            required: "2.0.0".to_string(),
+        },
+    )];
+    result.status = classify_readiness(&result);
+    assert_eq!(result.status, ReadyStatus::NotReady);
+    assert_eq!(missing_dep_names(&result), vec!["oldreq".to_string()]);
+    // The diagnostic names the real problem — outdated, not missing —
+    // with both versions, like the checklist's OUTDATED label.
+    let json = build_json_result(&result, &[]);
+    let diag = json["diagnostic"].as_str().unwrap();
+    assert!(
+        diag.contains("required dependency outdated: oldreq (1.0.0 < 2.0.0)"),
+        "{diag}"
+    );
+}
+
+#[test]
+fn fixed_dep_names_reports_only_actually_repaired_dependencies() {
+    // "a" was attempted and is still unsatisfied; "b" was attempted and
+    // repaired. `fixed` must contain exactly "b" and stay disjoint from
+    // the missing array the same result derives — passing the pre-fix
+    // result instead of the re-check would empty it, and dropping the
+    // filter would put "a" in both arrays.
+    let result = make_result(&["a"], &[], vec![], vec![], vec![]);
+    let attempted = vec!["a".to_string(), "b".to_string()];
+    let fixed = fixed_dep_names(&attempted, &result);
+    assert_eq!(fixed, vec!["b".to_string()]);
+    let missing = missing_dep_names(&result);
+    assert!(fixed.iter().all(|n| !missing.contains(n)));
+}
+
+#[test]
+fn diagnostic_never_calls_an_installed_dependency_missing() {
+    // The phrase helper returns None for a satisfied dependency, so no
+    // future filter slip can render "required dependency missing: sh"
+    // for a dependency the builder left Available.
+    let result = make_post_fix_result(vec![], vec![("file_write".to_string(), false)], vec![]);
+    assert_eq!(result.status, ReadyStatus::NotReady);
+    let diag = build_json_result(&result, &[])["diagnostic"].as_str().unwrap().to_string();
+    assert!(!diag.contains("dependency missing: sh"), "{diag}");
+    assert!(diag.contains("permission denied: file_write"), "{diag}");
+}
+
+#[test]
+fn non_ready_results_always_explain_themselves() {
+    // Whatever makes a result non-READY, the JSON payload can always
+    // name it through `missing` or `reasons` — the invariant that lets
+    // hook consumers drop their "unknown" fallbacks once they read
+    // `reasons`.
+    let fixtures = vec![
+        make_result(&["req1"], &[], vec![], vec![], vec![]),
+        make_result(&[], &[], vec![], vec![("file_write".to_string(), false)], vec![]),
+        make_result(&[], &["rec1"], vec![], vec![], vec![]),
+        make_result(&[], &[], vec![("~/.cfg".to_string(), false)], vec![], vec![]),
+        make_result(&[], &[], vec![], vec![], vec![("https".to_string(), false)]),
+    ];
+    for result in &fixtures {
+        assert_ne!(result.status, ReadyStatus::Ready);
+        assert!(
+            !missing_dep_names(result).is_empty() || !readiness_reasons(result).is_empty(),
+            "a non-READY result must carry an explanation"
+        );
+    }
 }
 
 #[test]
@@ -1256,14 +1494,10 @@ fn format_dep_status_and_label_coverage() {
 
 #[test]
 fn build_json_result_not_ready_diagnostic() {
-    let result = build_json_result(
-        "TestTool",
-        &ReadyStatus::NotReady,
-        &[],
-        &["dep1".to_string(), "dep2".to_string()],
-    );
-    assert!(result["diagnostic"].as_str().unwrap().contains("NOT_READY"));
-    assert!(result["diagnostic"].as_str().unwrap().contains("dep1"));
+    let result = make_result(&["dep1", "dep2"], &[], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &[]);
+    assert!(json["diagnostic"].as_str().unwrap().contains("NOT_READY"));
+    assert!(json["diagnostic"].as_str().unwrap().contains("dep1"));
 }
 
 #[test]
@@ -1465,27 +1699,32 @@ fn load_spec_valid_file() {
 
 #[test]
 fn build_json_result_ready_with_diagnostic() {
-    let result = build_json_result(
-        "TestTool",
-        &ReadyStatus::NotReady,
-        &[],
-        &["missing-dep".to_string()],
-    );
-    assert_eq!(result["tool"], "TestTool");
-    assert!(result["diagnostic"].as_str().unwrap().contains("NOT_READY"));
-    assert!(result["missing"].as_array().unwrap().len() == 1);
+    let result = make_result(&["missing-dep"], &[], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &[]);
+    assert_eq!(json["tool"], "TestTool");
+    assert!(json["diagnostic"].as_str().unwrap().contains("NOT_READY"));
+    assert!(json["missing"].as_array().unwrap().len() == 1);
 }
 
 #[test]
 fn build_json_result_with_fixed_and_missing() {
-    let result = build_json_result(
-        "TestTool",
-        &ReadyStatus::Ready,
-        &["fixed-dep".to_string()],
-        &["still-missing".to_string()],
-    );
-    assert!(result["fixed"].as_array().unwrap().len() == 1);
-    assert!(result["missing"].as_array().unwrap().len() == 1);
+    let result = make_result(&[], &["still-missing"], vec![], vec![], vec![]);
+    let json = build_json_result(&result, &["fixed-dep".to_string()]);
+    assert!(json["fixed"].as_array().unwrap().len() == 1);
+    assert!(json["missing"].as_array().unwrap().len() == 1);
+}
+
+#[test]
+fn build_json_result_diagnostic_distinguishes_recommended_from_required() {
+    // The missing array is the union, but the diagnostic must not call
+    // an optional dependency "required".
+    let result = make_result(&["req-a"], &["opt-b"], vec![], vec![("file_write".to_string(), false)], vec![]);
+    assert_eq!(result.status, ReadyStatus::NotReady);
+    let json = build_json_result(&result, &[]);
+    let diag = json["diagnostic"].as_str().unwrap();
+    assert!(diag.contains("required dependency missing: req-a"));
+    assert!(diag.contains("recommended dependency missing: opt-b"));
+    assert!(diag.contains("permission denied: file_write"));
 }
 
 #[test]

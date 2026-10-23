@@ -39,7 +39,7 @@ if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 # User-writable paths must be owned by current user and not world-writable.
 #
 # KEEP IN SYNC with the Rust equivalent in
-# `crates/tokenless-cli/src/env_check/mod.rs` (`is_trusted_path`).
+# `crates/tokenless-cli/src/env_check.rs` (`is_trusted_path`).
 # Changes to trust criteria must be applied to both implementations.
 is_trusted_file() {
   local f="$1"
@@ -424,7 +424,15 @@ if [ "$rec_count" -gt 0 ]; then
   done
 fi
 
-# --- Determine readiness ---
+# --- Determine readiness (pre-fix; this file re-implements the rule
+# three times — here, in the Phase 3 post-fix re-check, and in the
+# Phase 4 re-check) ---
+# KEEP IN SYNC with the Rust classification in
+# `crates/tokenless-cli/src/env_check.rs` (`classify_readiness`).
+# The rules are NOT equivalent today: the Rust side additionally
+# downgrades on missing config files and failing network checks, and
+# counts an outdated recommended dependency as PARTIAL. Reconcile the
+# two rule sets before lifting the hard bypass above.
 IS_READY=true
 IS_PARTIAL=false
 $HAS_REQUIRED_MISSING && IS_READY=false
@@ -448,6 +456,23 @@ fi
 
 # ============================================================================
 # Phase 3: FIX — Auto-install missing dependencies
+# KEEP IN SYNC with the Rust post-fix re-check in
+# `crates/tokenless-cli/src/env_check.rs` (`check_tool` re-run in
+# `run()`'s fix branch). This is the POST-FIX path and it is NOT
+# equivalent to the Rust re-check: Phase 3 never queues a version_low
+# required dep for fixing (only the `missing` arm appends to
+# MISSING_DEP_JSONS in the required loop above), so an outdated-only
+# tool skips the fix block entirely (missing_count == 0) and is
+# permanently NOT_READY here, while the Rust fixable_deps filter
+# includes VersionLow and does attempt the upgrade. Phase 3 also
+# rescans required, version_low, and recommended, but PERM_MISSING
+# below is still the PRE-FIX snapshot (check_permissions runs once,
+# above), and there are no config-file or network arms. The NOT_READY
+# diagnostic wording also differs from the Rust diagnostic
+# ("version too low" / "permission missing:" vs "outdated" /
+# "permission denied:", semicolon- vs comma-separated), and Rust emits
+# no `diagnostic` key at all for PARTIAL. Reconcile before lifting the
+# hard bypass.
 # ============================================================================
 
 missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
@@ -468,6 +493,10 @@ if [ "$missing_count" -gt 0 ] \
         binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
         if ! resolve_binary "$binary" >/dev/null 2>&1; then
             STILL_MISSING="${STILL_MISSING} ${binary}"
+            # Always true today: MISSING_DEP_JSONS holds only required
+            # `missing` entries, so $i is always below its length. The
+            # guard documents that the whole array is required; if
+            # recommended deps are ever appended here, revisit it.
             if [ "$i" -lt "$REQUIRED_MISSING_COUNT" ]; then
                 HAS_REQUIRED_MISSING=true
             fi
@@ -505,6 +534,8 @@ if [ "$missing_count" -gt 0 ] \
         done
     fi
 
+    # Post-fix readiness judgment — the alignment list is in the Phase 3
+    # header above.
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
         exit 0
     fi

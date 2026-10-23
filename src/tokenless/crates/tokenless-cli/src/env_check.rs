@@ -195,7 +195,9 @@ enum DepStatus {
 enum ReadyStatus {
     /// All required and recommended dependencies satisfied.
     Ready,
-    /// Recommended deps missing but required deps OK — degraded but usable.
+    /// A recommended dependency, config file, or network capability is
+    /// missing while everything required is satisfied — degraded but
+    /// usable.
     Partial,
     /// Required deps or permissions missing — tool cannot function.
     NotReady,
@@ -823,6 +825,87 @@ fn load_spec(
     Ok(specs)
 }
 
+/// Whether a dependency status means "not satisfied" — the single
+/// definition shared by the classifier, the `missing` array, the `fixed`
+/// derivation and the diagnostic. Exhaustive (no `_`), so a fourth
+/// `DepStatus` variant is a compile error here instead of being silently
+/// counted as satisfied.
+fn is_dep_unsatisfied(status: &DepStatus) -> bool {
+    match status {
+        DepStatus::Available => false,
+        DepStatus::Missing | DepStatus::VersionLow { .. } => true,
+    }
+}
+
+/// Diagnostic phrase for one unsatisfied dependency. `None` when the
+/// dependency is satisfied, so the filter and the wording are one
+/// decision and cannot drift apart (an installed dependency can never be
+/// called "missing" in the output).
+fn dependency_diag_phrase(scope: &str, dep: &DepEntry, status: &DepStatus) -> Option<String> {
+    match status {
+        DepStatus::VersionLow {
+            installed,
+            required,
+        } => Some(format!(
+            "{scope} dependency outdated: {} ({installed} < {required})",
+            dep.binary
+        )),
+        DepStatus::Missing => Some(format!("{scope} dependency missing: {}", dep.binary)),
+        DepStatus::Available => None,
+    }
+}
+
+/// Classify overall readiness from a completed check's five per-category
+/// result lists.
+///
+/// This is the single classification entry point: `check_tool` backfills
+/// every `ToolReadyResult.status` from it — including the result of the
+/// post-fix re-check — so callers downstream of `check_tool` reuse
+/// `result.status` instead of recomputing it. A missing/outdated required
+/// dependency or a denied permission is NOT_READY; a missing recommended
+/// dependency, config file, or network capability is PARTIAL; everything
+/// else is READY. (The shipped spec schema marks `network` as removed
+/// and the out-of-the-box specs keep `network: []`, so that clause is
+/// dormant in practice — see tool-ready-spec.json.)
+///
+/// The post-fix JSON branch used to recompute its status inline with a
+/// narrower rule — dependencies and permissions only — so a tool whose
+/// config files were still missing (or whose network capability still
+/// failed) was reported as READY after a fix even though the same
+/// findings are PARTIAL before it (#7899).
+///
+/// KEEP IN SYNC: the dormant shell-side readiness gate in
+/// `adapters/tokenless/common/hooks/tool_ready_hook.sh` re-implements
+/// this rule and is NOT equivalent — it has no config-file or
+/// network-check arms, and its recommended loop does not count an
+/// outdated dependency. The hook's own readiness section carries the
+/// reverse pointer; reconcile the rule sets before lifting its bypass.
+fn classify_readiness(result: &ToolReadyResult) -> ReadyStatus {
+    // Every field is named (no `..`) so adding a sixth check category
+    // becomes a compile error here instead of a silent fail-open.
+    let ToolReadyResult {
+        tool_name: _,
+        status: _,
+        required_results: required,
+        recommended_results: recommended,
+        config_results: config,
+        permission_results: permissions,
+        network_results: network,
+    } = result;
+    let has_required_missing = required.iter().any(|(_, s)| is_dep_unsatisfied(s));
+    let has_perm_missing = permissions.iter().any(|(_, ok)| !ok);
+    if has_required_missing || has_perm_missing {
+        return ReadyStatus::NotReady;
+    }
+    let has_recommended_missing = recommended.iter().any(|(_, s)| is_dep_unsatisfied(s));
+    let has_config_missing = config.iter().any(|(_, ok)| !ok);
+    let has_net_missing = network.iter().any(|(_, ok)| !ok);
+    if has_recommended_missing || has_config_missing || has_net_missing {
+        return ReadyStatus::Partial;
+    }
+    ReadyStatus::Ready
+}
+
 /// Check a specific tool's environment readiness.
 fn check_tool(tool_name: &str, spec: &ToolDepSpec) -> ToolReadyResult {
     let required_results: Vec<(DepEntry, DepStatus)> = spec
@@ -855,33 +938,20 @@ fn check_tool(tool_name: &str, spec: &ToolDepSpec) -> ToolReadyResult {
         .map(|n| (n.clone(), check_network(n)))
         .collect();
 
-    let has_required_missing = required_results
-        .iter()
-        .any(|(_, s)| s == &DepStatus::Missing || matches!(s, DepStatus::VersionLow { .. }));
-    let has_perm_missing = permission_results.iter().any(|(_, ok)| !ok);
-    let has_recommended_missing = recommended_results
-        .iter()
-        .any(|(_, s)| s == &DepStatus::Missing || matches!(s, DepStatus::VersionLow { .. }));
-    let has_config_missing = config_results.iter().any(|(_, ok)| !ok);
-    let has_net_missing = network_results.iter().any(|(_, ok)| !ok);
-
-    let status = if has_required_missing || has_perm_missing {
-        ReadyStatus::NotReady
-    } else if has_recommended_missing || has_config_missing || has_net_missing {
-        ReadyStatus::Partial
-    } else {
-        ReadyStatus::Ready
-    };
-
-    ToolReadyResult {
+    let mut result = ToolReadyResult {
         tool_name: tool_name.to_string(),
-        status,
+        // Backfilled from the findings above through the single
+        // struct-taking classifier; the placeholder avoids passing five
+        // same-shaped positional lists that could be swapped silently.
+        status: ReadyStatus::Unknown,
         required_results,
         recommended_results,
         config_results,
         permission_results,
         network_results,
-    }
+    };
+    result.status = classify_readiness(&result);
+    result
 }
 
 /// Format a DepStatus as a human-readable string (with icon).
@@ -1318,13 +1388,77 @@ fn find_spec_path() -> Result<PathBuf, String> {
     ))
 }
 
+/// Human-readable reasons a completed check did not reach READY beyond
+/// the dependency names already reported through `missing`: still-missing
+/// config files, denied permissions, and failed network checks. Empty
+/// when none of those categories failed — the JSON consumers (the codex
+/// `tool-ready` hook and the openclaw adapter) would otherwise have to
+/// invent a reason for a PARTIAL/NOT_READY status (#7899).
+fn readiness_reasons(result: &ToolReadyResult) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for (path, ok) in &result.config_results {
+        if !ok {
+            reasons.push(format!("config file missing: {path}"));
+        }
+    }
+    for (perm, ok) in &result.permission_results {
+        if !ok {
+            reasons.push(format!("permission denied: {perm}"));
+        }
+    }
+    for (cap, ok) in &result.network_results {
+        if !ok {
+            reasons.push(format!("network capability failed: {cap}"));
+        }
+    }
+    reasons
+}
+
+/// Names of required and recommended dependencies that are still
+/// missing or outdated — the `missing` array of the JSON payload.
+fn missing_dep_names(result: &ToolReadyResult) -> Vec<String> {
+    result
+        .required_results
+        .iter()
+        .chain(result.recommended_results.iter())
+        .filter(|(_, s)| is_dep_unsatisfied(s))
+        .map(|(d, _)| d.binary.clone())
+        .collect()
+}
+
+/// Names of the attempted dependencies the fix actually repaired: the
+/// attempted list minus whatever the re-check still reports
+/// unsatisfied. Taking the re-check (not the pre-fix result) is what
+/// keeps `fixed` disjoint from the JSON `missing` array, which the same
+/// re-check derives.
+fn fixed_dep_names(attempted: &[String], result: &ToolReadyResult) -> Vec<String> {
+    let still_missing = missing_dep_names(result);
+    attempted
+        .iter()
+        .filter(|n| !still_missing.contains(*n))
+        .cloned()
+        .collect()
+}
+
+/// JSON for a tool the spec does not know: no check ran, so there is
+/// nothing to derive and the payload is the status alone.
+fn build_unknown_tool_json(tool_name: &str) -> Value {
+    serde_json::json!({
+        "tool": tool_name,
+        "status": format_status(&ReadyStatus::Unknown),
+    })
+}
+
 /// Build a JSON result for a single tool check.
-fn build_json_result(
-    tool_name: &str,
-    status: &ReadyStatus,
-    fixed: &[String],
-    missing: &[String],
-) -> Value {
+///
+/// Everything except `fixed` is derived from the check result itself, so
+/// a call site cannot pass a status, a missing list, and a reasons list
+/// that disagree with each other — or drop one of them silently.
+fn build_json_result(result: &ToolReadyResult, fixed: &[String]) -> Value {
+    let tool_name = result.tool_name.as_str();
+    let status = &result.status;
+    let missing = missing_dep_names(result);
+    let reasons = readiness_reasons(result);
     let mut obj = serde_json::Map::new();
     obj.insert("tool".to_string(), Value::String(tool_name.to_string()));
     obj.insert(
@@ -1343,11 +1477,31 @@ fn build_json_result(
             Value::Array(missing.iter().map(|s| Value::String(s.clone())).collect()),
         );
     }
+    if !reasons.is_empty() {
+        obj.insert(
+            "reasons".to_string(),
+            Value::Array(reasons.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+    }
     if *status == ReadyStatus::NotReady {
-        let diag_parts: Vec<String> = missing
+        // Distinguish required from recommended, and missing from
+        // installed-but-outdated: the missing array is the union of both
+        // statuses, but telling an operator to install a binary that is
+        // installed at the wrong version misdirects the fix. The phrase
+        // helper returns None for a satisfied dependency, so the filter
+        // and the wording are one decision.
+        let mut diag_parts: Vec<String> = result
+            .required_results
             .iter()
-            .map(|m| format!("required dependency missing: {m}"))
+            .filter_map(|(d, s)| dependency_diag_phrase("required", d, s))
             .collect();
+        diag_parts.extend(
+            result
+                .recommended_results
+                .iter()
+                .filter_map(|(d, s)| dependency_diag_phrase("recommended", d, s)),
+        );
+        diag_parts.extend(reasons.iter().cloned());
         obj.insert(
             "diagnostic".to_string(),
             Value::String(format!(
@@ -1437,7 +1591,7 @@ pub fn run(
         };
         if !specs.contains_key(&resolved) {
             if json {
-                let result = build_json_result(&resolved, &ReadyStatus::Unknown, &[], &[]);
+                let result = build_unknown_tool_json(&resolved);
                 println!("{}", serde_json::to_string(&result).unwrap());
                 return Ok(());
             }
@@ -1457,20 +1611,11 @@ pub fn run(
         let fixable_deps: Vec<DepEntry> = result
             .required_results
             .iter()
-            .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
-            .map(|(d, _)| d.clone())
-            .collect();
-
-        let missing_deps: Vec<DepEntry> = result
-            .required_results
-            .iter()
-            .chain(result.recommended_results.iter())
-            .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
+            .filter(|(_, s)| is_dep_unsatisfied(s))
             .map(|(d, _)| d.clone())
             .collect();
 
         let fixable_names: Vec<String> = fixable_deps.iter().map(|d| d.binary.clone()).collect();
-        let missing_names: Vec<String> = missing_deps.iter().map(|d| d.binary.clone()).collect();
 
         if fix && !fixable_deps.is_empty() {
             if !json {
@@ -1489,43 +1634,29 @@ pub fn run(
                 }
             }
 
-            // Re-check after fix
-            let post_result = check_tool(tool_name, spec);
-            let post_missing: Vec<String> = post_result
-                .required_results
-                .iter()
-                .chain(post_result.recommended_results.iter())
-                .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
-                .map(|(d, _)| d.binary.clone())
-                .collect();
+            // Re-check after fix, then shadow immediately. The shadow
+            // removes the pre-fix binding's *name* — every later
+            // reference (the fixed derivation and both output branches)
+            // can only name the re-check. It does not by itself force
+            // the derivation order: keep `fixed` below the shadow, or
+            // it reads the pre-fix result again.
+            let result = check_tool(tool_name, spec);
 
-            let fixed: Vec<String> = fixable_names
-                .iter()
-                .filter(|n| !post_missing.contains(n))
-                .cloned()
-                .collect();
+            let fixed: Vec<String> = fixed_dep_names(&fixable_names, &result);
 
             if json {
-                let post_status =
-                    if post_missing.is_empty()
-                        && post_result.permission_results.iter().all(|(_, ok)| *ok)
-                    {
-                        ReadyStatus::Ready
-                    } else if post_result.required_results.iter().any(|(_, s)| {
-                        matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. })
-                    }) || post_result.permission_results.iter().any(|(_, ok)| !ok)
-                    {
-                        ReadyStatus::NotReady
-                    } else {
-                        ReadyStatus::Partial
-                    };
-                let result_json = build_json_result(tool_name, &post_status, &fixed, &post_missing);
+                // The re-check's own status is the post-fix status: the
+                // JSON branch reads the same value the text branch below
+                // prints, so the two outputs cannot disagree — the inline
+                // recomputation here is what #7899 reported. Everything
+                // else the payload needs is derived from the result.
+                let result_json = build_json_result(&result, &fixed);
                 println!("{}", serde_json::to_string(&result_json).unwrap());
             } else {
-                println!("{}: {}", tool_name, format_status(&post_result.status));
+                println!("{}: {}", tool_name, format_status(&result.status));
             }
         } else if json {
-            let result_json = build_json_result(tool_name, &result.status, &[], &missing_names);
+            let result_json = build_json_result(&result, &[]);
             println!("{}", serde_json::to_string(&result_json).unwrap());
         } else {
             println!("{}: {}", tool_name, format_status(&result.status));
@@ -1572,7 +1703,7 @@ pub fn run(
             } else if result
                 .recommended_results
                 .iter()
-                .any(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
+                .any(|(_, s)| is_dep_unsatisfied(s))
             {
                 println!(
                     "  Note: missing recommended deps are optional and are not auto-installed."

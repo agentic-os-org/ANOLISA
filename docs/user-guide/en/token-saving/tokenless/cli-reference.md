@@ -422,7 +422,7 @@ Automatic repair:
 tokenless env-check --tool Shell --fix
 ```
 
-> While the hard bypass is active, `--fix` does not invoke a package manager or modify the environment. The retained legacy implementation would attempt only missing required dependencies if it were redesigned and re-enabled in a future release.
+> While the hard bypass is active, `--fix` does not invoke a package manager or modify the environment. The retained legacy implementation would attempt missing or outdated required dependencies if it were redesigned and re-enabled in a future release.
 
 ## `stats`
 
