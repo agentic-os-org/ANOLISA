@@ -37,6 +37,7 @@ PRE_TOOL_AGENTS = {
     "qoder-cli": {"TOKENLESS_AGENT_ID": "qoder-cli"},
     "qwenwork": {"TOKENLESS_AGENT_ID": "qwenwork"},
     "opencode": {"TOKENLESS_AGENT_ID": "opencode"},
+    "cmd": {"TOKENLESS_AGENT_ID": "cmd"},
     "qwencode": {"TOKENLESS_AGENT_ID": "qwencode"},
     "cosh-ng": {"COSH_NG_VERSION": "0.5.0"},
 }
@@ -124,7 +125,7 @@ class ResponseHookContract(unittest.TestCase):
     # Replacement hosts and how an applied output lands in their envelope.
     # qwencode is additionalContext-only: Core sees that it cannot replace
     # output and returns passthrough, but the hook still makes its one v2 call.
-    REPLACEMENT_AGENTS = ["claude-code", "qoder-cli", "qwenwork", "opencode", "cosh-ng"]
+    REPLACEMENT_AGENTS = ["claude-code", "qoder-cli", "qwenwork", "opencode", "cmd", "cosh-ng"]
 
     def setUp(self):
         self.fixture = load_fixture("post_tool", "api_records")

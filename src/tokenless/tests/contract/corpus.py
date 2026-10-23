@@ -36,6 +36,7 @@ RESPONSE_AGENTS = {
     "claude-code": {"TOKENLESS_AGENT_ID": "claude-code"},
     "qoder-cli": {"TOKENLESS_AGENT_ID": "qoder-cli"},
     "opencode": {"TOKENLESS_AGENT_ID": "opencode"},
+    "cmd": {"TOKENLESS_AGENT_ID": "cmd"},
     "qwencode": {"TOKENLESS_AGENT_ID": "qwencode"},
     "cosh-ng": {"COSH_NG_VERSION": "0.5.0"},
 }
