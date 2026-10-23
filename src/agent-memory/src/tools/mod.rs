@@ -4,7 +4,8 @@
 //! - Take a `&MemoryService` plus path arguments
 //! - Resolve every path through `ns::paths::resolve_path` (sandbox)
 //! - Perform real IO under the namespace mount
-//! - Emit one `AuditEntry` per call (success or failure)
+//! - Emit one `AuditEntry` per call (success or failure); retained recovery data
+//!   may produce an additional recovery-location event.
 
 pub mod append;
 pub mod diff;

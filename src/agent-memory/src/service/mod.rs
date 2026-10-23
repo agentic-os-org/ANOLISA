@@ -232,6 +232,13 @@ impl MemoryService {
         crate::tools::snapshot_restore(self, id)
     }
 
+    pub(crate) fn mem_snapshot_restore_with_outcome(
+        &self,
+        id: &str,
+    ) -> Result<crate::snapshot::RestoreOutcome> {
+        crate::tools::mem_snapshot_restore::snapshot_restore_with_outcome(self, id)
+    }
+
     /// Convenience for shutdown handlers that don't have ownership of the
     /// MemoryService: clean the session directory if we still hold the only Arc.
     pub fn try_end_session(&self, action: EndAction) {

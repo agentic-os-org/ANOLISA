@@ -323,6 +323,19 @@ Namespace layout:
     └── git/                         # bare git mirror (when git enabled)
 ```
 
+Restore backups use `trash/<UTC>-<snapshot id>[~N]/`; a `~N` suffix avoids
+reusing an existing backup. If trash is unavailable, each restore retains its
+displaced tree in a separate `.anolisa/.<snapshot id>.rollback.entries[~N]/`
+directory. If a successful restore leaves a recovery directory requiring
+inspection, the MCP response names its path and an additional
+`mem_snapshot_restore_recovery` audit entry records its mount-relative location.
+These recovery copies are kept until an operator explicitly removes them.
+**Before removing any recovery copy, verify the restored data and ensure no
+restore is running in any process.** A directory name alone does not establish
+that it is idle. Older stranded rollback entries are left untouched. If bounded
+reservation is exhausted, inspect the stranded copies under these same safety
+conditions before freeing names; never remove a directory used by a live restore.
+
 Session dir (tmpfs, 0700):
 
 ```

@@ -762,3 +762,86 @@ async fn mem_export_returns_ama_json() {
     drop(stdin);
     let _ = child.kill().await;
 }
+
+#[tokio::test]
+async fn snapshot_recovery_location_reaches_mcp_and_audit() {
+    for retain in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+        handshake(&mut reader, &mut stdin).await;
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            700,
+            "mem_write",
+            json!({"path": "doc.md", "content": "before"}),
+        )
+        .await;
+        assert_ne!(resp["result"]["isError"], true);
+        let resp = call_tool(&mut reader, &mut stdin, 701, "mem_snapshot", json!({})).await;
+        let snapshot: Value = serde_json::from_str(&extract_text(&resp)).unwrap();
+        let id = snapshot["id"].as_str().unwrap();
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            702,
+            "mem_write",
+            json!({"path": "doc.md", "content": "displaced", "overwrite": true}),
+        )
+        .await;
+        assert_ne!(resp["result"]["isError"], true);
+        let mount = tmp.path().join("user-tester");
+        let meta = mount.join(".anolisa");
+        if retain {
+            std::fs::write(meta.join("trash"), "occupied").unwrap();
+        }
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            703,
+            "mem_snapshot_restore",
+            json!({"id": id}),
+        )
+        .await;
+        assert_ne!(resp["result"]["isError"], true);
+        let text = extract_text(&resp);
+        let audit = std::fs::read_to_string(meta.join("audit.log")).unwrap();
+        let events: Vec<Value> = audit
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let recovery: Vec<_> = events
+            .iter()
+            .filter(|e| e["tool"] == "mem_snapshot_restore_recovery")
+            .collect();
+        assert_eq!(
+            std::fs::read_to_string(mount.join("doc.md")).unwrap(),
+            "before"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e["tool"] == "mem_snapshot_restore" && e["path"] == id && e["ok"] == true)
+        );
+        if retain {
+            let relative = format!(".anolisa/.{id}.rollback.entries");
+            let retained = mount.join(&relative);
+            assert!(
+                text.contains(&retained.display().to_string()),
+                "response omitted recovery path: {text}"
+            );
+            assert!(text.contains("no restore is running"));
+            assert_eq!(
+                std::fs::read_to_string(retained.join("doc.md")).unwrap(),
+                "displaced"
+            );
+            assert_eq!(recovery.len(), 1);
+            assert_eq!(recovery[0]["path"], relative);
+        } else {
+            assert_eq!(text, format!("restored {id}"));
+            assert!(recovery.is_empty());
+        }
+        drop(stdin);
+        let _ = child.kill().await;
+    }
+}

@@ -344,12 +344,18 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Restore a snapshot by id. All current files (except .anolisa/) are replaced by the archive contents. Each top-level entry is swapped via a single rename(2): a crash mid-restore leaves the prior state intact with hidden `.<id>.rollback.*` entries under .anolisa/. Concurrent reads of an individual path see either old or new content (or briefly ENOENT during that path's rename window), never a half-written file."
+        description = "Restore a snapshot by id. All current files (except .anolisa/) are replaced by the archive contents. Each top-level entry is swapped via a single rename(2): failed moves attempt rollback, retaining displaced data in hidden .anolisa/.<id>.rollback.entries[~N]/ containers when recovery or trash transfer is incomplete. A process or host failure may require manual recovery. If a recovery directory remains after a successful restore, the response names it and a mem_snapshot_restore_recovery audit entry records its location. Clean up only after verifying the data and ensuring no restore is running. Concurrent reads of an individual path see either old or new content (or briefly ENOENT during that path's rename window), never a half-written file."
     )]
     async fn mem_snapshot_restore(&self, #[tool(param)] id: String) -> ToolResult {
         self.svc
-            .mem_snapshot_restore(&id)
-            .map(|()| format!("restored {id}"))
+            .mem_snapshot_restore_with_outcome(&id)
+            .map(|outcome| match outcome.retained_dir {
+                None => format!("restored {id}"),
+                Some(dir) => format!(
+                    "restored {id}; recovery directory needs inspection: {}. Verify the restored data and ensure no restore is running before cleanup.",
+                    dir.display()
+                ),
+            })
             .map_err(|e| fmt_err("snapshot_restore failed", e))
     }
 
