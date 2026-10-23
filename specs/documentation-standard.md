@@ -30,6 +30,7 @@ placement, bilingual and maintenance rules.
 |-------|-------------------|---------|-------|
 | Repo root / component root | `FILE.md` | `FILE_zh.md` | No suffix = English |
 | `docs/` directory guide | `docs/README.md` | `docs/README_zh.md` | Explains the documentation layout |
+| ADRs | `docs/adr/NNNN-<decision>.md` | `docs/adr/NNNN-<decision>_zh.md` | English original is authoritative; translations are reference only |
 | `docs/` long-form guides | `docs/{type}/en/` | `docs/{type}/zh/` | Directory-based separation |
 
 **Cross-reference convention:**
@@ -109,6 +110,12 @@ docs/
 ├── README.md                  # Documentation layout and placement rationale
 ├── README_zh.md
 ├── navigation.yaml            # Website groups, labels, descriptions and ordering
+├── adr/                       # All ADRs, including component-specific decisions
+│   ├── README.md              # Decision index
+│   ├── README_zh.md
+│   ├── NNNN-<decision>.md
+│   ├── NNNN-<decision>_zh.md   # Chinese reference translation
+│   └── assets/<number>/       # Assets referenced by the corresponding ADR
 ├── user-guide/
 │   ├── en/
 │   │   ├── index.md           # Manual entry point
@@ -141,7 +148,8 @@ docs/
 | Full user-facing how-to / reference | `docs/user-guide/{en,zh}/` | — |
 | Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
 | Archived manuals for deprecated components | `deprecated/<component>/docs/` | Published user/developer guides |
-| Component design docs | `src/<component>/docs/` | `docs/` top level |
+| Detailed component implementation designs | `src/<component>/docs/` | `docs/` top level |
+| Architecture decision records (ADRs), including component-specific decisions | `docs/adr/` | Component directories |
 | Cross-component quick start | `docs/user-guide/{en,zh}/getting-started/quickstart.md` | Component entry pages |
 | Build and test instructions | `docs/user-guide/{en,zh}/getting-started/{building,testing}.md` | Duplicate command inventories |
 
@@ -154,11 +162,15 @@ archive lives in `deprecated/copilot-shell/docs/`.
 
 ### 3.2 Design Documents
 
-Design documents live **only** in the component's own directory:
+Detailed component implementation designs live **only** in the component's own directory:
 
 ```
 src/<component>/docs/design/    ← component-specific design docs
 ```
+
+This rule covers implementation designs and supporting technical details.
+Architecture decision records, including decisions about a single component,
+follow §3.2.1 and live centrally in `docs/adr/`.
 
 A single design may remain directly under this directory. A coherent batch or
 multi-stage change may use a dated topic subdirectory with a `README.md` entry
@@ -179,10 +191,34 @@ root registered in `.github/components.json`, such as
 `distribution/anolisa/docs/design/`. Component-local documentation stays with its
 component when that directory moves.
 
-Design docs are **never** placed at:
+Component design docs are **never** placed at:
 - Repository root
 - `docs/` top level
 - `docs/user-guide/` or `docs/developer-guide/`
+
+### 3.2.1 Architecture Decision Records
+
+All ADRs MUST live in `docs/adr/NNNN-<decision>.md`, whether their scope is the
+whole system, several components, or a single component. Do not create separate
+ADR directories or decision records inside component source trees. Use one
+repository-wide numbering sequence starting with `0001`, and identify the
+affected system or components in each record's `Scope` metadata. Add each record
+to `docs/adr/README.md`.
+
+Write each ADR in English and provide a Chinese translation using the same name
+with `_zh.md`. The English original is authoritative; all translations are for
+reference only. State this in the ADR index and each record, add reciprocal
+language links, and keep translations semantically aligned with the original.
+Translations share the original's ADR number and index entry.
+
+Include status, scope, context, decision, alternatives, and consequences. Drafts
+use `Proposed` until accepted through review. Keep referenced images under
+`docs/adr/assets/<number>/` and use relative links.
+
+An ADR records an architectural choice, its rationale, alternatives, and
+consequences. Detailed implementation designs and supporting protocol
+specifications remain in the registered component's `docs/` directory. Link
+between the central ADR and those documents instead of duplicating the decision.
 
 ### 3.3 Public Website and Agent Endpoints
 
@@ -241,7 +277,7 @@ Pull requests build and validate the artifact without deploying it, and
 | `CONTRIBUTING.md` | **If exists, `CONTRIBUTING_zh.md` is also required** | When component has specific build/test/lint process | Must NOT repeat root-level general rules |
 | `AGENTS.md` | English only | When component has non-trivial AI-agent constraints | Specific to module scope |
 | `LICENSE` | English only | When component uses a different license than root | e.g. MIT sub-component |
-| `docs/` | — | For design documents, internal protocol specs | NOT for user-guide content |
+| `docs/` | — | Detailed implementation designs and internal protocol specs | NOT for ADRs or current user-guide content |
 
 Deprecated components may also retain their archived user and developer manuals
 in this directory, as specified in §3.1.
@@ -324,7 +360,8 @@ When a PR introduces any of the following changes, documentation MUST be updated
 | New/modified CLI command or flag | Component README (summary) + user-guide (full reference) |
 | New/modified config option | Component README (summary) + user-guide (full reference) |
 | Installation method change | Shared installation/quickstart pages as applicable + component index and README |
-| Architecture or protocol change | Component `docs/design/` |
+| Architectural decision (system-wide or component-specific) | ADR in `docs/adr/` |
+| Implementation or protocol detail change | Component design or protocol documentation; update the central ADR if its decision changes |
 | New component added | Root README + NOTICE (if applicable) |
 
 **CHANGELOG update timing**: Daily feature/fix PRs update README and user-guide only; CHANGELOG is written exclusively in **release version bump PRs** that aggregate all user-perceivable changes since the last release.
