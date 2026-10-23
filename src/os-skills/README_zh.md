@@ -46,6 +46,8 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+使用已知凭据读取受密码保护的 Excel 表格，详见[加密工作簿参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#受密码保护的-excel-分析)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

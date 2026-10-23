@@ -35,6 +35,9 @@ Handle the request directly. Do NOT spawn sub-agents. Always write the output fi
 ## READ — Analyze data (read `references/read-analyze.md` first)
 
 Start with `xlsx_reader.py` for structure discovery, then pandas for custom analysis.
+Encrypted `.xlsx`/`.xlsm` can be read with their known password using
+`--password-env ENV_NAME` and optional `msoffcrypto-tool`. Decryption stays in
+memory; credentials are absent from reports and no macros are executed.
 Never modify the source file.
 
 **Formatting rule**: When the user specifies decimal places (e.g. "2 decimal places"), apply that format to ALL numeric values — use `f'{v:.2f}'` on every number. Never output `12875` when `12875.00` is required.
