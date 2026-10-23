@@ -163,6 +163,9 @@ impl AnthropicParser {
                 name: String,
                 input_json: String,
             },
+            // A server-tool result arrives complete on its start event; the
+            // deserialized block is parked here until the block is finished.
+            ToolResult(AnthropicContentBlock),
         }
         let mut current_block: Option<CurrentBlock> = None;
         // Finish a streamed block, pushing it when it carries content. Called
@@ -202,6 +205,7 @@ impl AnthropicParser {
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 out.push(AnthropicContentBlock::ToolUse { id, name, input });
             }
+            CurrentBlock::ToolResult(block) => out.push(block),
         };
 
         for event_value in events {
@@ -250,6 +254,20 @@ impl AnthropicParser {
                             }),
                             AnthropicContentBlock::Text { text, .. } => {
                                 Some(CurrentBlock::Text { text: text.clone() })
+                            }
+                            // The server-tool results (`web_search_tool_result`,
+                            // `web_fetch_tool_result`, the code-execution
+                            // results, `tool_search_tool_result`,
+                            // `mcp_tool_result`) carry the finished payload on
+                            // the start event — the provider ran the tool on
+                            // its side and streams the block whole, with no
+                            // deltas after it. The catch-all used to open an
+                            // empty text accumulator for them, and an empty
+                            // text block is dropped at finish, so a streamed
+                            // search/fetch turn lost the result the answer was
+                            // built from.
+                            AnthropicContentBlock::ToolResult { .. } => {
+                                Some(CurrentBlock::ToolResult(content_block.clone()))
                             }
                             _ => {
                                 // Any other block type
