@@ -77,6 +77,15 @@ matrix and expression boundaries are documented in the [user guide](../../../../
 `tests/fixtures/credit_cards.json` is shared by Python and Rust quality tests, including
 the original benign Host outputs; the historical V1 oracle is unchanged.
 
+Remote-identity classification requires the URI prefix to end immediately before the address.
+The V1 oracle anchored `_REMOTE_EMAIL_URI_RE` with `$`, which in Python also matches before
+one trailing newline: `scheme://\nuser@host` was therefore classified as a remote identity
+while a space or a blank line in the same position was not. The Rust port's `$` is a strict
+end-of-input anchor and never reproduced that behavior, so the engines silently disagreed.
+The Python anchor is now `\Z`; both engines keep the full-confidence finding whenever any
+character — including a single newline — separates the URI from the address. The frozen
+V1 corpus contains no newline-terminated URI prefix, so the oracle bytes are unchanged.
+
 The top-level V1 fields remain `ok`, `verdict`, `summary`, `findings`, `elapsed_ms`,
 and optional `redacted_text`. `summary` separates execution status from coverage:
 

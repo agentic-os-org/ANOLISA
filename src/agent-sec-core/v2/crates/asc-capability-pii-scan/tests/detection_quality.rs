@@ -150,6 +150,58 @@ fn email_sentence_boundaries_preserve_spans_and_punctuation() {
 }
 
 #[test]
+fn remote_identity_requires_a_uri_prefix_ending_at_the_address() {
+    // The remote-identity URI prefix must end immediately before the address.
+    // Python's `$` also matches before one trailing newline, so the V1 oracle
+    // classified `scheme://\nuser@host` as a remote identity while a space or
+    // a blank line in the same position did not — an anchor artifact that this
+    // port's strict `$` never reproduced, silently diverging from V1. The V1
+    // anchor is now `\Z`, and this matrix pins the unified adjacency on both
+    // engines in both directions.
+    let scanner = PiiScanner::new().unwrap();
+    for (input, remote) in [
+        ("ssh://alice@company.cn.", true),
+        ("ssh://\nalice@company.cn.", false),
+        ("rsync://\nbob@securecorp.cn.", false),
+        ("sftp://\n\nalice@company.cn.", false),
+        ("scp:// alice@company.cn.", false),
+    ] {
+        let report = scanner
+            .scan(
+                input,
+                &PiiScanOptions {
+                    include_low_confidence: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.pii_type == "email")
+            .unwrap_or_else(|| panic!("{input}: email finding missing"));
+        assert_eq!(
+            finding.metadata.get("context").and_then(|v| v.as_str()),
+            remote.then_some("remote_identity"),
+            "{input}"
+        );
+        if remote {
+            assert!((finding.confidence - 0.35).abs() < f64::EPSILON, "{input}");
+        } else {
+            assert!(finding.confidence >= 0.82, "{input}");
+        }
+        // The default threshold keeps the classification difference observable:
+        // an adjacent URI hides the address, any separator keeps it reported.
+        let default = scanner.scan(input, &PiiScanOptions::default()).unwrap();
+        assert_eq!(
+            default.findings.iter().any(|f| f.pii_type == "email"),
+            !remote,
+            "{input}"
+        );
+    }
+}
+
+#[test]
 fn email_sentence_rejects_domain_continuations_without_hiding_later_email() {
     let scanner = PiiScanner::new().unwrap();
     let mut suffixes: Vec<String> = [

@@ -208,7 +208,9 @@ is followed by end of input, whitespace, or a supported sentence/closing delimit
 `alice@company.co.uk.` produces a finding for `alice@company.co.uk`; the period remains outside
 both the finding span and the redaction replacement. Invalid domain suffixes such as `.123`, `.c`,
 `.-bad`, `._bad`, and `..evil` are rejected without reporting a shorter address. Reserved domains
-and remote identities retain their existing low-confidence handling.
+and remote identities retain their existing low-confidence handling. A remote-identity URI prefix
+(`git+ssh`, `ssh`, `sftp`, `scp` or `rsync` scheme) must end immediately before the address;
+a space or a line break between the URI and the address keeps the finding at normal confidence.
 
 ## Verdicts and redaction
 
