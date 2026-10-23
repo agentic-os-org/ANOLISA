@@ -211,9 +211,10 @@ reference only. State this in the ADR index and each record, add reciprocal
 language links, and keep translations semantically aligned with the original.
 Translations share the original's ADR number and index entry.
 
-Include status, scope, context, decision, alternatives, and consequences. Drafts
-use `Proposed` until accepted through review. Keep referenced images under
-`docs/adr/assets/<number>/` and use relative links.
+Include status, scope, context, decision, alternatives, and consequences. Follow
+the [ADR review workflow and lifecycle](../docs/adr/README.md#review-workflow)
+for review, acceptance metadata, status transitions, and later replacements.
+Keep referenced images under `docs/adr/assets/<number>/` and use relative links.
 
 An ADR records an architectural choice, its rationale, alternatives, and
 consequences. Detailed implementation designs and supporting protocol
