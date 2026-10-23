@@ -119,6 +119,7 @@ impl OscParser {
             shell_environment_snapshot: None,
             environment_observer: None,
             history_file_tracker: super::HistoryFileTracker::default(),
+            startup_environment: super::StartupEnvironmentGate::default(),
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
             pending_prompt_intercepts: Vec::new(),
             submission_boundary_observed: false,

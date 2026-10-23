@@ -26,6 +26,96 @@ fn install_user_hook(home: &Path, name: &str, body: &str) {
     write_executable(&hooks_dir.join(name), body);
 }
 
+#[cfg(target_os = "linux")]
+fn assert_login_hook_path(env_interpreter: bool, inherited: bool) {
+    let fixture = tempfile::tempdir().unwrap();
+    let home = fixture.path();
+    let bin = home.join("profile-bin");
+    fs::create_dir_all(&bin).unwrap();
+    write_executable(
+        &bin.join("cosh-hook-interpreter"),
+        "#!/bin/sh\nexec /bin/sh \"$@\"\n",
+    );
+    write_executable(
+        &bin.join("cosh-hook-tool"),
+        "#!/bin/sh\nprintf 'tool-hit\\n' >> \"$HOME/tool-hits\"\n\
+         printf '%s\\n' '{\"hook_id\":\"login-path\",\"severity\":\"warning\",\"title\":\"PROFILE HOOK FINDING\",\"description\":\"profile tool\",\"suggestion\":\"none\"}'\n",
+    );
+    let interpreter = if env_interpreter {
+        "/usr/bin/env cosh-hook-interpreter"
+    } else {
+        "/bin/sh"
+    };
+    install_user_hook(
+        home,
+        "login-path.sh",
+        &format!(
+            "#!{interpreter}\n# cosh-hook: login-path\n# match-commands: echo\n\
+             printf '%s\\n' \"$PATH\" >> \"$HOME/hook-path\"\ncosh-hook-tool\n"
+        ),
+    );
+    fs::write(
+        home.join(".bash_profile"),
+        "printf 'profile-hit\\n' >> \"$HOME/profile-hits\"\n\
+         export PATH=\"$HOME/profile-bin:$PATH\"\nPS1='hook-login$ '\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy();
+    let inherited_path = if inherited {
+        format!("{}:/usr/bin:/bin", bin.display())
+    } else {
+        "/usr/bin:/bin".to_owned()
+    };
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "cosh-core",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &inherited_path),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        home,
+        &[
+            ("hook-login$ ", b"echo hook-check\n"),
+            ("hook-login$ ", b"exit\n"),
+        ],
+    );
+    let read = |name| fs::read_to_string(home.join(name)).unwrap_or_default();
+    assert_eq!(read("profile-hits").lines().count(), 1, "{output}");
+    assert_eq!(
+        read("tool-hits"),
+        "tool-hit\n",
+        "hook PATH: {:?}\n{output}",
+        read("hook-path")
+    );
+    assert!(
+        read("hook-path").starts_with(&format!("{}:", bin.display())),
+        "{output}"
+    );
+    assert!(output.contains("PROFILE HOOK FINDING"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_external_hook_resolves_profile_only_tool() {
+    assert_login_hook_path(false, false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_external_hook_resolves_env_interpreter() {
+    assert_login_hook_path(true, false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_external_hook_inherited_path_control() {
+    assert_login_hook_path(true, true);
+}
+
 fn hook_status_count(output: &str, label: &str) -> usize {
     let start = output.find(label).expect("hook status label") + label.len();
     output[start..]

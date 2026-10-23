@@ -16,5 +16,6 @@ pub use implementation::{
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{
-    prompt_from_request, provider_prompt_contract, FreshSessionOutcome,
+    command_with_trusted_startup_path, prompt_from_request, provider_prompt_contract,
+    FreshSessionOutcome,
 };

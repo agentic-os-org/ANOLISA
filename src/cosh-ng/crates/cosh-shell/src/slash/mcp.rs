@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -191,7 +191,7 @@ fn capture_mcp_cli_with_timeout(
     timeout: Duration,
 ) -> Result<McpCliCapture, String> {
     let deadline = std::time::Instant::now() + timeout;
-    let mut command = Command::new(program);
+    let mut command = crate::adapter::command_with_trusted_startup_path(program);
     command
         .args(args)
         .stdin(Stdio::null())

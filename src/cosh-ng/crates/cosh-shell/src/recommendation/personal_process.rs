@@ -1,7 +1,9 @@
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(all(test, target_os = "macos"))]
+use std::process::Command;
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,7 +47,7 @@ impl CoshCoreAnalyzerProcess {
         let owner_start_identity = process_start_identity_token(owner_pid);
         #[cfg(target_os = "linux")]
         let expected_parent = std::process::id() as nix::libc::pid_t;
-        let mut child_command = Command::new(command.program);
+        let mut child_command = crate::adapter::command_with_trusted_startup_path(command.program);
         child_command
             .args(command.args)
             .envs(command.env)

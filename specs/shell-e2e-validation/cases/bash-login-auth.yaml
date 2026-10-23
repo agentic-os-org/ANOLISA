@@ -1,0 +1,326 @@
+version: 1
+suite: bash-login-auth
+defaults:
+  execution: ci
+  shell_mode: isolated
+  adapter: cosh-core
+  approval_mode: ask
+  analysis_mode: smart
+  render: terminal
+  timeout_ms: 120000
+  real_provider: false
+  command:
+    - bash
+    - -lc
+    - >-
+      cd /work/repo/src/cosh-ng &&
+      cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+      bash /work/repo/specs/shell-e2e-validation/fixtures/setup-local-sshd-pam.sh
+      "$CARGO_TARGET_DIR/debug/cosh-shell" &&
+      exec runuser -u coshli -- env -i HOME=/home/coshli USER=coshli LOGNAME=coshli
+      PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm-256color COSH_SHELL_WIDTH=110
+      COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0
+      COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0
+      COSH_SHELL_LANG=zh-CN COSH_SHELL_RAW_SHELL=bash
+      COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+      /usr/local/libexec/cosh-li/cosh-shell raw cosh-core
+cases:
+  - id: L02-BASH-SSH-T-LOGIN-PROFILE-ORACLE
+    title: Native Bash ssh -t login under UsePAM sources the login profile once
+    tags: [shell, bash, ssh, login-shell, pam, oracle]
+    shell: bash
+    command:
+      - bash
+      - -lc
+      - >-
+        cd /work/repo/src/cosh-ng &&
+        cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+        bash /work/repo/specs/shell-e2e-validation/fixtures/setup-local-sshd-pam.sh
+        "$CARGO_TARGET_DIR/debug/cosh-shell" &&
+        exec env TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8
+        ssh -tt -F /tmp/cosh-li-sshd/ssh_config cosh-li-pam
+    input:
+      - type: wait_for
+        text: "cosh-li-login$ "
+        timeout_ms: 60000
+      - type: line
+        text: >-
+          printf '__L02_%s__<%s><%s><%s>\n' LOGIN "$(wc -l < ~/profile-hits)"
+          "$(shopt -q login_shell && echo yes || echo no)" "$0"
+      - id: bash-login-oracle
+        type: wait_for
+        text: "__L02_LOGIN__<"
+        timeout_ms: 10000
+      - type: line
+        text: "bash -lc true; printf '__L02_%s__<%s>\\n' SENSITIVE \"$(wc -l < ~/profile-hits)\""
+      - id: bash-login-sensitivity
+        type: wait_for
+        text: "__L02_SENSITIVE__<"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L02_LOGIN__<1><yes><-bash>"
+        - "__L02_SENSITIVE__<2>"
+      not_contains:
+        - "command not found"
+    evidence:
+      points:
+        - id: bash-login-oracle
+          trigger_event: bash-login-oracle
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: bash-login-sensitivity
+          trigger_event: bash-login-sensitivity
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L02-COSH-SSH-T-LOGIN-PROFILE-ONCE
+    title: Cosh ssh -t login under UsePAM sources the profile once and finds Core through it
+    tags: [shell, bash, ssh, login-shell, pam, startup-path]
+    shell: bash
+    command:
+      - bash
+      - -lc
+      - >-
+        cd /work/repo/src/cosh-ng &&
+        cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+        bash /work/repo/specs/shell-e2e-validation/fixtures/setup-local-sshd-pam.sh
+        "$CARGO_TARGET_DIR/debug/cosh-shell" &&
+        exec env TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8
+        ssh -tt -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh-pam
+    input:
+      - type: wait_for
+        text: "cosh-li-login$ "
+        timeout_ms: 60000
+      - type: line
+        text: >-
+          printf '__L02_%s__<%s><%s><%s>\n' LOGIN "$(wc -l < ~/profile-hits)"
+          "$(shopt -q login_shell && echo yes || echo no)" "$0"
+      - id: cosh-login-once
+        type: wait_for
+        text: "__L02_LOGIN__<"
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: cosh-first-agent-request
+        type: wait_for
+        text: "STARTUP_PATH_CORE_DONE"
+        timeout_ms: 30000
+      - type: line
+        text: >-
+          printf '__L02_%s__<%s><%s>\n' CORE "$(cat ~/core-child)" "$(cut -d: -f1 ~/core-path)"
+      - id: cosh-core-path
+        type: wait_for
+        text: "__L02_CORE__<"
+        timeout_ms: 10000
+      - type: line
+        text: "bash -lc true; printf '__L02_%s__<%s>\\n' SENSITIVE \"$(wc -l < ~/profile-hits)\""
+      - id: cosh-login-sensitivity
+        type: wait_for
+        text: "__L02_SENSITIVE__<"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L02_LOGIN__<1><yes><-bash>"
+        - "__L02_CORE__</home/coshlicosh/profile-bin/cosh-li-profile-tool></home/coshlicosh/profile-bin>"
+        - "__L02_SENSITIVE__<2>"
+      not_contains:
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: cosh-login-once
+          trigger_event: cosh-login-once
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: cosh-first-agent-request
+          trigger_event: cosh-first-agent-request
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: cosh-core-path
+          trigger_event: cosh-core-path
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: cosh-login-sensitivity
+          trigger_event: cosh-login-sensitivity
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-SU-PASSWORD-OWNED
+    title: su reads its password from Bash's foreground, never from the Agent router
+    tags: [shell, bash, input-ownership, password, pam]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 60000
+      - type: line
+        text: "su - coshlipw -c 'printf \"__I01_SU_%s__\\n\" \"$(whoami)\"'"
+      - type: wait_for
+        text: "Password:"
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: su-password-accepted
+        type: wait_for
+        text: "__I01_SU_coshlipw__"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 2
+        timeout_ms: 10000
+      - type: line
+        text: "su - coshlipw -c true; printf '__I01_SU_%s__<%s>\\n' EXIT \"$?\""
+      - type: wait_for
+        text: "Password:"
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: line
+        text: li-wrong-password
+      - id: su-password-rejected
+        type: wait_for
+        text: "__I01_SU_EXIT__<1>"
+        timeout_ms: 15000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__I01_SU_coshlipw__"
+        - "__I01_SU_EXIT__<1>"
+      not_contains:
+        - '解释一下 ls -la "当前目录 (preview)"'
+        - "li-wrong-password"
+        - "failed to run cosh-core"
+    evidence:
+      points:
+        - id: su-password-accepted
+          trigger_event: su-password-accepted
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: su-password-rejected
+          trigger_event: su-password-rejected
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-SUDO-PASSWORD-OWNED
+    title: sudo reads its password from Bash's foreground, never from the Agent router
+    tags: [shell, bash, input-ownership, password, pam]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 60000
+      - type: line
+        text: >-
+          p='__I01_SUDO_'PROMPT'__ '; sudo -k; sudo -p "$p" whoami | sed 's/^/__I01_SUDO_USER_/'
+      - type: wait_for
+        text: "__I01_SUDO_PROMPT__ "
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: sudo-password-accepted
+        type: wait_for
+        text: "__I01_SUDO_USER_root"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 2
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          sudo -k; sudo -p "$p" true; printf '__I01_SUDO_%s__<%s>\n' EXIT "$?"
+      - type: wait_for
+        text: "__I01_SUDO_PROMPT__ "
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: line
+        text: li-wrong-password
+      - id: sudo-password-rejected
+        type: wait_for
+        text: "__I01_SUDO_EXIT__<1>"
+        timeout_ms: 15000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__I01_SUDO_USER_root"
+        - "__I01_SUDO_EXIT__<1>"
+      not_contains:
+        - '解释一下 ls -la "当前目录 (preview)"'
+        - "li-wrong-password"
+        - "failed to run cosh-core"
+    evidence:
+      points:
+        - id: sudo-password-accepted
+          trigger_event: sudo-password-accepted
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: sudo-password-rejected
+          trigger_event: sudo-password-rejected
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-SSH-PASSWORD-OWNED
+    title: ssh reads its password from Bash's foreground, never from the Agent router
+    tags: [shell, bash, input-ownership, password, ssh, pam]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 60000
+      - type: line
+        text: "ssh -F ~/.ssh/li-pw-config cosh-li-pw 'printf \"__I01_SSHPW_%s__\\n\" \"$(whoami)\"'"
+      - type: wait_for
+        text: "password: "
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: ssh-password-accepted
+        type: wait_for
+        text: "__I01_SSHPW_coshlipw__"
+        timeout_ms: 15000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 2
+        timeout_ms: 10000
+      - type: line
+        text: "ssh -F ~/.ssh/li-pw-config cosh-li-pw true; printf '__I01_SSHPW_%s__<%s>\\n' EXIT \"$?\""
+      - type: wait_for
+        text: "password: "
+        occurrence: "+1"
+        timeout_ms: 10000
+      - type: line
+        text: li-wrong-password
+      - id: ssh-password-rejected
+        type: wait_for
+        text: "__I01_SSHPW_EXIT__<255>"
+        timeout_ms: 15000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__I01_SSHPW_coshlipw__"
+        - "__I01_SSHPW_EXIT__<255>"
+      not_contains:
+        - '解释一下 ls -la "当前目录 (preview)"'
+        - "li-wrong-password"
+        - "failed to run cosh-core"
+    evidence:
+      points:
+        - id: ssh-password-accepted
+          trigger_event: ssh-password-accepted
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ssh-password-rejected
+          trigger_event: ssh-password-rejected
+          layout_sensitive: true
+          required_types: [screenshot]

@@ -15,6 +15,7 @@ use super::terminal::CrLfWriter;
 mod bootstrap;
 mod failopen;
 mod input_wait;
+mod startup_auth;
 
 use input_wait::input_wait_timeout_recovery_action;
 

@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -435,7 +435,7 @@ impl TaskTranscript {
 
 fn run_gateway(arguments: &[&str], stdin: Option<&[u8]>) -> Result<Output, String> {
     let program = gateway_executable()?;
-    let mut command = Command::new(program);
+    let mut command = crate::adapter::command_with_trusted_startup_path(program);
     if arguments.first() == Some(&"task") {
         command.arg("task");
         if let Some(socket) = configured_gateway_socket()? {
