@@ -86,7 +86,7 @@ anolisa env
 - 操作系统和架构
 - 可用文件系统（btrfs 用于 ws-ckpt）
 - FUSE 可用性（用于 skillfs）
-- 已安装的 Agent 运行时（cosh、OpenClaw、Hermes）
+- 已安装的 Agent 运行时（cosh-ng、OpenClaw、Hermes）
 - 内核特性（eBPF 用于 agentsight）
 
 ---
@@ -103,7 +103,6 @@ anolisa install <component>
 
 | 组件 | 说明 | 支持的模式 |
 |------|------|------------|
-| `cosh` | Copilot Shell AI 终端助手 | user、system |
 | `cosh-ng` | AI 原生终端与 Agent 运行时（实验阶段） | system（Linux）、user 或 system（macOS 11+ (arm64 / x86_64)） |
 | `os-skills` | 系统管理与 DevOps 技能 | user、system |
 | `tokenless` | Token 优化（压缩） | user、system |
@@ -304,5 +303,4 @@ anolisa update all
 
 - [anolisa CLI 参考](user-entrypoint/anolisa-cli.md)
 - [cosh-ng 快速开始](user-entrypoint/cosh-ng/QUICKSTART.md)
-- [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [故障排查](troubleshooting.md)

@@ -125,7 +125,7 @@ curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tok
 
 ### 方式 D：Skill（面向 Agent）
 
-当 Agent 框架（如 cosh、OpenClaw、Hermes 等）需要自行安装和管理 Tokenless 时，可以使用 Skill 方式。
+当 Agent 框架（如 cosh-ng、OpenClaw、Hermes 等）需要自行安装和管理 Tokenless 时，可以使用 Skill 方式。
 
 Skill 文件位于仓库的 `src/os-skills/ai/install-tokenless/SKILL.md`。加载此文件的 Agent 可自动完成安装和配置。
 
@@ -231,7 +231,7 @@ anolisa adapter scan
 
 | Agent | 接入方式 |
 |-------|----------|
-| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` |
+| cosh-ng | `anolisa adapter enable tokenless cosh` |
 | OpenClaw | `anolisa adapter enable tokenless openclaw` |
 | Hermes | `anolisa adapter enable tokenless hermes` |
 | Qoder | `anolisa adapter enable tokenless qoder` |

@@ -220,6 +220,5 @@ cosh 通过 skill 定义（`src/os-skills/system-admin/ktuner/`）自动发现 k
 
 ## 参见
 
-- [Copilot Shell](copilot-shell/QUICKSTART.md)
 - [OS Skills](os-skills.md)
 - 完整参考：`src/ktuner/README.md`

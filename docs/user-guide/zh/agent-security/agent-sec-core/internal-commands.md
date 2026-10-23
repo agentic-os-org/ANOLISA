@@ -34,7 +34,7 @@ AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock agent-sec-daemon-health
 ## `log-sandbox`
 
 把一次沙箱前置决策记录为一条 Security Event。它是 Copilot Shell 沙箱防护的审计侧：
-[`sandbox-guard` hook](../../user-entrypoint/copilot-shell/hooks.md) 决定如何处理一条
+`sandbox-guard` hook 决定如何处理一条
 危险 shell 命令后，spawn `log-sandbox` 把该决策落到本地事件库。
 
 ```bash

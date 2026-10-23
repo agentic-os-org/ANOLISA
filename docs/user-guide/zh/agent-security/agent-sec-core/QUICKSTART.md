@@ -466,7 +466,7 @@ anolisa adapter enable sec-core openclaw
 
 ### 源码集成入口
 
-默认源码构建会把 cosh 扩展直接安装到
+默认源码构建会把 Cosh-NG 扩展直接安装到
 `~/.copilot-shell/extensions/agent-sec-core`，无需再执行启用命令。其他集成请
 运行用户目录中对应的脚本。
 
@@ -658,7 +658,9 @@ Qoder 的 `CODE_SCANNER_MODE` 支持 `observe`、`ask` 和 `block`。prompt scan
 CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 ```
 
-### Copilot Shell（cosh）
+### Cosh-NG
+
+Cosh-NG 使用的 adapter ID 为 `cosh`，扩展仍从现有的 `.copilot-shell` 目录加载。
 
 通过安装包部署时，在目标用户的配置中启用 adapter。
 
@@ -666,7 +668,7 @@ CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 anolisa adapter enable sec-core cosh
 ```
 
-cosh 启动时会加载 hook。
+Cosh-NG 启动时会加载 hook。
 
 扩展路径：
 - 用户安装：`~/.copilot-shell/extensions/agent-sec-core/`

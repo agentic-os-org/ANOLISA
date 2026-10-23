@@ -130,11 +130,17 @@ docs/
 |-------------|----------|----------|
 | Full user-facing how-to / reference | `docs/user-guide/{en,zh}/` | — |
 | Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
+| Archived manuals for deprecated components | `deprecated/<component>/docs/` | Published user/developer guides |
 | Component design docs | `src/<component>/docs/` | `docs/` top level |
 | Cross-component quick start | `docs/QUICKSTART.md` | README |
 | Build instructions | `docs/BUILDING.md` | README |
 
 > **Note on component README**: README.md serves as a **summary entry point** (positioning + quick-start + basic install/use). It is NOT a full how-to or reference manual. Complete usage documentation belongs in `docs/user-guide/`. When CLI/config changes occur, update both the README summary and the user-guide reference.
+
+Deprecated component manuals are retained with their source, with the component
+README linking to the archive. Keep archived relative links checked, but remove
+their entries from current guide indexes and the public website. Copilot Shell's
+archive lives in `deprecated/copilot-shell/docs/`.
 
 ### 3.2 Design Documents
 
@@ -214,6 +220,9 @@ Pull requests build and validate the artifact without deploying it, and
 | `AGENTS.md` | English only | When component has non-trivial AI-agent constraints | Specific to module scope |
 | `LICENSE` | English only | When component uses a different license than root | e.g. MIT sub-component |
 | `docs/` | — | For design documents, internal protocol specs | NOT for user-guide content |
+
+Deprecated components may also retain their archived user and developer manuals
+in this directory, as specified in §3.1.
 
 ### 4.3 Files NOT Needed at Component Level
 
@@ -312,4 +321,4 @@ created; the workflow does not fall back to commit subjects or another version.
 
 ---
 
-*Last updated: 2026-10-15*
+*Last updated: 2026-10-23*

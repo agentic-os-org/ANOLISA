@@ -129,7 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tok
 
 ### Method D: Skill (for agents)
 
-When an agent framework (cosh, OpenClaw, Hermes, etc.) needs to install and manage Tokenless on its own, use the Skill method.
+When an agent framework (cosh-ng, OpenClaw, Hermes, etc.) needs to install and manage Tokenless on its own, use the Skill method.
 
 The Skill file is at `src/os-skills/ai/install-tokenless/SKILL.md` in the repository. An agent that loads this file can complete installation and configuration automatically.
 
@@ -237,7 +237,7 @@ anolisa adapter scan
 
 | Agent | Setup |
 |-------|-------|
-| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` |
+| cosh-ng | `anolisa adapter enable tokenless cosh` |
 | OpenClaw | `anolisa adapter enable tokenless openclaw` |
 | Hermes | `anolisa adapter enable tokenless hermes` |
 | Qoder | `anolisa adapter enable tokenless qoder` |

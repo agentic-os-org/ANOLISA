@@ -86,5 +86,4 @@ confirm_destructive = true
 
 ## See Also
 
-- [Copilot Shell](copilot-shell/QUICKSTART.md)
 - [anolisa CLI](anolisa-cli.md)

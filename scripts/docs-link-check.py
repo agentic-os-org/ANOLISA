@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Relative markdown link checker for the documentation tree.
 
-Scans docs/**/*.md plus the root and component README files, extracts
-relative links, and verifies each target exists in the repository.
+Scans docs/**/*.md, archived Copilot Shell docs, and README entry points,
+extracts relative links, and verifies each target exists in the repository.
 External URLs, mailto and pure in-page anchors are skipped.
 """
 
@@ -27,18 +27,22 @@ def repo_root() -> Path:
 
 
 def files_to_check(root: Path) -> list[Path]:
-    # Scope: the published docs tree, root-level docs, and component README
-    # entry points. Deep in-tree docs (design notes, SKILL.md assets) are
-    # intentionally excluded to keep the gate focused on reader-facing paths.
+    # Keep archived reader-facing docs checked after they leave the website.
+    # Deep design notes and SKILL.md assets remain outside this gate.
     out = subprocess.run(
         [
             "git",
             "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
             "docs/**/*.md",
             ":(glob)docs/*.md",
             ":(glob)*.md",
             ":(glob)src/*/README*.md",
             ":(glob)src/*/python/*/README*.md",
+            ":(glob)deprecated/copilot-shell/README*.md",
+            ":(glob)deprecated/copilot-shell/docs/**/*.md",
         ],
         capture_output=True,
         text=True,

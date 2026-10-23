@@ -253,6 +253,5 @@ On first Linux auth, if a trusted ktuner is installed at a system path, cosh sho
 
 ## See Also
 
-- [Copilot Shell](copilot-shell/QUICKSTART.md)
 - [OS Skills](os-skills.md)
 - Full reference: `src/ktuner/README.md`

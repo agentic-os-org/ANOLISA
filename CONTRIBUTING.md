@@ -42,7 +42,6 @@ scopes are used in commit subjects and PR titles.
 
 | Component | Path | Platform | Build name | Scope | Development entry and minimum local gate |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `deprecated/copilot-shell/` | All platforms | `cosh` | `cosh` | `cd deprecated/copilot-shell`; `make deps`, `make build`, `make lint`, `make test` |
 | cosh-ng | `src/cosh-ng/` | Linux full; macOS limited functionality | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`, `cargo fmt --all -- --check`, then run the closest targeted test described in `src/cosh-ng/CONTRIBUTING.md` |
 | agent-sec-core | `src/agent-sec-core/` | Linux only | `sec-core` | `sec-core` | Python 3.11.6 and `uv`; `make build-all`, `make test` |
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
@@ -61,7 +60,8 @@ The Linux-only components must be built and tested on Linux. `cosh-ng` and
 
 ### Toolchain prerequisites
 
-- Node.js 20 or newer for `copilot-shell` and TypeScript adapters.
+- Node.js and npm for TypeScript plugins, adapters, and the website. Follow
+  each package's `package.json` and build instructions for version requirements.
 - The stable Rust toolchain for Rust components. Follow a component's
   `AGENTS.md` when it pins a toolchain or adds native libraries.
 - Python **3.11.6** and [uv](https://docs.astral.sh/uv/) for
@@ -114,26 +114,24 @@ boundaries, explain the contract and test impact in the PR.
 
 ### Unified build
 
-`build-all.sh` supports eight components only:
-
-- Default set: `cosh`, `skills`, `sec-core`, `tokenless`, `ws-ckpt`, `memory`.
-- Optional set: `cosh-ng` and `sight`. Add `--all` or name them with
-  `--component`.
+`scripts/build-all.sh` is a Linux convenience entry point. Select the maintained
+components you need with repeated `--component` options: `skills`, `sec-core`,
+`tokenless`, `ws-ckpt`, `memory`, `cosh-ng`, and `sight`.
 
 The script does not build `anolisa`, `skillfs`, or `ktuner`. Use their
 component gates in the matrix above.
 
-With no install-mode flag, component files install to the user profile under
-`$HOME/.local` without elevated installation privileges. Dependency bootstrap
+With no install-mode flag, each component's install rules select paths within
+the user's home directory without elevated installation privileges. Dependency bootstrap
 may still request `sudo` for system packages. System installation uses
 `--system` or `--usr` and may require `sudo`. For development, prefer a
 targeted build with installation disabled.
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh
+./scripts/build-all.sh --no-install --component cosh-ng
 ./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --all
+./scripts/build-all.sh --no-install --component sec-core --component tokenless
 ```
 
 The main options are:
@@ -143,17 +141,15 @@ The main options are:
 | `--no-install` | Install dependencies and build, then skip installation. |
 | `--install-mode <mode>` | Select `user` or `system`; `user` is the default. |
 | `--usr`, `--system` | Select system installation mode. |
-| `--ignore-deps` | Skip dependency installation. |
+| `--ignore-deps` | Skip dependency setup and runtime verification; use only on a pre-provisioned host. |
 | `--deps-only` | Install dependencies without building. |
 | `--uninstall` | Remove installed files; combine with `--component` to target a component. |
 | `--dry-run` | Print actions without changing files or systemd state. |
 | `--interactive`, `--non-interactive` | Open the guided flow or explicitly select automation mode. |
-| `--all` | Include optional components `cosh-ng` and `sight`. |
 | `--component <name>` | Build or uninstall one supported component; repeat for multiple components. |
 
-Do not treat `build-all.sh --all` as a build of every `src/<component>/`
-directory. Its scope is limited to the eight names printed by
-`./scripts/build-all.sh --help`.
+Use explicit component selections for development. See
+`./scripts/build-all.sh --help` for the complete script interface.
 
 The `sight` selection uses the Linux eBPF build. On macOS, build AgentSight
 locally with `make build-mac` instead.
@@ -164,13 +160,10 @@ packaging reference.
 
 ### Convenience test runner
 
-`tests/run-all-tests.sh` is a convenience aggregator for five components:
-`copilot-shell`, `agent-sec-core`, `agentsight`, `tokenless`, and
-`agent-memory`. It accepts these filters:
+`tests/run-all-tests.sh` provides partial convenience suites. Select the
+affected maintained component explicitly with one of these filters:
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless

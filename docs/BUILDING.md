@@ -28,7 +28,6 @@ The following table lists component locations in the repository:
 
 | Component | Directory | Platform and role |
 |-----------|-----------|-------------------|
-| copilot-shell (`cosh`) | [`deprecated/copilot-shell`](../deprecated/copilot-shell/README.md) | TypeScript terminal assistant; Linux, macOS, and Windows |
 | cosh-ng | [`src/cosh-ng`](../src/cosh-ng/README.md) | Rust Agent OS CLI and shell; full Linux build, limited macOS source build |
 | agent-sec-core | [`src/agent-sec-core`](../src/agent-sec-core/README.md) | Rust sandbox plus Python security CLI; Linux |
 | agentsight | [`src/agentsight`](../src/agentsight/README.md) | Rust/eBPF observability; full tracing on Linux, `trace` and `serve` on macOS |
@@ -52,7 +51,7 @@ component.
 
 | Need | Source of truth |
 |------|-----------------|
-| Node.js | `deprecated/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
+| Node.js | npm is used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. Follow each component's `package.json` and build instructions for its Node.js requirements. |
 | Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
 | Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `distribution/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
@@ -79,20 +78,17 @@ export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standa
 
 ## 4. Unified build script
 
-`scripts/build-all.sh` is a convenience entry point, not a complete monorepo
-builder. It currently knows eight components:
-
-- Default six: `cosh`, `skills`, `sec-core`, `tokenless`, `ws-ckpt`, and
-  `memory`.
-- Optional two: `cosh-ng` and `sight`. Add `--all` or select them with
-  `--component`.
+`scripts/build-all.sh` is a Linux convenience entry point, not a complete
+monorepo builder. Select the maintained components you need with repeated
+`--component` options: `skills`, `sec-core`, `tokenless`, `ws-ckpt`, `memory`,
+`cosh-ng`, and `sight`.
 
 Build `anolisa`, `skillfs`, and `ktuner` with their local commands in
 section 5; they are not handled by this script.
 
-The default install profile is user mode. Component files install under
-`~/.local` and user-scoped Copilot Shell directories without `sudo`. Initial
-system dependency installation may still request `sudo`. Use `--system` (or
+The default install profile is user mode. Each component's install rules select
+paths within the user's home directory. Initial system dependency installation
+may still request `sudo`. Use `--system` (or
 `--install-mode system`) for system paths; the script stages files and may
 invoke `sudo`. `--no-install` builds and stages artifacts without installing
 them.
@@ -107,31 +103,27 @@ system install that needs Node.js requires Node.js 20 or newer in the standard
 system PATH.
 
 ```bash
-# Default six components, user install
-./scripts/build-all.sh
+# Build and install selected components
+./scripts/build-all.sh --component sec-core --component tokenless
 
-# Build and stage without installing
-./scripts/build-all.sh --no-install
+# Build and stage without installing component files
+./scripts/build-all.sh --component sec-core --no-install
 
 # Use system paths instead of the default user profile
-./scripts/build-all.sh --system
+./scripts/build-all.sh --component ws-ckpt --system
 
-# Include cosh-ng and agentsight as well
-./scripts/build-all.sh --all
-
-# Select one or more of the eight supported names
-./scripts/build-all.sh --component cosh --component sec-core
+# Select cosh-ng and agentsight
 ./scripts/build-all.sh --component cosh-ng --component sight
 
 # Reuse already-installed dependencies
-./scripts/build-all.sh --ignore-deps
+./scripts/build-all.sh --component sec-core --ignore-deps
 
 # Install dependencies only, or print the plan without changing the system
-./scripts/build-all.sh --deps-only
-./scripts/build-all.sh --dry-run
+./scripts/build-all.sh --component sec-core --deps-only
+./scripts/build-all.sh --component sec-core --dry-run
 
 # Explicit non-interactive mode and help
-./scripts/build-all.sh --non-interactive
+./scripts/build-all.sh --component sec-core --non-interactive
 ./scripts/build-all.sh --help
 ```
 
@@ -139,10 +131,9 @@ system PATH.
 verification. Use it only on a pre-provisioned host; the caller is responsible
 for ensuring that installed components have all required runtimes.
 
-Valid `--component` names are `cosh`, `skills`, `sec-core`, `tokenless`,
-`ws-ckpt`, `memory`, `cosh-ng`, and `sight`. The script may build a component
-in `target/` before installing it, and a component's own install policy still
-applies. For example, `ws-ckpt` requires `--system` to install its daemon;
+The script may build a component in `target/` before installing it, and a
+component's own install policy still applies. For example, `ws-ckpt` requires
+`--system` to install its daemon;
 selecting it in the default user profile does not create a user service.
 
 ## 5. Component build and test entry points
@@ -154,7 +145,6 @@ guide before changing component internals.
 | Component | Build | Test and quality gate |
 |-----------|-------|-----------------------|
 | [AW](developer-guide/en/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`; Linux only, uses the pinned Rust toolchain, Python 3 and Node.js. |
-| [copilot-shell](../deprecated/copilot-shell/README.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README.md) | `cd src/os-skills && make build` | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
 | [agent-sec-core](../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
 | [agentsight](../src/agentsight/README.md) | Linux: `cd src/agentsight && make build-all`; macOS local viewer: `cd src/agentsight && make build-mac` | Linux: `cd src/agentsight && make lint && make test`; macOS: run the tests relevant to the local viewer and trajectory collector. |
@@ -178,14 +168,11 @@ workflow when a change touches a generated package or a framework adapter.
 
 ## 6. Aggregate tests and pull-request gates
 
-`tests/run-all-tests.sh` is a partial convenience runner. With no filter it
-invokes exactly five components: copilot-shell, agent-sec-core, agentsight,
-tokenless, and agent-memory. It does not test cosh-ng, os-skills, ws-ckpt,
-anolisa, SkillFS, or ktuner.
+`tests/run-all-tests.sh` is a partial convenience runner. Use `--filter` to
+select agent-sec-core, agentsight, tokenless, or agent-memory. It does not test
+cosh-ng, os-skills, ws-ckpt, anolisa, SkillFS, or ktuner.
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless

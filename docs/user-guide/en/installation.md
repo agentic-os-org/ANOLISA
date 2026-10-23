@@ -88,7 +88,7 @@ This displays:
 - OS and architecture
 - Available filesystems (btrfs for ws-ckpt)
 - FUSE availability (for skillfs)
-- Installed Agent runtimes (cosh, OpenClaw, Hermes)
+- Installed Agent runtimes (cosh-ng, OpenClaw, Hermes)
 - Kernel features (eBPF for agentsight)
 
 ---
@@ -105,7 +105,6 @@ anolisa install <component>
 
 | Component | Description | Supported modes |
 |-----------|-------------|-----------------|
-| `cosh` | Copilot Shell — AI terminal assistant | user, system |
 | `cosh-ng` | AI-native terminal and deterministic Agent runtime (experimental) | system (Linux), user or system (macOS 11+ (arm64 / x86_64)) |
 | `os-skills` | System management and DevOps skills | user, system |
 | `tokenless` | Token optimization (compression) | user, system |
@@ -313,5 +312,4 @@ for an RPM-owned CLI.
 
 - [anolisa CLI Reference](user-entrypoint/anolisa-cli.md)
 - [cosh-ng Quick Start](user-entrypoint/cosh-ng/QUICKSTART.md)
-- [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [Troubleshooting](troubleshooting.md)

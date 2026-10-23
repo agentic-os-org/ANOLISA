@@ -12,10 +12,6 @@
 - [配置参考](aw/configuration.md)
 - [用户指南](../../user-guide/zh/user-entrypoint/aw/README.md)
 
-## Copilot Shell
-
-- [架构](./copilot-shell/architecture.md)
-
 ## Cosh-ng
 
 - [开发入门](./cosh-ng/getting-started.md)

@@ -4,6 +4,7 @@ import {
   exists,
   generatedDir,
   repoRoot,
+  stripCopilotShellNavigation,
   titleFromMarkdown,
   toPosix,
   walkFiles,
@@ -73,18 +74,9 @@ for (const document of chineseDocuments) {
 
 function knownAlias(source, unresolvedPath) {
   const locale = source.includes('/zh/') || source.endsWith('_zh.md') ? 'zh' : 'en';
-  if (unresolvedPath.endsWith('/copilot-shell.md')) {
-    return `docs/user-guide/${locale}/user-entrypoint/copilot-shell/QUICKSTART.md`;
-  }
-  if (unresolvedPath.endsWith('/copilot-shell/overview.md')) {
-    return `docs/user-guide/${locale}/user-entrypoint/copilot-shell/QUICKSTART.md`;
-  }
   if (unresolvedPath.includes('/user-entrypoint/developers/')) {
     const basename = path.posix.basename(unresolvedPath);
     if (source.includes('/cosh-ng/')) return `docs/developer-guide/${locale}/cosh-ng/${basename}`;
-    if (source.includes('/copilot-shell/')) {
-      return `docs/developer-guide/${locale}/copilot-shell/hooks/${basename}`;
-    }
   }
   return undefined;
 }
@@ -323,7 +315,6 @@ const documentPositions = {
   'developer-guide/aw/sec-core.md': 10,
   'developer-guide/aw/agentsight.md': 11,
   'user-guide/installation.md': 2,
-  'user-guide/user-entrypoint/copilot-shell/quickstart.md': 1,
   'user-guide/user-entrypoint/cosh-ng/quickstart.md': 2,
   'user-guide/token-saving/tokenless/quickstart.md': 1,
   'user-guide/agent-security/agent-sec-core/quickstart.md': 1,
@@ -373,7 +364,7 @@ async function writeCategories(outputRoot, documents, locale) {
 async function prepareLocale(documents, outputRoot, locale) {
   for (const document of documents) {
     const sourceMarkdown = await readFile(path.join(repoRoot, document.source), 'utf8');
-    const websiteMarkdown = stripLocaleSwitchLinks(sourceMarkdown);
+    const websiteMarkdown = stripCopilotShellNavigation(stripLocaleSwitchLinks(sourceMarkdown));
     const markdown = makeMdxSafe(await rewriteLinks(websiteMarkdown, document.source));
     const output = path.join(outputRoot, document.target);
     await mkdir(path.dirname(output), {recursive: true});
@@ -422,10 +413,6 @@ await writeFile(
         message: '系统操作',
         description: "The label for the cosh-ng system operations category in sidebar 'userGuide'",
       },
-      'sidebar.userGuide.category.category-user-guide-user-entrypoint-copilot-shell': {
-        message: 'Copilot Shell',
-        description: "The label for category 'Copilot Shell' in sidebar 'userGuide'",
-      },
       'sidebar.userGuide.category.Token Efficiency': {
         message: 'Token 效率',
         description: "The label for category 'Token Efficiency' in sidebar 'userGuide'",
@@ -449,14 +436,6 @@ await writeFile(
       'sidebar.userGuide.category.category-user-guide-agent-security-agent-sec-core': {
         message: 'Agent Sec Core',
         description: "The label for category 'Agent Sec Core' in sidebar 'userGuide'",
-      },
-      'sidebar.developerGuide.category.Copilot Shell': {
-        message: 'Copilot Shell',
-        description: "The label for category 'Copilot Shell' in sidebar 'developerGuide'",
-      },
-      'sidebar.developerGuide.category.category-developer-guide-copilot-shell-hooks': {
-        message: 'Hooks',
-        description: "The label for category 'Hooks' in sidebar 'developerGuide'",
       },
       'sidebar.developerGuide.category.Cosh-ng': {
         message: 'cosh-ng',

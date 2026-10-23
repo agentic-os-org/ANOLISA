@@ -22,16 +22,13 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 减少 Agent Token 开销
 
 安装 Tokenless，将它接入 Codex、Claude Code、Qoder、OpenClaw、Hermes、
-Qwen Code 或 cosh，然后确认一条压缩前后的 Token 记录。
+Qwen Code 或 cosh-ng，然后确认一条压缩前后的 Token 记录。
 
 [开始三分钟 Tokenless 快速体验 →](user-guide/zh/token-saving/tokenless/QUICKSTART.md)
 
 ### 使用 Agent 原生终端
 
-根据环境选择终端：
-
-- [开始使用 cosh-ng](user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md)——面向 AI 时代重构的终端
-- [开始使用 Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md)——可扩展的 Agent Shell
+从 [cosh-ng](user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md) 开始使用面向 AI 时代重构的终端。
 
 在 Alibaba Cloud Linux 4 上使用 RPM backend，让 dnf 选择匹配的系统库。
 脚本只会为组件操作调用 `sudo`。

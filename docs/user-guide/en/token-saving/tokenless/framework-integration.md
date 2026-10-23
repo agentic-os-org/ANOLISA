@@ -10,7 +10,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
+| cosh-ng | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
@@ -23,6 +23,8 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
 “—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
+
+Cosh-NG uses the adapter value `cosh` and the existing `.copilot-shell` extension directory.
 
 Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook); Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
 
@@ -382,9 +384,9 @@ The scripts call the framework's own plugin or extension mechanism. Follow their
 
 On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
 
-### npm with cosh
+### npm with Cosh-NG
 
-cosh uses an Extension directory and does not provide a separate `scripts/install.sh`. Copy the npm-installed shared resources into the user Extension directory:
+Cosh-NG uses an Extension directory and does not provide a separate `scripts/install.sh`. Copy the npm-installed shared resources into the user Extension directory:
 
 ```bash
 mkdir -p ~/.copilot-shell/extensions/tokenless
@@ -394,13 +396,13 @@ cp -R ~/.local/share/anolisa/adapters/tokenless/common/hooks \
   ~/.copilot-shell/extensions/tokenless/
 ```
 
-Restart cosh afterwards. Before removing it, exit cosh and confirm that the target directory is the Tokenless Extension created by this npm installation.
+Restart Cosh-NG afterwards. Before removing it, exit Cosh-NG and confirm that the target directory is the Tokenless Extension created by this npm installation.
 
 ## Agent adapter activation notes
 
-### cosh
+### Cosh-NG
 
-Extensions are discovered at startup. Restart cosh, run a shell-tool task, and inspect `tokenless stats list`.
+Extensions are discovered at startup. Restart Cosh-NG, run a shell-tool task, and inspect `tokenless stats list`.
 
 ### OpenClaw
 

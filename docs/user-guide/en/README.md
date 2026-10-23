@@ -10,10 +10,10 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  Agent Applications (cosh / OpenClaw / Hermes / custom)            │
+│  Agent Applications (cosh-ng / OpenClaw / Hermes / custom)          │
 ├────────────────────────────────────────────────────────────────────┤
 │  User Entry Points                                                 │
-│  anolisa-cli · cosh · os-skills                                    │
+│  anolisa-cli · cosh-ng · os-skills                                  │
 ├──────────────────────────────────┬─────────────────────────────────┤
 │  Token Saving                    │  Runtime                        │
 │  tokenless · agent-memory        │  skillfs · ws-ckpt              │
@@ -41,7 +41,6 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
 | [AW](user-entrypoint/aw/README.md) | aw | Shared policy configuration and native tool Hooks for Qoder, OpenClaw, QwenPaw and Hermes; Linux Preview |
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | AI-native Linux terminal with an integrated Agent runtime |
-| [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI terminal assistant and command gateway |
 | [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-tuning engine with JSON recommendations and safe rollback |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
 

@@ -1,7 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import {mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import path from 'node:path';
-import {exists, kebabCase, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
+import {exists, kebabCase, repoRoot, stripCopilotShellNavigation, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
 const overrides = JSON.parse(await readFile(path.join(repoRoot, 'website/agent-index/overrides.json'), 'utf8'));
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
@@ -211,10 +211,10 @@ const installCommand = quickstart.match(
 if (!installCommand) throw new Error('Could not derive the canonical install command from docs/QUICKSTART.md');
 
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
-const componentRows = parseOverview(agentsMarkdown);
+const componentRows = parseOverview(agentsMarkdown)
+  .filter((component) => !component.source_path.startsWith('deprecated/'));
 const anolisaSourcePath = componentSourcePath('anolisa');
 const tokenlessSourcePath = componentSourcePath('tokenless');
-const copilotShellSourcePath = componentSourcePath('copilot-shell');
 const components = [];
 for (const row of componentRows) {
   const id = path.posix.basename(row.source_path);
@@ -425,10 +425,6 @@ const cliReference = [
   '',
   ...enumCommands(tokenlessCommandsSource, 'Commands').map((command) => `  ${command.name.padEnd(20)} ${command.description}`),
   '',
-  '## Copilot Shell',
-  '',
-  `Entry points from ${copilotShellSourcePath}/package.json: cosh, co, copilot`,
-  '',
 ].join('\n');
 await writeFile(path.join(agentsOutput, 'cli-reference.txt'), cliReference);
 
@@ -439,7 +435,7 @@ const changelogSources = [
 const changelogText = [];
 for (const source of changelogSources) {
   if (source !== 'CHANGELOG.md' && !(await exists(path.join(repoRoot, source)))) continue;
-  changelogText.push(`===== ${source} =====`, '', await readFile(path.join(repoRoot, source), 'utf8'), '');
+  changelogText.push(`===== ${source} =====`, '', stripCopilotShellNavigation(await readFile(path.join(repoRoot, source), 'utf8')), '');
 }
 await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n'));
 
@@ -450,7 +446,7 @@ await writeGenerated(
 
 const fullDocumentation = [];
 for (const source of documentationSources) {
-  fullDocumentation.push(`===== ${source} =====`, '', await readFile(path.join(repoRoot, source), 'utf8'), '');
+  fullDocumentation.push(`===== ${source} =====`, '', stripCopilotShellNavigation(await readFile(path.join(repoRoot, source), 'utf8')), '');
 }
 await writeGenerated(
   'static/llms-full.txt',

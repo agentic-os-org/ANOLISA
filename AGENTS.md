@@ -14,7 +14,6 @@ and existing build and test entry points.
 
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
-| **copilot-shell** (`cosh`) | `deprecated/copilot-shell/` | TypeScript / Node.js | All |
 | **cosh-ng** | `src/cosh-ng/` | Rust | Linux (full); macOS (limited functionality) |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux (full); macOS (trajectory/serve only) |
@@ -32,24 +31,16 @@ and existing build and test entry points.
 ## 2. Development Commands
 
 ```bash
-# Unified build (recommended — handles deps, build, and user install)
-./scripts/build-all.sh                                        # integrated default components
-./scripts/build-all.sh --no-install                           # build only, skip install
-./scripts/build-all.sh --ignore-deps                          # skip dependency setup and runtime verification
-./scripts/build-all.sh --component cosh --component sec-core  # selected components
+# Unified build (Linux — select maintained components explicitly)
+./scripts/build-all.sh --component sec-core --component tokenless  # deps, build, and user install
+./scripts/build-all.sh --component sec-core --no-install           # install deps and build, skip component install
+./scripts/build-all.sh --component sec-core --ignore-deps          # pre-provisioned hosts: skip dependency setup and runtime verification
 
-# Partial convenience test runner (five components; may skip unavailable suites)
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell   # copilot-shell only
+# Partial convenience test suites (may skip unavailable suites)
 ./tests/run-all-tests.sh --filter sec     # agent-sec-core only
 ./tests/run-all-tests.sh --filter sight   # agentsight only
-
-# copilot-shell (per-component)
-cd deprecated/copilot-shell
-make deps      # npm install + husky hooks (use make deps-ci in CI)
-make build
-make lint
-make test
+./tests/run-all-tests.sh --filter tokenless
+./tests/run-all-tests.sh --filter memory
 
 # cosh-ng (Linux full; macOS limited functionality, per-component)
 cd src/cosh-ng
@@ -217,12 +208,10 @@ Summary:
 
 ## 5. TypeScript Conventions
 
-> Detailed config in `deprecated/copilot-shell/`.
-
-- **Linting**: ESLint
-- **Formatting**: Prettier
-- **Build**: `make build` (npm-based)
-- **Test**: `make test`
+Follow each active package's `package.json`, `tsconfig.json`, and local lint
+configuration. TypeScript is used by component plugins, adapters, and `website/`;
+their build and test entry points differ. Use the component's documented commands
+and its declared package scripts rather than assuming repository-wide npm targets.
 
 ## 6. Commit Message Rules
 

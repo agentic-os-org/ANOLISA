@@ -106,7 +106,8 @@ Copilot Shell 使用分层配置系统（按优先级从高到低）：
 
 ## 文档
 
-- [快速入门](../../docs/user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md)
+- [归档用户与开发者指南](docs/README_zh.md)
+- [快速入门](docs/user-guide/zh/QUICKSTART.md)
 - [贡献指南](CONTRIBUTING.md)
 
 ## 许可证

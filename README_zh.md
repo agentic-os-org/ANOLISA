@@ -259,7 +259,7 @@ AW 专项文档见[架构总览](docs/developer-guide/zh/aw/architecture.md)、[
 | [`providers/`](providers/README_zh.md) | AW Provider 协作空间，各实现拥有独立 workspace、示例和契约测试。 |
 | [`distribution/`](distribution/) | 发行工具。`anolisa/` 包含安装 CLI、组件清单和打包资源。 |
 | [`benchmark/`](benchmark/) | 跨组件评测工具，包括 ClawEval、SWE 和 Terminal Bench runner。组件专用 benchmark 仍保留在各组件内。 |
-| [`deprecated/`](deprecated/) | 保留的旧版实现。`copilot-shell/` 已不推荐用于新增开发；正式退役前保留现有构建、安装、CI 和发布入口。 |
+| [`deprecated/`](deprecated/) | 保留的旧版实现及其归档文档。 |
 | [`scripts/`](scripts/) | 仓库级构建、打包和校验脚本。 |
 | [`tests/`](tests/) | 仓库级回归检查与测试编排。组件测试仍放在各组件内。 |
 | [`docker/`](docker/) | 容器镜像定义与构建资源。 |

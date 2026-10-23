@@ -38,7 +38,7 @@ model, Job and enforcement readiness require their own checks.
 
 Records one sandbox pre-hook decision as a Security Event. This is the audit
 half of Copilot Shell's sandbox protection: the
-[`sandbox-guard` hook](../../user-entrypoint/copilot-shell/hooks.md) decides how
+`sandbox-guard` hook decides how
 to treat a dangerous shell command, then spawns `log-sandbox` so the decision
 lands in the local event store.
 

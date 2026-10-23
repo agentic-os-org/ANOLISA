@@ -770,7 +770,7 @@ function CoshVisual({locale}: {locale: Locale}) {
       </nav>
 
       <section className={`coshStage coshStage--${activeView}`} key={activeView}>
-        <header className="featureStageHeader"><span><i /> cosh-ng · bash/zsh</span><b>{zh ? '人机共驾' : 'COPILOT SHELL'}</b></header>
+        <header className="featureStageHeader"><span><i /> cosh-ng · bash/zsh</span><b>{zh ? '人机共驾' : 'TERMINAL COLLABORATION'}</b></header>
 
         {activeView === 'handoff' && (
           <div className="coshHandoffScene">

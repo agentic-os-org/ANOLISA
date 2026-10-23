@@ -64,7 +64,7 @@ RPM installs support Yum 3 and DNF 4. ANOLISA prefers yum and uses dnf when
 yum is absent. Use `sudo` to check dependencies and conflicts before installing:
 
 ```bash
-sudo anolisa --install-mode system --dry-run install cosh --backend rpm
+sudo anolisa --install-mode system --dry-run install cosh-ng --backend rpm
 ```
 
 This check does not install or change packages. Resolve any reported conflicts
@@ -123,7 +123,7 @@ the system root; it does not enumerate other users' state.
 Untracked RPM observations use the same package resolver as installation.
 An index mapping takes precedence over historical package aliases and
 capabilities: an old cosh-ng RPM providing `anolisa-component(cosh)` is shown
-under cosh-ng, while cosh still resolves to copilot-shell. `action=install`
+under cosh-ng. `action=install`
 identifies a lifecycle action; it is not a native dependency check. Use the
 RPM install dry-run to check whether the packages can coexist.
 
@@ -376,12 +376,15 @@ inspection.
 
 ## Example Workflow
 
+With your Agent already installed, scan for its adapter and use the reported
+name in place of `<framework>`:
+
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 anolisa env
-anolisa install cosh
 anolisa install tokenless
-anolisa adapter enable tokenless cosh
+anolisa adapter scan
+anolisa adapter enable tokenless <framework>
 anolisa doctor
 anolisa status
 ```

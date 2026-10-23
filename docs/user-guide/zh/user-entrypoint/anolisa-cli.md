@@ -59,7 +59,7 @@ RPM 安装支持 Yum 3 和 DNF 4。ANOLISA 优先使用 yum，不存在时使用
 安装前可使用 `sudo` 检查依赖和冲突：
 
 ```bash
-sudo anolisa --install-mode system --dry-run install cosh --backend rpm
+sudo anolisa --install-mode system --dry-run install cosh-ng --backend rpm
 ```
 
 此检查不会安装或更改软件包。请先解决报告的冲突再重试；检查通过不保证
@@ -113,7 +113,7 @@ user view 中两个 scope 都有同名组件时，user record 为 active，syste
 
 未跟踪的 RPM 观察使用与安装相同的包解析器。index 映射优先于历史包 alias
 和 capability：提供 `anolisa-component(cosh)` 的旧 cosh-ng RPM 显示在
-cosh-ng 下，cosh 仍解析到 copilot-shell。`action=install` 表示生命周期操作，
+cosh-ng 下。`action=install` 表示生命周期操作，
 并不代表已检查 native 依赖；请通过 RPM install dry-run 检查这些包能否共存。
 
 ### doctor
@@ -336,12 +336,15 @@ journal 会有意保持 pending，等待人工检查。
 
 ## 示例流程
 
+先安装需要使用的 Agent，再扫描它的 adapter，并用扫描结果中的名称替换
+`<framework>`：
+
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 anolisa env
-anolisa install cosh
 anolisa install tokenless
-anolisa adapter enable tokenless cosh
+anolisa adapter scan
+anolisa adapter enable tokenless <framework>
 anolisa doctor
 anolisa status
 ```

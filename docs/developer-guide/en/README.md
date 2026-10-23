@@ -12,10 +12,6 @@ Use this guide when you need to understand, extend, test, or contribute to ANOLI
 - [Configuration reference](aw/configuration.md)
 - [User guide](../../user-guide/en/user-entrypoint/aw/README.md)
 
-## Copilot Shell
-
-- [Architecture](./copilot-shell/architecture.md)
-
 ## Cosh-ng
 
 - [Getting started](./cosh-ng/getting-started.md)

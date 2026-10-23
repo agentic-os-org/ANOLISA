@@ -494,8 +494,8 @@ the other packaged integrations.
 
 ### Source-build Integration
 
-The default source build installs the cosh extension directly under
-`~/.copilot-shell/extensions/agent-sec-core`, so no separate cosh enable step
+The default source build installs the Cosh-NG extension directly under
+`~/.copilot-shell/extensions/agent-sec-core`, so no separate adapter enable step
 is needed. Deploy another integration with its installed user-path script:
 
 ```bash
@@ -698,7 +698,10 @@ scanner is separate and accepts only `observe` or `deny`; use
 CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 ```
 
-### Copilot Shell (cosh)
+### Cosh-NG
+
+Cosh-NG uses the adapter ID `cosh` and loads extensions from the existing
+`.copilot-shell` directory.
 
 For a package install, enable the adapter in the target user's configuration:
 
@@ -706,7 +709,7 @@ For a package install, enable the adapter in the target user's configuration:
 anolisa adapter enable sec-core cosh
 ```
 
-Hooks are loaded when cosh starts.
+Hooks are loaded when Cosh-NG starts.
 
 Extension path:
 - User install: `~/.copilot-shell/extensions/agent-sec-core/`

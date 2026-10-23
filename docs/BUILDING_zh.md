@@ -24,7 +24,6 @@ cd anolisa
 
 | 组件 | 目录 | 平台和职责 |
 |------|------|------------|
-| copilot-shell（`cosh`） | [`deprecated/copilot-shell`](../deprecated/copilot-shell/README_zh.md) | TypeScript 终端助手，支持 Linux、macOS 和 Windows |
 | cosh-ng | [`src/cosh-ng`](../src/cosh-ng/README_zh.md) | Rust Agent OS CLI 和 Shell，Linux 提供完整构建，macOS 提供受限源码构建 |
 | agent-sec-core | [`src/agent-sec-core`](../src/agent-sec-core/README_zh.md) | Rust sandbox 与 Python 安全 CLI，Linux |
 | agentsight | [`src/agentsight`](../src/agentsight/README_zh.md) | Rust/eBPF 可观测组件，Linux 提供完整 tracing，macOS 提供 `trace` 和 `serve` |
@@ -46,7 +45,7 @@ Linux-only 组件。
 
 | 需求 | 依据 |
 |------|------|
-| Node.js | `deprecated/copilot-shell/package.json` 要求 Node.js `>=20.0.0`。agent-memory、agentsight、agent-sec-core、tokenless 和 ws-ckpt 的插件构建也会使用 npm。 |
+| Node.js | agent-memory、agentsight、agent-sec-core、tokenless 和 ws-ckpt 的插件构建需要 npm。Node.js 版本要求以各组件的 `package.json` 和构建说明为准。 |
 | Python 和 uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` 要求 Python `==3.11.6`，该项目使用 `uv`。不要把它扩展成仓库级 Python 最低版本。 |
 | Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`distribution/anolisa/rust-toolchain.toml` 固定 `1.93.1`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
 | cosh-ng | Linux 源码构建需要 `pkg-config` 和 OpenSSL 开发文件。 |
@@ -70,17 +69,14 @@ export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standa
 
 ## 4. 统一构建脚本
 
-`scripts/build-all.sh` 是便捷入口，并不负责构建整个 monorepo。当前脚本支持 8 个
-组件。
-
-- 默认 6 个组件包括 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt` 和
-  `memory`。
-- 可选 2 个组件包括 `cosh-ng` 和 `sight`。可以用 `--all` 或 `--component` 显式加入。
+`scripts/build-all.sh` 是 Linux 上的便捷入口，并不负责构建整个 monorepo。请通过
+重复的 `--component` 参数选择需要的维护中组件：`skills`、`sec-core`、`tokenless`、
+`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
 
 `anolisa`、`skillfs` 和 `ktuner` 不由该脚本构建，请按第 5 节的组件命令单独构建。
 
-默认安装模式是 user mode，组件文件安装到 `~/.local` 和 Copilot Shell 的用户目录
-时无需 `sudo`，首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
+默认安装模式是 user mode，各组件按自己的安装规则选择用户目录中的路径。
+首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
 `--install-mode system`）切换到系统路径，脚本会暂存文件并可能调用 `sudo`。
 `--no-install` 只构建并暂存制品，不执行安装。
 
@@ -91,39 +87,34 @@ package；若缺少 language runtime 或 platform capability，则在修改 pack
 需要 Node.js 的 system install 必须能从标准 system PATH 找到 Node.js 20 或更高版本。
 
 ```bash
-# Default six components, user install
-./scripts/build-all.sh
+# Build and install selected components
+./scripts/build-all.sh --component sec-core --component tokenless
 
-# Build and stage without installing
-./scripts/build-all.sh --no-install
+# Build and stage without installing component files
+./scripts/build-all.sh --component sec-core --no-install
 
 # Use system paths instead of the default user profile
-./scripts/build-all.sh --system
+./scripts/build-all.sh --component ws-ckpt --system
 
-# Include cosh-ng and agentsight as well
-./scripts/build-all.sh --all
-
-# Select one or more of the eight supported names
-./scripts/build-all.sh --component cosh --component sec-core
+# Select cosh-ng and agentsight
 ./scripts/build-all.sh --component cosh-ng --component sight
 
 # Reuse already-installed dependencies
-./scripts/build-all.sh --ignore-deps
+./scripts/build-all.sh --component sec-core --ignore-deps
 
 # Install dependencies only, or print the plan without changing the system
-./scripts/build-all.sh --deps-only
-./scripts/build-all.sh --dry-run
+./scripts/build-all.sh --component sec-core --deps-only
+./scripts/build-all.sh --component sec-core --dry-run
 
 # Explicit non-interactive mode and help
-./scripts/build-all.sh --non-interactive
+./scripts/build-all.sh --component sec-core --non-interactive
 ./scripts/build-all.sh --help
 ```
 
 `--ignore-deps` 会同时跳过 dependency setup 和 runtime dependency verification。
 它只适用于已经准备好全部依赖的主机，调用者需要自行保证安装后的组件具备所需 runtime。
 
-`--component` 的合法名称为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、
-`memory`、`cosh-ng` 和 `sight`。脚本可能先在 `target/` 中生成构建结果，再执行安装，
+脚本可能先在 `target/` 中生成构建结果，再执行安装，
 最终行为仍由组件自己的安装规则决定。例如 `ws-ckpt` 只有在 `--system` 下才会安装
 daemon，默认 user profile 不会创建 user service。
 
@@ -135,7 +126,6 @@ daemon，默认 user profile 不会创建 user service。
 | 组件 | 构建 | 测试和质量门禁 |
 |------|------|----------------|
 | [AW](developer-guide/zh/aw/building.md) | `cd src/aw && cargo build --locked -p aw-cli -p aw-service -p aw-package -p aw-provider -p aw-host --bins --examples` | `python3 src/aw/scripts/check.py`；仅 Linux，使用固定 Rust 工具链、Python 3 和 Node.js。 |
-| [copilot-shell](../deprecated/copilot-shell/README_zh.md) | `cd deprecated/copilot-shell && make deps && make build` | `cd deprecated/copilot-shell && make lint && make test` |
 | [os-skills](../src/os-skills/README_zh.md) | `cd src/os-skills && make build` | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
 | [agent-sec-core](../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |
 | [agentsight](../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make build-all`；macOS local viewer 使用 `cd src/agentsight && make build-mac` | Linux 使用 `cd src/agentsight && make lint && make test`；macOS 运行 local viewer 和 trajectory collector 相关测试。 |
@@ -157,13 +147,11 @@ adapter 时应再查看 workflow。
 
 ## 6. 聚合测试与 PR 门禁
 
-`tests/run-all-tests.sh` 只是部分组件的便捷测试脚本。不带过滤条件时，它只会调用
-copilot-shell、agent-sec-core、agentsight、tokenless 和 agent-memory 这 5 个组件，
-不会测试 cosh-ng、os-skills、ws-ckpt、anolisa、SkillFS 或 ktuner。
+`tests/run-all-tests.sh` 只是部分组件的便捷测试脚本。请通过 `--filter` 选择
+agent-sec-core、agentsight、tokenless 或 agent-memory。它不会测试 cosh-ng、os-skills、
+ws-ckpt、anolisa、SkillFS 或 ktuner。
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless

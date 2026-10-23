@@ -257,7 +257,7 @@ tokenless compress-schema -f request.json
 
 ```bash
 tokenless compress-schema -f tools.json --batch \
-  --agent-id copilot-shell --session-id session-001
+  --agent-id demo-agent --session-id session-001
 ```
 
 ## `compress-response`

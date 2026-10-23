@@ -23,16 +23,13 @@ can alternatively install the CLI with `sudo yum install anolisa`.
 ### Reduce Agent Token usage
 
 Install Tokenless, connect it to Codex, Claude Code, Qoder, OpenClaw, Hermes,
-Qwen Code, or cosh, then verify a before/after Token record.
+Qwen Code, or cosh-ng, then verify a before/after Token record.
 
 [Start the three-minute Tokenless Quick Start →](user-guide/en/token-saving/tokenless/QUICKSTART.md)
 
 ### Work with an Agent-native terminal
 
-Choose the terminal that matches your environment:
-
-- [Start with cosh-ng](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md) — an AI-native terminal
-- [Start with Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md) — an extensible Agent Shell
+Start with [cosh-ng](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md), an AI-native terminal.
 
 On Alibaba Cloud Linux 4, use the RPM backend so dnf selects the matching
 system libraries. Only the component action uses `sudo`:

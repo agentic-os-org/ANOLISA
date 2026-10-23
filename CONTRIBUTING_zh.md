@@ -30,7 +30,6 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 | 组件 | 路径 | 平台 | 构建名称 | Scope | 开发入口和最低本地门禁 |
 | --- | --- | --- | --- | --- | --- |
-| copilot-shell | `deprecated/copilot-shell/` | 所有平台 | `cosh` | `cosh` | `cd deprecated/copilot-shell`；`make deps`、`make build`、`make lint`、`make test` |
 | cosh-ng | `src/cosh-ng/` | Linux 完整功能；macOS 功能受限 | `cosh-ng` | `cosh-ng` | `cd src/cosh-ng`; `cargo build --workspace`、`cargo fmt --all -- --check`，随后按 `src/cosh-ng/CONTRIBUTING_zh.md` 选择最接近改动的测试 |
 | agent-sec-core | `src/agent-sec-core/` | 仅 Linux | `sec-core` | `sec-core` | Python 3.11.6 和 `uv`; `make build-all`、`make test` |
 | agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
@@ -46,7 +45,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 
 ### 工具链前置条件
 
-- `copilot-shell` 和 TypeScript adapter 需要 Node.js 20 或更高版本。
+- TypeScript 插件、adapter 和网站需要 Node.js 与 npm，版本要求以各包的 `package.json` 和构建说明为准。
 - Rust 组件需要 stable Rust 工具链。若组件固定了工具链版本或增加了原生库，请遵循对应的 `AGENTS.md`。
 - `agent-sec-core` 使用 Python **3.11.6** 和 [uv](https://docs.astral.sh/uv/)。`os-skills` 主要由静态 Markdown 和 shell 资源组成，不负责仓库的 Python 环境。
 - 修改 `agentsight` eBPF probe 时需要 `clang` 和 `libbpf` 头文件。
@@ -90,22 +89,20 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 统一构建
 
-`build-all.sh` 目前只支持八个组件。
-
-- 默认集合为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`。
-- 可选集合为 `cosh-ng` 和 `sight`。使用 `--all` 或通过 `--component` 指定它们。
+`scripts/build-all.sh` 是 Linux 便捷构建入口。重复使用 `--component`，选择需要的
+维护中组件：`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
 
 脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
-不指定安装模式时，组件文件会安装到用户目录 `$HOME/.local`，这一步不需要提权。
+不指定安装模式时，各组件按自己的安装规则选择用户主目录内的路径，这一步不需要提权。
 依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
 安装模式，通常需要 `sudo`。开发时建议指定组件并关闭安装。
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh
+./scripts/build-all.sh --no-install --component cosh-ng
 ./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --all
+./scripts/build-all.sh --no-install --component sec-core --component tokenless
 ```
 
 主要选项如下。
@@ -115,15 +112,14 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 | `--no-install` | 安装依赖并构建，随后跳过安装。 |
 | `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `user`。 |
 | `--usr`、`--system` | 选择系统安装模式。 |
-| `--ignore-deps` | 跳过依赖安装。 |
+| `--ignore-deps` | 跳过依赖准备和运行时校验；仅用于已配好依赖的主机。 |
 | `--deps-only` | 只安装依赖，不构建。 |
 | `--uninstall` | 删除已安装文件；与 `--component` 一起使用可限定组件。 |
 | `--dry-run` | 只打印动作，不修改文件或 systemd 状态。 |
 | `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式。 |
-| `--all` | 纳入可选组件 `cosh-ng` 和 `sight`。 |
 | `--component <name>` | 构建或卸载一个受支持的组件，可以重复指定。 |
 
-不要把 `build-all.sh --all` 理解成构建每个 `src/<component>/` 目录。它的范围只包括 `./scripts/build-all.sh --help` 打印的八个名称。
+开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
 
 `sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
 
@@ -131,11 +127,9 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 便捷测试脚本
 
-`tests/run-all-tests.sh` 是五个组件的便捷聚合入口，覆盖 `copilot-shell`、`agent-sec-core`、`agentsight`、`tokenless` 和 `agent-memory`。它支持以下过滤器。
+`tests/run-all-tests.sh` 提供部分便捷测试套件。使用以下过滤器之一，明确选择受影响的维护中组件。
 
 ```bash
-./tests/run-all-tests.sh
-./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
 ./tests/run-all-tests.sh --filter tokenless
