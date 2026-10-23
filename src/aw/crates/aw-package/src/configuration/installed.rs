@@ -5,12 +5,13 @@ use crate::{
     install::selected_receipts,
     require, Result,
 };
-use std::{collections::BTreeMap, fs::File, path::Path};
+use aw_exec::PackageLock;
+use std::{collections::BTreeMap, path::Path};
 
 pub(super) struct Selection {
     pub packages: BTreeMap<String, InstalledPackage>,
     _inventory: Option<Inventory>,
-    _prefix_lock: File,
+    _prefix_lock: PackageLock,
 }
 
 impl Selection {
@@ -107,6 +108,7 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let temporary = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
         let root = temporary.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         let paths = DatabasePaths::user(Some(root), None).unwrap();
         let prefix = root.join("installed");
         let bundle = root.join("bundle");

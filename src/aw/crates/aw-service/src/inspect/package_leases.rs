@@ -1,15 +1,19 @@
 //! Direct view queries hold installed files through cancellation and process cleanup.
 
 use super::*;
-use std::{fs, fs::File, thread};
+use std::{fs, fs::File, os::unix::fs::PermissionsExt, thread};
 
 #[test]
 fn direct_view_queries_hold_files_until_cancelled_children_are_reaped() {
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let prefix = directory.path().join("installed");
     fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+    for path in [directory.path(), &prefix, &prefix.join(".aw-packages")] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let lock = prefix.join(".aw-install.lock");
     fs::write(&lock, []).unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
     let script = prefix.join("view.sh");
     let ready = directory.path().join("ready");
     fs::write(&script, b"printf ready > \"$1\"\nwhile :; do :; done\n").unwrap();

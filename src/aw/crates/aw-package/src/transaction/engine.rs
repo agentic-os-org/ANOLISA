@@ -9,7 +9,8 @@ use crate::{
     database::DatabasePaths, require, Error, MutationFailure, MutationNotice, MutationReport,
     MutationResult, NoticeCode, RecoveryState, Result,
 };
-use std::{fs::File, path::Path, sync::atomic::AtomicBool};
+use aw_exec::PackageLock;
+use std::{path::Path, sync::atomic::AtomicBool};
 
 pub(super) fn apply(
     paths: &DatabasePaths,
@@ -112,7 +113,7 @@ fn execute(
     paths: &DatabasePaths,
     changes: &ChangeSet,
     entry: &mut Journal,
-    prefix_lock: &mut Option<File>,
+    prefix_lock: &mut Option<PackageLock>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     journal::check_cancel(cancel)?;

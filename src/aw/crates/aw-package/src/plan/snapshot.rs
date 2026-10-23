@@ -8,8 +8,9 @@ use crate::{
     },
     require, Error, Payload, Result,
 };
+use aw_exec::PackageLock;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs::File, os::unix::fs::MetadataExt, path::Path};
+use std::{collections::BTreeMap, os::unix::fs::MetadataExt, path::Path};
 
 pub(super) struct Snapshot {
     pub database: InstalledDatabase,
@@ -18,7 +19,7 @@ pub(super) struct Snapshot {
     pub legacy: BTreeMap<String, Vec<u8>>,
     pub marker: Option<Vec<u8>>,
     _inventories: Vec<Inventory>,
-    _prefix_lock: Option<File>,
+    _prefix_lock: Option<PackageLock>,
 }
 
 impl Snapshot {

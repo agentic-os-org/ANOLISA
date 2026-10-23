@@ -1,7 +1,7 @@
 //! Nonblocking shared flock over stable installation directories and lock inodes.
 
 use super::{LeaseError, PackageLeases};
-use crate::CommandSpec;
+use crate::{CommandSpec, PackageLock};
 use std::{
     collections::BTreeSet,
     ffi::{CString, OsStr},
@@ -210,7 +210,7 @@ fn same(left: &Metadata, right: &Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-fn acquire(prefix: &Path) -> Result<File> {
+fn acquire(prefix: &Path) -> Result<PackageLock> {
     let root = directory(prefix)?;
     let records_path = prefix.join(".aw-packages");
     let records = open_at(&root, OsStr::new(".aw-packages"), true, &records_path)?;
@@ -237,6 +237,7 @@ fn acquire(prefix: &Path) -> Result<File> {
             io(&lock_path, error)
         });
     }
+    let lock = PackageLock::from_locked(lock);
     let fresh_root = directory(prefix)?;
     let fresh_lock = open_at(
         &fresh_root,
@@ -251,7 +252,11 @@ fn acquire(prefix: &Path) -> Result<File> {
             &metadata(&records, &records_path)?,
             &metadata(&fresh_records, &records_path)?,
         )
-        || metadata(&lock, &lock_path)?.nlink() != 1
+        || lock
+            .metadata()
+            .map_err(|error| io(&lock_path, error))?
+            .nlink()
+            != 1
     {
         return Err(LeaseError::Changed(prefix.to_owned()));
     }

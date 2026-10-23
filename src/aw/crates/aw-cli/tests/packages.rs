@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::MetadataExt,
+    path::Path,
     process::{Command, Output},
 };
 use support::{success, Fixture};
@@ -85,7 +86,7 @@ fn unified_install_init_and_uninstall_preserve_external_and_unowned_files() {
 fn bundle_root_aw_requires_explicit_bundle_and_installs_without_a_second_command() {
     let f = Fixture::new();
     let bootstrap = f.bundle.join("aw");
-    fs::copy(env!("CARGO_BIN_EXE_aw"), &bootstrap).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
 
     let diagnostic = failure(
         Command::new(&bootstrap)
@@ -157,7 +158,7 @@ fn provider_bundle_root_aw_appends_to_core_without_a_second_command() {
     )
     .unwrap();
     let bootstrap = bundle.join("aw");
-    fs::copy(env!("CARGO_BIN_EXE_aw"), &bootstrap).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_aw"), &bootstrap);
     assert!(!bundle.join("payload/bin/aw").exists());
     success(
         Command::new(&bootstrap)
@@ -367,4 +368,20 @@ fn package_help_uses_the_unified_frontend_name() {
     );
     assert!(output.contains("Install a local software bundle"));
     assert!(output.contains("manifest.json or package.json"));
+}
+
+/// Keep writable executable descriptors out of unrelated concurrent test forks.
+fn copy_executable(source: impl AsRef<Path>, destination: &Path) {
+    let output = support::invoke(
+        Command::new("/bin/cp")
+            .arg("--")
+            .arg(source.as_ref())
+            .arg(destination)
+            .current_dir(destination.parent().unwrap()),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

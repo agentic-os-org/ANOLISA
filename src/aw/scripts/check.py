@@ -179,7 +179,10 @@ def package_permissions() -> None:
     commands = [
         ["cargo", "test", "--locked", "-p", "aw-package", "--test", "database"],
         ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "inventory"],
-        ["cargo", "test", "--locked", "-p", "aw-package", "--lib", "transaction::tests"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--lib"],
+        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "management"],
+        ["cargo", "test", "--locked", "-p", "aw-host", "--test", "host", "package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-service", "--lib", "inspect::package_leases"],
         ["cargo", "test", "--locked", "-p", "aw-exec", "--test", "packages"],
         ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "packages"],
     ]

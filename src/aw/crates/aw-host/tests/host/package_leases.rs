@@ -4,6 +4,7 @@ use crate::{capabilities, Fixture, Host, TIMEOUT};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File},
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -16,7 +17,15 @@ use std::{
 fn installed_provider(fixture: &Fixture) -> (Value, PathBuf) {
     let prefix = fixture.0.join("installed");
     fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+    for path in [&prefix, &prefix.join(".aw-packages")] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     fs::write(prefix.join(".aw-install.lock"), []).unwrap();
+    fs::set_permissions(
+        prefix.join(".aw-install.lock"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
     let script = prefix.join("provider.py");
     fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py"),

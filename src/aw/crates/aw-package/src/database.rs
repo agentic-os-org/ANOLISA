@@ -1,5 +1,6 @@
 //! Read-only installed-package inventory and file verification, without running package code.
 
+use aw_exec::PackageLock;
 mod doctor;
 mod json;
 mod legacy;
@@ -16,7 +17,6 @@ use crate::{description::ProviderDeclaration, Payload, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -166,7 +166,7 @@ pub struct Inventory {
     /// Registered installations or one explicitly requested legacy prefix.
     pub installations: Vec<Installation>,
     #[serde(skip)]
-    _locks: Vec<File>,
+    _locks: Vec<PackageLock>,
     #[serde(skip)]
     _database_generation: Option<u64>,
     #[serde(skip)]

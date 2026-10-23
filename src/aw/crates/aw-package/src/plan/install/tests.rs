@@ -55,6 +55,7 @@ fn combined_prefix_byte_limit_blocks_append_without_preventing_later_removal() {
     fs::create_dir_all(&target).unwrap();
     let temporary = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
     let root = temporary.path();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
     let paths = DatabasePaths::user(Some(root), None).unwrap();
     let prefix = root.join("installed");
     let base = bundle(root, "base", b"base");

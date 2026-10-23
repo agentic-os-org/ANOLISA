@@ -353,7 +353,7 @@ fn lock_permission_failure_removes_owned_prefix_and_allows_retry() {
             held = Some(paths::lock(prefix)?);
             // Inject an fd that rejects fchmod even as root, after creating the
             // actual owned lock. Keep that flock held throughout rollback.
-            Ok(File::open("/proc/self/status")?)
+            Ok(PackageLock::from_locked(File::open("/proc/self/status")?))
         },
         |_, _| panic!("copy must not run after permission setup fails"),
     );

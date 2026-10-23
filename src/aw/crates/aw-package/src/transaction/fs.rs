@@ -1,5 +1,6 @@
 //! Descriptor-relative mutation refuses symlinks and never overwrites an unclaimed file.
 
+use aw_exec::PackageLock;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
@@ -253,11 +254,11 @@ pub(super) fn ensure_tree(path: &Path, mode: u32) -> Result<()> {
     }
 }
 
-pub(super) fn lock(path: &Path, create: bool) -> Result<File> {
+pub(super) fn lock(path: &Path, create: bool) -> Result<PackageLock> {
     lock_flags(path, if create { libc::O_CREAT } else { 0 })
 }
 
-pub(super) fn new_lock(path: &Path) -> Result<File> {
+pub(super) fn new_lock(path: &Path) -> Result<PackageLock> {
     lock_flags(path, libc::O_CREAT | libc::O_EXCL)
 }
 
@@ -294,7 +295,7 @@ pub(super) fn make_readable(path: &Path, before: &Identity, after: &Identity) ->
     same(path, after)
 }
 
-fn lock_flags(path: &Path, extra: i32) -> Result<File> {
+fn lock_flags(path: &Path, extra: i32) -> Result<PackageLock> {
     let (parent, name) = parent(path)?;
     let file = opened(&parent, name, libc::O_RDWR | extra, 0o644)?;
     if extra & libc::O_CREAT != 0 {
@@ -322,6 +323,7 @@ fn lock_flags(path: &Path, extra: i32) -> Result<File> {
             error.into()
         });
     }
+    let file = PackageLock::from_locked(file);
     let current = regular(path)?.metadata()?;
     require(
         current.dev() == held.dev() && current.ino() == held.ino(),

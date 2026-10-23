@@ -33,7 +33,9 @@ fn bundle_files(root: &Path, name: &str, names: &[&str]) -> PathBuf {
 fn root() -> tempfile::TempDir {
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/package-action-capacity");
     fs::create_dir_all(&target).unwrap();
-    tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap()
+    let directory = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    directory
 }
 
 fn install_limit(

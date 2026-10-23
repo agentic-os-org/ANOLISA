@@ -24,6 +24,7 @@ impl Fixture {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/package-management");
         fs::create_dir_all(&target).unwrap();
         let directory = tempfile::tempdir_in(target.canonicalize().unwrap()).unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let paths = DatabasePaths::user(Some(directory.path()), None).unwrap();
         let prefix = directory.path().join("installed");
         Self {
@@ -65,10 +66,27 @@ impl Fixture {
         fs::write(&file, b"older AW executable").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         fs::create_dir(self.prefix.join(".aw-packages")).unwrap();
+        for path in [
+            &self.prefix,
+            &self.prefix.join("bin"),
+            &self.prefix.join(".aw-packages"),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         fs::write(self.prefix.join(".aw-install.lock"), b"").unwrap();
+        fs::set_permissions(
+            self.prefix.join(".aw-install.lock"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let record = json!({"format":1,"component":"aw-core","version":"vendor/dev-build","source_commit":"vendor-provided-build-label","os":"linux","arch":std::env::consts::ARCH,"provider_protocol":"aw-provider/v1alpha1","requires":{},"files":{"bin/aw":{"sha256":digest(&file).unwrap(),"mode":493}}});
         let bytes = serde_json::to_vec_pretty(&record).unwrap();
         fs::write(self.prefix.join(".aw-packages/aw-core.json"), &bytes).unwrap();
+        fs::set_permissions(
+            self.prefix.join(".aw-packages/aw-core.json"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         bytes
     }
 }
@@ -212,6 +230,7 @@ fn existing_unknown_files_owned_paths_and_symlink_parents_are_never_replaced() {
     fs::remove_file(fixture.prefix.join("bin/tool")).unwrap();
     let other = fixture.directory.path().join("other-prefix");
     fs::create_dir(&other).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
     symlink(fixture.prefix.join("bin"), other.join("bin")).unwrap();
     let blocked = plan::install(&fixture.paths, &tool, &other).unwrap();
     assert!(blocked

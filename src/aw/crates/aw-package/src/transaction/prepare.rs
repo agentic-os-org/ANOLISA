@@ -9,12 +9,13 @@ use crate::{
     database::{self, DatabasePaths, Scope},
     require, Error, Result,
 };
-use std::{collections::BTreeMap, fs::File, path::Path};
+use aw_exec::PackageLock;
+use std::{collections::BTreeMap, path::Path};
 
 pub(super) struct Prepared {
     pub journal: Journal,
-    pub _database_lock: File,
-    pub prefix_lock: Option<File>,
+    pub _database_lock: PackageLock,
+    pub prefix_lock: Option<PackageLock>,
 }
 
 pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepared> {

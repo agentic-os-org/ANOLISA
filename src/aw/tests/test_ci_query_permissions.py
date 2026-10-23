@@ -53,11 +53,13 @@ class QueryPermissionTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(before.stat().st_mode), stat.S_IMODE(after.stat().st_mode))
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
         self.assertEqual(calls, [
-            [["test", "--locked", "-p", package, selector, target], mode]
+            [["test", "--locked", "-p", *target], mode]
             for mode in (0o644, 0o664)
-            for package, selector, target in (
+            for target in (
                 ("aw-package", "--test", "database"), ("aw-cli", "--test", "inventory"),
-                ("aw-package", "--lib", "transaction::tests"),
+                ("aw-package", "--lib"), ("aw-package", "--test", "management"),
+                ("aw-host", "--test", "host", "package_leases"),
+                ("aw-service", "--lib", "inspect::package_leases"),
                 ("aw-exec", "--test", "packages"), ("aw-cli", "--test", "packages"),
             )
         ])
@@ -70,7 +72,7 @@ class QueryPermissionTests(unittest.TestCase):
             gate.package_permissions()
         self.assertEqual(failure.exception.returncode, 7)
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 9)
         self.assertEqual(calls[-1][1], 0o664)
 
 

@@ -2,6 +2,7 @@
 
 mod capacity;
 mod durability;
+mod locks;
 
 use super::{fs, journal, prepare, ChangeSet, SourceFile};
 use crate::{

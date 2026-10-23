@@ -1,5 +1,6 @@
 //! Transactional owned-file installation; existing components and user data are preserved.
 
+use aw_exec::PackageLock;
 mod report;
 pub use report::{
     MutationFailure, MutationNotice, MutationReport, MutationResult, NoticeCode, RecoveryState,
@@ -87,7 +88,7 @@ struct Transaction<'a> {
     directories: Vec<PathBuf>,
     prefix: Option<PathBuf>,
     // Keep ownership through Drop so rollback cannot race another installer.
-    lock: Option<File>,
+    lock: Option<PackageLock>,
     committed: bool,
     report: &'a mut MutationReport,
 }
@@ -217,7 +218,7 @@ fn install_using(
     bundle: &Path,
     prefix: &Path,
     cancel: &AtomicBool,
-    lock: impl FnOnce(&Path) -> Result<File>,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
     copy: impl FnMut(&Path, &mut File) -> Result<()>,
 ) -> Result<()> {
     legacy(install_reported_using(bundle, prefix, cancel, lock, copy))
@@ -227,7 +228,7 @@ fn install_reported_using(
     bundle: &Path,
     prefix: &Path,
     cancel: &AtomicBool,
-    lock: impl FnOnce(&Path) -> Result<File>,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
     copy: impl FnMut(&Path, &mut File) -> Result<()>,
 ) -> MutationResult {
     let mut report = MutationReport::default();
@@ -239,7 +240,7 @@ fn install_into(
     bundle: &Path,
     prefix: &Path,
     cancel: &AtomicBool,
-    lock: impl FnOnce(&Path) -> Result<File>,
+    lock: impl FnOnce(&Path) -> Result<PackageLock>,
     mut copy: impl FnMut(&Path, &mut File) -> Result<()>,
     report: &mut MutationReport,
 ) -> Result<()> {

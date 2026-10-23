@@ -26,7 +26,7 @@ pub(super) fn service(fixture: &mut Fixture, root: &Path) {
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let executable = fixture.prefix.join("bin/aw");
-    fs::copy(fixture.bundle.join("payload/bin/aw"), &executable).unwrap();
+    super::copy_executable(fixture.bundle.join("payload/bin/aw"), &executable);
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     let prefix_lock = fixture.prefix.join(".aw-install.lock");
     fs::write(&prefix_lock, []).unwrap();

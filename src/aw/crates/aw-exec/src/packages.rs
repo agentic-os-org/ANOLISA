@@ -47,7 +47,7 @@ pub enum LeaseError {
 #[derive(Debug)]
 pub struct PackageLeases {
     #[cfg(target_os = "linux")]
-    _held: Vec<std::fs::File>,
+    _held: Vec<crate::PackageLock>,
 }
 
 impl PackageLeases {
@@ -56,8 +56,8 @@ impl PackageLeases {
     /// Resolution uses only that command's working directory and explicit PATH.
     /// The program is replaced by its resolved absolute path before returning.
     /// Absolute arguments, including `--option=/absolute/path`, are also checked.
-    /// Locks are acquired in prefix order without waiting or inheriting descriptors
-    /// into children. Relative arguments and executable-generated paths cannot
+    /// Locks are acquired in prefix order without waiting; descriptors are closed
+    /// across child exec. Relative arguments and executable-generated paths cannot
     /// establish that all runtime references are known.
     ///
     /// # Errors

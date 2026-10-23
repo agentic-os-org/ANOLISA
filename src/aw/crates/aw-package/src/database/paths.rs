@@ -2,6 +2,7 @@
 
 use super::Scope;
 use crate::{require, Error, Result};
+use aw_exec::PackageLock;
 use std::{
     ffi::CString,
     fs::{self, File, Metadata},
@@ -166,7 +167,7 @@ pub(crate) fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) fn lock(path: &Path) -> Result<File> {
+pub(crate) fn lock(path: &Path) -> Result<PackageLock> {
     let file = regular(path)?;
     require(
         file.metadata()?.nlink() == 1,
@@ -176,6 +177,7 @@ pub(crate) fn lock(path: &Path) -> Result<File> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    let file = PackageLock::from_locked(file);
     same(path, &file.metadata()?)?;
     Ok(file)
 }

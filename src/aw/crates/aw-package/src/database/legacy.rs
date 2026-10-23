@@ -5,9 +5,10 @@ use super::{
     SourceEvidence, MAX_PACKAGES,
 };
 use crate::{description, require, Component, Result};
-use std::{collections::BTreeSet, fs::File, os::unix::fs::MetadataExt, path::Path};
+use aw_exec::PackageLock;
+use std::{collections::BTreeSet, os::unix::fs::MetadataExt, path::Path};
 
-pub(super) fn installation(prefix: &Path) -> Result<Option<(Installation, File)>> {
+pub(super) fn installation(prefix: &Path) -> Result<Option<(Installation, PackageLock)>> {
     let directory = prefix.join(".aw-packages");
     let _directory = match paths::directory(&directory) {
         Err(error) if paths::missing(&error) => return Ok(None),

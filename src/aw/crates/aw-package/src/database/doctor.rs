@@ -2,10 +2,10 @@
 
 use super::{paths, read, Installation, Inventory, InventorySource, Manager, Registration};
 use crate::{Error, Payload, Result};
+use aw_exec::PackageLock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -184,7 +184,7 @@ fn metadata(
     inventory: &Inventory,
     installation: &Installation,
     report: &mut DoctorReport,
-) -> Option<File> {
+) -> Option<PackageLock> {
     let paths = super::DatabasePaths {
         root: inventory
             .database_path
