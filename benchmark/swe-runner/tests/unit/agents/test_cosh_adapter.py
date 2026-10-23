@@ -55,6 +55,64 @@ def make_prepared(*, max_turns: int = 0) -> PreparedAgentRun:
     )
 
 
+# -- Preparation failure cleanup --
+
+
+def make_instance_and_settings() -> tuple[SWEInstance, Settings]:
+    instance = SWEInstance(
+        instance_id="test-instance",
+        repo="example/repo",
+        version="1",
+        base_commit="abc123",
+        problem_statement="Fix it",
+        patch="",
+        test_patch="",
+    )
+    settings = Settings(agent=AgentConfig(name="cosh", timeout=1800, step_limit=0))
+    return instance, settings
+
+
+def _prepare_with_docker(agent: CoshAdapter, docker: MagicMock, prompt_side_effect: Exception | None = None) -> None:
+    with (
+        patch("swe_runner.agents.cosh.adapter.get_docker_image_name", return_value="img"),
+        patch("swe_runner.agents.cosh.adapter.DockerManager", return_value=docker),
+        patch("swe_runner.agents.cosh.adapter.get_git_revision", return_value="abc123"),
+        patch(
+            "swe_runner.agents.cosh.adapter.build_prompt",
+            side_effect=prompt_side_effect,
+        ),
+    ):
+        instance, settings = make_instance_and_settings()
+        agent.prepare(instance, settings)
+
+
+def test_prepare_cleans_up_container_when_prompt_fails(agent: CoshAdapter) -> None:
+    docker = MagicMock()
+    docker.start.return_value = Path("/tmp/workdir")
+    with pytest.raises(UnicodeDecodeError):
+        _prepare_with_docker(
+            agent, docker, prompt_side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "bad prompt bytes")
+        )
+    docker.cleanup.assert_called_once()
+
+
+def test_prepare_cleans_up_container_when_revision_probe_fails(agent: CoshAdapter) -> None:
+    docker = MagicMock()
+    docker.start.return_value = Path("/tmp/workdir")
+    with patch("swe_runner.agents.cosh.adapter.get_docker_image_name", return_value="img"),          patch("swe_runner.agents.cosh.adapter.DockerManager", return_value=docker),          patch("swe_runner.agents.cosh.adapter.get_git_revision", side_effect=RuntimeError("git gone")):
+        instance, settings = make_instance_and_settings()
+        with pytest.raises(RuntimeError):
+            agent.prepare(instance, settings)
+    docker.cleanup.assert_called_once()
+
+
+def test_prepare_registers_cleanup_callback_on_success(agent: CoshAdapter) -> None:
+    docker = MagicMock()
+    docker.start.return_value = Path("/tmp/workdir")
+    _prepare_with_docker(agent, docker)
+    docker.cleanup.assert_not_called()
+
+
 # -- Basic property test --
 
 
