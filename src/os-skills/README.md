@@ -49,6 +49,13 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## XLSX Row Editing
+
+The `xlsx` row-edit helper updates entire-row formula ranges, including `5:10`
+and `$5:$10`, along with A1 references when rows are inserted or deleted. Sheet
+qualifiers and `$` markers are preserved; entire-row endpoints stay within rows
+1–1048576.
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

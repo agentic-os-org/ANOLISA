@@ -68,6 +68,21 @@ anolisa status os-skills
 
 ---
 
+## XLSX row edits
+
+Run the row shifter on an unpacked workbook using the installed `xlsx` skill directory:
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 2
+```
+
+This changes `SUM(5:10)` to `SUM(7:12)` in worksheet formulas and updates chart
+formula sources too. Entire-row references such as `$5:$10` retain their `$`
+markers and sheet qualifiers. Row endpoints are limited to 1–1048576; references
+inside string literals or structured table labels are excluded from entire-row
+matching. Named ranges and external-link XML parts still require manual review.
+Repack and validate the workbook after editing.
+
 ## Configuration
 
 Configuration file: `~/.config/os-skills/config.toml`

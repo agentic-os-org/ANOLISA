@@ -516,6 +516,12 @@ python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
 
 The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
 
+Worksheet formulas and chart sources support entire-row ranges as well as A1
+references. Inserting two rows at row 5 changes `SUM(5:10)` to `SUM(7:12)` and
+`'FY2025 data'!$5:$10` to `'FY2025 data'!$7:$12`. Sheet qualifiers and absolute
+markers are retained. Entire-row endpoints remain within rows 1–1048576. String
+literals and bracketed table labels are excluded from entire-row matching.
+
 **After running the shift script, always repack and validate:**
 ```bash
 python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/xlsx_work/ output.xlsx
